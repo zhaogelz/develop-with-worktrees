@@ -129,6 +129,17 @@ def _init_lock(repo: GitRepo) -> DirectoryLock:
     return DirectoryLock(repo.local_dir / "locks" / "initialize.lock")
 
 
+def maintenance_lock(repo: GitRepo) -> DirectoryLock:
+    """串行化会修改空闲槽位或清理本地状态的维护操作。"""
+    return DirectoryLock(repo.common_dir / "solo-ai-maintenance.lock")
+
+
+def _require_no_lifecycle_lock(repo: GitRepo) -> None:
+    locks = repo.local_dir / "locks"
+    if locks.exists() and any(path.name != "state.lock" for path in locks.iterdir()):
+        raise SoloAIError("An active lifecycle lock blocks this maintenance operation")
+
+
 def _initialization_plan(
     repo: GitRepo, commands: list[CommandSpec], *, slots: int
 ) -> dict[str, Any]:
@@ -324,44 +335,45 @@ def _base_ref(repo: GitRepo) -> str:
 
 
 def start(repo: GitRepo, *, name: str) -> dict[str, Any]:
-    config, _, _ = _config_and_mode(repo)
-    store = StateStore(repo)
-    store.ensure_slots(config)
-    base_ref = _base_ref(repo)
-    base_head = repo.git(["rev-parse", base_ref]).stdout.strip()
-    branch = f"{config.branch_prefix}{safe_slug(name)}-{uuid.uuid4().hex[:6]}"
-    task = store.allocate(
-        config, name=name, branch=branch, base_head=base_head, base_ref=base_ref
-    )
-    worktree = ensure_within(
-        Path(task["worktree"]), repo.root / config.worktree_directory
-    )
-    try:
-        registered = next(
-            (item for item in repo.worktrees() if item.path == worktree), None
+    with maintenance_lock(repo):
+        config, _, _ = _config_and_mode(repo)
+        store = StateStore(repo)
+        store.ensure_slots(config)
+        base_ref = _base_ref(repo)
+        base_head = repo.git(["rev-parse", base_ref]).stdout.strip()
+        branch = f"{config.branch_prefix}{safe_slug(name)}-{uuid.uuid4().hex[:6]}"
+        task = store.allocate(
+            config, name=name, branch=branch, base_head=base_head, base_ref=base_ref
         )
-        if registered is None:
-            if worktree.exists() and any(worktree.iterdir()):
-                raise SoloAIError(f"Unregistered non-empty slot path: {worktree}")
-            repo.git(["worktree", "add", "--detach", str(worktree), base_ref])
-        else:
-            if not repo.is_clean(worktree):
-                raise SoloAIError(f"Idle slot is not clean: {worktree}")
-            if repo.branch(worktree) is not None:
-                raise SoloAIError(
-                    f"Idle slot is unexpectedly attached to a branch: {worktree}"
-                )
-            repo.git(["reset", "--hard", base_ref], cwd=worktree)
-        repo.git(["switch", "-c", branch, base_ref], cwd=worktree)
-        return store.update_task(
-            task["id"],
-            status="active",
-            candidate_head=repo.head(worktree),
-            baseline_paths=repo.changed_paths(worktree),
+        worktree = ensure_within(
+            Path(task["worktree"]), repo.root / config.worktree_directory
         )
-    except Exception as exc:
-        store.quarantine(task["id"], str(exc))
-        raise
+        try:
+            registered = next(
+                (item for item in repo.worktrees() if item.path == worktree), None
+            )
+            if registered is None:
+                if worktree.exists() and any(worktree.iterdir()):
+                    raise SoloAIError(f"Unregistered non-empty slot path: {worktree}")
+                repo.git(["worktree", "add", "--detach", str(worktree), base_ref])
+            else:
+                if not repo.is_clean(worktree):
+                    raise SoloAIError(f"Idle slot is not clean: {worktree}")
+                if repo.branch(worktree) is not None:
+                    raise SoloAIError(
+                        f"Idle slot is unexpectedly attached to a branch: {worktree}"
+                    )
+                repo.git(["reset", "--hard", base_ref], cwd=worktree)
+            repo.git(["switch", "-c", branch, base_ref], cwd=worktree)
+            return store.update_task(
+                task["id"],
+                status="active",
+                candidate_head=repo.head(worktree),
+                baseline_paths=repo.changed_paths(worktree),
+            )
+        except Exception as exc:
+            store.quarantine(task["id"], str(exc))
+            raise
 
 
 def _path_is_safe(path: str) -> bool:
@@ -803,45 +815,55 @@ def dev_stop(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
 
 
 def warm_slot(repo: GitRepo, *, slot_id: str) -> dict[str, Any]:
-    config, _, _ = _config_and_mode(repo)
-    if slot_id not in {f"{number:02d}" for number in range(1, config.slots + 1)}:
-        raise SoloAIError("WarmSlot requires an active configured slot id")
-    store = StateStore(repo)
-    state = store.ensure_slots(config)
-    slot = state["slots"][slot_id]
-    if slot["status"] != "idle":
-        raise SoloAIError("WarmSlot only runs on an idle slot and never queues")
-    worktree = Path(slot["path"])
-    base = _base_ref(repo)
-    if not worktree.exists():
-        repo.git(["worktree", "add", "--detach", str(worktree), base])
-    if not repo.is_clean(worktree):
-        raise SoloAIError("WarmSlot found a dirty slot and will not modify it")
-    results: list[dict[str, Any]] = []
-    for command in config.warm_commands:
-        pending = (
-            repo.local_dir
-            / "logs"
-            / "pending"
-            / f"warm-{slot_id}-{uuid.uuid4().hex}.log"
-        )
-        code, duration = run_logged(command.argv, cwd=worktree, log_path=pending)
-        results.append(
-            {
-                "command": command.redacted(),
-                "exit_code": code,
-                "duration_seconds": round(duration, 3),
-                "log": str(pending),
-            }
-        )
-        if code:
-            raise SoloAIError(
-                f"WarmSlot command failed; preserved local log: {pending}"
+    with maintenance_lock(repo):
+        config, _, _ = _config_and_mode(repo)
+        if slot_id not in {f"{number:02d}" for number in range(1, config.slots + 1)}:
+            raise SoloAIError("WarmSlot requires an active configured slot id")
+        store = StateStore(repo)
+        state = store.ensure_slots(config)
+        slot = state["slots"][slot_id]
+        if slot["status"] != "idle":
+            raise SoloAIError("WarmSlot only runs on an idle slot and never queues")
+        worktree = Path(slot["path"])
+        base = _base_ref(repo)
+        if not worktree.exists():
+            repo.git(["worktree", "add", "--detach", str(worktree), base])
+        else:
+            if not repo.is_clean(worktree):
+                raise SoloAIError("WarmSlot found a dirty slot and will not modify it")
+            if repo.branch(worktree) is not None:
+                raise SoloAIError("WarmSlot found an unexpectedly attached idle slot")
+            repo.git(["reset", "--hard", base], cwd=worktree)
+        results: list[dict[str, Any]] = []
+        for command in config.warm_commands:
+            pending = (
+                repo.local_dir
+                / "logs"
+                / "pending"
+                / f"warm-{slot_id}-{uuid.uuid4().hex}.log"
             )
-    return {"slot": slot_id, "commands": results}
+            code, duration = run_logged(command.argv, cwd=worktree, log_path=pending)
+            results.append(
+                {
+                    "command": command.redacted(),
+                    "exit_code": code,
+                    "duration_seconds": round(duration, 3),
+                    "log": str(pending),
+                }
+            )
+            if code:
+                raise SoloAIError(
+                    f"WarmSlot command failed; preserved local log: {pending}"
+                )
+        return {"slot": slot_id, "commands": results}
 
 
 def deinit(repo: GitRepo, *, confirm: str, message: str) -> dict[str, Any]:
+    with maintenance_lock(repo):
+        return _deinit_locked(repo, confirm=confirm, message=message)
+
+
+def _deinit_locked(repo: GitRepo, *, confirm: str, message: str) -> dict[str, Any]:
     if confirm != "DEINIT":
         raise SoloAIError("Deinit requires --confirm DEINIT")
     if _effective_mode(repo) != "managed":
@@ -857,6 +879,7 @@ def deinit(repo: GitRepo, *, confirm: str, message: str) -> dict[str, Any]:
         task.get("status") not in FINAL_TASK_STATES for task in state["tasks"].values()
     ) or any((repo.local_dir / "queue").glob("*.json")):
         raise SoloAIError("Active tasks or integration tickets block deinitialization")
+    _require_no_lifecycle_lock(repo)
     primary, _ = repo.ensure_default_primary_clean()
     agents = repo.root / "AGENTS.md"
     existing = agents.read_text(encoding="utf-8") if agents.exists() else ""
@@ -867,11 +890,12 @@ def deinit(repo: GitRepo, *, confirm: str, message: str) -> dict[str, Any]:
         )
     # 先检查全部槽位；任何一个不安全都不得创建或合入策略删除提交。
     slots_to_remove = _preflight_deinit_slots(repo, config=config, state=state)
-    # Commit and integrate tracked policy cleanup before any worktree deletion.
+    # 在临时分支准备策略删除，但只在槽位全部安全释放后才合入默认分支。
     cleanup = repo.local_dir / "deinit" / uuid.uuid4().hex / "worktree"
     branch = f"solo-ai/deinit-{uuid.uuid4().hex[:8]}"
     default = repo.default_branch()
     repo.git(["worktree", "add", "-b", branch, str(cleanup), default], cwd=primary)
+    policy_integrated = False
     try:
         (cleanup / ".solo-ai" / "config.toml").unlink()
         (cleanup / ".solo-ai" / "verification.toml").unlink()
@@ -886,16 +910,25 @@ def deinit(repo: GitRepo, *, confirm: str, message: str) -> dict[str, Any]:
             cleanup_agents.write_text(cleaned_agents, encoding="utf-8", newline="\n")
         repo.git(["add", "--update", "--", ".solo-ai", "AGENTS.md"], cwd=cleanup)
         repo.git(["commit", "-m", message], cwd=cleanup)
+        removed_slots: list[str] = []
+        for path in slots_to_remove:
+            # 预检后仍重验，避免用户或其他工具在清理过程中写入槽位。
+            if _assert_removable_managed_slot(repo, path):
+                repo.git(["worktree", "remove", "--force", str(path)], cwd=primary)
+                removed_slots.append(str(path))
+        # 槽位释放成功后再次确认主工作区，随后才提交受管策略删除。
+        primary, _ = repo.ensure_default_primary_clean()
         repo.git(["merge", "--ff-only", branch], cwd=primary)
+        policy_integrated = True
     finally:
-        repo.git(["worktree", "remove", str(cleanup)], cwd=primary, check=False)
-        repo.git(["branch", "-d", branch], cwd=primary, check=False)
-    removed_slots: list[str] = []
-    for path in slots_to_remove:
-        # 预检后仍重验，避免用户或其他工具在清理过程中写入槽位。
-        if _assert_removable_managed_slot(repo, path):
-            repo.git(["worktree", "remove", "--force", str(path)], cwd=primary)
-            removed_slots.append(str(path))
+        repo.git(
+            ["worktree", "remove", "--force", str(cleanup)], cwd=primary, check=False
+        )
+        repo.git(
+            ["branch", "-d" if policy_integrated else "-D", branch],
+            cwd=primary,
+            check=False,
+        )
     # Only the exact local state root is removed after all managed slots are gone.
     shutil.rmtree(repo.local_dir)
     return {

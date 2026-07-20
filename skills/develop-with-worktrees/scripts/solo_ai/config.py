@@ -132,6 +132,29 @@ def _commands(raw: Any, *, field: str) -> tuple[CommandSpec, ...]:
     )
 
 
+def _worktree_directory(repo: GitRepo, raw: Any) -> str:
+    value = str(raw).strip()
+    candidate = Path(value)
+    if (
+        not value
+        or candidate == Path(".")
+        or candidate.is_absolute()
+        or candidate.anchor
+        or ".." in candidate.parts
+    ):
+        raise SoloAIError(
+            "worktree_directory must be a non-empty repository-relative child path"
+        )
+    target = (repo.root / candidate).resolve()
+    try:
+        target.relative_to(repo.root.resolve())
+    except ValueError as exc:
+        raise SoloAIError(
+            "worktree_directory must resolve inside the repository root"
+        ) from exc
+    return str(candidate)
+
+
 def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     data = _read_toml((cwd or repo.policy_path()) / ".solo-ai" / "config.toml")
     if int(data.get("schema_version", 0)) != CONFIG_SCHEMA:
@@ -178,7 +201,9 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         mode=mode,
         slots=slots,
         branch_prefix=str(data.get("branch_prefix", "codex/")),
-        worktree_directory=str(data.get("worktree_directory", ".worktrees")),
+        worktree_directory=_worktree_directory(
+            repo, data.get("worktree_directory", ".worktrees")
+        ),
         port_base=port_base,
         remote_policy=remote_policy,
         sensitive_allowlist=tuple(
@@ -359,7 +384,7 @@ def render_repo_config(*, slots: int = 3, agents_file_created: bool = False) -> 
 mode = "managed"
 slots = {slots}
 branch_prefix = "codex/"
-worktree_directory = ".worktrees"
+worktree_directory = ".worktrees" # repository-relative only
 port_base = 20000
 remote_policy = "local-only"
 sensitive_allowlist = []

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -66,3 +67,18 @@ timeout_seconds = 10
     )
     with pytest.raises(SoloAIError, match="tcp or http"):
         load_repo_config(GitRepo(git_repo))
+
+
+def test_rejects_worktree_directory_outside_repository(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    for directory in ("../outside", str(git_repo.parent / "outside"), "."):
+        (config / "config.toml").write_text(
+            render_repo_config().replace(
+                'worktree_directory = ".worktrees"',
+                f"worktree_directory = {json.dumps(directory)}",
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(SoloAIError, match="worktree_directory"):
+            load_repo_config(GitRepo(git_repo))

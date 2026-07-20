@@ -23,6 +23,7 @@ from .lifecycle import (
     finish,
     initialize,
     local_enabled,
+    maintenance_lock,
     ready,
     set_local_enabled,
     start,
@@ -245,61 +246,66 @@ def _require_idle(repo: GitRepo) -> None:
 
 
 def _prune(repo: GitRepo, *, kind: str, slot: str | None = None) -> dict[str, Any]:
-    _require_idle(repo)
-    if kind in {"proofs", "logs"}:
-        targets = [repo.local_dir / kind]
-        if kind == "proofs":
-            targets.append(repo.local_dir / "profile-proofs")
-        removed: list[str] = []
-        for target in targets:
-            if target.exists():
-                shutil.rmtree(target)
-                removed.append(str(target))
-        return {
-            "removed": removed,
-            "proof_reuse": "invalidated" if kind in {"proofs", "logs"} else "unchanged",
-        }
-    if not slot:
-        raise SoloAIError("Slot is required")
-    state = StateStore(repo).read()
-    details = state["slots"].get(slot)
-    if not details or details.get("status") not in {"idle", "inactive"}:
-        raise SoloAIError("Only an empty idle or inactive slot can be pruned")
-    policy = repo.policy_path()
-    config = load_repo_config(repo, cwd=policy)
-    path = ensure_within(Path(details["path"]), repo.root / config.worktree_directory)
-    if any(item.path == path for item in repo.worktrees()):
-        protected = [
-            item
-            for item in repo.ignored_untracked(path)
-            if Path(item).name.startswith(".env")
-        ]
-        if protected:
-            raise SoloAIError(
-                "Protected .env files block PruneSlot; it never deletes local credentials"
-            )
-        allowed = {".venv", "node_modules", ".cache", ".tmp", "__pycache__"}
-        removed: list[str] = []
-        for child in path.iterdir():
-            if child.name in allowed and child.exists():
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-                removed.append(str(child))
-            elif (
-                child.name == "uv.toml"
-                and child.is_file()
-                and not repo.tracked("uv.toml", cwd=path)
-            ):
-                child.unlink()
-                removed.append(str(child))
-        return {"slot": slot, "removed": removed, "worktree_retained": True}
-    if path.exists():
-        raise SoloAIError(
-            "Slot path is not registered with Git and is retained; recover or inspect it manually"
+    with maintenance_lock(repo):
+        _require_idle(repo)
+        if kind in {"proofs", "logs"}:
+            targets = [repo.local_dir / kind]
+            if kind == "proofs":
+                targets.append(repo.local_dir / "profile-proofs")
+            removed: list[str] = []
+            for target in targets:
+                if target.exists():
+                    shutil.rmtree(target)
+                    removed.append(str(target))
+            return {
+                "removed": removed,
+                "proof_reuse": "invalidated"
+                if kind in {"proofs", "logs"}
+                else "unchanged",
+            }
+        if not slot:
+            raise SoloAIError("Slot is required")
+        state = StateStore(repo).read()
+        details = state["slots"].get(slot)
+        if not details or details.get("status") not in {"idle", "inactive"}:
+            raise SoloAIError("Only an empty idle or inactive slot can be pruned")
+        policy = repo.policy_path()
+        config = load_repo_config(repo, cwd=policy)
+        path = ensure_within(
+            Path(details["path"]), repo.root / config.worktree_directory
         )
-    return {"slot": slot, "removed": [], "worktree_retained": False}
+        if any(item.path == path for item in repo.worktrees()):
+            protected = [
+                item
+                for item in repo.ignored_untracked(path)
+                if Path(item).name.startswith(".env")
+            ]
+            if protected:
+                raise SoloAIError(
+                    "Protected .env files block PruneSlot; it never deletes local credentials"
+                )
+            allowed = {".venv", "node_modules", ".cache", ".tmp", "__pycache__"}
+            removed: list[str] = []
+            for child in path.iterdir():
+                if child.name in allowed and child.exists():
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                    removed.append(str(child))
+                elif (
+                    child.name == "uv.toml"
+                    and child.is_file()
+                    and not repo.tracked("uv.toml", cwd=path)
+                ):
+                    child.unlink()
+                    removed.append(str(child))
+            return {"slot": slot, "removed": removed, "worktree_retained": True}
+        if path.exists():
+            raise SoloAIError(
+                "Slot path is not registered with Git and is retained; recover or inspect it manually"
+            )
+        return {"slot": slot, "removed": [], "worktree_retained": False}
 
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any]:

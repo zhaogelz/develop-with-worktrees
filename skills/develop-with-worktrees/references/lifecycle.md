@@ -28,7 +28,7 @@ inactive / idle -> starting -> active -> ready -> finished
 
 Excess reduced slots transition `active -> draining -> inactive`. Each task gets a random lease returned only by Start or explicit Recover. `status`, `doctor`, and JSON status redact it. Each mutable action atomically records `active_operation` plus process identity first, then clears it on exit. Recover rotates a lease only if that recorded operation is no longer live; it never repairs a quarantined task by guessing.
 
-Start chooses the least-recently-used idle configured slot. It is lazy: it checks out source on first use and does not install dependencies. `warm-slot` is the only serial prewarm action. All slot caches and environments remain local to that slot.
+Start chooses the least-recently-used idle configured slot. It is lazy: it checks out source on first use and does not install dependencies. `warm-slot` resets a clean detached idle slot to the latest local default branch before preparation, so its dependencies match current source. A repository-wide maintenance lock prevents it from overlapping Start, pruning, or removal. All slot caches and environments remain local to that slot.
 
 ## Commit, Ready, Finish
 
@@ -40,4 +40,4 @@ Finish creates a local FIFO ticket, takes one integration lock, checks both work
 
 ## Recover, abandon, deinit
 
-`abandon` needs an exact task id and current lease. It preserves unknown/protected ignored files by quarantining instead of cleaning. `deinit` first preflights every managed slot for registration, cleanliness, and protected data; any failure leaves tracked policy untouched. It then commits the exact tracked policy deletion, removes only the preflighted registered worktrees, and finally removes the exact local state directory. It never scans disks for repositories and never removes another tool's worktree.
+`abandon` needs an exact task id and current lease. It preserves unknown/protected ignored files by quarantining instead of cleaning. `deinit` takes the same maintenance lock, preflights every managed slot for registration, cleanliness, and protected data, then prepares the exact tracked-policy deletion in a temporary branch. It removes only the preflighted registered worktrees and fast-forwards that deletion only after every release succeeds. Any cleanup failure leaves the tracked policy and local state available for recovery. It never scans disks for repositories and never removes another tool's worktree.

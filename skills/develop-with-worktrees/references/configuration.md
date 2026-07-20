@@ -16,7 +16,7 @@ schema_version = 2
 mode = "managed"
 slots = 3                       # 1 through 5
 branch_prefix = "codex/"
-worktree_directory = ".worktrees"
+worktree_directory = ".worktrees" # non-empty repository-relative child path
 port_base = 20000               # each slot owns a separate 100-port range
 remote_policy = "local-only"
 sensitive_allowlist = []
@@ -39,6 +39,8 @@ sensitive_allowlist = []
 ```
 
 There is no `compatible` tracked mode. A detected mature workflow wins before managed policy and causes complete defer. A locally disabled preference wins over both. If a marker is later added, managed actions stop; if it is later removed, adoption is not silently recreated or migrated.
+
+`worktree_directory` must be a non-empty relative child of the repository. Absolute paths, parent traversal, the repository root itself, and symlink escapes are rejected before any slot is allocated.
 
 `lifecycle.dev_start` is an argv array and is started with `shell=False`. It must declare a TCP or HTTP readiness probe. The process manager records a redacted-safe identity digest, uses a slot-only port range, and stops only a matching owned process tree.
 

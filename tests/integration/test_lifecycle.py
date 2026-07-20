@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -22,7 +23,9 @@ from solo_ai.lifecycle import (
     ready,
     set_local_enabled,
     start,
+    warm_slot,
 )
+import solo_ai.lifecycle as lifecycle
 from solo_ai.repo import GitRepo
 from solo_ai.state import StateStore
 from solo_ai.util import SoloAIError
@@ -321,6 +324,35 @@ def test_deinit_preflights_slot_before_removing_tracked_policy(git_repo: Path) -
     assert marker.read_text(encoding="utf-8") == "preserve me\n"
 
 
+def test_deinit_keeps_policy_when_a_slot_changes_after_preflight(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="simulate concurrent slot write")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    original = lifecycle._assert_removable_managed_slot
+    checks = 0
+
+    def fail_on_second_check(current_repo: GitRepo, path: Path) -> bool:
+        nonlocal checks
+        if path == worktree:
+            checks += 1
+            if checks == 2:
+                raise SoloAIError("simulated concurrent slot write")
+        return original(current_repo, path)
+
+    monkeypatch.setattr(
+        lifecycle, "_assert_removable_managed_slot", fail_on_second_check
+    )
+    with pytest.raises(SoloAIError, match="simulated concurrent"):
+        deinit(repo, confirm="DEINIT", message="chore: remove local worktree workflow")
+
+    assert (git_repo / ".solo-ai" / "config.toml").exists()
+    assert repo.local_dir.exists()
+    assert worktree.exists()
+
+
 def test_prune_slot_removes_only_declared_local_dependency_paths(
     git_repo: Path,
 ) -> None:
@@ -350,6 +382,61 @@ def test_prune_slot_retains_an_unregistered_slot_directory(git_repo: Path) -> No
         _prune(repo, kind="slot", slot="01")
 
     assert marker.read_text(encoding="utf-8") == "preserve me\n"
+
+
+def test_warm_slot_blocks_concurrent_start(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    config = git_repo / ".solo-ai" / "config.toml"
+    command = [sys.executable, "-c", "import time; time.sleep(1.5)"]
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "\n[lifecycle]\n", f"\nwarm = [{json.dumps(command)}]\n\n[lifecycle]\n"
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: add slow warm command")
+    approve(repo, load_verification_config(repo))
+    errors: list[Exception] = []
+
+    def run_warm() -> None:
+        try:
+            warm_slot(repo, slot_id="01")
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_warm)
+    worker.start()
+    lock_path = repo.common_dir / "solo-ai-maintenance.lock"
+    deadline = time.monotonic() + 5
+    while not lock_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert lock_path.exists()
+    with pytest.raises(SoloAIError, match="Operation is already active"):
+        start(repo, name="must wait for warm slot")
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert errors == []
+
+
+def test_warm_slot_syncs_an_idle_slot_to_latest_default(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    stale = start(repo, name="create stale idle slot")
+    worktree = Path(stale["worktree"])
+    abandoned = abandon(
+        repo, task_id=stale["id"], lease=stale["lease"], confirm=stale["id"]
+    )
+    assert abandoned["status"] == "abandoned"
+    old_head = repo.head(worktree)
+
+    update = start(repo, name="advance default branch")
+    commit_one(repo, update, "latest.txt", "latest\n", "test: advance default")
+    ready(repo, task_id=update["id"], lease=update["lease"])
+    finish(repo, task_id=update["id"], lease=update["lease"])
+
+    warm_slot(repo, slot_id="01")
+    assert old_head != repo.head(git_repo)
+    assert repo.head(worktree) == repo.head(git_repo)
 
 
 def test_dev_supervisor_owns_and_stops_http_process_tree(git_repo: Path) -> None:
