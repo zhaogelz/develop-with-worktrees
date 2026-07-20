@@ -121,7 +121,7 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
 
 def _prune(repo: GitRepo) -> dict[str, Any]:
     removed: list[str] = []
-    for name in ("proofs", "logs"):
+    for name in ("proofs", "profile-proofs", "logs"):
         path = repo.local_dir / name
         if path.exists():
             shutil.rmtree(path)

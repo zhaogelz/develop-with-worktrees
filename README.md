@@ -15,7 +15,7 @@ Key defaults:
 - Start from the committed local default branch even when the primary worktree is dirty; Finish waits for a clean primary worktree.
 - One branch per task; no squash, rebase, amend, or history rewriting.
 - Ready validation plus FIFO Finish integration.
-- Exact proof reuse tied to code, policy, commands, dependencies, tools, and platform.
+- Exact candidate-proof reuse plus conservative cross-task profile reuse tied to code, policy, commands, dependencies, tools, platform, and persistent logs.
 - Sensitive-content gates and redacted local logs.
 - Failures preserve the task worktree for recovery.
 

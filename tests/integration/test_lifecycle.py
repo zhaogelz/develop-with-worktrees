@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -145,3 +146,100 @@ def test_personal_disable_is_local_and_blocks_start(git_repo: Path) -> None:
     set_local_enabled(repo, enabled=True)
     task = start(repo, name="resumed")
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_profile_proof_reuses_identical_inputs_across_tasks(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    first = start(repo, name="first identical change")
+    first_tree = Path(first["worktree"])
+    (first_tree / "same.txt").write_text("same\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=first["id"],
+        lease=first["lease"],
+        message="test: first candidate",
+    )
+    first_ready = ready(repo, task_id=first["id"], lease=first["lease"])
+
+    second = start(repo, name="second identical change")
+    second_tree = Path(second["worktree"])
+    (second_tree / "same.txt").write_text("same\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=second["id"],
+        lease=second["lease"],
+        message="test: second candidate",
+    )
+    second_ready = ready(repo, task_id=second["id"], lease=second["lease"])
+    proof_path = repo.local_dir / "proofs" / f"{second_ready['ready_proof']}.json"
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    assert proof["profile_proofs"][0]["reused"] is True
+    assert first_ready["ready_proof"] != second_ready["ready_proof"]
+
+    abandon(repo, task_id=first["id"], lease=first["lease"], confirm=first["id"])
+    abandon(
+        repo,
+        task_id=second["id"],
+        lease=second["lease"],
+        confirm=second["id"],
+    )
+
+
+def test_validation_failure_preserves_task(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    initialize(
+        repo,
+        slots=1,
+        commands=["git diff --quiet main...HEAD"],
+        accept=True,
+        accept_static_only=False,
+        compatible=False,
+    )
+    task = start(repo, name="expected validation failure")
+    worktree = Path(task["worktree"])
+    (worktree / "change.txt").write_text("change\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: failing candidate",
+    )
+    with pytest.raises(SoloAIError, match="Validation failed"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+    assert StateStore(repo).task(task["id"])["status"] == "active"
+    assert (worktree / "change.txt").exists()
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_parallel_conflict_stays_in_later_worktree(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    first = start(repo, name="first edit")
+    second = start(repo, name="conflicting edit")
+    first_tree = Path(first["worktree"])
+    second_tree = Path(second["worktree"])
+    (first_tree / "README.md").write_text("first\n", encoding="utf-8")
+    (second_tree / "README.md").write_text("second\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=first["id"],
+        lease=first["lease"],
+        message="test: first edit",
+    )
+    commit_task(
+        repo,
+        task_id=second["id"],
+        lease=second["lease"],
+        message="test: second edit",
+    )
+    ready(repo, task_id=first["id"], lease=first["lease"])
+    finish(repo, task_id=first["id"], lease=first["lease"])
+    with pytest.raises(SoloAIError, match="Command failed"):
+        ready(repo, task_id=second["id"], lease=second["lease"])
+    assert "UU README.md" in repo.status_lines(second_tree)
+    assert StateStore(repo).task(second["id"])["status"] == "active"
+    abandon(
+        repo,
+        task_id=second["id"],
+        lease=second["lease"],
+        confirm=second["id"],
+    )

@@ -21,6 +21,6 @@ target repository
 
 State mutations use atomic file replacement under an atomic-directory lock. Integration uses a timestamped FIFO ticket plus one shared integration lock. A task lease prevents a stale agent window from mutating a recovered task.
 
-Validation proofs are content-addressed. The proof key includes candidate commit/tree, current default-branch commit, tracked policy hashes, selected commands, relevant lockfiles, resolved tools and versions, and platform identity. Logs must still exist for reuse.
+Validation proofs are content-addressed. Candidate proofs include the candidate commit/tree and current default-branch commit, so Ready-to-Finish reuse is exact. Per-profile proofs hash every tracked file in the profile's declared path closure plus policy, commands, lockfiles, tools, and platform, allowing conservative reuse across tasks when those inputs are identical. Referenced logs must still exist for either form of reuse.
 
 The process manager is deliberately narrow. It owns only processes launched through the configured lifecycle command and records enough identity to reject PID reuse or an unrelated process.
