@@ -17,3 +17,5 @@ jobs:
       - run: uv sync --dev
       - run: uv run pytest
       - run: uv run python -m compileall -q skills/develop-with-worktrees/scripts
+      - run: uvx ruff check .
+      - run: uvx ruff format --check .

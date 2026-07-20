@@ -29,11 +29,10 @@ class CommandResult:
 
 
 def run(
-    args: Sequence[str] | str,
+    args: Sequence[str],
     *,
     cwd: Path,
     check: bool = True,
-    shell: bool = False,
     env: dict[str, str] | None = None,
     timeout: float | None = None,
 ) -> CommandResult:
@@ -45,7 +44,6 @@ def run(
         errors="replace",
         capture_output=True,
         check=False,
-        shell=shell,
         env=env,
         timeout=timeout,
     )
@@ -53,7 +51,7 @@ def run(
         args, completed.returncode, completed.stdout, completed.stderr
     )
     if check and completed.returncode != 0:
-        display = args if isinstance(args, str) else " ".join(args)
+        display = " ".join(redact_text(item) for item in args)
         detail = redact_text(completed.stderr.strip() or completed.stdout.strip())
         raise SoloAIError(
             f"Command failed ({completed.returncode}): {display}\n{detail}"
@@ -61,21 +59,23 @@ def run(
     return result
 
 
-def run_logged(command: str, *, cwd: Path, log_path: Path) -> tuple[int, float]:
+def run_logged(
+    command: Sequence[str], *, cwd: Path, log_path: Path
+) -> tuple[int, float]:
+    """Run an explicit argv command and write a redacted transient log."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     with log_path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(f"$ {redact_text(command)}\n")
+        handle.write("$ " + " ".join(redact_text(item) for item in command) + "\n")
         handle.flush()
         process = subprocess.Popen(
-            command,
+            list(command),
             cwd=str(cwd),
             text=True,
             encoding="utf-8",
             errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            shell=True,
         )
         assert process.stdout is not None
         for line in process.stdout:
@@ -184,7 +184,9 @@ def process_snapshot(pid: int | None = None) -> dict[str, Any]:
             "create_time": process.create_time(),
             "exe": process.exe(),
             "cwd": process.cwd(),
-            "cmdline": process.cmdline(),
+            # Command arguments can contain a credential. Persist a stable digest,
+            # not the raw command line, while still detecting PID reuse.
+            "cmdline_sha256": sha256_text(stable_json(process.cmdline())),
         }
     except (psutil.Error, OSError):
         return {
@@ -192,7 +194,7 @@ def process_snapshot(pid: int | None = None) -> dict[str, Any]:
             "create_time": None,
             "exe": None,
             "cwd": None,
-            "cmdline": [],
+            "cmdline_sha256": None,
         }
 
 
@@ -218,8 +220,8 @@ def process_matches(snapshot: dict[str, Any]) -> bool:
             str(current.get(key))
         ):
             return False
-    expected_cmd = snapshot.get("cmdline") or []
-    return not expected_cmd or expected_cmd == current.get("cmdline")
+    expected_cmd = snapshot.get("cmdline_sha256")
+    return not expected_cmd or expected_cmd == current.get("cmdline_sha256")
 
 
 class DirectoryLock:

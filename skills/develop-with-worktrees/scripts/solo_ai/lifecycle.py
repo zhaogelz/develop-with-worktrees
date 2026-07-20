@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import os
+import json
+import platform
+import shutil
 import socket
 import subprocess
+import sys
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -11,19 +16,22 @@ from typing import Any
 import psutil
 
 from .config import (
+    CommandSpec,
     VerificationConfig,
     detect_existing_workflows,
     discover_validation_commands,
     load_repo_config,
     load_verification_config,
+    managed_block,
+    remove_managed_agents_block,
     render_agents,
     render_repo_config,
     render_verification_config,
 )
-from .proof import validate
+from .proof import approval_plan, validate
 from .repo import GitRepo
 from .safety import require_safe
-from .state import StateStore
+from .state import FINAL_TASK_STATES, StateStore
 from .util import (
     DirectoryLock,
     SoloAIError,
@@ -32,164 +40,299 @@ from .util import (
     process_matches,
     process_snapshot,
     read_json,
+    run_logged,
     safe_slug,
+    sha256_text,
+    stable_json,
     utc_timestamp,
 )
 
 
-def _approvals(repo: GitRepo) -> dict[str, Any]:
+BOOTSTRAP_SCHEMA = 1
+LOCKFILE_NAMES = (
+    "uv.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "Cargo.lock",
+    "go.sum",
+)
+
+
+def _preferences(repo: GitRepo) -> dict[str, Any]:
     return read_json(
-        repo.local_dir / "approvals.json", {"schema_version": 1, "accepted": {}}
+        repo.local_dir / "preferences.json", {"schema_version": 1, "enabled": True}
     )
 
 
 def set_local_enabled(repo: GitRepo, *, enabled: bool) -> dict[str, Any]:
-    preferences = {
-        "schema_version": 1,
-        "enabled": enabled,
-        "updated_at": utc_timestamp(),
-    }
-    atomic_write_json(repo.local_dir / "preferences.json", preferences)
-    return preferences
+    result = {"schema_version": 1, "enabled": enabled, "updated_at": utc_timestamp()}
+    atomic_write_json(repo.local_dir / "preferences.json", result)
+    return result
 
 
 def local_enabled(repo: GitRepo) -> bool:
-    preferences = read_json(
-        repo.local_dir / "preferences.json",
-        {"schema_version": 1, "enabled": True},
-    )
-    return bool(preferences.get("enabled", True))
+    return bool(_preferences(repo).get("enabled", True))
 
 
-def approve(repo: GitRepo, verification: VerificationConfig) -> str:
-    approvals = _approvals(repo)
-    fingerprint = verification.command_fingerprint
-    approvals["accepted"][fingerprint] = {
-        "commands": list(verification.commands),
-        "accepted_at": utc_timestamp(),
-    }
-    atomic_write_json(repo.local_dir / "approvals.json", approvals)
-    return fingerprint
+def _bootstrap(repo: GitRepo) -> dict[str, Any]:
+    return read_json(repo.local_dir / "bootstrap.json", {})
 
 
-def require_approval(repo: GitRepo, verification: VerificationConfig) -> None:
-    if verification.command_fingerprint not in _approvals(repo).get("accepted", {}):
+def _effective_mode(repo: GitRepo) -> str:
+    if not local_enabled(repo):
+        return "disabled"
+    existing = detect_existing_workflows(repo.root)
+    if existing:
+        return "defer"
+    if (repo.policy_path() / ".solo-ai" / "config.toml").exists():
+        return "managed"
+    return "uninitialized"
+
+
+def _approval_path(repo: GitRepo) -> Path:
+    return repo.local_dir / "approvals.json"
+
+
+def _approval_fingerprint(
+    repo: GitRepo, verification: VerificationConfig, *, cwd: Path
+) -> tuple[str, dict[str, Any]]:
+    plan = approval_plan(repo, cwd=cwd, verification=verification)
+    return sha256_text(stable_json(plan)), plan
+
+
+def approve(
+    repo: GitRepo, verification: VerificationConfig, *, cwd: Path | None = None
+) -> dict[str, Any]:
+    policy = cwd or repo.policy_path()
+    fingerprint, plan = _approval_fingerprint(repo, verification, cwd=policy)
+    approvals = read_json(_approval_path(repo), {"schema_version": 2, "accepted": {}})
+    approvals["accepted"][fingerprint] = {"accepted_at": utc_timestamp(), "plan": plan}
+    atomic_write_json(_approval_path(repo), approvals)
+    return {"fingerprint": fingerprint, "plan": plan}
+
+
+def require_approval(
+    repo: GitRepo, verification: VerificationConfig, *, cwd: Path | None = None
+) -> None:
+    policy = cwd or repo.policy_path()
+    fingerprint, _ = _approval_fingerprint(repo, verification, cwd=policy)
+    if fingerprint not in read_json(_approval_path(repo), {"accepted": {}}).get(
+        "accepted", {}
+    ):
         raise SoloAIError(
-            "Validation commands changed and are not approved. Review .solo-ai/verification.toml, then run `approve --accept`."
+            "This machine has not approved the full normalized validation plan. Review `doctor` then run `approve --accept`."
         )
+
+
+def _init_lock(repo: GitRepo) -> DirectoryLock:
+    return DirectoryLock(repo.local_dir / "locks" / "initialize.lock")
+
+
+def _initialization_plan(
+    repo: GitRepo, commands: list[CommandSpec], *, slots: int
+) -> dict[str, Any]:
+    return {
+        "slots": slots,
+        "profiles": (
+            [
+                {
+                    "id": "default",
+                    "paths": ["**"],
+                    "commands": [command.redacted() for command in commands],
+                    "cross_task_reuse": False,
+                    "external_state": "unknown",
+                }
+            ]
+            if commands
+            else []
+        ),
+        "static_only": not commands,
+        "dependency_inputs": [
+            name for name in LOCKFILE_NAMES if (repo.root / name).exists()
+        ],
+        "platform_condition": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "note": "Exact executable paths and versions are captured and require local approval after bootstrap.",
+        },
+        "cross_task_policy": "disabled by default; only explicit external_state = none with declared closed inputs may reuse",
+        "tracked_bootstrap_files": [
+            ".solo-ai/config.toml",
+            ".solo-ai/verification.toml",
+            "AGENTS.md managed block",
+        ],
+    }
 
 
 def initialize(
     repo: GitRepo,
     *,
     slots: int,
-    commands: list[str] | None,
+    commands: list[CommandSpec] | None,
     accept: bool,
     accept_static_only: bool,
-    compatible: bool,
+    decline: bool = False,
 ) -> dict[str, Any]:
-    if (repo.root / ".solo-ai" / "config.toml").exists():
-        raise SoloAIError("Repository is already initialized")
+    """Create an isolated policy commit, never touching dirty primary content."""
+    if decline:
+        if accept or accept_static_only:
+            raise SoloAIError("--decline cannot be combined with acceptance flags")
+        return {
+            "decision": "declined",
+            "local_preference": set_local_enabled(repo, enabled=False),
+        }
+    if not local_enabled(repo):
+        raise SoloAIError(
+            "This repository is locally disabled; run enable before adopting it"
+        )
     if not 1 <= slots <= 5:
         raise SoloAIError("--slots must be between 1 and 5")
-    primary, default = repo.ensure_default_primary_clean()
     existing = detect_existing_workflows(repo.root)
-    if existing and not compatible:
-        raise SoloAIError(
-            "Existing worktree/orchestration workflow detected: "
-            + ", ".join(existing)
-            + ". Re-run with --compatible to defer to it."
+    if existing:
+        # Do this before acquiring a local lifecycle lock: defer mode must not
+        # create a .git/solo-ai directory either.
+        return {
+            "decision": "deferred",
+            "reason": "existing-workflow",
+            "workflows": existing,
+        }
+    with _init_lock(repo):
+        existing = detect_existing_workflows(repo.root)
+        if existing:
+            # Deliberately no tracked or local workflow state is written in defer mode.
+            return {
+                "decision": "deferred",
+                "reason": "existing-workflow",
+                "workflows": existing,
+            }
+        if (repo.root / ".solo-ai" / "config.toml").exists() or _bootstrap(repo):
+            raise SoloAIError(
+                "Repository is already adopted or has a pending bootstrap; run doctor"
+            )
+        primary, default = repo.ensure_primary_default()
+        selected = (
+            commands
+            if commands is not None
+            else discover_validation_commands(repo.root)
         )
-    selected = (
-        commands if commands is not None else discover_validation_commands(repo.root)
-    )
-    static_only = not selected
-    if static_only and not accept_static_only:
-        raise SoloAIError(
-            "No validation command was discovered. Review the repository and re-run with --accept-static-only, or provide --verify COMMAND."
-        )
-    if selected and not accept:
-        rendered = "\n".join(f"- {item}" for item in selected)
-        raise SoloAIError(
-            f"Review the discovered validation commands, then re-run with --accept:\n{rendered}"
-        )
+        static_only = not selected
+        if static_only and not accept_static_only and accept:
+            raise SoloAIError(
+                "No validation command was discovered. Re-run with --accept-static-only only after reviewing the limitation."
+            )
+        if (selected and not accept) or (static_only and not accept_static_only):
+            return {
+                "decision": "needs-approval",
+                "plan": _initialization_plan(repo, selected, slots=slots),
+            }
+        bootstrap_id = uuid.uuid4().hex[:8]
+        branch = f"solo-ai/bootstrap-{bootstrap_id}"
+        worktree = repo.local_dir / "bootstrap" / bootstrap_id / "worktree"
+        repo.git(["worktree", "add", "-b", branch, str(worktree), default], cwd=primary)
+        try:
+            config_dir = worktree / ".solo-ai"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            agents = worktree / "AGENTS.md"
+            agents_existed = agents.exists()
+            (config_dir / "config.toml").write_text(
+                render_repo_config(slots=slots, agents_file_created=not agents_existed),
+                encoding="utf-8",
+                newline="\n",
+            )
+            (config_dir / "verification.toml").write_text(
+                render_verification_config(selected, static_only=static_only),
+                encoding="utf-8",
+                newline="\n",
+            )
+            previous = agents.read_text(encoding="utf-8") if agents.exists() else ""
+            agents.write_text(render_agents(previous), encoding="utf-8", newline="\n")
+            repo.git(
+                [
+                    "add",
+                    "--",
+                    ".solo-ai/config.toml",
+                    ".solo-ai/verification.toml",
+                    "AGENTS.md",
+                ],
+                cwd=worktree,
+            )
+            # The caller supplies a project-conventional message in a real adoption.
+            # This fallback is only the generic bootstrap, not a task-change commit.
+            repo.git(
+                ["commit", "-m", "chore: adopt local worktree workflow"], cwd=worktree
+            )
+        except Exception as exc:
+            raise SoloAIError(
+                f"Bootstrap was preserved at {worktree} for inspection. Cause: {exc}"
+            ) from exc
+        repo.add_local_exclude("/.worktrees/")
+        clean_primary = repo.is_clean(primary)
+        bootstrap = {
+            "schema_version": BOOTSTRAP_SCHEMA,
+            "branch": branch,
+            "worktree": str(worktree),
+            "default_branch": default,
+            "bootstrap_head": repo.head(worktree),
+            "created_at": utc_timestamp(),
+        }
+        if clean_primary:
+            repo.git(["merge", "--ff-only", branch], cwd=primary)
+            repo.git(["worktree", "remove", str(worktree)], cwd=primary)
+            repo.git(["branch", "-d", branch], cwd=primary)
+        else:
+            atomic_write_json(repo.local_dir / "bootstrap.json", bootstrap)
+        policy = repo.policy_path()
+        verification = load_verification_config(repo, cwd=policy)
+        approval = approve(repo, verification, cwd=policy)
+        StateStore(repo).ensure_slots(load_repo_config(repo, cwd=policy))
+        return {
+            "decision": "adopted" if clean_primary else "pending-primary-clean",
+            "slots": slots,
+            "static_only": static_only,
+            "commands": [command.redacted() for command in selected],
+            "approval": approval["fingerprint"],
+            "primary_dirty_excluded": not clean_primary,
+        }
 
-    mode = "compatible" if compatible else "managed"
-    bootstrap_id = uuid.uuid4().hex[:8]
-    branch = f"codex/solo-ai-bootstrap-{bootstrap_id}"
-    bootstrap = repo.local_dir / "bootstrap" / bootstrap_id
-    repo.git(["worktree", "add", "-b", branch, str(bootstrap), default], cwd=primary)
-    try:
-        config_dir = bootstrap / ".solo-ai"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "config.toml").write_text(
-            render_repo_config(mode=mode, slots=slots), encoding="utf-8", newline="\n"
-        )
-        (config_dir / "verification.toml").write_text(
-            render_verification_config(selected, static_only=static_only),
-            encoding="utf-8",
-            newline="\n",
-        )
-        agents = bootstrap / "AGENTS.md"
-        previous = agents.read_text(encoding="utf-8") if agents.exists() else ""
-        agents.write_text(
-            render_agents(previous, compatible=compatible),
-            encoding="utf-8",
-            newline="\n",
-        )
-        repo.git(
-            [
-                "add",
-                "--",
-                ".solo-ai/config.toml",
-                ".solo-ai/verification.toml",
-                "AGENTS.md",
-            ],
-            cwd=bootstrap,
-        )
-        repo.git(
-            ["commit", "-m", "chore: initialize isolated worktree workflow"],
-            cwd=bootstrap,
-        )
-        repo.git(["merge", "--ff-only", branch], cwd=primary)
-    except Exception as exc:
+
+def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
+    mode = _effective_mode(repo)
+    if mode == "disabled":
         raise SoloAIError(
-            f"Initialization was preserved for inspection at {bootstrap}. Cause: {exc}"
-        ) from exc
-    else:
-        repo.git(["worktree", "remove", str(bootstrap)], cwd=primary)
-        repo.git(["branch", "-d", branch], cwd=primary)
-    repo.add_local_exclude("/.worktrees/")
-    verification = load_verification_config(repo)
-    fingerprint = approve(repo, verification)
-    StateStore(repo).ensure_slots(load_repo_config(repo))
-    return {
-        "mode": mode,
-        "slots": slots,
-        "static_only": static_only,
-        "commands": selected,
-        "approval": fingerprint,
-    }
+            "develop-with-worktrees is disabled on this machine; run enable to opt in again"
+        )
+    if mode == "defer":
+        raise SoloAIError(
+            "An existing mature workflow governs this repository; develop-with-worktrees will make no managed changes"
+        )
+    if mode != "managed":
+        raise SoloAIError(
+            "Repository is not adopted. Review the one-time plan with `init`, then pass --accept or --decline"
+        )
+    policy = repo.policy_path()
+    config = load_repo_config(repo, cwd=policy)
+    verification = load_verification_config(repo, cwd=policy)
+    require_approval(repo, verification, cwd=policy)
+    return config, verification, policy
+
+
+def _base_ref(repo: GitRepo) -> str:
+    bootstrap = _bootstrap(repo)
+    return str(bootstrap.get("branch") or repo.default_branch())
 
 
 def start(repo: GitRepo, *, name: str) -> dict[str, Any]:
-    config = load_repo_config(repo)
-    if not local_enabled(repo):
-        raise SoloAIError(
-            "develop-with-worktrees is disabled on this machine; run `enable` to opt in again"
-        )
-    if config.mode == "disabled":
-        raise SoloAIError("develop-with-worktrees is disabled for this repository")
-    if config.mode == "compatible":
-        raise SoloAIError(
-            "Compatible mode is active: use the repository's existing worktree workflow instead of claiming a managed slot"
-        )
+    config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     store.ensure_slots(config)
-    default = repo.default_branch()
-    base_head = repo.git(["rev-parse", default]).stdout.strip()
+    base_ref = _base_ref(repo)
+    base_head = repo.git(["rev-parse", base_ref]).stdout.strip()
     branch = f"{config.branch_prefix}{safe_slug(name)}-{uuid.uuid4().hex[:6]}"
-    task = store.allocate(config, name=name, branch=branch, base_head=base_head)
+    task = store.allocate(
+        config, name=name, branch=branch, base_head=base_head, base_ref=base_ref
+    )
     worktree = ensure_within(
         Path(task["worktree"]), repo.root / config.worktree_directory
     )
@@ -200,7 +343,7 @@ def start(repo: GitRepo, *, name: str) -> dict[str, Any]:
         if registered is None:
             if worktree.exists() and any(worktree.iterdir()):
                 raise SoloAIError(f"Unregistered non-empty slot path: {worktree}")
-            repo.git(["worktree", "add", "--detach", str(worktree), default])
+            repo.git(["worktree", "add", "--detach", str(worktree), base_ref])
         else:
             if not repo.is_clean(worktree):
                 raise SoloAIError(f"Idle slot is not clean: {worktree}")
@@ -208,41 +351,91 @@ def start(repo: GitRepo, *, name: str) -> dict[str, Any]:
                 raise SoloAIError(
                     f"Idle slot is unexpectedly attached to a branch: {worktree}"
                 )
-            repo.git(["reset", "--hard", default], cwd=worktree)
-        repo.git(["switch", "-c", branch, default], cwd=worktree)
+            repo.git(["reset", "--hard", base_ref], cwd=worktree)
+        repo.git(["switch", "-c", branch, base_ref], cwd=worktree)
         return store.update_task(
-            task["id"], status="active", candidate_head=repo.head(worktree)
+            task["id"],
+            status="active",
+            candidate_head=repo.head(worktree),
+            baseline_paths=repo.changed_paths(worktree),
         )
     except Exception as exc:
         store.quarantine(task["id"], str(exc))
         raise
 
 
+def _path_is_safe(path: str) -> bool:
+    candidate = Path(path)
+    return (
+        not candidate.is_absolute()
+        and ".." not in candidate.parts
+        and path not in {"", "."}
+    )
+
+
+def _run_declared_secret_scanner(
+    repo: GitRepo, *, cwd: Path, scanner: CommandSpec | None
+) -> None:
+    if scanner is None:
+        return
+    pending = (
+        repo.local_dir / "logs" / "pending" / f"secret-scan-{uuid.uuid4().hex}.log"
+    )
+    code, _ = run_logged(scanner.argv, cwd=cwd, log_path=pending)
+    if code:
+        raise SoloAIError(
+            f"Repository-declared secret scanner failed. Review its local redacted log: {pending}"
+        )
+
+
 def commit_task(
-    repo: GitRepo, *, task_id: str, lease: str, message: str
+    repo: GitRepo, *, task_id: str, lease: str, message: str, paths: list[str]
 ) -> dict[str, Any]:
-    config = load_repo_config(repo)
+    config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
-    task = store.task(task_id)
-    store.require_lease(task, lease)
-    worktree = Path(task["worktree"])
-    if repo.branch(worktree) != task["branch"]:
-        raise SoloAIError("Task branch identity no longer matches its slot")
-    if repo.is_clean(worktree):
-        if (
-            repo.is_ancestor(task["base_head"], repo.head(worktree), cwd=worktree)
-            and repo.head(worktree) != task["base_head"]
+    with store.operation(task_id, lease, "commit") as task:
+        worktree = Path(task["worktree"])
+        if repo.branch(worktree) != task["branch"]:
+            raise SoloAIError("Task branch identity no longer matches its slot")
+        if not paths:
+            raise SoloAIError(
+                "Commit requires one or more exact --path values; inspect the task diff before staging"
+            )
+        if len(paths) != len(set(paths)) or any(
+            not _path_is_safe(path) for path in paths
         ):
-            return store.update_task(task_id, candidate_head=repo.head(worktree))
-        raise SoloAIError("Task has no changes to commit")
-    repo.git(["add", "-A"], cwd=worktree)
-    require_safe(
-        repo, cwd=worktree, base=None, staged=True, allowlist=config.sensitive_allowlist
-    )
-    repo.git(["commit", "-m", message], cwd=worktree)
-    return store.update_task(
-        task_id, candidate_head=repo.head(worktree), ready_proof=None
-    )
+            raise SoloAIError(
+                "Commit paths must be unique, repository-relative exact paths"
+            )
+        changed = set(repo.changed_paths(worktree))
+        requested = set(paths)
+        if changed != requested:
+            missing = sorted(changed - requested)
+            extra = sorted(requested - changed)
+            detail = [
+                *(f"unstaged or unreviewed: {item}" for item in missing),
+                *(f"not changed: {item}" for item in extra),
+            ]
+            raise SoloAIError(
+                "Exact staging manifest does not match task changes:\n"
+                + "\n".join(detail)
+            )
+        repo.git(["add", "--", *paths], cwd=worktree)
+        _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
+        require_safe(
+            repo,
+            cwd=worktree,
+            base=None,
+            staged=True,
+            allowlist=config.sensitive_allowlist,
+        )
+        repo.git(["commit", "-m", message, "--", *paths], cwd=worktree)
+        return store.update_task(
+            task_id,
+            candidate_head=repo.head(worktree),
+            ready_proof=None,
+            status="active",
+        )
 
 
 def _sync_default(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
@@ -250,33 +443,45 @@ def _sync_default(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
     default = repo.default_branch()
     default_head = repo.git(["rev-parse", default], cwd=worktree).stdout.strip()
     if not repo.is_ancestor(default_head, "HEAD", cwd=worktree):
+        prediction = repo.git(
+            ["merge-tree", "--write-tree", default, "HEAD"], cwd=worktree, check=False
+        )
+        if prediction.returncode != 0:
+            raise SoloAIError(
+                "Read-only merge prediction found a conflict. Resolve it in this task worktree; no automatic semantic merge was attempted."
+            )
         repo.git(["merge", "--no-edit", default], cwd=worktree)
     task["candidate_head"] = repo.head(worktree)
     return task
 
 
 def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
-    config = load_repo_config(repo)
+    _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
-    task = store.task(task_id)
-    store.require_lease(task, lease)
-    worktree = Path(task["worktree"])
-    verification = load_verification_config(repo, cwd=worktree)
-    require_approval(repo, verification)
-    if not repo.is_clean(worktree):
-        raise SoloAIError("Commit all task changes before Ready")
-    task = _sync_default(repo, task)
-    if not repo.is_clean(worktree):
-        raise SoloAIError("Default-branch synchronization left the task dirty")
-    default = repo.default_branch()
-    require_safe(repo, cwd=worktree, base=default, allowlist=config.sensitive_allowlist)
-    proof = validate(repo, cwd=worktree, base=default, verification=verification)
-    return store.update_task(
-        task_id,
-        status="ready",
-        candidate_head=repo.head(worktree),
-        ready_proof=proof["fingerprint"],
-    )
+    with store.operation(task_id, lease, "ready") as task:
+        worktree = Path(task["worktree"])
+        config = load_repo_config(repo, cwd=worktree)
+        verification = load_verification_config(repo, cwd=worktree)
+        require_approval(repo, verification, cwd=worktree)
+        if task.get("status") not in {"active", "ready"}:
+            raise SoloAIError(f"Task cannot enter Ready from {task.get('status')}")
+        if not repo.is_clean(worktree):
+            raise SoloAIError("Commit all task changes before Ready")
+        task = _sync_default(repo, task)
+        if not repo.is_clean(worktree):
+            raise SoloAIError("Default-branch synchronization left the task dirty")
+        default = repo.default_branch()
+        _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
+        require_safe(
+            repo, cwd=worktree, base=default, allowlist=config.sensitive_allowlist
+        )
+        proof = validate(repo, cwd=worktree, base=default, verification=verification)
+        return store.update_task(
+            task_id,
+            status="ready",
+            candidate_head=repo.head(worktree),
+            ready_proof=proof["fingerprint"],
+        )
 
 
 def _queue_ticket(repo: GitRepo, task_id: str) -> Path:
@@ -306,22 +511,27 @@ def _wait_turn(ticket: Path) -> None:
         if tickets and tickets[0] == ticket:
             return
         if time.monotonic() - last_report >= 30:
-            position = tickets.index(ticket) + 1 if ticket in tickets else 0
-            print(f"Waiting in integration queue at position {position}...", flush=True)
+            print(
+                f"Waiting in integration queue at position {tickets.index(ticket) + 1 if ticket in tickets else 0}...",
+                flush=True,
+            )
             last_report = time.monotonic()
         time.sleep(0.5)
 
 
-def _known_ignored(path: str) -> bool:
-    parts = Path(path).parts
-    return (
-        any(
-            part in {".venv", "node_modules", ".tmp", ".cache", "__pycache__"}
-            for part in parts
-        )
-        or Path(path).name == "uv.toml"
-        or Path(path).name.startswith(".env")
-    )
+def _unknown_ignored(repo: GitRepo, worktree: Path) -> list[str]:
+    known_roots = {".venv", "node_modules", ".tmp", ".cache", "__pycache__"}
+    unknown: list[str] = []
+    for item in repo.ignored_untracked(worktree):
+        parts = Path(item).parts
+        if Path(item).name.startswith(".env"):
+            unknown.append(item)
+        elif (
+            not any(part in known_roots for part in parts)
+            and Path(item).name != "uv.toml"
+        ):
+            unknown.append(item)
+    return unknown
 
 
 def _stop_registered_processes(store: StateStore, task: dict[str, Any]) -> None:
@@ -330,149 +540,130 @@ def _stop_registered_processes(store: StateStore, task: dict[str, Any]) -> None:
             raise SoloAIError(
                 f"Registered process identity changed or is unknown: PID {snapshot.get('pid')}"
             )
-        process = psutil.Process(snapshot["pid"])
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except psutil.TimeoutExpired as exc:
+        root = psutil.Process(snapshot["pid"])
+        processes = [*root.children(recursive=True), root]
+        for process in reversed(processes):
+            try:
+                process.terminate()
+            except psutil.NoSuchProcess:
+                continue
+        _, alive = psutil.wait_procs(processes, timeout=10)
+        if alive:
             raise SoloAIError(
-                f"Registered process did not stop: PID {snapshot['pid']}"
-            ) from exc
+                "Owned development process did not stop; task remains preserved"
+            )
     if task.get("processes"):
         store.update_task(task["id"], processes=[])
 
 
+def _integrate_pending_bootstrap(repo: GitRepo, primary: Path) -> None:
+    pending = _bootstrap(repo)
+    if not pending:
+        return
+    branch = str(pending["branch"])
+    repo.git(["merge", "--ff-only", branch], cwd=primary)
+    worktree = Path(str(pending["worktree"]))
+    if worktree.exists():
+        repo.git(["worktree", "remove", str(worktree)], cwd=primary)
+    repo.git(["branch", "-d", branch], cwd=primary)
+    (repo.local_dir / "bootstrap.json").unlink(missing_ok=True)
+
+
 def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
-    config = load_repo_config(repo)
+    _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
-    initial = store.task(task_id)
-    store.require_lease(initial, lease)
-    verification = load_verification_config(repo, cwd=Path(initial["worktree"]))
-    require_approval(repo, verification)
-    ticket = _queue_ticket(repo, task_id)
-    try:
-        _wait_turn(ticket)
-        with DirectoryLock(repo.local_dir / "locks" / "integration.lock", wait=True):
-            if sorted(ticket.parent.glob("*.json"))[0] != ticket:
-                raise SoloAIError("Integration queue order changed unexpectedly")
-            primary, default = repo.ensure_default_primary_clean()
-            task = store.task(task_id)
-            store.require_lease(task, lease)
-            worktree = Path(task["worktree"])
-            if not repo.is_clean(worktree) or repo.head(worktree) != task.get(
-                "candidate_head"
+    with store.operation(task_id, lease, "finish"):
+        initial = store.task(task_id)
+        if initial.get("status") != "ready":
+            raise SoloAIError("Finish requires a successful Ready")
+        ticket = _queue_ticket(repo, task_id)
+        try:
+            _wait_turn(ticket)
+            with DirectoryLock(
+                repo.local_dir / "locks" / "integration.lock", wait=True
             ):
-                raise SoloAIError("Candidate changed after Ready; run Ready again")
-            task = _sync_default(repo, task)
-            require_safe(
-                repo, cwd=worktree, base=default, allowlist=config.sensitive_allowlist
-            )
-            proof = validate(
-                repo, cwd=worktree, base=default, verification=verification
-            )
-            store.update_task(
-                task_id,
-                candidate_head=repo.head(worktree),
-                ready_proof=proof["fingerprint"],
-            )
-            if not repo.is_clean(primary) or not repo.is_clean(worktree):
-                raise SoloAIError("A worktree changed during integration")
-            ignored = repo.ignored_untracked(worktree)
-            unknown = [item for item in ignored if not _known_ignored(item)]
-            if unknown:
-                raise SoloAIError(
-                    "Unknown ignored files block slot release:\n"
-                    + "\n".join(f"- {item}" for item in unknown[:20])
+                if sorted(ticket.parent.glob("*.json"))[0] != ticket:
+                    raise SoloAIError("Integration queue order changed unexpectedly")
+                primary, default = repo.ensure_default_primary_clean()
+                _integrate_pending_bootstrap(repo, primary)
+                task = store.task(task_id)
+                store.require_lease(task, lease)
+                worktree = Path(task["worktree"])
+                config = load_repo_config(repo, cwd=worktree)
+                verification = load_verification_config(repo, cwd=worktree)
+                require_approval(repo, verification, cwd=worktree)
+                if not repo.is_clean(worktree) or repo.head(worktree) != task.get(
+                    "candidate_head"
+                ):
+                    raise SoloAIError("Candidate changed after Ready; run Ready again")
+                task = _sync_default(repo, task)
+                _run_declared_secret_scanner(
+                    repo, cwd=worktree, scanner=config.secret_scanner
                 )
-            _stop_registered_processes(store, task)
-            repo.git(["merge", "--ff-only", task["branch"]], cwd=primary)
-            integrated_head = repo.head(primary)
-            repo.git(["switch", "--detach", integrated_head], cwd=worktree)
-            repo.git(["branch", "-d", task["branch"]], cwd=primary)
-            store.release(task_id, final_status="finished")
-            return {
-                "task_id": task_id,
-                "integrated_head": integrated_head,
-                "proof": proof["fingerprint"],
-                "proof_kind": proof["kind"],
-            }
-    finally:
-        ticket.unlink(missing_ok=True)
+                require_safe(
+                    repo,
+                    cwd=worktree,
+                    base=default,
+                    allowlist=config.sensitive_allowlist,
+                )
+                proof = validate(
+                    repo, cwd=worktree, base=default, verification=verification
+                )
+                store.update_task(
+                    task_id,
+                    candidate_head=repo.head(worktree),
+                    ready_proof=proof["fingerprint"],
+                )
+                if not repo.is_clean(primary) or not repo.is_clean(worktree):
+                    raise SoloAIError("A worktree changed during integration")
+                unknown = _unknown_ignored(repo, worktree)
+                if unknown:
+                    raise SoloAIError(
+                        "Unknown or protected ignored files block slot release:\n"
+                        + "\n".join(f"- {item}" for item in unknown[:20])
+                    )
+                _stop_registered_processes(store, task)
+                repo.git(["merge", "--ff-only", task["branch"]], cwd=primary)
+                integrated_head = repo.head(primary)
+                repo.git(["switch", "--detach", integrated_head], cwd=worktree)
+                repo.git(["branch", "-d", task["branch"]], cwd=primary)
+                store.release(task_id, final_status="finished")
+                return {
+                    "task_id": task_id,
+                    "integrated_head": integrated_head,
+                    "proof": proof["fingerprint"],
+                    "proof_kind": proof["kind"],
+                    "proof_reused": proof.get("reused", False),
+                }
+        finally:
+            ticket.unlink(missing_ok=True)
 
 
 def abandon(repo: GitRepo, *, task_id: str, lease: str, confirm: str) -> dict[str, Any]:
     if confirm != task_id:
         raise SoloAIError("Abandon requires --confirm with the exact task id")
-    config = load_repo_config(repo)
+    config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
-    task = store.task(task_id)
-    store.require_lease(task, lease)
-    worktree = ensure_within(
-        Path(task["worktree"]), repo.root / config.worktree_directory
-    )
-    _stop_registered_processes(store, task)
-    unknown = [
-        item for item in repo.ignored_untracked(worktree) if not _known_ignored(item)
-    ]
-    if unknown:
-        store.quarantine(task_id, "Unknown ignored files require manual review")
-        raise SoloAIError(
-            "Unknown ignored files block abandon:\n"
-            + "\n".join(f"- {item}" for item in unknown[:20])
+    with store.operation(task_id, lease, "abandon") as task:
+        worktree = ensure_within(
+            Path(task["worktree"]), repo.root / config.worktree_directory
         )
-    default = repo.default_branch()
-    repo.git(["reset", "--hard", default], cwd=worktree)
-    repo.git(["clean", "-fd"], cwd=worktree)
-    repo.git(["switch", "--detach", default], cwd=worktree)
-    repo.git(["branch", "-D", task["branch"]], cwd=repo.primary_path, check=False)
-    store.release(task_id, final_status="abandoned")
-    return {"task_id": task_id, "status": "abandoned"}
-
-
-def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
-    config = load_repo_config(repo)
-    if not config.dev_start:
-        raise SoloAIError("No lifecycle.dev_start command is configured")
-    store = StateStore(repo)
-    task = store.task(task_id)
-    store.require_lease(task, lease)
-    if task.get("processes"):
-        raise SoloAIError("Task already has a registered development process")
-    block = config.port_base + (int(task["slot_id"]) - 1) * 100
-    port = next(
-        (candidate for candidate in range(block, block + 100) if _port_free(candidate)),
-        None,
-    )
-    if port is None:
-        raise SoloAIError(f"No free port in slot block {block}-{block + 99}")
-    command = config.dev_start.format(port=port, slot=task["slot_id"])
-    kwargs: dict[str, Any] = {
-        "cwd": task["worktree"],
-        "shell": True,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
-    process = subprocess.Popen(command, **kwargs)
-    time.sleep(0.2)
-    if process.poll() is not None:
-        raise SoloAIError(
-            f"Development command exited immediately with code {process.returncode}"
-        )
-    snapshot = process_snapshot(process.pid)
-    store.update_task(task_id, processes=[snapshot], port=port)
-    return {"task_id": task_id, "pid": process.pid, "port": port}
-
-
-def dev_stop(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
-    store = StateStore(repo)
-    task = store.task(task_id)
-    store.require_lease(task, lease)
-    _stop_registered_processes(store, task)
-    return {"task_id": task_id, "status": "stopped"}
+        _stop_registered_processes(store, task)
+        unknown = _unknown_ignored(repo, worktree)
+        if unknown:
+            store.quarantine(
+                task_id, "Unknown or protected ignored files require manual review"
+            )
+            raise SoloAIError(
+                "Unknown or protected ignored files block abandon:\n"
+                + "\n".join(f"- {item}" for item in unknown[:20])
+            )
+        repo.git(["reset", "--hard", task["base_ref"]], cwd=worktree)
+        repo.git(["clean", "-fd"], cwd=worktree)
+        repo.git(["switch", "--detach", task["base_ref"]], cwd=worktree)
+        repo.git(["branch", "-D", task["branch"]], cwd=repo.primary_path, check=False)
+        store.release(task_id, final_status="abandoned")
+        return {"task_id": task_id, "status": "abandoned"}
 
 
 def _port_free(port: int) -> bool:
@@ -482,3 +673,210 @@ def _port_free(port: int) -> bool:
             return True
         except OSError:
             return False
+
+
+def _format_argv(command: CommandSpec, *, port: int, slot: str) -> list[str]:
+    return [
+        item.replace("{port}", str(port)).replace("{slot}", slot)
+        for item in command.argv
+    ]
+
+
+def _ready(kind: str, target: str | None, *, port: int) -> bool:
+    rendered = (target or "").replace("{port}", str(port))
+    try:
+        if kind == "tcp":
+            host, _, raw_port = rendered.partition(":")
+            with socket.create_connection(
+                (host or "127.0.0.1", int(raw_port)), timeout=1
+            ):
+                return True
+        if kind == "http":
+            with urllib.request.urlopen(rendered, timeout=2) as response:
+                return 200 <= response.status < 400
+    except (OSError, ValueError, urllib.error.URLError):
+        return False
+    return False
+
+
+def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
+    config, _, _ = _config_and_mode(repo)
+    if not config.dev_start or not config.readiness:
+        raise SoloAIError(
+            "No lifecycle.dev_start plus readiness configuration is declared"
+        )
+    if config.readiness.kind == "command":
+        raise SoloAIError(
+            "Command readiness is reserved until its argv schema is declared; use tcp or http"
+        )
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "dev-start") as task:
+        if task.get("processes"):
+            raise SoloAIError("Task already has a registered development process")
+        block = config.port_base + (int(task["slot_id"]) - 1) * 100
+        for port in range(block, block + 100):
+            if not _port_free(port):
+                continue
+            kwargs: dict[str, Any] = {
+                "cwd": task["worktree"],
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "shell": False,
+                "text": True,
+                "encoding": "utf-8",
+            }
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+            supervisor = subprocess.Popen(
+                [sys.executable, str(Path(__file__).with_name("supervisor.py"))],
+                **kwargs,
+            )
+            assert supervisor.stdin is not None
+            payload = {
+                "argv": _format_argv(config.dev_start, port=port, slot=task["slot_id"]),
+                "cwd": task["worktree"],
+            }
+            supervisor.stdin.write(json.dumps(payload))
+            supervisor.stdin.close()
+            deadline = time.monotonic() + config.readiness.timeout_seconds
+            while time.monotonic() < deadline:
+                if supervisor.poll() is not None:
+                    break
+                if _ready(config.readiness.kind, config.readiness.target, port=port):
+                    snapshot = process_snapshot(supervisor.pid)
+                    snapshot["role"] = "supervisor"
+                    store.update_task(task_id, processes=[snapshot], port=port)
+                    return {
+                        "task_id": task_id,
+                        "supervisor_pid": supervisor.pid,
+                        "port": port,
+                    }
+                time.sleep(0.2)
+            if supervisor.poll() is None:
+                supervisor.terminate()
+                try:
+                    supervisor.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    supervisor.kill()
+        raise SoloAIError(
+            f"No development process became ready in slot port block {block}-{block + 99}"
+        )
+
+
+def dev_stop(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
+    _, _, _ = _config_and_mode(repo)
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "dev-stop") as task:
+        _stop_registered_processes(store, task)
+        return {"task_id": task_id, "status": "stopped"}
+
+
+def warm_slot(repo: GitRepo, *, slot_id: str) -> dict[str, Any]:
+    config, _, _ = _config_and_mode(repo)
+    if slot_id not in {f"{number:02d}" for number in range(1, config.slots + 1)}:
+        raise SoloAIError("WarmSlot requires an active configured slot id")
+    store = StateStore(repo)
+    state = store.ensure_slots(config)
+    slot = state["slots"][slot_id]
+    if slot["status"] != "idle":
+        raise SoloAIError("WarmSlot only runs on an idle slot and never queues")
+    worktree = Path(slot["path"])
+    base = _base_ref(repo)
+    if not worktree.exists():
+        repo.git(["worktree", "add", "--detach", str(worktree), base])
+    if not repo.is_clean(worktree):
+        raise SoloAIError("WarmSlot found a dirty slot and will not modify it")
+    results: list[dict[str, Any]] = []
+    for command in config.warm_commands:
+        pending = (
+            repo.local_dir
+            / "logs"
+            / "pending"
+            / f"warm-{slot_id}-{uuid.uuid4().hex}.log"
+        )
+        code, duration = run_logged(command.argv, cwd=worktree, log_path=pending)
+        results.append(
+            {
+                "command": command.redacted(),
+                "exit_code": code,
+                "duration_seconds": round(duration, 3),
+                "log": str(pending),
+            }
+        )
+        if code:
+            raise SoloAIError(
+                f"WarmSlot command failed; preserved local log: {pending}"
+            )
+    return {"slot": slot_id, "commands": results}
+
+
+def deinit(repo: GitRepo, *, confirm: str, message: str) -> dict[str, Any]:
+    if confirm != "DEINIT":
+        raise SoloAIError("Deinit requires --confirm DEINIT")
+    if _effective_mode(repo) != "managed":
+        raise SoloAIError("Only an adopted managed repository can be deinitialized")
+    config, _, policy = _config_and_mode(repo)
+    if policy != repo.root:
+        raise SoloAIError(
+            "Pending dirty-primary bootstrap must be integrated before deinitialization"
+        )
+    store = StateStore(repo)
+    state = store.read()
+    if any(
+        task.get("status") not in FINAL_TASK_STATES for task in state["tasks"].values()
+    ) or any((repo.local_dir / "queue").glob("*.json")):
+        raise SoloAIError("Active tasks or integration tickets block deinitialization")
+    primary, _ = repo.ensure_default_primary_clean()
+    agents = repo.root / "AGENTS.md"
+    existing = agents.read_text(encoding="utf-8") if agents.exists() else ""
+    cleaned_agents = remove_managed_agents_block(existing)
+    if managed_block() not in existing.replace("\r\n", "\n"):
+        raise SoloAIError(
+            "Managed AGENTS.md block differs; deinit refuses to remove ambiguous policy text"
+        )
+    # Commit and integrate tracked policy cleanup before any worktree deletion.
+    cleanup = repo.local_dir / "deinit" / uuid.uuid4().hex / "worktree"
+    branch = f"solo-ai/deinit-{uuid.uuid4().hex[:8]}"
+    default = repo.default_branch()
+    repo.git(["worktree", "add", "-b", branch, str(cleanup), default], cwd=primary)
+    try:
+        (cleanup / ".solo-ai" / "config.toml").unlink()
+        (cleanup / ".solo-ai" / "verification.toml").unlink()
+        try:
+            (cleanup / ".solo-ai").rmdir()
+        except OSError:
+            pass
+        cleanup_agents = cleanup / "AGENTS.md"
+        if config.agents_file_created and not cleaned_agents:
+            cleanup_agents.unlink()
+        else:
+            cleanup_agents.write_text(cleaned_agents, encoding="utf-8", newline="\n")
+        repo.git(["add", "--update", "--", ".solo-ai", "AGENTS.md"], cwd=cleanup)
+        repo.git(["commit", "-m", message], cwd=cleanup)
+        repo.git(["merge", "--ff-only", branch], cwd=primary)
+    finally:
+        repo.git(["worktree", "remove", str(cleanup)], cwd=primary, check=False)
+        repo.git(["branch", "-d", branch], cwd=primary, check=False)
+    removed_slots: list[str] = []
+    for slot in state["slots"].values():
+        path = ensure_within(Path(slot["path"]), repo.root / config.worktree_directory)
+        if not path.exists():
+            continue
+        if _unknown_ignored(repo, path):
+            raise SoloAIError(
+                f"Unknown or protected files block removal of managed slot: {path}"
+            )
+        registered = any(item.path == path for item in repo.worktrees())
+        if registered:
+            repo.git(["worktree", "remove", "--force", str(path)], cwd=primary)
+            removed_slots.append(str(path))
+    # Only the exact local state root is removed after all managed slots are gone.
+    shutil.rmtree(repo.local_dir)
+    return {
+        "status": "deinitialized",
+        "removed_slots": removed_slots,
+        "next": "Plugin may now be uninstalled from Codex; no repository scan is performed.",
+    }

@@ -1,0 +1,47 @@
+{
+  "description": "Codex guardrails for develop-with-worktrees. They inject policy context; the lifecycle CLI remains the hard gate.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"$PLUGIN_ROOT/hooks/worktree_guard.py\"",
+            "commandWindows": "uv run --script \"%PLUGIN_ROOT%\\hooks\\worktree_guard.py\"",
+            "timeout": 15,
+            "statusMessage": "Checking worktree policy"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|apply_patch|Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"$PLUGIN_ROOT/hooks/worktree_guard.py\"",
+            "commandWindows": "uv run --script \"%PLUGIN_ROOT%\\hooks\\worktree_guard.py\"",
+            "timeout": 15,
+            "statusMessage": "Checking worktree policy"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Bash|apply_patch|Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"$PLUGIN_ROOT/hooks/worktree_guard.py\"",
+            "commandWindows": "uv run --script \"%PLUGIN_ROOT%\\hooks\\worktree_guard.py\"",
+            "timeout": 15,
+            "statusMessage": "Reviewing worktree policy"
+          }
+        ]
+      }
+    ]
+  }
+}

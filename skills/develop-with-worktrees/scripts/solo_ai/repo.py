@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .util import CommandResult, SoloAIError, run
 
@@ -31,6 +32,26 @@ class GitRepo:
             common_path = self.root / common_path
         self.common_dir = common_path.resolve()
         self.local_dir = self.common_dir / "solo-ai"
+
+    def local_json(self, name: str, default: Any) -> Any:
+        from .util import read_json
+
+        return read_json(self.local_dir / name, default)
+
+    def policy_path(self) -> Path:
+        """Return the tracked policy checkout, including a dirty-primary bootstrap."""
+        config = self.root / ".solo-ai" / "config.toml"
+        if config.exists():
+            return self.root
+        bootstrap = self.local_json("bootstrap.json", {})
+        path = bootstrap.get("worktree")
+        if (
+            path
+            and (candidate := Path(str(path))).is_dir()
+            and (candidate / ".solo-ai" / "config.toml").exists()
+        ):
+            return candidate
+        return self.root
 
     def git(
         self,
@@ -139,15 +160,17 @@ class GitRepo:
             if line
         ]
 
-    def ensure_default_primary_clean(self) -> tuple[Path, str]:
+    def ensure_primary_default(self) -> tuple[Path, str]:
         primary = self.primary_path
         default = self.default_branch()
         if self.branch(primary) != default:
             raise SoloAIError(f"Primary worktree must have {default!r} checked out")
+        return primary, default
+
+    def ensure_default_primary_clean(self) -> tuple[Path, str]:
+        primary, default = self.ensure_primary_default()
         if not self.is_clean(primary):
-            raise SoloAIError(
-                "Primary worktree must be clean before initialization or integration"
-            )
+            raise SoloAIError("Primary worktree must be clean before integration")
         return primary, default
 
     def merge_base(self, left: str, right: str, cwd: Path | None = None) -> str:
@@ -199,3 +222,16 @@ class GitRepo:
             ["ls-files", "--others", "--exclude-standard", "-z"], cwd=cwd
         ).stdout
         return sorted(item for item in output.split("\0") if item)
+
+    def changed_paths(self, cwd: Path) -> list[str]:
+        """All tracked and untracked paths that would be included in a task commit."""
+        changed = self.git(["diff", "--name-only", "-z"], cwd=cwd).stdout.split("\0")
+        staged = self.git(
+            ["diff", "--cached", "--name-only", "-z"], cwd=cwd
+        ).stdout.split("\0")
+        return sorted(
+            {item for item in [*changed, *staged, *self.untracked(cwd)] if item}
+        )
+
+    def default_head(self) -> str:
+        return self.git(["rev-parse", self.default_branch()]).stdout.strip()

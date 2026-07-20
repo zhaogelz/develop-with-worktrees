@@ -3,8 +3,9 @@ from __future__ import annotations
 import copy
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .config import RepoConfig
 from .repo import GitRepo
@@ -19,6 +20,10 @@ from .util import (
 )
 
 
+STATE_SCHEMA = 2
+FINAL_TASK_STATES = {"finished", "abandoned"}
+
+
 class StateStore:
     def __init__(self, repo: GitRepo):
         self.repo = repo
@@ -27,7 +32,7 @@ class StateStore:
 
     def _empty(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": STATE_SCHEMA,
             "slots": {},
             "tasks": {},
             "updated_at": utc_timestamp(),
@@ -35,8 +40,10 @@ class StateStore:
 
     def read(self) -> dict[str, Any]:
         state = read_json(self.path, self._empty())
-        if state.get("schema_version") != 1:
-            raise SoloAIError("Unsupported local state schema")
+        if state.get("schema_version") != STATE_SCHEMA:
+            raise SoloAIError(
+                "Unsupported local state schema; run doctor before changing this repository"
+            )
         return state
 
     def mutate(self, callback: Callable[[dict[str, Any]], Any]) -> Any:
@@ -49,48 +56,57 @@ class StateStore:
 
     def ensure_slots(self, config: RepoConfig) -> dict[str, Any]:
         def update(state: dict[str, Any]) -> dict[str, Any]:
-            for number in range(1, config.slots + 1):
+            for number in range(1, 6):
                 slot_id = f"{number:02d}"
-                slot_path = (
+                path = (
                     self.repo.root
                     / config.worktree_directory
                     / f"solo-ai-slot-{slot_id}"
                 )
-                state["slots"].setdefault(
+                slot = state["slots"].setdefault(
                     slot_id,
                     {
                         "id": slot_id,
-                        "path": str(slot_path.resolve()),
-                        "status": "idle",
+                        "path": str(path.resolve()),
+                        "status": "inactive" if number > config.slots else "idle",
                         "task_id": None,
                         "last_used": 0.0,
                         "quarantine_reason": None,
                     },
                 )
-            for slot_id in list(state["slots"]):
-                if (
-                    int(slot_id) > config.slots
-                    and state["slots"][slot_id].get("status") != "idle"
-                ):
-                    raise SoloAIError(
-                        f"Cannot reduce slots while slot {slot_id} is active"
-                    )
+                if number <= config.slots and slot["status"] == "inactive":
+                    slot["status"] = "idle"
+                if number > config.slots:
+                    if slot["status"] in {"active", "starting", "ready"}:
+                        slot["status"] = "draining"
+                    elif slot["status"] == "idle":
+                        slot["status"] = "inactive"
             return copy.deepcopy(state)
 
         return self.mutate(update)
 
     def allocate(
-        self, config: RepoConfig, *, name: str, branch: str, base_head: str
+        self,
+        config: RepoConfig,
+        *,
+        name: str,
+        branch: str,
+        base_head: str,
+        base_ref: str,
     ) -> dict[str, Any]:
         task_id = f"task-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         lease = uuid.uuid4().hex
 
         def update(state: dict[str, Any]) -> dict[str, Any]:
             candidates = [
-                slot for slot in state["slots"].values() if slot.get("status") == "idle"
+                slot
+                for slot in state["slots"].values()
+                if slot.get("status") == "idle" and int(slot["id"]) <= config.slots
             ]
             if not candidates:
-                raise SoloAIError("All managed worktree slots are busy or quarantined")
+                raise SoloAIError(
+                    "All managed worktree slots are busy, draining, or quarantined; no task was queued"
+                )
             slot = min(candidates, key=lambda item: float(item.get("last_used", 0.0)))
             task = {
                 "id": task_id,
@@ -99,19 +115,21 @@ class StateStore:
                 "worktree": slot["path"],
                 "branch": branch,
                 "base_head": base_head,
+                "base_ref": base_ref,
                 "candidate_head": None,
                 "status": "starting",
                 "lease": lease,
                 "lease_owner": process_snapshot(),
+                "active_operation": None,
                 "created_at": utc_timestamp(),
                 "updated_at": utc_timestamp(),
                 "ready_proof": None,
-                "registered_outputs": [],
+                "baseline_paths": [],
                 "processes": [],
             }
             state["tasks"][task_id] = task
             slot.update(
-                {"status": "active", "task_id": task_id, "quarantine_reason": None}
+                {"status": "starting", "task_id": task_id, "quarantine_reason": None}
             )
             return copy.deepcopy(task)
 
@@ -126,10 +144,10 @@ class StateStore:
     def task_for_worktree(self, path: Path) -> dict[str, Any]:
         resolved = str(path.resolve())
         for task in self.read()["tasks"].values():
-            if task.get("worktree") == resolved and task.get("status") not in {
-                "finished",
-                "abandoned",
-            }:
+            if (
+                task.get("worktree") == resolved
+                and task.get("status") not in FINAL_TASK_STATES
+            ):
                 return copy.deepcopy(task)
         raise SoloAIError(f"No active task owns worktree: {resolved}")
 
@@ -148,10 +166,51 @@ class StateStore:
 
         return self.mutate(update)
 
+    @contextmanager
+    def operation(
+        self, task_id: str, lease: str, kind: str
+    ) -> Iterator[dict[str, Any]]:
+        """Atomically publish an operation so recovery cannot steal an active lease."""
+        operation_id = uuid.uuid4().hex
+
+        def begin(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            if not task:
+                raise SoloAIError(f"Unknown task id: {task_id}")
+            self.require_lease(task, lease)
+            active = task.get("active_operation")
+            if active and process_matches(active.get("owner", {})):
+                raise SoloAIError(
+                    f"Task already has a live {active.get('kind', 'unknown')} operation"
+                )
+            task["active_operation"] = {
+                "id": operation_id,
+                "kind": kind,
+                "owner": process_snapshot(),
+                "started_at": utc_timestamp(),
+            }
+            task["updated_at"] = utc_timestamp()
+            return copy.deepcopy(task)
+
+        task = self.mutate(begin)
+        try:
+            yield task
+        finally:
+
+            def end(state: dict[str, Any]) -> None:
+                current = state["tasks"].get(task_id)
+                active = current.get("active_operation") if current else None
+                if active and active.get("id") == operation_id:
+                    current["active_operation"] = None
+                    current["updated_at"] = utc_timestamp()
+
+            self.mutate(end)
+
     def quarantine(self, task_id: str, reason: str) -> None:
         def update(state: dict[str, Any]) -> None:
             task = state["tasks"][task_id]
             task["status"] = "quarantined"
+            task["active_operation"] = None
             slot = state["slots"][task["slot_id"]]
             slot["status"] = "quarantined"
             slot["quarantine_reason"] = reason
@@ -164,10 +223,13 @@ class StateStore:
             task["status"] = final_status
             task["lease"] = None
             task["lease_owner"] = None
+            task["active_operation"] = None
             slot = state["slots"][task["slot_id"]]
             slot.update(
                 {
-                    "status": "idle",
+                    "status": "inactive"
+                    if slot.get("status") == "draining"
+                    else "idle",
                     "task_id": None,
                     "last_used": time.time(),
                     "quarantine_reason": None,
@@ -179,17 +241,30 @@ class StateStore:
     def recover(self, task_id: str) -> dict[str, Any]:
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
-            if not task or task.get("status") in {"finished", "abandoned"}:
+            if not task or task.get("status") in FINAL_TASK_STATES:
                 raise SoloAIError(f"Task cannot be recovered: {task_id}")
             active = task.get("active_operation")
-            if active and process_matches(active):
-                raise SoloAIError(
-                    "Task still has an active operation; recovery is unsafe"
-                )
+            if active and process_matches(active.get("owner", {})):
+                raise SoloAIError("Task still has a live operation; recovery is unsafe")
             task["lease"] = uuid.uuid4().hex
             task["lease_owner"] = process_snapshot()
+            task["active_operation"] = None
+            if task["status"] == "quarantined":
+                raise SoloAIError(
+                    "Quarantined tasks require doctor and manual repair; recover will not hide them"
+                )
             task["status"] = "active"
             task["updated_at"] = utc_timestamp()
             return copy.deepcopy(task)
 
         return self.mutate(update)
+
+    @staticmethod
+    def public_task(task: dict[str, Any]) -> dict[str, Any]:
+        value = copy.deepcopy(task)
+        value.pop("lease", None)
+        value.pop("lease_owner", None)
+        active = value.get("active_operation")
+        if active:
+            active.pop("owner", None)
+        return value
