@@ -40,4 +40,4 @@ Finish creates a local FIFO ticket, takes one integration lock, checks both work
 
 ## Recover, abandon, deinit
 
-`abandon` needs an exact task id and current lease. It preserves unknown/protected ignored files by quarantining instead of cleaning. `deinit` is a separate two-stage removal: first it commits the exact tracked policy deletion, then it removes exact registered managed worktrees, and only then removes the exact local state directory. It never scans disks for repositories and never removes another tool's worktree.
+`abandon` needs an exact task id and current lease. It preserves unknown/protected ignored files by quarantining instead of cleaning. `deinit` first preflights every managed slot for registration, cleanliness, and protected data; any failure leaves tracked policy untouched. It then commits the exact tracked policy deletion, removes only the preflighted registered worktrees, and finally removes the exact local state directory. It never scans disks for repositories and never removes another tool's worktree.

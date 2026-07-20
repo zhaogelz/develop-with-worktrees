@@ -5,6 +5,7 @@ import pytest
 from solo_ai.config import (
     CommandSpec,
     discover_validation_commands,
+    load_repo_config,
     load_verification_config,
     render_repo_config,
     render_verification_config,
@@ -48,3 +49,20 @@ commands = [["git", "status"]]
     )
     with pytest.raises(SoloAIError, match="external_state"):
         load_verification_config(GitRepo(git_repo))
+
+
+def test_rejects_unimplemented_command_readiness(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "config.toml").write_text(
+        render_repo_config()
+        + """\ndev_start = ["python", "-m", "http.server", "{port}"]
+
+[lifecycle.readiness]
+kind = "command"
+timeout_seconds = 10
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(SoloAIError, match="tcp or http"):
+        load_repo_config(GitRepo(git_repo))

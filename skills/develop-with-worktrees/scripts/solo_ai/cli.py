@@ -296,8 +296,10 @@ def _prune(repo: GitRepo, *, kind: str, slot: str | None = None) -> dict[str, An
                 removed.append(str(child))
         return {"slot": slot, "removed": removed, "worktree_retained": True}
     if path.exists():
-        shutil.rmtree(path)
-    return {"slot": slot, "removed": str(path)}
+        raise SoloAIError(
+            "Slot path is not registered with Git and is retained; recover or inspect it manually"
+        )
+    return {"slot": slot, "removed": [], "worktree_retained": False}
 
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any]:

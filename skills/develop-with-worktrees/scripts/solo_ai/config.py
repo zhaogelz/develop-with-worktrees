@@ -160,8 +160,8 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
                 "lifecycle.readiness is required when lifecycle.dev_start is configured"
             )
         kind = str(readiness_raw.get("kind", ""))
-        if kind not in {"tcp", "http", "command"}:
-            raise SoloAIError("lifecycle.readiness.kind must be tcp, http, or command")
+        if kind not in {"tcp", "http"}:
+            raise SoloAIError("lifecycle.readiness.kind must be tcp or http")
         readiness = ReadinessSpec(
             kind=kind,
             target=str(readiness_raw["target"])
@@ -373,7 +373,7 @@ agents_file_created = {"true" if agents_file_created else "false"}
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{{port}}"]
 # [lifecycle.readiness]
-# kind = "http" # tcp, http, or command
+# kind = "http" # tcp or http
 # target = "http://127.0.0.1:{{port}}/health"
 # timeout_seconds = 30
 """

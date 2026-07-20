@@ -33,7 +33,7 @@ sensitive_allowlist = []
 # dev_start = ["npm", "run", "dev", "--", "--port", "{port}"]
 
 # [lifecycle.readiness]
-# kind = "http"                 # tcp or http in 0.1.0-beta.1
+# kind = "http"                 # tcp or http
 # target = "http://127.0.0.1:{port}/health"
 # timeout_seconds = 30
 ```

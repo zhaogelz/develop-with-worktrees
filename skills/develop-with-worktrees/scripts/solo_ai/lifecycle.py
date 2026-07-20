@@ -460,9 +460,6 @@ def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
     store = StateStore(repo)
     with store.operation(task_id, lease, "ready") as task:
         worktree = Path(task["worktree"])
-        config = load_repo_config(repo, cwd=worktree)
-        verification = load_verification_config(repo, cwd=worktree)
-        require_approval(repo, verification, cwd=worktree)
         if task.get("status") not in {"active", "ready"}:
             raise SoloAIError(f"Task cannot enter Ready from {task.get('status')}")
         if not repo.is_clean(worktree):
@@ -470,6 +467,10 @@ def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
         task = _sync_default(repo, task)
         if not repo.is_clean(worktree):
             raise SoloAIError("Default-branch synchronization left the task dirty")
+        # 同步可能带入新的受管策略；必须按同步后的策略重新确认和验证。
+        config = load_repo_config(repo, cwd=worktree)
+        verification = load_verification_config(repo, cwd=worktree)
+        require_approval(repo, verification, cwd=worktree)
         default = repo.default_branch()
         _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
         require_safe(
@@ -534,6 +535,36 @@ def _unknown_ignored(repo: GitRepo, worktree: Path) -> list[str]:
     return unknown
 
 
+def _assert_removable_managed_slot(repo: GitRepo, path: Path) -> bool:
+    """只允许删除干净、已登记且没有受保护忽略内容的受管槽位。"""
+    if not path.exists():
+        return False
+    if not any(item.path == path for item in repo.worktrees()):
+        raise SoloAIError(
+            f"Managed slot path is no longer registered with Git and is retained: {path}"
+        )
+    if not repo.is_clean(path):
+        raise SoloAIError(f"Dirty managed slot blocks removal: {path}")
+    if unknown := _unknown_ignored(repo, path):
+        raise SoloAIError(
+            "Unknown or protected files block removal of managed slot:\n"
+            + "\n".join(f"- {item}" for item in unknown[:20])
+        )
+    return True
+
+
+def _preflight_deinit_slots(
+    repo: GitRepo, *, config: Any, state: dict[str, Any]
+) -> list[Path]:
+    """在写入任何策略清理提交前验证全部槽位，避免半卸载。"""
+    removable: list[Path] = []
+    for slot in state["slots"].values():
+        path = ensure_within(Path(slot["path"]), repo.root / config.worktree_directory)
+        if _assert_removable_managed_slot(repo, path):
+            removable.append(path)
+    return removable
+
+
 def _stop_registered_processes(store: StateStore, task: dict[str, Any]) -> None:
     for snapshot in task.get("processes", []):
         if not process_matches(snapshot):
@@ -589,14 +620,15 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                 task = store.task(task_id)
                 store.require_lease(task, lease)
                 worktree = Path(task["worktree"])
-                config = load_repo_config(repo, cwd=worktree)
-                verification = load_verification_config(repo, cwd=worktree)
-                require_approval(repo, verification, cwd=worktree)
                 if not repo.is_clean(worktree) or repo.head(worktree) != task.get(
                     "candidate_head"
                 ):
                     raise SoloAIError("Candidate changed after Ready; run Ready again")
                 task = _sync_default(repo, task)
+                # 不能用同步前的策略证明同步后的候选；策略变化必须重新绑定。
+                config = load_repo_config(repo, cwd=worktree)
+                verification = load_verification_config(repo, cwd=worktree)
+                require_approval(repo, verification, cwd=worktree)
                 _run_declared_secret_scanner(
                     repo, cwd=worktree, scanner=config.secret_scanner
                 )
@@ -704,10 +736,6 @@ def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
     if not config.dev_start or not config.readiness:
         raise SoloAIError(
             "No lifecycle.dev_start plus readiness configuration is declared"
-        )
-    if config.readiness.kind == "command":
-        raise SoloAIError(
-            "Command readiness is reserved until its argv schema is declared; use tcp or http"
         )
     store = StateStore(repo)
     with store.operation(task_id, lease, "dev-start") as task:
@@ -837,6 +865,8 @@ def deinit(repo: GitRepo, *, confirm: str, message: str) -> dict[str, Any]:
         raise SoloAIError(
             "Managed AGENTS.md block differs; deinit refuses to remove ambiguous policy text"
         )
+    # 先检查全部槽位；任何一个不安全都不得创建或合入策略删除提交。
+    slots_to_remove = _preflight_deinit_slots(repo, config=config, state=state)
     # Commit and integrate tracked policy cleanup before any worktree deletion.
     cleanup = repo.local_dir / "deinit" / uuid.uuid4().hex / "worktree"
     branch = f"solo-ai/deinit-{uuid.uuid4().hex[:8]}"
@@ -861,16 +891,9 @@ def deinit(repo: GitRepo, *, confirm: str, message: str) -> dict[str, Any]:
         repo.git(["worktree", "remove", str(cleanup)], cwd=primary, check=False)
         repo.git(["branch", "-d", branch], cwd=primary, check=False)
     removed_slots: list[str] = []
-    for slot in state["slots"].values():
-        path = ensure_within(Path(slot["path"]), repo.root / config.worktree_directory)
-        if not path.exists():
-            continue
-        if _unknown_ignored(repo, path):
-            raise SoloAIError(
-                f"Unknown or protected files block removal of managed slot: {path}"
-            )
-        registered = any(item.path == path for item in repo.worktrees())
-        if registered:
+    for path in slots_to_remove:
+        # 预检后仍重验，避免用户或其他工具在清理过程中写入槽位。
+        if _assert_removable_managed_slot(repo, path):
             repo.git(["worktree", "remove", "--force", str(path)], cwd=primary)
             removed_slots.append(str(path))
     # Only the exact local state root is removed after all managed slots are gone.

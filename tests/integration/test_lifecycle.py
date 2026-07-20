@@ -31,6 +31,7 @@ from conftest import git
 
 
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
+STRICT_VERIFY = CommandSpec(("git", "status", "--short"))
 
 
 def initialized(path: Path) -> GitRepo:
@@ -50,6 +51,43 @@ def commit_one(
     commit_task(
         repo, task_id=task["id"], lease=task["lease"], message=message, paths=[relative]
     )
+
+
+def merge_verification_policy(repo: GitRepo, command: CommandSpec) -> None:
+    task = start(repo, name="change validation policy")
+    worktree = Path(task["worktree"])
+    (worktree / ".solo-ai" / "verification.toml").write_text(
+        f"""schema_version = 2
+static_only = false
+
+[[profiles]]
+id = "default"
+paths = ["**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["**"]
+environment = []
+commands = [{json.dumps(list(command.argv))}]
+""",
+        encoding="utf-8",
+    )
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: change verification policy",
+        paths=[".solo-ai/verification.toml"],
+    )
+    approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    finish(repo, task_id=task["id"], lease=task["lease"])
+
+
+def proof_commands(repo: GitRepo, fingerprint: str) -> list[list[str] | None]:
+    proof = json.loads(
+        (repo.local_dir / "proofs" / f"{fingerprint}.json").read_text(encoding="utf-8")
+    )
+    return [item["command"] for item in proof["runs"]]
 
 
 def test_full_managed_lifecycle_and_exact_ready_proof_reuse(git_repo: Path) -> None:
@@ -194,6 +232,32 @@ commands = [["git", "diff", "--check"]]
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
+def test_ready_uses_policy_after_default_branch_synchronization(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="candidate before policy update")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+
+    merge_verification_policy(repo, STRICT_VERIFY)
+
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+    assert proof_commands(repo, prepared["ready_proof"]) == [list(STRICT_VERIFY.argv)]
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_finish_uses_policy_after_default_branch_synchronization(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="ready candidate before policy update")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+
+    merge_verification_policy(repo, STRICT_VERIFY)
+
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert proof_commands(repo, result["proof"]) == [list(STRICT_VERIFY.argv)]
+
+
 def test_status_never_reveals_lease_and_recover_rejects_live_operation(
     git_repo: Path,
 ) -> None:
@@ -242,6 +306,21 @@ def test_deinit_removes_only_exact_adopted_policy_and_slots(git_repo: Path) -> N
     assert not repo.local_dir.exists()
 
 
+def test_deinit_preflights_slot_before_removing_tracked_policy(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="preserve unexpected slot file")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    marker = worktree / "user-note.txt"
+    marker.write_text("preserve me\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="Dirty managed slot"):
+        deinit(repo, confirm="DEINIT", message="chore: remove local worktree workflow")
+
+    assert (git_repo / ".solo-ai" / "config.toml").exists()
+    assert marker.read_text(encoding="utf-8") == "preserve me\n"
+
+
 def test_prune_slot_removes_only_declared_local_dependency_paths(
     git_repo: Path,
 ) -> None:
@@ -255,6 +334,22 @@ def test_prune_slot_removes_only_declared_local_dependency_paths(
     assert result["worktree_retained"] is True
     assert not (worktree / ".venv").exists()
     assert (worktree / "README.md").exists()
+
+
+def test_prune_slot_retains_an_unregistered_slot_directory(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="orphaned slot")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    repo.git(["worktree", "remove", "--force", str(worktree)], cwd=git_repo)
+    worktree.mkdir()
+    marker = worktree / "user-note.txt"
+    marker.write_text("preserve me\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="not registered"):
+        _prune(repo, kind="slot", slot="01")
+
+    assert marker.read_text(encoding="utf-8") == "preserve me\n"
 
 
 def test_dev_supervisor_owns_and_stops_http_process_tree(git_repo: Path) -> None:
