@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-[![CI](https://github.com/lz1539/develop-with-worktrees/actions/workflows/ci.yml/badge.svg)](https://github.com/lz1539/develop-with-worktrees/actions/workflows/ci.yml)
+[![CI](https://github.com/zhaogelz/develop-with-worktrees/actions/workflows/ci.yml/badge.svg)](https://github.com/zhaogelz/develop-with-worktrees/actions/workflows/ci.yml)
 
 一个面向 Codex 的本地优先插件：把“单人 AI + Git worktree”从临时习惯变成可复用、可恢复、可卸载的开发闭环。
 
@@ -13,7 +13,7 @@
 需要 Git、[uv](https://docs.astral.sh/uv/) 和支持插件与 hook 的 Codex：
 
 ```text
-codex plugin marketplace add lz1539/develop-with-worktrees --ref v0.1.0-beta.1
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.1.0-beta.2
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
@@ -91,6 +91,6 @@ uv run --script <插件内 dww.py 的绝对路径> --repo <仓库> deinit --conf
 
 ## 当前状态
 
-`0.1.0-beta.1` 是本地试用版。已包含 Windows、Linux、macOS CI 配置目标以及本地 CLI/生命周期/hook/卸载测试；在真实本机安装和 GitHub 发布前仍应先跑临时 `CODEX_HOME` 的安装、信任、升级与卸载演练。
+`0.1.0-beta.2` 是公开测试版。已包含 Windows、Linux、macOS CI 配置目标，以及本地 CLI/生命周期/hook/卸载测试；发布前已完成临时 `CODEX_HOME` 的安装、信任、升级与卸载演练。
 
 开发时，完整生命周期测试会反复创建、释放和恢复临时 Git worktree，在 Windows 上可能需要数分钟；外层超时至少预留十分钟。若外层先超时，先确认原 `pytest` 子进程是否仍在运行，不能立即并发重跑。

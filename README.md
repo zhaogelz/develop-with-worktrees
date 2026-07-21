@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-[![CI](https://github.com/lz1539/develop-with-worktrees/actions/workflows/ci.yml/badge.svg)](https://github.com/lz1539/develop-with-worktrees/actions/workflows/ci.yml)
+[![CI](https://github.com/zhaogelz/develop-with-worktrees/actions/workflows/ci.yml/badge.svg)](https://github.com/zhaogelz/develop-with-worktrees/actions/workflows/ci.yml)
 
 **Safe parallel Codex work, for one developer.**
 
@@ -24,7 +24,7 @@ main advances safely; failures keep their task scene intact
 Requirements: Git, [uv](https://docs.astral.sh/uv/), and Codex with plugin and hook support.
 
 ```text
-codex plugin marketplace add lz1539/develop-with-worktrees --ref v0.1.0-beta.1
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.1.0-beta.2
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

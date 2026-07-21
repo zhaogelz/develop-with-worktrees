@@ -1,7 +1,7 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "description": "A local-first Codex workflow for isolated worktrees, explicit validation, safe integration, and clean removal.",
   "skills": "skills",
   "author": {

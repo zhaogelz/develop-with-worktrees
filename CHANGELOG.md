@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0-beta.2 — 2026-07-21
+
+- Republishes the public beta from its maintained GitHub namespace.
+- Updates the CI badges and documented marketplace command to the new canonical repository.
+
 ## 0.1.0-beta.1 — 2026-07-21
 
 First public beta.
