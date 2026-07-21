@@ -12,6 +12,8 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     tmp_path: Path,
 ) -> None:
     """Exercise Codex's real local marketplace install/remove flow, never the user's home."""
+    if os.environ.get("DWW_SKIP_CODEX_CLI_INTEGRATION") == "1":
+        pytest.skip("Codex CLI install integration is exercised on a local Codex host")
     repository_root = Path(__file__).parents[2]
     source = repository_root / "plugins" / "develop-with-worktrees"
     marketplace_source = repository_root / ".agents" / "plugins" / "marketplace.json"

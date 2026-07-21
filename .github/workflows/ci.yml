@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  DWW_SKIP_CODEX_CLI_INTEGRATION: "1"
+
 jobs:
   test:
     strategy:
