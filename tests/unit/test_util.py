@@ -67,27 +67,18 @@ def test_unix_process_group_stops_with_term_before_waiting(
     assert calls == [(321, signal.SIGTERM)]
 
 
-def test_tcp_readiness_uses_a_nonblocking_connection(
+def test_tcp_readiness_uses_a_bounded_connection_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
         port = listener.getsockname()[1]
-        original_select = lifecycle.select.select
 
         def blocking_connection_was_used(*args: object, **kwargs: object) -> None:
             raise AssertionError("TCP readiness must not use create_connection")
 
         monkeypatch.setattr(
             lifecycle.socket, "create_connection", blocking_connection_was_used
-        )
-        monkeypatch.setattr(
-            lifecycle.select,
-            "select",
-            lambda readable, writable, exceptional, timeout: (
-                *original_select(readable, writable, exceptional, timeout)[:2],
-                writable,
-            ),
         )
         assert lifecycle._ready("tcp", f"127.0.0.1:{port}", port=port) is True

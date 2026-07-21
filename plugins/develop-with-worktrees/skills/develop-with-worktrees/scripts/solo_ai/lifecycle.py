@@ -4,7 +4,6 @@ import errno
 import os
 import json
 import platform
-import select
 import signal
 import shutil
 import socket
@@ -821,23 +820,11 @@ def _ready(kind: str, target: str | None, *, port: int) -> bool:
         if kind == "tcp":
             host, _, raw_port = rendered.partition(":")
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
-                connection.setblocking(False)
-                result = connection.connect_ex((host or "127.0.0.1", int(raw_port)))
-                if result == 0:
-                    return True
-                pending = {
-                    errno.EINPROGRESS,
-                    errno.EWOULDBLOCK,
-                    errno.EALREADY,
-                    getattr(errno, "WSAEWOULDBLOCK", 10035),
+                connection.settimeout(0.2)
+                return connection.connect_ex((host or "127.0.0.1", int(raw_port))) in {
+                    0,
+                    errno.EISCONN,
                 }
-                if result not in pending:
-                    return False
-                _, writable, _ = select.select([], [connection], [connection], 0.2)
-                return (
-                    bool(writable)
-                    and connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0
-                )
         if kind == "http":
             with urllib.request.urlopen(rendered, timeout=2) as response:
                 return 200 <= response.status < 400
