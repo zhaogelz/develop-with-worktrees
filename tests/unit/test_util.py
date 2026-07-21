@@ -74,11 +74,20 @@ def test_tcp_readiness_uses_a_nonblocking_connection(
         listener.bind(("127.0.0.1", 0))
         listener.listen()
         port = listener.getsockname()[1]
+        original_select = lifecycle.select.select
 
         def blocking_connection_was_used(*args: object, **kwargs: object) -> None:
             raise AssertionError("TCP readiness must not use create_connection")
 
         monkeypatch.setattr(
             lifecycle.socket, "create_connection", blocking_connection_was_used
+        )
+        monkeypatch.setattr(
+            lifecycle.select,
+            "select",
+            lambda readable, writable, exceptional, timeout: (
+                *original_select(readable, writable, exceptional, timeout)[:2],
+                writable,
+            ),
         )
         assert lifecycle._ready("tcp", f"127.0.0.1:{port}", port=port) is True

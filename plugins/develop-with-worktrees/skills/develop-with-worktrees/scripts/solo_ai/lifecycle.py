@@ -832,12 +832,9 @@ def _ready(kind: str, target: str | None, *, port: int) -> bool:
                 }
                 if result not in pending:
                     return False
-                _, writable, exceptional = select.select(
-                    [], [connection], [connection], 0.2
-                )
+                _, writable, _ = select.select([], [connection], [connection], 0.2)
                 return (
                     bool(writable)
-                    and not exceptional
                     and connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0
                 )
         if kind == "http":
