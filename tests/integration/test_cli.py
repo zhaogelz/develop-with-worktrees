@@ -105,7 +105,7 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
         / "dww.py"
     )
 
-    def call_json(*arguments: str) -> dict:
+    def call_json(*arguments: str, repo_path: Path = git_repo) -> dict:
         completed = subprocess.run(
             [
                 "uv",
@@ -113,7 +113,7 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
                 "--script",
                 str(runner),
                 "--repo",
-                str(git_repo),
+                str(repo_path),
                 "--json",
                 *arguments,
             ],
@@ -172,7 +172,12 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
         "feat: cli greeting",
         "--path",
         "cli.txt",
+        repo_path=worktree,
     )
-    call_json("ready", "--task", task["id"], "--lease", task["lease"])
-    call_json("finish", "--task", task["id"], "--lease", task["lease"])
+    call_json(
+        "ready", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
+    )
+    call_json(
+        "finish", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
+    )
     assert (git_repo / "cli.txt").exists()

@@ -62,7 +62,9 @@ class StateStore:
             if slot is None:
                 continue
             expected = (
-                self.repo.root / config.worktree_directory / f"solo-ai-slot-{slot_id}"
+                self.repo.primary_path
+                / config.worktree_directory
+                / f"solo-ai-slot-{slot_id}"
             ).resolve()
             actual = Path(str(slot.get("path", ""))).resolve()
             if actual != expected:
@@ -83,7 +85,7 @@ class StateStore:
             for number in range(1, 6):
                 slot_id = f"{number:02d}"
                 path = (
-                    self.repo.root
+                    self.repo.primary_path
                     / config.worktree_directory
                     / f"solo-ai-slot-{slot_id}"
                 )

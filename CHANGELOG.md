@@ -4,6 +4,7 @@
 
 - Republishes the public beta from its maintained GitHub namespace.
 - Updates the CI badges and documented marketplace command to the new canonical repository.
+- Fixes task-worktree CLI calls so `commit`, `ready`, and `finish` keep validating managed slot paths against the primary worktree.
 
 ## 0.1.0-beta.1 — 2026-07-21
 

@@ -365,7 +365,7 @@ def start(repo: GitRepo, *, name: str) -> dict[str, Any]:
             config, name=name, branch=branch, base_head=base_head, base_ref=base_ref
         )
         worktree = ensure_within(
-            Path(task["worktree"]), repo.root / config.worktree_directory
+            Path(task["worktree"]), repo.primary_path / config.worktree_directory
         )
         try:
             registered = next(
@@ -603,7 +603,9 @@ def _preflight_deinit_slots(
     """在写入任何策略清理提交前验证全部槽位，避免半卸载。"""
     removable: list[Path] = []
     for slot in state["slots"].values():
-        path = ensure_within(Path(slot["path"]), repo.root / config.worktree_directory)
+        path = ensure_within(
+            Path(slot["path"]), repo.primary_path / config.worktree_directory
+        )
         if _assert_removable_managed_slot(repo, path):
             removable.append(path)
     return removable
@@ -778,7 +780,7 @@ def abandon(repo: GitRepo, *, task_id: str, lease: str, confirm: str) -> dict[st
     store = StateStore(repo)
     with store.operation(task_id, lease, "abandon") as task:
         worktree = ensure_within(
-            Path(task["worktree"]), repo.root / config.worktree_directory
+            Path(task["worktree"]), repo.primary_path / config.worktree_directory
         )
         _stop_registered_processes(store, task)
         unknown = _unknown_ignored(repo, worktree)

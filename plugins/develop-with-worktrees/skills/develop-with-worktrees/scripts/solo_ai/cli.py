@@ -273,7 +273,7 @@ def _prune(repo: GitRepo, *, kind: str, slot: str | None = None) -> dict[str, An
         if not details or details.get("status") not in {"idle", "inactive"}:
             raise SoloAIError("Only an empty idle or inactive slot can be pruned")
         path = ensure_within(
-            Path(details["path"]), repo.root / config.worktree_directory
+            Path(details["path"]), repo.primary_path / config.worktree_directory
         )
         if any(item.path == path for item in repo.worktrees()):
             protected = [
