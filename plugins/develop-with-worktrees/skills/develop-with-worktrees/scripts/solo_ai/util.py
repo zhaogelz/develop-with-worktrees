@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -257,7 +258,10 @@ class DirectoryLock:
                 prepared.rename(self.path)
                 self.acquired = True
                 return self
-            except FileExistsError:
+            except OSError as error:
+                if error.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    shutil.rmtree(prepared, ignore_errors=True)
+                    raise
                 shutil.rmtree(prepared, ignore_errors=True)
                 if self._remove_stale():
                     continue
