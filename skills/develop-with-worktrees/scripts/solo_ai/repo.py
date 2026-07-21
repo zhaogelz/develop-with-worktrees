@@ -225,9 +225,11 @@ class GitRepo:
 
     def changed_paths(self, cwd: Path) -> list[str]:
         """All tracked and untracked paths that would be included in a task commit."""
-        changed = self.git(["diff", "--name-only", "-z"], cwd=cwd).stdout.split("\0")
+        changed = self.git(
+            ["diff", "--no-renames", "--name-only", "-z"], cwd=cwd
+        ).stdout.split("\0")
         staged = self.git(
-            ["diff", "--cached", "--name-only", "-z"], cwd=cwd
+            ["diff", "--cached", "--no-renames", "--name-only", "-z"], cwd=cwd
         ).stdout.split("\0")
         return sorted(
             {item for item in [*changed, *staged, *self.untracked(cwd)] if item}

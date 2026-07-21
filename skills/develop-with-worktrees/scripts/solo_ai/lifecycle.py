@@ -448,7 +448,19 @@ def commit_task(
                 "Exact staging manifest does not match task changes:\n"
                 + "\n".join(detail)
             )
-        repo.git(["add", "--", *paths], cwd=worktree)
+        # 先更新所有已跟踪路径的删除和修改；前置精确清单检查保证它们都已审阅。
+        repo.git(["add", "-u"], cwd=worktree)
+        existing_paths = [
+            path
+            for path in paths
+            if (worktree / path).exists() or (worktree / path).is_symlink()
+        ]
+        if existing_paths:
+            repo.git(["add", "--", *existing_paths], cwd=worktree)
+        if set(repo.changed_paths(worktree)) != requested:
+            raise SoloAIError(
+                "Task changes changed while staging; inspect the task diff and retry"
+            )
         _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
         require_safe(
             repo,

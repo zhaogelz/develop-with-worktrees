@@ -69,3 +69,5 @@ uv run --script <插件内 dww.py 的绝对路径> --repo <仓库> deinit --conf
 ## 当前状态
 
 `0.1.0-beta.1` 是本地试用版。已包含 Windows、Linux、macOS CI 配置目标以及本地 CLI/生命周期/hook/卸载测试；在真实本机安装和 GitHub 发布前仍应先跑临时 `CODEX_HOME` 的安装、信任、升级与卸载演练。
+
+开发时，完整生命周期测试会反复创建、释放和恢复临时 Git worktree，在 Windows 上可能需要数分钟；外层超时至少预留十分钟。若外层先超时，先确认原 `pytest` 子进程是否仍在运行，不能立即并发重跑。

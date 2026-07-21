@@ -41,6 +41,9 @@ uv run --with pyyaml <path-to-skill-creator>/scripts/quick_validate.py skills/de
 ```
 
 The test suite creates temporary repositories. It does not modify the current business project.
+On Windows, the full lifecycle suite can take several minutes because it repeatedly creates,
+releases, and restores temporary Git worktrees. Give its outer timeout at least ten minutes and,
+after a timeout, check for the original `pytest` child before starting another run.
 
 See the Chinese README for a fuller first-use and removal guide, and [`docs/architecture.md`](docs/architecture.md) for invariants and state layout.
 

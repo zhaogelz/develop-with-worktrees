@@ -195,6 +195,32 @@ def test_exact_path_manifest_blocks_unknown_changes(git_repo: Path) -> None:
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
+def test_commit_requires_both_paths_for_a_staged_rename(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="rename an exact path")
+    worktree = Path(task["worktree"])
+    repo.git(["mv", "README.md", "RENAMED.md"], cwd=worktree)
+
+    with pytest.raises(SoloAIError, match="README.md"):
+        commit_task(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            message="test: incomplete rename manifest",
+            paths=["RENAMED.md"],
+        )
+
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: rename exact path",
+        paths=["README.md", "RENAMED.md"],
+    )
+    assert repo.is_clean(worktree)
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
 def test_sensitive_candidate_is_blocked_and_preserved(git_repo: Path) -> None:
     repo = initialized(git_repo)
     task = start(repo, name="unsafe task")
@@ -569,6 +595,38 @@ def test_ready_rejects_worktree_directory_change_before_it_can_integrate(
 
     assert StateStore(repo).task(task["id"])["status"] == "active"
     assert 'worktree_directory = ".worktrees"' in (
+        git_repo / ".solo-ai" / "config.toml"
+    ).read_text(encoding="utf-8")
+
+
+def test_ready_rejects_invalid_branch_prefix_before_it_can_integrate(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="must not change prefix to an invalid branch")
+    worktree = Path(task["worktree"])
+    config = worktree / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'branch_prefix = "codex/"',
+            'branch_prefix = "bad..prefix/"',
+        ),
+        encoding="utf-8",
+    )
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: change branch prefix",
+        paths=[".solo-ai/config.toml"],
+    )
+    approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
+
+    with pytest.raises(SoloAIError, match="branch_prefix"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert StateStore(repo).task(task["id"])["status"] == "active"
+    assert 'branch_prefix = "codex/"' in (
         git_repo / ".solo-ai" / "config.toml"
     ).read_text(encoding="utf-8")
 

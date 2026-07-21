@@ -45,7 +45,7 @@ _CONTENT_RULES = (
 
 def _allowed(path: str, allowlist: tuple[str, ...]) -> bool:
     normalized = path.replace("\\", "/")
-    return any(fnmatch.fnmatchcase(normalized, item) for item in allowlist)
+    return normalized in allowlist
 
 
 def scan(

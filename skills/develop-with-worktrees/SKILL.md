@@ -50,7 +50,7 @@ Every machine must approve the complete normalized plan once. After a clone, or 
 uv run --script <DWW> --repo <worktree> commit --task <id> --lease <lease> --message <message> --path <path> [--path <path> ...]
 ```
 
-The supplied paths must equal all task changes. Do not use `git add -A`, do not absorb unrelated files, and stop for user direction if the exact list is unclear.
+The supplied paths must equal all task changes. A rename is deliberately treated as two paths (the deleted source and added destination), so list both. After verifying that exact manifest, the lifecycle stages tracked deletions and modifications plus listed existing paths, then checks the complete change set again. Never use an unscoped `git add -A`, do not absorb unrelated files, and stop for user direction if the exact list is unclear.
 
 6. Run `ready --task <id> --lease <lease>`.
 7. Immediately run `finish --task <id> --lease <lease>` after Ready succeeds.

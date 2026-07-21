@@ -19,7 +19,7 @@ branch_prefix = "codex/"
 worktree_directory = ".worktrees" # non-empty repository-relative child path
 port_base = 20000               # each slot owns a separate 100-port range
 remote_policy = "local-only"
-sensitive_allowlist = []
+sensitive_allowlist = []       # exact repository-relative Git paths only; no globs
 
 # Optional, repository-declared argv. It runs before the built-in low-false-
 # positive secret gate; a non-zero exit preserves the task.
@@ -41,6 +41,8 @@ sensitive_allowlist = []
 There is no `compatible` tracked mode. A detected mature workflow wins before managed policy and causes complete defer. A locally disabled preference wins over both. If a marker is later added, managed actions stop; if it is later removed, adoption is not silently recreated or migrated.
 
 `worktree_directory` must be a non-empty relative child of the repository. Absolute paths, parent traversal, the repository root itself, and symlink escapes are rejected before any slot is allocated. It is immutable after adoption: restore the original value before continuing, or deinitialize and adopt again when the managed-slot root must move. This prevents a policy edit from leaving a task bound to an unreachable old slot.
+
+Configuration is parsed strictly: booleans, integers, strings, string arrays, argv arrays, and TOML tables must use their declared type. Values are never coerced from strings or arbitrary collections. `sensitive_allowlist` permits only exact repository-relative Git paths, not glob patterns, so it cannot disable the built-in gate globally. `branch_prefix` must be non-empty and, with the fixed task suffix, pass Git's branch-name check; invalid policy is rejected by Start, Ready, and Finish before it can allocate or integrate a task.
 
 `lifecycle.dev_start` is an argv array and is started with `shell=False`. It must declare a TCP or HTTP readiness probe. The process manager records a redacted-safe identity digest, uses a slot-only port range, and stops only a matching owned process tree.
 

@@ -82,3 +82,86 @@ def test_rejects_worktree_directory_outside_repository(git_repo: Path) -> None:
         )
         with pytest.raises(SoloAIError, match="worktree_directory"):
             load_repo_config(GitRepo(git_repo))
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ('branch_prefix = "bad..prefix/"', "branch_prefix"),
+        ('sensitive_allowlist = "*"', "sensitive_allowlist"),
+        ('sensitive_allowlist = ["*"]', "sensitive_allowlist"),
+        ('agents_file_created = "false"', "agents_file_created"),
+    ],
+)
+def test_rejects_unsafe_or_ambiguous_repository_config_types(
+    git_repo: Path, replacement: str, message: str
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    original = render_repo_config()
+    if replacement.startswith("branch_prefix"):
+        rendered = original.replace('branch_prefix = "codex/"', replacement)
+    elif replacement.startswith("sensitive_allowlist"):
+        rendered = original.replace("sensitive_allowlist = []", replacement)
+    else:
+        rendered = original.replace("agents_file_created = false", replacement)
+    (config / "config.toml").write_text(rendered, encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match=message):
+        load_repo_config(GitRepo(git_repo))
+
+
+def test_rejects_empty_declared_secret_scanner(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "config.toml").write_text(
+        render_repo_config().replace(
+            "\n[lifecycle]\n", "\nsecret_scanner = []\n\n[lifecycle]\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SoloAIError, match="secret_scanner"):
+        load_repo_config(GitRepo(git_repo))
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ('static_only = "false"\n', "static_only"),
+        (
+            """static_only = false
+
+[[profiles]]
+id = "bad-paths"
+paths = "**"
+commands = [["git", "status"]]
+""",
+            "paths",
+        ),
+        (
+            """static_only = false
+
+[[profiles]]
+id = "bad-reuse"
+paths = ["**"]
+cross_task_reuse = "false"
+external_state = "none"
+commands = [["git", "status"]]
+""",
+            "cross_task_reuse",
+        ),
+    ],
+)
+def test_rejects_ambiguous_verification_config_types(
+    git_repo: Path, body: str, message: str
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "verification.toml").write_text(
+        "schema_version = 2\n" + body,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SoloAIError, match=message):
+        load_verification_config(GitRepo(git_repo))

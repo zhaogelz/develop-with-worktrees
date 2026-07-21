@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .repo import GitRepo
@@ -122,6 +123,65 @@ def _command(raw: Any, *, field: str) -> CommandSpec:
     return CommandSpec(tuple(raw))
 
 
+def _integer(raw: Any, *, field: str) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise SoloAIError(f"{field} must be an integer")
+    return raw
+
+
+def _boolean(raw: Any, *, field: str) -> bool:
+    if not isinstance(raw, bool):
+        raise SoloAIError(f"{field} must be a boolean")
+    return raw
+
+
+def _number(raw: Any, *, field: str) -> float:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise SoloAIError(f"{field} must be a finite number")
+    value = float(raw)
+    if not math.isfinite(value):
+        raise SoloAIError(f"{field} must be a finite number")
+    return value
+
+
+def _string(raw: Any, *, field: str, non_empty: bool = False) -> str:
+    if not isinstance(raw, str):
+        raise SoloAIError(f"{field} must be a string")
+    if non_empty and not raw:
+        raise SoloAIError(f"{field} must be a non-empty string")
+    return raw
+
+
+def _strings(raw: Any, *, field: str, allow_empty: bool) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise SoloAIError(f"{field} must be an array of strings")
+    if not allow_empty and not raw:
+        raise SoloAIError(f"{field} must not be empty")
+    if any(not item for item in raw):
+        raise SoloAIError(f"{field} cannot contain an empty string")
+    return tuple(raw)
+
+
+def _sensitive_allowlist(raw: Any) -> tuple[str, ...]:
+    values = _strings(raw, field="sensitive_allowlist", allow_empty=True)
+    normalized: list[str] = []
+    for value in values:
+        path = value.replace("\\", "/")
+        candidate = PurePosixPath(path)
+        if (
+            path.startswith("/")
+            or (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/")
+            or candidate == PurePosixPath(".")
+            or ".." in candidate.parts
+            or any(character in path for character in "*?[")
+        ):
+            raise SoloAIError(
+                "sensitive_allowlist must contain exact repository-relative paths, not globs"
+            )
+        normalized.append(path)
+    return tuple(normalized)
+
+
 def _commands(raw: Any, *, field: str) -> tuple[CommandSpec, ...]:
     if raw is None:
         return ()
@@ -133,7 +193,7 @@ def _commands(raw: Any, *, field: str) -> tuple[CommandSpec, ...]:
 
 
 def _worktree_directory(repo: GitRepo, raw: Any) -> str:
-    value = str(raw).strip()
+    value = _string(raw, field="worktree_directory", non_empty=True)
     candidate = Path(value)
     if (
         not value
@@ -155,68 +215,88 @@ def _worktree_directory(repo: GitRepo, raw: Any) -> str:
     return str(candidate)
 
 
+def _branch_prefix(repo: GitRepo, raw: Any) -> str:
+    value = _string(raw, field="branch_prefix", non_empty=True)
+    probe = repo.git(
+        ["check-ref-format", "--branch", f"{value}solo-ai-policy-check"],
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise SoloAIError(
+            "branch_prefix must form a valid Git branch when combined with a task suffix"
+        )
+    return value
+
+
 def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     data = _read_toml((cwd or repo.policy_path()) / ".solo-ai" / "config.toml")
-    if int(data.get("schema_version", 0)) != CONFIG_SCHEMA:
+    if _integer(data.get("schema_version", 0), field="schema_version") != CONFIG_SCHEMA:
         raise SoloAIError(
             f"Unsupported .solo-ai/config.toml schema; expected {CONFIG_SCHEMA}"
         )
-    lifecycle = data.get("lifecycle") or {}
-    slots = int(data.get("slots", 3))
+    lifecycle = data.get("lifecycle", {})
+    if not isinstance(lifecycle, dict):
+        raise SoloAIError("lifecycle must be a TOML table")
+    slots = _integer(data.get("slots", 3), field="slots")
     if not 1 <= slots <= 5:
         raise SoloAIError("slots must be between 1 and 5")
-    mode = str(data.get("mode", "managed"))
+    mode = _string(data.get("mode", "managed"), field="mode")
     if mode != "managed":
         raise SoloAIError('Only mode = "managed" is valid in an adopted repository')
-    port_base = int(data.get("port_base", 20000))
+    port_base = _integer(data.get("port_base", 20000), field="port_base")
     if not 1024 <= port_base <= 65036:
         raise SoloAIError("port_base must leave room for all 100-port slot blocks")
-    remote_policy = str(data.get("remote_policy", "local-only"))
+    remote_policy = _string(
+        data.get("remote_policy", "local-only"), field="remote_policy"
+    )
     if remote_policy != "local-only":
         raise SoloAIError('Version 1 supports only remote_policy = "local-only"')
     readiness: ReadinessSpec | None = None
-    dev_start = lifecycle.get("dev_start")
+    dev_start: CommandSpec | None = None
     readiness_raw = lifecycle.get("readiness")
-    if dev_start is not None:
+    if "dev_start" in lifecycle:
+        dev_start = _command(lifecycle["dev_start"], field="lifecycle.dev_start")
         if not isinstance(readiness_raw, dict):
             raise SoloAIError(
                 "lifecycle.readiness is required when lifecycle.dev_start is configured"
             )
-        kind = str(readiness_raw.get("kind", ""))
+        kind = _string(readiness_raw.get("kind", ""), field="lifecycle.readiness.kind")
         if kind not in {"tcp", "http"}:
             raise SoloAIError("lifecycle.readiness.kind must be tcp or http")
+        target = _string(
+            readiness_raw.get("target", ""),
+            field="lifecycle.readiness.target",
+            non_empty=True,
+        )
         readiness = ReadinessSpec(
             kind=kind,
-            target=str(readiness_raw["target"])
-            if readiness_raw.get("target")
-            else None,
-            timeout_seconds=float(readiness_raw.get("timeout_seconds", 30)),
+            target=target,
+            timeout_seconds=_number(
+                readiness_raw.get("timeout_seconds", 30),
+                field="lifecycle.readiness.timeout_seconds",
+            ),
         )
         if readiness.timeout_seconds <= 0:
             raise SoloAIError("lifecycle.readiness.timeout_seconds must be positive")
-        if kind in {"tcp", "http"} and not readiness.target:
-            raise SoloAIError("lifecycle.readiness.target is required for tcp and http")
     return RepoConfig(
         schema_version=CONFIG_SCHEMA,
         mode=mode,
         slots=slots,
-        branch_prefix=str(data.get("branch_prefix", "codex/")),
+        branch_prefix=_branch_prefix(repo, data.get("branch_prefix", "codex/")),
         worktree_directory=_worktree_directory(
             repo, data.get("worktree_directory", ".worktrees")
         ),
         port_base=port_base,
         remote_policy=remote_policy,
-        sensitive_allowlist=tuple(
-            str(item) for item in data.get("sensitive_allowlist", [])
+        sensitive_allowlist=_sensitive_allowlist(data.get("sensitive_allowlist", [])),
+        agents_file_created=_boolean(
+            data.get("agents_file_created", False), field="agents_file_created"
         ),
-        agents_file_created=bool(data.get("agents_file_created", False)),
         secret_scanner=_command(data["secret_scanner"], field="secret_scanner")
-        if data.get("secret_scanner")
+        if "secret_scanner" in data
         else None,
         warm_commands=_commands(data.get("warm"), field="warm"),
-        dev_start=_command(dev_start, field="lifecycle.dev_start")
-        if dev_start
-        else None,
+        dev_start=dev_start,
         readiness=readiness,
     )
 
@@ -225,19 +305,36 @@ def load_verification_config(
     repo: GitRepo, *, cwd: Path | None = None
 ) -> VerificationConfig:
     data = _read_toml((cwd or repo.policy_path()) / ".solo-ai" / "verification.toml")
-    if int(data.get("schema_version", 0)) != VERIFICATION_SCHEMA:
+    if (
+        _integer(data.get("schema_version", 0), field="schema_version")
+        != VERIFICATION_SCHEMA
+    ):
         raise SoloAIError(
             f"Unsupported .solo-ai/verification.toml schema; expected {VERIFICATION_SCHEMA}"
         )
+    raw_profiles = data.get("profiles", [])
+    if not isinstance(raw_profiles, list):
+        raise SoloAIError("profiles must be an array of TOML tables")
     profiles: list[VerificationProfile] = []
-    for index, raw in enumerate(data.get("profiles", [])):
+    for index, raw in enumerate(raw_profiles):
         if not isinstance(raw, dict):
             raise SoloAIError(f"profiles[{index}] must be a TOML table")
-        profile_id = str(raw.get("id", "")).strip()
-        paths = tuple(str(item) for item in raw.get("paths", ["**"]))
+        profile_id = _string(raw.get("id", ""), field=f"profiles[{index}].id")
+        paths = _strings(
+            raw.get("paths", ["**"]),
+            field=f"profiles[{index}].paths",
+            allow_empty=False,
+        )
         commands = _commands(raw.get("commands"), field=f"profiles[{index}].commands")
-        reuse = bool(raw.get("cross_task_reuse", False))
-        external_state = str(raw.get("external_state", "unknown"))
+        reuse = _boolean(
+            raw.get("cross_task_reuse", False),
+            field=f"profiles[{index}].cross_task_reuse",
+        )
+        external_state = _string(
+            raw.get("external_state", "unknown"),
+            field=f"profiles[{index}].external_state",
+            non_empty=True,
+        )
         if not profile_id:
             raise SoloAIError("Every verification profile needs a non-empty id")
         if not commands:
@@ -253,11 +350,19 @@ def load_verification_config(
                 commands=commands,
                 cross_task_reuse=reuse,
                 external_state=external_state,
-                input_paths=tuple(str(item) for item in raw.get("input_paths", paths)),
-                environment=tuple(str(item) for item in raw.get("environment", [])),
+                input_paths=_strings(
+                    raw.get("input_paths", list(paths)),
+                    field=f"profiles[{index}].input_paths",
+                    allow_empty=False,
+                ),
+                environment=_strings(
+                    raw.get("environment", []),
+                    field=f"profiles[{index}].environment",
+                    allow_empty=True,
+                ),
             )
         )
-    static_only = bool(data.get("static_only", False))
+    static_only = _boolean(data.get("static_only", False), field="static_only")
     if not profiles and not static_only:
         raise SoloAIError(
             "No validation commands configured; explicitly enable static_only or add a profile"
