@@ -1,0 +1,21 @@
+schema_version = 2
+mode = "managed"
+slots = 3
+branch_prefix = "codex/"
+worktree_directory = ".worktrees" # repository-relative only
+port_base = 20000
+remote_policy = "local-only"
+sensitive_allowlist = []
+agents_file_created = true
+
+# Optional repository-declared scanner, for example: ["gitleaks", "protect", "--staged"]
+# secret_scanner = []
+# Optional serial preparation commands for an idle slot. No environment is copied.
+# warm = [["uv", "sync"]]
+
+[lifecycle]
+# dev_start = ["npm", "run", "dev", "--", "--port", "{port}"]
+# [lifecycle.readiness]
+# kind = "http" # tcp or http
+# target = "http://127.0.0.1:{port}/health"
+# timeout_seconds = 30

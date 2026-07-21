@@ -1,0 +1,13 @@
+schema_version = 2
+static_only = false
+
+[[profiles]]
+id = "default"
+paths = ["**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["**"]
+environment = []
+commands = [
+  ["uv", "run", "pytest"],
+]
