@@ -1,8 +1,10 @@
 import errno
+import signal
 from pathlib import Path
 
 import pytest
 
+import solo_ai.lifecycle as lifecycle
 from solo_ai.util import DirectoryLock, SoloAIError, redact_text
 
 
@@ -40,3 +42,25 @@ def test_directory_lock_normalizes_nonempty_destination_error(
         with pytest.raises(SoloAIError, match="Operation is already active"):
             with DirectoryLock(path):
                 raise AssertionError("lock was acquired twice")
+
+
+def test_unix_process_group_stops_with_term_before_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, signal.Signals]] = []
+
+    class ExitedProcess:
+        pid = 321
+
+        def is_running(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        lifecycle.os,
+        "killpg",
+        lambda pid, value: calls.append((pid, value)),
+        raising=False,
+    )
+
+    assert lifecycle._stop_unix_process_group(ExitedProcess()) is True
+    assert calls == [(321, signal.SIGTERM)]

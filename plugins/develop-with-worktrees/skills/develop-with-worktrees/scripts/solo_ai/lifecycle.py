@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import platform
+import signal
 import shutil
 import socket
 import subprocess
@@ -625,6 +626,36 @@ def _restore_removed_slots(
     return failures
 
 
+def _process_has_exited(process: psutil.Process) -> bool:
+    try:
+        return not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+def _stop_unix_process_group(root: psutil.Process) -> bool:
+    """停止由本插件创建的 Unix 会话，避免依赖 psutil 的进程回收语义。"""
+    try:
+        os.killpg(root.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if _process_has_exited(root):
+            return True
+        time.sleep(0.1)
+    try:
+        os.killpg(root.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if _process_has_exited(root):
+            return True
+        time.sleep(0.1)
+    return _process_has_exited(root)
+
+
 def _stop_registered_processes(store: StateStore, task: dict[str, Any]) -> None:
     for snapshot in task.get("processes", []):
         if not process_matches(snapshot):
@@ -632,6 +663,12 @@ def _stop_registered_processes(store: StateStore, task: dict[str, Any]) -> None:
                 f"Registered process identity changed or is unknown: PID {snapshot.get('pid')}"
             )
         root = psutil.Process(snapshot["pid"])
+        if os.name != "nt" and snapshot.get("role") == "command":
+            if not _stop_unix_process_group(root):
+                raise SoloAIError(
+                    "Owned development process did not stop; task remains preserved"
+                )
+            continue
         processes = [*root.children(recursive=True), root]
         for process in reversed(processes):
             try:
