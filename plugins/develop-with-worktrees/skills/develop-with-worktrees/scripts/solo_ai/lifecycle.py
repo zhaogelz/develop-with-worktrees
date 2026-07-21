@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import errno
 import os
 import json
 import platform
+import select
 import signal
 import shutil
 import socket
@@ -817,10 +819,27 @@ def _ready(kind: str, target: str | None, *, port: int) -> bool:
     try:
         if kind == "tcp":
             host, _, raw_port = rendered.partition(":")
-            with socket.create_connection(
-                (host or "127.0.0.1", int(raw_port)), timeout=1
-            ):
-                return True
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+                connection.setblocking(False)
+                result = connection.connect_ex((host or "127.0.0.1", int(raw_port)))
+                if result == 0:
+                    return True
+                pending = {
+                    errno.EINPROGRESS,
+                    errno.EWOULDBLOCK,
+                    errno.EALREADY,
+                    getattr(errno, "WSAEWOULDBLOCK", 10035),
+                }
+                if result not in pending:
+                    return False
+                _, writable, exceptional = select.select(
+                    [], [connection], [connection], 0.2
+                )
+                return (
+                    bool(writable)
+                    and not exceptional
+                    and connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0
+                )
         if kind == "http":
             with urllib.request.urlopen(rendered, timeout=2) as response:
                 return 200 <= response.status < 400
