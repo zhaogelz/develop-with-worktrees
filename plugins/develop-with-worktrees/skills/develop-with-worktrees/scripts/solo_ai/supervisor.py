@@ -1,9 +1,9 @@
-"""Own a development command until the lifecycle stops this supervisor.
+"""Own a development command with a Windows Job Object.
 
 The parent CLI exits after `dev start`, so Windows needs a long-lived owner for
 the Job Object. Closing this process closes its Job Object with
 KILL_ON_JOB_CLOSE, which terminates every process the development command
-started. Unix uses the supervisor's dedicated session/process group.
+started. Unix starts the declared command directly in its own session.
 """
 
 from __future__ import annotations

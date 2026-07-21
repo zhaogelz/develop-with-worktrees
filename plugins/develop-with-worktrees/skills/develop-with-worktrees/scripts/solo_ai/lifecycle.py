@@ -806,37 +806,43 @@ def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
         for port in range(block, block + 100):
             if not _port_free(port):
                 continue
-            kwargs: dict[str, Any] = {
-                "cwd": task["worktree"],
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
-                "shell": False,
-                "text": True,
-                "encoding": "utf-8",
-            }
+            command = _format_argv(config.dev_start, port=port, slot=task["slot_id"])
             if os.name == "nt":
-                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                supervisor = subprocess.Popen(
+                    [sys.executable, str(Path(__file__).with_name("supervisor.py"))],
+                    cwd=task["worktree"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                    text=True,
+                    encoding="utf-8",
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+                assert supervisor.stdin is not None
+                supervisor.stdin.write(
+                    json.dumps({"argv": command, "cwd": task["worktree"]})
+                )
+                supervisor.stdin.close()
+                role = "supervisor"
             else:
-                kwargs["start_new_session"] = True
-            supervisor = subprocess.Popen(
-                [sys.executable, str(Path(__file__).with_name("supervisor.py"))],
-                **kwargs,
-            )
-            assert supervisor.stdin is not None
-            payload = {
-                "argv": _format_argv(config.dev_start, port=port, slot=task["slot_id"]),
-                "cwd": task["worktree"],
-            }
-            supervisor.stdin.write(json.dumps(payload))
-            supervisor.stdin.close()
+                supervisor = subprocess.Popen(
+                    command,
+                    cwd=task["worktree"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                    start_new_session=True,
+                )
+                role = "command"
             deadline = time.monotonic() + config.readiness.timeout_seconds
             while time.monotonic() < deadline:
                 if supervisor.poll() is not None:
                     break
                 if _ready(config.readiness.kind, config.readiness.target, port=port):
                     snapshot = process_snapshot(supervisor.pid)
-                    snapshot["role"] = "supervisor"
+                    snapshot["role"] = role
                     store.update_task(task_id, processes=[snapshot], port=port)
                     return {
                         "task_id": task_id,
