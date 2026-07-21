@@ -658,12 +658,17 @@ def test_finish_rejects_slot_directory_change_arriving_from_default(
     assert StateStore(repo).task(task["id"])["status"] == "ready"
 
 
-def test_dev_supervisor_owns_and_stops_http_process_tree(git_repo: Path) -> None:
+def test_dev_supervisor_owns_and_stops_tcp_process_tree(git_repo: Path) -> None:
     repo = initialized(git_repo)
+    listener_command = (
+        "import socket,time;listener=socket.socket();"
+        "listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+        "listener.bind(('127.0.0.1',{port}));listener.listen();time.sleep(30)"
+    )
     config = git_repo / ".solo-ai" / "config.toml"
     config.write_text(
         config.read_text(encoding="utf-8")
-        + f"""\ndev_start = [{json.dumps(sys.executable)}, "-u", "-m", "http.server", "{{port}}", "--bind", "127.0.0.1"]\n\n[lifecycle.readiness]\nkind = "tcp"\ntarget = "127.0.0.1:{{port}}"\ntimeout_seconds = 10\n""",
+        + f"""\ndev_start = [{json.dumps(sys.executable)}, "-c", {json.dumps(listener_command)}]\n\n[lifecycle.readiness]\nkind = "tcp"\ntarget = "127.0.0.1:{{port}}"\ntimeout_seconds = 10\n""",
         encoding="utf-8",
     )
     git(git_repo, "add", ".solo-ai/config.toml")
