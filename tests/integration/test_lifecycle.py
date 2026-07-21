@@ -541,6 +541,65 @@ def test_worktree_directory_change_is_rejected_before_task_allocation(
     assert state["slots"]["01"]["status"] == "idle"
 
 
+def test_ready_rejects_worktree_directory_change_before_it_can_integrate(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="must not change the slot root")
+    worktree = Path(task["worktree"])
+    config = worktree / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'worktree_directory = ".worktrees"',
+            'worktree_directory = ".new-worktrees"',
+        ),
+        encoding="utf-8",
+    )
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: change slot root",
+        paths=[".solo-ai/config.toml"],
+    )
+    approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
+
+    with pytest.raises(SoloAIError, match="worktree_directory is immutable"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert StateStore(repo).task(task["id"])["status"] == "active"
+    assert 'worktree_directory = ".worktrees"' in (
+        git_repo / ".solo-ai" / "config.toml"
+    ).read_text(encoding="utf-8")
+
+
+def test_finish_rejects_slot_directory_change_arriving_from_default(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="candidate protected from changed default policy")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+
+    config = git_repo / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'worktree_directory = ".worktrees"',
+            'worktree_directory = ".new-worktrees"',
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: externally change slot root")
+    approve(repo, load_verification_config(repo))
+
+    with pytest.raises(SoloAIError, match="worktree_directory is immutable"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+
+    assert not (git_repo / "candidate.txt").exists()
+    assert StateStore(repo).task(task["id"])["status"] == "ready"
+
+
 def test_dev_supervisor_owns_and_stops_http_process_tree(git_repo: Path) -> None:
     repo = initialized(git_repo)
     config = git_repo / ".solo-ai" / "config.toml"

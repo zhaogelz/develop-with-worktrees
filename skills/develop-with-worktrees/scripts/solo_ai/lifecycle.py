@@ -497,6 +497,7 @@ def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
             raise SoloAIError("Default-branch synchronization left the task dirty")
         # 同步可能带入新的受管策略；必须按同步后的策略重新确认和验证。
         config = load_repo_config(repo, cwd=worktree)
+        store.require_slot_layout(config)
         verification = load_verification_config(repo, cwd=worktree)
         require_approval(repo, verification, cwd=worktree)
         default = repo.default_branch()
@@ -674,6 +675,7 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                 task = _sync_default(repo, task)
                 # 不能用同步前的策略证明同步后的候选；策略变化必须重新绑定。
                 config = load_repo_config(repo, cwd=worktree)
+                store.require_slot_layout(config)
                 verification = load_verification_config(repo, cwd=worktree)
                 require_approval(repo, verification, cwd=worktree)
                 _run_declared_secret_scanner(
