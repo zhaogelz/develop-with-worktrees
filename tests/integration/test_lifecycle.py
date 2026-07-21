@@ -107,6 +107,43 @@ def test_full_managed_lifecycle_and_exact_ready_proof_reuse(git_repo: Path) -> N
     assert StateStore(repo).task(task["id"])["status"] == "finished"
 
 
+def test_finish_retains_standard_tool_caches_created_by_validation(
+    git_repo: Path,
+) -> None:
+    cache_command = CommandSpec(
+        (
+            sys.executable,
+            "-c",
+            "from pathlib import Path\n"
+            "for name in ('.pytest_cache', '.ruff_cache'):\n"
+            "    cache = Path(name)\n"
+            "    cache.mkdir(exist_ok=True)\n"
+            "    (cache / 'marker').write_text('cache', encoding='utf-8')\n",
+        )
+    )
+    (git_repo / ".gitignore").write_text(
+        ".pytest_cache/\n.ruff_cache/\n", encoding="utf-8"
+    )
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore standard tool caches")
+    repo = GitRepo(git_repo)
+    initialize(
+        repo, slots=3, commands=[cache_command], accept=True, accept_static_only=False
+    )
+    task = start(repo, name="validate with standard caches")
+    commit_one(repo, task, "cached.txt", "cached\n", "test: cache validation")
+
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+
+    worktree = Path(task["worktree"])
+    assert result["integrated_head"] == repo.head(git_repo)
+    assert (worktree / ".pytest_cache" / "marker").read_text(
+        encoding="utf-8"
+    ) == "cache"
+    assert (worktree / ".ruff_cache" / "marker").read_text(encoding="utf-8") == "cache"
+
+
 def test_dirty_primary_bootstrap_is_pending_then_first_finish_integrates(
     git_repo: Path,
 ) -> None:

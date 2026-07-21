@@ -285,7 +285,15 @@ def _prune(repo: GitRepo, *, kind: str, slot: str | None = None) -> dict[str, An
                 raise SoloAIError(
                     "Protected .env files block PruneSlot; it never deletes local credentials"
                 )
-            allowed = {".venv", "node_modules", ".cache", ".tmp", "__pycache__"}
+            allowed = {
+                ".venv",
+                "node_modules",
+                ".cache",
+                ".tmp",
+                "__pycache__",
+                ".pytest_cache",
+                ".ruff_cache",
+            }
             removed: list[str] = []
             for child in path.iterdir():
                 if child.name in allowed and child.exists():

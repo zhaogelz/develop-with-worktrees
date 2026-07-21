@@ -565,7 +565,15 @@ def _wait_turn(ticket: Path) -> None:
 
 
 def _unknown_ignored(repo: GitRepo, worktree: Path) -> list[str]:
-    known_roots = {".venv", "node_modules", ".tmp", ".cache", "__pycache__"}
+    known_roots = {
+        ".venv",
+        "node_modules",
+        ".tmp",
+        ".cache",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
     unknown: list[str] = []
     for item in repo.ignored_untracked(worktree):
         parts = Path(item).parts
