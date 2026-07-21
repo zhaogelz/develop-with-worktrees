@@ -679,3 +679,32 @@ def test_dev_supervisor_owns_and_stops_http_process_tree(git_repo: Path) -> None
     with socket.socket() as connection:
         assert connection.connect_ex(("127.0.0.1", started["port"])) != 0
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_dev_start_fails_fast_when_first_free_port_never_becomes_ready(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    config = git_repo / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + f"""\ndev_start = [{json.dumps(sys.executable)}, "-c", "import time; time.sleep(5)"]
+
+[lifecycle.readiness]
+kind = "tcp"
+target = "127.0.0.1:{{port}}"
+timeout_seconds = 0.2
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "chore: add an unready development command")
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name="reject unready development server")
+
+    started_at = time.monotonic()
+    with pytest.raises(SoloAIError, match="did not become ready on port"):
+        dev_start(repo, task_id=task["id"], lease=task["lease"])
+    assert time.monotonic() - started_at < 3
+    assert not StateStore(repo).task(task["id"])["processes"]
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])

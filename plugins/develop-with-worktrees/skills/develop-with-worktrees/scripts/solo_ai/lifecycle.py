@@ -42,6 +42,7 @@ from .util import (
     ensure_within,
     process_matches,
     process_snapshot,
+    redact_text,
     read_json,
     run_logged,
     safe_slug,
@@ -860,6 +861,7 @@ def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
             if not _port_free(port):
                 continue
             command = _format_argv(config.dev_start, port=port, slot=task["slot_id"])
+            log_path = repo.local_dir / "logs" / f"{task_id}-dev.log"
             if os.name == "nt":
                 supervisor = subprocess.Popen(
                     [sys.executable, str(Path(__file__).with_name("supervisor.py"))],
@@ -879,15 +881,17 @@ def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                 supervisor.stdin.close()
                 role = "supervisor"
             else:
-                supervisor = subprocess.Popen(
-                    command,
-                    cwd=task["worktree"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                    start_new_session=True,
-                )
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("w", encoding="utf-8", newline="\n") as log:
+                    supervisor = subprocess.Popen(
+                        command,
+                        cwd=task["worktree"],
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        shell=False,
+                        start_new_session=True,
+                    )
                 role = "command"
             deadline = time.monotonic() + config.readiness.timeout_seconds
             while time.monotonic() < deadline:
@@ -909,6 +913,18 @@ def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                     supervisor.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     supervisor.kill()
+            detail = ""
+            if os.name != "nt" and log_path.exists():
+                log_tail = redact_text(
+                    log_path.read_text(encoding="utf-8", errors="replace")
+                )[-2000:].strip()
+                if log_tail:
+                    detail = f"\nRecent local development log:\n{log_tail}"
+            raise SoloAIError(
+                f"Development command did not become ready on port {port} within "
+                f"{config.readiness.timeout_seconds:g} seconds; task remains preserved."
+                + detail
+            )
         raise SoloAIError(
             f"No development process became ready in slot port block {block}-{block + 99}"
         )
