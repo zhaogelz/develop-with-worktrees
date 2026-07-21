@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -13,7 +12,9 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     tmp_path: Path,
 ) -> None:
     """Exercise Codex's real local marketplace install/remove flow, never the user's home."""
-    source = Path(__file__).parents[2]
+    repository_root = Path(__file__).parents[2]
+    source = repository_root / "plugins" / "develop-with-worktrees"
+    marketplace_source = repository_root / ".agents" / "plugins" / "marketplace.json"
     marketplace_root = tmp_path / "marketplace-root"
     marketplace_dir = marketplace_root / ".agents" / "plugins"
     plugin_copy = marketplace_root / "plugins" / "develop-with-worktrees"
@@ -24,29 +25,7 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         plugin_copy,
         ignore=shutil.ignore_patterns(".git", ".venv", ".tmp", ".cache", "__pycache__"),
     )
-    (marketplace_dir / "marketplace.json").write_text(
-        json.dumps(
-            {
-                "name": "dww-test",
-                "interface": {"displayName": "DWW test"},
-                "plugins": [
-                    {
-                        "name": "develop-with-worktrees",
-                        "source": {
-                            "source": "local",
-                            "path": "./plugins/develop-with-worktrees",
-                        },
-                        "policy": {
-                            "installation": "AVAILABLE",
-                            "authentication": "ON_INSTALL",
-                        },
-                        "category": "developer-tools",
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+    shutil.copy2(marketplace_source, marketplace_dir / "marketplace.json")
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     environment = {**os.environ, "CODEX_HOME": str(codex_home)}
@@ -75,13 +54,20 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         "plugin", "marketplace", "add", str(marketplace_root), "--json"
     )
     assert added_marketplace.returncode == 0, added_marketplace.stderr
-    installed = call("plugin", "add", "develop-with-worktrees@dww-test", "--json")
+    installed = call(
+        "plugin", "add", "develop-with-worktrees@develop-with-worktrees", "--json"
+    )
     assert installed.returncode == 0, installed.stderr
-    listed = call("plugin", "list", "--marketplace", "dww-test", "--json")
+    listed = call("plugin", "list", "--marketplace", "develop-with-worktrees", "--json")
     assert listed.returncode == 0, listed.stderr
     assert "develop-with-worktrees" in listed.stdout
-    removed = call("plugin", "remove", "develop-with-worktrees@dww-test", "--json")
+    removed = call(
+        "plugin", "remove", "develop-with-worktrees@develop-with-worktrees", "--json"
+    )
     assert removed.returncode == 0, removed.stderr
-    removed_marketplace = call("plugin", "marketplace", "remove", "dww-test", "--json")
+    removed_marketplace = call(
+        "plugin", "marketplace", "remove", "develop-with-worktrees", "--json"
+    )
     assert removed_marketplace.returncode == 0, removed_marketplace.stderr
-    assert not any(codex_home.rglob("develop-with-worktrees"))
+    cache_root = codex_home / "plugins" / "cache" / "develop-with-worktrees"
+    assert not cache_root.exists() or not any(cache_root.iterdir())

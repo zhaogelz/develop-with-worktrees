@@ -6,7 +6,13 @@ from pathlib import Path
 from conftest import git
 
 
-HOOK_PATH = Path(__file__).parents[2] / "hooks" / "worktree_guard.py"
+HOOK_PATH = (
+    Path(__file__).parents[2]
+    / "plugins"
+    / "develop-with-worktrees"
+    / "hooks"
+    / "worktree_guard.py"
+)
 SPEC = importlib.util.spec_from_file_location("worktree_guard", HOOK_PATH)
 assert SPEC and SPEC.loader
 HOOK = importlib.util.module_from_spec(SPEC)

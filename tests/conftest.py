@@ -8,7 +8,12 @@ import pytest
 
 
 SCRIPT_ROOT = (
-    Path(__file__).parents[1] / "skills" / "develop-with-worktrees" / "scripts"
+    Path(__file__).parents[1]
+    / "plugins"
+    / "develop-with-worktrees"
+    / "skills"
+    / "develop-with-worktrees"
+    / "scripts"
 )
 sys.path.insert(0, str(SCRIPT_ROOT))
 

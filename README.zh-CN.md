@@ -1,6 +1,29 @@
 # Develop with Worktrees
 
+[![CI](https://github.com/lz1539/develop-with-worktrees/actions/workflows/ci.yml/badge.svg)](https://github.com/lz1539/develop-with-worktrees/actions/workflows/ci.yml)
+
 一个面向 Codex 的本地优先插件：把“单人 AI + Git worktree”从临时习惯变成可复用、可恢复、可卸载的开发闭环。
+
+> **让一个人安全地并行推进多个 Codex 开发任务。**
+
+它不是又一个通用的 `git worktree` 命令封装，而是把独立任务隔离、明确验证、冲突预检、顺序本地集成和干净退出连成一个交付闭环。
+
+## 安装公开 beta 版
+
+需要 Git、[uv](https://docs.astral.sh/uv/) 和支持插件与 hook 的 Codex：
+
+```text
+codex plugin marketplace add lz1539/develop-with-worktrees --ref v0.1.0-beta.1
+codex plugin add develop-with-worktrees@develop-with-worktrees
+```
+
+安装后请新建一个 Codex 任务，让插件在任务开始时加载。新 Git 仓库的第一次修改只会展示采用计划；你确认前不会改变已跟踪文件。
+
+卸载前先对每个已采用仓库执行下文的 `deinit`，再运行：
+
+```text
+codex plugin remove develop-with-worktrees@develop-with-worktrees
+```
 
 它不是在每个项目强塞一套工作树。安装插件后，hook 只会在 Codex 支持的本地写入工具前提醒；skill 判断任务；CLI 才负责槽位、租约、精确暂存、验证证明和串行集成。当前 Codex hook 能注入强提醒，但不能作为跨 IDE、跨操作系统的硬拦截，所以项目规则和 CLI 仍是硬门禁。
 

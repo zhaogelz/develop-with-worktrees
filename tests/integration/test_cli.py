@@ -9,6 +9,8 @@ from pathlib import Path
 def test_cli_json_status_masks_uninitialized_state(git_repo: Path) -> None:
     runner = (
         Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
         / "skills"
         / "develop-with-worktrees"
         / "scripts"
@@ -32,6 +34,8 @@ def test_cli_json_status_masks_uninitialized_state(git_repo: Path) -> None:
 def test_cli_init_only_shows_plan_until_acceptance(git_repo: Path) -> None:
     runner = (
         Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
         / "skills"
         / "develop-with-worktrees"
         / "scripts"
@@ -69,6 +73,8 @@ def test_cli_init_only_shows_plan_until_acceptance(git_repo: Path) -> None:
 def test_cli_static_only_first_shows_a_plan(git_repo: Path) -> None:
     runner = (
         Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
         / "skills"
         / "develop-with-worktrees"
         / "scripts"
@@ -91,6 +97,8 @@ def test_cli_static_only_first_shows_a_plan(git_repo: Path) -> None:
 def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
     runner = (
         Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
         / "skills"
         / "develop-with-worktrees"
         / "scripts"

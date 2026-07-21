@@ -1,12 +1,14 @@
 # Architecture
 
-`develop-with-worktrees` is one Codex plugin, not merely a prompt file:
+`develop-with-worktrees` is a Codex marketplace repository containing one plugin, not merely a prompt file:
 
 ```text
-plugin root
-├── .codex-plugin/plugin.json       plugin metadata
-├── hooks/                          lightweight Codex guardrail
-├── skills/develop-with-worktrees/  task-facing policy and runner
+marketplace root
+├── .agents/plugins/marketplace.json
+├── plugins/develop-with-worktrees/
+│   ├── .codex-plugin/plugin.json   plugin metadata
+│   ├── hooks/                      lightweight Codex guardrail
+│   └── skills/develop-with-worktrees/  task-facing policy and runner
 └── tests/                          CLI, lifecycle, hook, and fault tests
 ```
 

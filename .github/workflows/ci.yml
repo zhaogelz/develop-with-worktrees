@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -16,6 +19,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --dev
       - run: uv run pytest
-      - run: uv run python -m compileall -q skills/develop-with-worktrees/scripts
+      - run: uv run python -m compileall -q plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts
       - run: uvx ruff check .
       - run: uvx ruff format --check .

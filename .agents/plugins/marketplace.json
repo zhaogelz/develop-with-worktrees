@@ -1,0 +1,20 @@
+{
+  "name": "develop-with-worktrees",
+  "interface": {
+    "displayName": "Develop with Worktrees"
+  },
+  "plugins": [
+    {
+      "name": "develop-with-worktrees",
+      "source": {
+        "source": "local",
+        "path": "./plugins/develop-with-worktrees"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
