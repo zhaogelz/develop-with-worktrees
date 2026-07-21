@@ -54,8 +54,32 @@ class StateStore:
             atomic_write_json(self.path, state)
             return result
 
+    def _assert_slot_layout(self, state: dict[str, Any], config: RepoConfig) -> None:
+        """受管槽位目录在首次采用后不可被配置文件静默迁移。"""
+        for number in range(1, 6):
+            slot_id = f"{number:02d}"
+            slot = state["slots"].get(slot_id)
+            if slot is None:
+                continue
+            expected = (
+                self.repo.root / config.worktree_directory / f"solo-ai-slot-{slot_id}"
+            ).resolve()
+            actual = Path(str(slot.get("path", ""))).resolve()
+            if actual != expected:
+                raise SoloAIError(
+                    "worktree_directory is immutable after adoption; restore its "
+                    "original value before continuing, or deinitialize and adopt "
+                    "again to move managed slots"
+                )
+
+    def require_slot_layout(self, config: RepoConfig) -> dict[str, Any]:
+        state = self.read()
+        self._assert_slot_layout(state, config)
+        return copy.deepcopy(state)
+
     def ensure_slots(self, config: RepoConfig) -> dict[str, Any]:
         def update(state: dict[str, Any]) -> dict[str, Any]:
+            self._assert_slot_layout(state, config)
             for number in range(1, 6):
                 slot_id = f"{number:02d}"
                 path = (
@@ -216,6 +240,30 @@ class StateStore:
             slot["quarantine_reason"] = reason
 
         self.mutate(update)
+
+    def quarantine_slot(self, slot_id: str, reason: str) -> None:
+        def update(state: dict[str, Any]) -> None:
+            slot = state["slots"].get(slot_id)
+            if not slot or slot.get("task_id"):
+                raise SoloAIError("Only an unassigned slot can be quarantined")
+            slot.update(
+                {
+                    "status": "quarantined",
+                    "quarantine_reason": reason,
+                }
+            )
+
+        self.mutate(update)
+
+    def restore_quarantined_slot(self, slot_id: str) -> dict[str, Any]:
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            slot = state["slots"].get(slot_id)
+            if not slot or slot.get("status") != "quarantined" or slot.get("task_id"):
+                raise SoloAIError("Only an unassigned quarantined slot can be restored")
+            slot.update({"status": "idle", "quarantine_reason": None})
+            return copy.deepcopy(slot)
+
+        return self.mutate(update)
 
     def release(self, task_id: str, *, final_status: str) -> None:
         def update(state: dict[str, Any]) -> None:

@@ -16,10 +16,12 @@ from solo_ai.lifecycle import (
     approve,
     commit_task,
     deinit,
+    disable,
     dev_start,
     dev_stop,
     finish,
     initialize,
+    local_enabled,
     ready,
     set_local_enabled,
     start,
@@ -161,6 +163,18 @@ def test_decline_is_local_and_blocks_future_start(git_repo: Path) -> None:
     with pytest.raises(SoloAIError, match="disabled"):
         start(repo, name="must not start")
     set_local_enabled(repo, enabled=True)
+
+
+def test_disable_refuses_to_strand_an_active_task(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="finish before disabling")
+
+    with pytest.raises(SoloAIError, match="Active or quarantined tasks"):
+        disable(repo)
+
+    assert local_enabled(repo) is True
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert disable(repo)["enabled"] is False
 
 
 def test_exact_path_manifest_blocks_unknown_changes(git_repo: Path) -> None:
@@ -353,6 +367,40 @@ def test_deinit_keeps_policy_when_a_slot_changes_after_preflight(
     assert worktree.exists()
 
 
+def test_deinit_restores_earlier_slot_when_a_later_slot_changes(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    first = start(repo, name="create first idle slot")
+    first_worktree = Path(first["worktree"])
+    abandon(repo, task_id=first["id"], lease=first["lease"], confirm=first["id"])
+    second = start(repo, name="create second idle slot")
+    second_worktree = Path(second["worktree"])
+    abandon(repo, task_id=second["id"], lease=second["lease"], confirm=second["id"])
+
+    original = lifecycle._assert_removable_managed_slot
+    second_checks = 0
+
+    def fail_when_second_slot_is_rechecked(current_repo: GitRepo, path: Path) -> bool:
+        nonlocal second_checks
+        if path == second_worktree:
+            second_checks += 1
+            if second_checks == 2:
+                raise SoloAIError("simulated later slot write")
+        return original(current_repo, path)
+
+    monkeypatch.setattr(
+        lifecycle, "_assert_removable_managed_slot", fail_when_second_slot_is_rechecked
+    )
+    with pytest.raises(SoloAIError, match="simulated later slot write"):
+        deinit(repo, confirm="DEINIT", message="chore: remove local worktree workflow")
+
+    assert (git_repo / ".solo-ai" / "config.toml").exists()
+    assert first_worktree.exists()
+    assert any(item.path == first_worktree for item in repo.worktrees())
+    assert second_worktree.exists()
+
+
 def test_prune_slot_removes_only_declared_local_dependency_paths(
     git_repo: Path,
 ) -> None:
@@ -437,6 +485,60 @@ def test_warm_slot_syncs_an_idle_slot_to_latest_default(git_repo: Path) -> None:
     warm_slot(repo, slot_id="01")
     assert old_head != repo.head(git_repo)
     assert repo.head(worktree) == repo.head(git_repo)
+
+
+def test_warm_slot_quarantines_a_slot_that_changes_source(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    initialize(repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False)
+    config = git_repo / ".solo-ai" / "config.toml"
+    command = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; Path('generated-by-warm.txt').write_text('x', encoding='utf-8')",
+    ]
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "\n[lifecycle]\n", f"\nwarm = [{json.dumps(command)}]\n\n[lifecycle]\n"
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: configure unsafe warm command")
+    approve(repo, load_verification_config(repo))
+
+    with pytest.raises(SoloAIError, match="modified source or protected files"):
+        warm_slot(repo, slot_id="01")
+
+    state = StateStore(repo).read()
+    worktree = Path(state["slots"]["01"]["path"])
+    assert state["slots"]["01"]["status"] == "quarantined"
+    assert (worktree / "generated-by-warm.txt").exists()
+    with pytest.raises(SoloAIError, match="All managed worktree slots are busy"):
+        start(repo, name="must not allocate dirty warm slot")
+
+
+def test_worktree_directory_change_is_rejected_before_task_allocation(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    config = git_repo / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'worktree_directory = ".worktrees"',
+            'worktree_directory = ".new-worktrees"',
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: change worktree directory")
+    approve(repo, load_verification_config(repo))
+
+    with pytest.raises(SoloAIError, match="worktree_directory is immutable"):
+        start(repo, name="must not create a stranded task")
+
+    state = StateStore(repo).read()
+    assert state["tasks"] == {}
+    assert state["slots"]["01"]["status"] == "idle"
 
 
 def test_dev_supervisor_owns_and_stops_http_process_tree(git_repo: Path) -> None:

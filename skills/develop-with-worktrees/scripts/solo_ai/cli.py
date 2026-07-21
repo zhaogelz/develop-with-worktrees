@@ -18,6 +18,7 @@ from .lifecycle import (
     approve,
     commit_task,
     deinit,
+    disable,
     dev_start,
     dev_stop,
     finish,
@@ -265,12 +266,12 @@ def _prune(repo: GitRepo, *, kind: str, slot: str | None = None) -> dict[str, An
             }
         if not slot:
             raise SoloAIError("Slot is required")
-        state = StateStore(repo).read()
+        policy = repo.policy_path()
+        config = load_repo_config(repo, cwd=policy)
+        state = StateStore(repo).require_slot_layout(config)
         details = state["slots"].get(slot)
         if not details or details.get("status") not in {"idle", "inactive"}:
             raise SoloAIError("Only an empty idle or inactive slot can be pruned")
-        policy = repo.policy_path()
-        config = load_repo_config(repo, cwd=policy)
         path = ensure_within(
             Path(details["path"]), repo.root / config.worktree_directory
         )
@@ -323,7 +324,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         verification = load_verification_config(repo)
         return approve(repo, verification)
     if args.command == "disable":
-        return set_local_enabled(repo, enabled=False)
+        return disable(repo)
     if args.command == "enable":
         return set_local_enabled(repo, enabled=True)
     if args.command == "doctor":

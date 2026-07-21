@@ -27,7 +27,7 @@ sensitive_allowlist = []
 
 # Optional serial preparation commands. They run only through WarmSlot in an
 # idle slot and do not copy a primary .venv, node_modules, cache, or .env file.
-# warm = [["uv", "sync"]]
+# warm = [["uv", "sync"]]       # must not modify source or create .env*/unknown ignored files
 
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{port}"]
@@ -40,7 +40,7 @@ sensitive_allowlist = []
 
 There is no `compatible` tracked mode. A detected mature workflow wins before managed policy and causes complete defer. A locally disabled preference wins over both. If a marker is later added, managed actions stop; if it is later removed, adoption is not silently recreated or migrated.
 
-`worktree_directory` must be a non-empty relative child of the repository. Absolute paths, parent traversal, the repository root itself, and symlink escapes are rejected before any slot is allocated.
+`worktree_directory` must be a non-empty relative child of the repository. Absolute paths, parent traversal, the repository root itself, and symlink escapes are rejected before any slot is allocated. It is immutable after adoption: restore the original value before continuing, or deinitialize and adopt again when the managed-slot root must move. This prevents a policy edit from leaving a task bound to an unreachable old slot.
 
 `lifecycle.dev_start` is an argv array and is started with `shell=False`. It must declare a TCP or HTTP readiness probe. The process manager records a redacted-safe identity digest, uses a slot-only port range, and stops only a matching owned process tree.
 
