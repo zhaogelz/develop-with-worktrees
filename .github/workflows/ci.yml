@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --dev
-      - run: uv run pytest -vv
+      - run: uv run pytest -vv -o faulthandler_timeout=30
       - run: uv run python -m compileall -q plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts
       - run: uvx ruff check .
       - run: uvx ruff format --check .
