@@ -436,9 +436,9 @@ def load_verification_config(
             field=f"profiles[{index}].level",
             non_empty=True,
         )
-        if level not in {"development", "ready"}:
+        if level not in {"development", "ready", "full"}:
             raise SoloAIError(
-                f"Profile {profile_id!r} level must be development or ready"
+                f"Profile {profile_id!r} level must be development, ready, or full"
             )
         profiles.append(
             VerificationProfile(

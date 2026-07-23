@@ -56,11 +56,11 @@ def changed_files(repo: GitRepo, *, cwd: Path, base: str) -> list[str]:
 
 
 def select_profiles(
-    config: VerificationConfig, files: list[str], *, level: str = "ready"
+    config: VerificationConfig, files: list[str], *, levels: tuple[str, ...] = ("ready",)
 ) -> list[VerificationProfile]:
     selected: list[VerificationProfile] = []
     for profile in config.profiles:
-        if profile.level != level:
+        if profile.level not in levels:
             continue
         if not files or any(
             any(fnmatch.fnmatchcase(path, pattern) for pattern in profile.paths)
@@ -71,10 +71,10 @@ def select_profiles(
 
 
 def unmapped_files(
-    config: VerificationConfig, files: list[str], *, level: str = "ready"
+    config: VerificationConfig, files: list[str], *, levels: tuple[str, ...] = ("ready",)
 ) -> list[str]:
     """只要候选改动没有 Ready 映射，就拒绝猜测该运行什么验证。"""
-    available = [profile for profile in config.profiles if profile.level == level]
+    available = [profile for profile in config.profiles if profile.level in levels]
     return [
         path
         for path in files
@@ -237,10 +237,11 @@ def proof_inputs(
     base: str,
     verification: VerificationConfig,
     task_id: str | None = None,
+    levels: tuple[str, ...] = ("ready",),
 ) -> tuple[dict[str, Any], list[tuple[VerificationProfile, dict[str, Any], str]]]:
     files = changed_files(repo, cwd=cwd, base=base)
-    profiles = select_profiles(verification, files)
-    missing = unmapped_files(verification, files)
+    profiles = select_profiles(verification, files, levels=levels)
+    missing = unmapped_files(verification, files, levels=levels)
     commands = [command for profile in profiles for command in profile.commands]
     tracked = _tracked(repo, cwd)
     shared = _shared_inputs(repo, cwd, commands, verification)
@@ -265,6 +266,7 @@ def proof_inputs(
         "base_head": repo.git(["rev-parse", base], cwd=cwd).stdout.strip(),
         "files": files,
         "unmapped_files": missing,
+        "levels": list(levels),
         "profiles": [profile.profile_id for profile in profiles],
         "profile_fingerprints": [item[2] for item in records],
     }
@@ -374,11 +376,18 @@ def validate(
     base: str,
     verification: VerificationConfig,
     task_id: str | None = None,
+    level: str = "ready",
 ) -> dict[str, Any]:
     from .util import read_json
 
+    levels = ("ready", "full") if level == "full" else (level,)
     inputs, records = proof_inputs(
-        repo, cwd=cwd, base=base, verification=verification, task_id=task_id
+        repo,
+        cwd=cwd,
+        base=base,
+        verification=verification,
+        task_id=task_id,
+        levels=levels,
     )
     if inputs["unmapped_files"] and not verification.static_only:
         raise SoloAIError(

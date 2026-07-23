@@ -33,7 +33,7 @@ from .lifecycle import (
     start,
     warm_slot,
 )
-from .proof import approval_plan
+from .proof import approval_plan, proof_inputs, validate
 from .repo import GitRepo
 from .state import FINAL_TASK_STATES, StateStore
 from .util import (
@@ -130,6 +130,18 @@ def _parser() -> argparse.ArgumentParser:
     retarget_parser.add_argument("--base", required=True)
     retarget_parser.add_argument(
         "--confirm", required=True, help="exactly TASK_ID:BASE_BRANCH"
+    )
+
+    plan = sub.add_parser("plan", help="read the registered verification plan for one task")
+    plan.add_argument("--task", required=True)
+
+    verify = sub.add_parser(
+        "verify", help="run only registered development, ready, or explicit full profiles"
+    )
+    verify.add_argument("--task", required=True)
+    verify.add_argument("--lease", required=True)
+    verify.add_argument(
+        "--level", choices=["development", "ready", "full"], default="development"
     )
 
     status = sub.add_parser("status", help="show masked slots and tasks")
@@ -497,6 +509,56 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             base=args.base,
             confirm=args.confirm,
         )
+    if args.command == "plan":
+        task = StateStore(repo).task(args.task)
+        worktree = Path(str(task["worktree"]))
+        verification = load_verification_config(repo, cwd=worktree)
+        inputs, records = proof_inputs(
+            repo,
+            cwd=worktree,
+            base=str(task["base_ref"]),
+            verification=verification,
+            task_id=task["id"],
+        )
+        return {
+            "task_id": task["id"],
+            "base_ref": task["base_ref"],
+            "changed_files": inputs["files"],
+            "unmapped_files": inputs["unmapped_files"],
+            "profiles": [
+                {
+                    "id": profile.profile_id,
+                    "level": profile.level,
+                    "resource_class": profile.resource_class,
+                    "timeout_seconds": profile.timeout_seconds,
+                    "commands": [command.redacted() for command in profile.commands],
+                    "fingerprint": fingerprint,
+                }
+                for profile, _, fingerprint in records
+            ],
+        }
+    if args.command == "verify":
+        store = StateStore(repo)
+        with store.operation(args.task, args.lease, "verify") as task:
+            worktree = Path(str(task["worktree"]))
+            if not repo.is_clean(worktree):
+                raise SoloAIError("Commit task changes before producing reusable verification evidence")
+            verification = load_verification_config(repo, cwd=worktree)
+            proof = validate(
+                repo,
+                cwd=worktree,
+                base=str(task["base_ref"]),
+                verification=verification,
+                task_id=task["id"],
+                level=args.level,
+            )
+            return {
+                "task_id": task["id"],
+                "level": args.level,
+                "proof": proof["fingerprint"],
+                "reused": proof.get("reused", False),
+                "kind": proof["kind"],
+            }
     if args.command == "status":
         return _status(repo, detailed=args.detailed)
     if args.command == "recover":
