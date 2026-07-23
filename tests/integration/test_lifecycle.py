@@ -23,6 +23,7 @@ from solo_ai.lifecycle import (
     initialize,
     local_enabled,
     ready,
+    retarget,
     set_local_enabled,
     start,
     warm_slot,
@@ -371,6 +372,56 @@ def test_cross_task_profile_reuse_is_off_by_default(git_repo: Path) -> None:
     assert proof["profile_proofs"][0]["reused"] is False
     abandon(repo, task_id=first["id"], lease=first["lease"], confirm=first["id"])
     abandon(repo, task_id=second["id"], lease=second["lease"], confirm=second["id"])
+
+
+def test_start_uses_current_branch_and_finish_integrates_back_to_it(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    git(git_repo, "switch", "-c", "release")
+
+    task = start(repo, name="release hotfix")
+    assert task["base_ref"] == "release"
+    assert Path(task["base_worktree"]) == git_repo.resolve()
+    commit_one(repo, task, "release.txt", "release\n", "fix: release hotfix")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    finish(repo, task_id=task["id"], lease=task["lease"])
+
+    assert repo.branch(git_repo) == "release"
+    assert (git_repo / "release.txt").read_text(encoding="utf-8") == "release\n"
+
+
+def test_start_rejects_a_child_of_an_active_managed_task(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="parent")
+
+    with pytest.raises(SoloAIError, match="child task"):
+        start(GitRepo(Path(task["worktree"])), name="child")
+
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_rewritten_base_blocks_ready_until_explicit_retarget(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    (git_repo / "base.txt").write_text("base\n", encoding="utf-8")
+    git(git_repo, "add", "base.txt")
+    git(git_repo, "commit", "-m", "test: advance base")
+    task = start(repo, name="candidate with rewritten base")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+
+    git(git_repo, "reset", "--hard", "HEAD~1")
+    with pytest.raises(SoloAIError, match="rewritten"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+
+    retarget(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        base="main",
+        confirm=f"{task['id']}:main",
+    )
+    assert ready(repo, task_id=task["id"], lease=task["lease"])["status"] == "ready"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
 def test_deinit_removes_only_exact_adopted_policy_and_slots(git_repo: Path) -> None:

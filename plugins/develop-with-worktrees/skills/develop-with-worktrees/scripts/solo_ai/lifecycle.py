@@ -349,20 +349,80 @@ def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
 
 
 def _base_ref(repo: GitRepo) -> str:
+    """保留给空闲槽位等没有调用方上下文的场景。"""
     bootstrap = _bootstrap(repo)
     return str(bootstrap.get("branch") or repo.default_branch())
 
 
-def start(repo: GitRepo, *, name: str) -> dict[str, Any]:
+def _checked_out_branch_worktree(repo: GitRepo, branch: str) -> Path:
+    for item in repo.worktrees():
+        if repo.branch(item.path) == branch:
+            return item.path
+    raise SoloAIError(
+        f"Base branch {branch!r} must be checked out in a local worktree before starting a task"
+    )
+
+
+def _resolve_start_base(
+    repo: GitRepo, store: StateStore, explicit_base: str | None
+) -> tuple[str, str, Path]:
+    """确定任务基线；默认以调用处当前分支为准，不把 main 当成隐含前提。"""
+    try:
+        owner = store.task_for_worktree(repo.root)
+    except SoloAIError:
+        owner = None
+    if owner:
+        raise SoloAIError(
+            f"Cannot start a child task from active managed task {owner['id']}; finish, abandon, or use its recorded base worktree"
+        )
+    bootstrap = _bootstrap(repo)
+    if explicit_base:
+        base_ref = explicit_base
+    elif bootstrap.get("branch") and not (repo.root / ".solo-ai").exists():
+        # 脏主工作树的首次采用尚未合入策略时，唯一可验证的基线是 bootstrap。
+        base_ref = str(bootstrap["branch"])
+    else:
+        base_ref = repo.branch(repo.root)
+        if base_ref is None:
+            raise SoloAIError(
+                "Current worktree is detached; pass --base with a checked-out local branch"
+            )
+    exists = repo.git(
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{base_ref}"], check=False
+    )
+    if exists.returncode != 0:
+        raise SoloAIError(f"Base branch does not exist locally: {base_ref}")
+    base_worktree = _checked_out_branch_worktree(repo, base_ref)
+    active_paths = {
+        Path(str(task["worktree"])).resolve()
+        for task in store.read()["tasks"].values()
+        if task.get("status") not in FINAL_TASK_STATES
+    }
+    if base_worktree.resolve() in active_paths:
+        raise SoloAIError(
+            "Base branch is checked out by an active managed task; use a stable base worktree instead"
+        )
+    return (
+        base_ref,
+        repo.git(["rev-parse", base_ref], cwd=base_worktree).stdout.strip(),
+        base_worktree,
+    )
+
+
+def start(repo: GitRepo, *, name: str, base: str | None = None) -> dict[str, Any]:
     with maintenance_lock(repo):
         config, _, _ = _config_and_mode(repo)
         store = StateStore(repo)
         store.ensure_slots(config)
-        base_ref = _base_ref(repo)
-        base_head = repo.git(["rev-parse", base_ref]).stdout.strip()
+        base_ref, base_head, base_worktree = _resolve_start_base(repo, store, base)
         branch = f"{config.branch_prefix}{safe_slug(name)}-{uuid.uuid4().hex[:6]}"
         task = store.allocate(
-            config, name=name, branch=branch, base_head=base_head, base_ref=base_ref
+            config,
+            name=name,
+            branch=branch,
+            base_head=base_head,
+            base_ref=base_ref,
+            base_worktree=base_worktree,
         )
         worktree = ensure_within(
             Path(task["worktree"]), repo.primary_path / config.worktree_directory
@@ -481,21 +541,103 @@ def commit_task(
         )
 
 
-def _sync_default(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
+def _sync_base(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
     worktree = Path(task["worktree"])
-    default = repo.default_branch()
-    default_head = repo.git(["rev-parse", default], cwd=worktree).stdout.strip()
-    if not repo.is_ancestor(default_head, "HEAD", cwd=worktree):
+    base_ref = str(task["base_ref"])
+    current = repo.git(
+        ["rev-parse", "--verify", f"refs/heads/{base_ref}"],
+        cwd=worktree,
+        check=False,
+    )
+    if current.returncode != 0:
+        raise SoloAIError(
+            f"Recorded base branch {base_ref!r} no longer exists; explicitly retarget this task before Ready or Finish"
+        )
+    base_head = current.stdout.strip()
+    recorded_head = str(task["base_head"])
+    if not repo.is_ancestor(recorded_head, base_head, cwd=worktree):
+        raise SoloAIError(
+            f"Recorded base branch {base_ref!r} was rewritten or moved backward; explicitly retarget this task before Ready or Finish"
+        )
+    if not repo.is_ancestor(base_head, "HEAD", cwd=worktree):
         prediction = repo.git(
-            ["merge-tree", "--write-tree", default, "HEAD"], cwd=worktree, check=False
+            ["merge-tree", "--write-tree", base_ref, "HEAD"],
+            cwd=worktree,
+            check=False,
         )
         if prediction.returncode != 0:
             raise SoloAIError(
                 "Read-only merge prediction found a conflict. Resolve it in this task worktree; no automatic semantic merge was attempted."
             )
-        repo.git(["merge", "--no-edit", default], cwd=worktree)
+        repo.git(["merge", "--no-edit", base_ref], cwd=worktree)
     task["candidate_head"] = repo.head(worktree)
+    task["base_head"] = base_head
     return task
+
+
+def _recorded_base_worktree(repo: GitRepo, task: dict[str, Any]) -> Path:
+    value = task.get("base_worktree")
+    if not value:
+        raise SoloAIError(
+            "Task has no recorded base worktree; recover it by explicitly retargeting before Finish"
+        )
+    path = Path(str(value)).resolve()
+    if not any(item.path == path for item in repo.worktrees()):
+        raise SoloAIError("Recorded base worktree no longer exists; explicitly retarget")
+    if repo.branch(path) != task.get("base_ref"):
+        raise SoloAIError("Recorded base worktree no longer has the recorded base branch")
+    if not repo.is_clean(path):
+        raise SoloAIError("Recorded base worktree must be clean before integration")
+    return path
+
+
+def retarget(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    lease: str,
+    base: str,
+    confirm: str,
+) -> dict[str, Any]:
+    """在用户显式确认后重绑基线；不替用户改写历史或猜测合并策略。"""
+    expected = f"{task_id}:{base}"
+    if confirm != expected:
+        raise SoloAIError(f"Retarget requires --confirm {expected!r}")
+    _, _, _ = _config_and_mode(repo)
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "retarget") as task:
+        if task.get("status") not in {"active", "ready"}:
+            raise SoloAIError("Only active or ready tasks can be retargeted")
+        worktree = Path(str(task["worktree"]))
+        if not repo.is_clean(worktree):
+            raise SoloAIError("Commit task changes before retargeting its base")
+        exists = repo.git(
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{base}"],
+            check=False,
+        )
+        if exists.returncode != 0:
+            raise SoloAIError(f"Base branch does not exist locally: {base}")
+        base_worktree = _checked_out_branch_worktree(repo, base)
+        active_paths = {
+            Path(str(item["worktree"])).resolve()
+            for item in store.read()["tasks"].values()
+            if item.get("id") != task_id and item.get("status") not in FINAL_TASK_STATES
+        }
+        if base_worktree.resolve() in active_paths:
+            raise SoloAIError("New base worktree is owned by another active managed task")
+        base_head = repo.git(["rev-parse", base], cwd=base_worktree).stdout.strip()
+        if not repo.is_ancestor(base_head, "HEAD", cwd=worktree):
+            raise SoloAIError(
+                "The task does not yet contain the chosen base. Resolve or merge it manually, then retry retarget; history is never rewritten automatically."
+            )
+        return store.update_task(
+            task_id,
+            base_ref=base,
+            base_head=base_head,
+            base_worktree=str(base_worktree.resolve()),
+            status="active",
+            ready_proof=None,
+        )
 
 
 def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
@@ -507,23 +649,23 @@ def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
             raise SoloAIError(f"Task cannot enter Ready from {task.get('status')}")
         if not repo.is_clean(worktree):
             raise SoloAIError("Commit all task changes before Ready")
-        task = _sync_default(repo, task)
+        task = _sync_base(repo, task)
         if not repo.is_clean(worktree):
-            raise SoloAIError("Default-branch synchronization left the task dirty")
+            raise SoloAIError("Base-branch synchronization left the task dirty")
         # 同步可能带入新的受管策略；必须按同步后的策略重新确认和验证。
         config = load_repo_config(repo, cwd=worktree)
         store.require_slot_layout(config)
         verification = load_verification_config(repo, cwd=worktree)
         require_approval(repo, verification, cwd=worktree)
-        default = repo.default_branch()
+        base_ref = str(task["base_ref"])
         _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
         require_safe(
-            repo, cwd=worktree, base=default, allowlist=config.sensitive_allowlist
+            repo, cwd=worktree, base=base_ref, allowlist=config.sensitive_allowlist
         )
         proof = validate(
             repo,
             cwd=worktree,
-            base=default,
+            base=base_ref,
             verification=verification,
             task_id=task_id,
         )
@@ -531,6 +673,7 @@ def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
             task_id,
             status="ready",
             candidate_head=repo.head(worktree),
+            base_head=task["base_head"],
             ready_proof=proof["fingerprint"],
         )
 
@@ -702,17 +845,27 @@ def _stop_registered_processes(store: StateStore, task: dict[str, Any]) -> None:
         store.update_task(task["id"], processes=[])
 
 
-def _integrate_pending_bootstrap(repo: GitRepo, primary: Path) -> None:
+def _integrate_pending_bootstrap(repo: GitRepo, primary: Path) -> dict[str, str] | None:
     pending = _bootstrap(repo)
     if not pending:
-        return
+        return None
     branch = str(pending["branch"])
     repo.git(["merge", "--ff-only", branch], cwd=primary)
+    target_ref = repo.branch(primary)
+    if target_ref is None:
+        raise SoloAIError("Primary worktree detached while integrating bootstrap")
+    result = {
+        "bootstrap_branch": branch,
+        "base_ref": target_ref,
+        "base_head": repo.head(primary),
+        "base_worktree": str(primary.resolve()),
+    }
     worktree = Path(str(pending["worktree"]))
     if worktree.exists():
         repo.git(["worktree", "remove", str(worktree)], cwd=primary)
     repo.git(["branch", "-d", branch], cwd=primary)
     (repo.local_dir / "bootstrap.json").unlink(missing_ok=True)
+    return result
 
 
 def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
@@ -730,16 +883,32 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
             ):
                 if sorted(ticket.parent.glob("*.json"))[0] != ticket:
                     raise SoloAIError("Integration queue order changed unexpectedly")
-                primary, default = repo.ensure_default_primary_clean()
-                _integrate_pending_bootstrap(repo, primary)
+                pending = _bootstrap(repo)
+                if pending:
+                    primary, _ = repo.ensure_default_primary_clean()
+                    bootstrap_result = _integrate_pending_bootstrap(repo, primary)
+                    task = store.task(task_id)
+                    if (
+                        bootstrap_result
+                        and task.get("base_ref")
+                        == bootstrap_result["bootstrap_branch"]
+                    ):
+                        task = store.update_task(
+                            task_id,
+                            base_ref=bootstrap_result["base_ref"],
+                            base_head=bootstrap_result["base_head"],
+                            base_worktree=bootstrap_result["base_worktree"],
+                            ready_proof=None,
+                        )
                 task = store.task(task_id)
                 store.require_lease(task, lease)
+                primary = _recorded_base_worktree(repo, task)
                 worktree = Path(task["worktree"])
                 if not repo.is_clean(worktree) or repo.head(worktree) != task.get(
                     "candidate_head"
                 ):
                     raise SoloAIError("Candidate changed after Ready; run Ready again")
-                task = _sync_default(repo, task)
+                task = _sync_base(repo, task)
                 # 不能用同步前的策略证明同步后的候选；策略变化必须重新绑定。
                 config = load_repo_config(repo, cwd=worktree)
                 store.require_slot_layout(config)
@@ -751,19 +920,20 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                 require_safe(
                     repo,
                     cwd=worktree,
-                    base=default,
+                    base=str(task["base_ref"]),
                     allowlist=config.sensitive_allowlist,
                 )
                 proof = validate(
                     repo,
                     cwd=worktree,
-                    base=default,
+                    base=str(task["base_ref"]),
                     verification=verification,
                     task_id=task_id,
                 )
                 store.update_task(
                     task_id,
                     candidate_head=repo.head(worktree),
+                    base_head=task["base_head"],
                     ready_proof=proof["fingerprint"],
                 )
                 if not repo.is_clean(primary) or not repo.is_clean(worktree):

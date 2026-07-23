@@ -26,6 +26,7 @@ from .lifecycle import (
     local_enabled,
     maintenance_lock,
     ready,
+    retarget,
     set_local_enabled,
     start,
     warm_slot,
@@ -89,6 +90,10 @@ def _parser() -> argparse.ArgumentParser:
 
     start_parser = sub.add_parser("start", help="claim a slot and create a task branch")
     start_parser.add_argument("--name", required=True)
+    start_parser.add_argument(
+        "--base",
+        help="local branch to use as the task base; defaults to the invocation worktree's current branch",
+    )
 
     commit = sub.add_parser(
         "commit", help="stage only an exact reviewed task path list and commit it"
@@ -102,6 +107,16 @@ def _parser() -> argparse.ArgumentParser:
         item = sub.add_parser(name)
         item.add_argument("--task", required=True)
         item.add_argument("--lease", required=True)
+
+    retarget_parser = sub.add_parser(
+        "retarget", help="explicitly rebind a task after its base branch changed"
+    )
+    retarget_parser.add_argument("--task", required=True)
+    retarget_parser.add_argument("--lease", required=True)
+    retarget_parser.add_argument("--base", required=True)
+    retarget_parser.add_argument(
+        "--confirm", required=True, help="exactly TASK_ID:BASE_BRANCH"
+    )
 
     status = sub.add_parser("status", help="show masked slots and tasks")
     status.add_argument("--detailed", action="store_true")
@@ -338,7 +353,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "doctor":
         return _doctor(repo)
     if args.command == "start":
-        return start(repo, name=args.name)
+        return start(repo, name=args.name, base=args.base)
     if args.command == "commit":
         return commit_task(
             repo,
@@ -351,6 +366,14 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return ready(repo, task_id=args.task, lease=args.lease)
     if args.command == "finish":
         return finish(repo, task_id=args.task, lease=args.lease)
+    if args.command == "retarget":
+        return retarget(
+            repo,
+            task_id=args.task,
+            lease=args.lease,
+            base=args.base,
+            confirm=args.confirm,
+        )
     if args.command == "status":
         return _status(repo, detailed=args.detailed)
     if args.command == "recover":

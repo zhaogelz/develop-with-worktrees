@@ -119,6 +119,7 @@ class StateStore:
         branch: str,
         base_head: str,
         base_ref: str,
+        base_worktree: Path,
     ) -> dict[str, Any]:
         task_id = f"task-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         lease = uuid.uuid4().hex
@@ -142,6 +143,7 @@ class StateStore:
                 "branch": branch,
                 "base_head": base_head,
                 "base_ref": base_ref,
+                "base_worktree": str(base_worktree.resolve()),
                 "candidate_head": None,
                 "status": "starting",
                 "lease": lease,
