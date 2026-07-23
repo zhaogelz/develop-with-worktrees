@@ -6,6 +6,10 @@ import sys
 import tomllib
 from pathlib import Path
 
+from solo_ai import __version__
+
+from conftest import git
+
 
 def test_release_version_contract_matches_manifest_metadata_and_cli(
     git_repo: Path,
@@ -45,6 +49,10 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     assert payload["version"] == "0.2.0-beta.1"
     assert payload["version"] == payload["plugin_version"] == manifest["version"]
     assert payload["version"] == pyproject["project"]["version"]
+    assert payload["version"] == __version__
+    assert f"## {payload['version']}" in (repository_root / "CHANGELOG.md").read_text(
+        encoding="utf-8"
+    )
     assert payload["verification_schema"] == 3
     assert Path(payload["script"]).name == "dww.py"
 
@@ -158,6 +166,150 @@ def test_cli_static_only_first_shows_a_plan(git_repo: Path) -> None:
     payload = json.loads(completed.stdout)
     assert payload["result"]["decision"] == "needs-approval"
     assert payload["result"]["plan"]["static_only"] is True
+
+
+def test_cli_plan_and_verify_cover_registered_development_ready_and_full_levels(
+    git_repo: Path,
+) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+
+    def call(
+        *arguments: str, repo_path: Path = git_repo
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "uv",
+                "run",
+                "--script",
+                str(runner),
+                "--repo",
+                str(repo_path),
+                *arguments,
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=90,
+        )
+
+    def call_json(*arguments: str, repo_path: Path = git_repo) -> dict:
+        completed = call("--json", *arguments, repo_path=repo_path)
+        assert completed.returncode == 0, completed.stderr
+        return json.loads(completed.stdout)["result"]
+
+    call_json(
+        "init", "--accept", "--verify", '["git", "diff", "--check", "main...HEAD"]'
+    )
+    policy = git_repo / ".solo-ai" / "verification.toml"
+    policy.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "development"
+level = "development"
+paths = ["**"]
+commands = [["git", "diff", "--check", "main...HEAD"]]
+
+[[profiles]]
+id = "ready"
+level = "ready"
+paths = ["**"]
+commands = [["git", "diff", "--check", "main...HEAD"]]
+
+[[profiles]]
+id = "full"
+level = "full"
+paths = ["**"]
+commands = [["git", "diff", "--check", "main...HEAD"]]
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/verification.toml")
+    git(git_repo, "commit", "-m", "test: configure validation levels")
+    call_json("approve", "--accept")
+    started = call("start", "--name", "verify levels")
+    assert started.returncode == 0, started.stderr
+    values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
+    task_id = values["Task"]
+    lease = values["Lease"]
+    worktree = Path(values["Worktree"])
+    (worktree / "levels.txt").write_text("levels\n", encoding="utf-8")
+    call_json(
+        "commit",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--message",
+        "test: commit validation level fixture",
+        "--path",
+        "levels.txt",
+        repo_path=worktree,
+    )
+    plan = call_json("plan", "--task", task_id, repo_path=worktree)
+    assert {profile["level"] for profile in plan["profiles"]} == {
+        "development",
+        "ready",
+        "full",
+    }
+    development = call_json(
+        "verify",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--level",
+        "development",
+        repo_path=worktree,
+    )
+    development_proof = json.loads(
+        (
+            git_repo / ".git" / "solo-ai" / "proofs" / f"{development['proof']}.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert [item["profile_id"] for item in development_proof["profile_proofs"]] == [
+        "development"
+    ]
+    full = call_json(
+        "verify",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--level",
+        "full",
+        repo_path=worktree,
+    )
+    full_proof = json.loads(
+        (git_repo / ".git" / "solo-ai" / "proofs" / f"{full['proof']}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [item["profile_id"] for item in full_proof["profile_proofs"]] == [
+        "ready",
+        "full",
+    ]
+    call_json(
+        "abandon",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--confirm",
+        task_id,
+        repo_path=worktree,
+    )
 
 
 def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:

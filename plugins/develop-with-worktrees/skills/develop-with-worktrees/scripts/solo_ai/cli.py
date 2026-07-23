@@ -576,12 +576,21 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         task = StateStore(repo).task(args.task)
         worktree = Path(str(task["worktree"]))
         verification = load_verification_config(repo, cwd=worktree)
-        inputs, records = proof_inputs(
+        inputs, _ = proof_inputs(
             repo,
             cwd=worktree,
             base=str(task["base_ref"]),
             verification=verification,
             task_id=task["id"],
+            levels=("ready",),
+        )
+        _, records = proof_inputs(
+            repo,
+            cwd=worktree,
+            base=str(task["base_ref"]),
+            verification=verification,
+            task_id=task["id"],
+            levels=("development", "ready", "full"),
         )
         estimate = estimate_validation(
             [

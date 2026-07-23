@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import threading
@@ -654,6 +655,28 @@ def test_prune_slot_stops_when_a_declared_target_contains_protected_content(
     assert (worktree / ".venv" / ".env.local").read_text(
         encoding="utf-8"
     ) == "marker=kept\n"
+
+
+def test_prune_slot_stops_when_a_declared_target_contains_a_link(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name="preserve linked cleanup content")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    target = worktree / ".venv"
+    target.mkdir()
+    link = target / "linked-readme"
+    try:
+        os.symlink(worktree / "README.md", link)
+    except OSError as exc:
+        pytest.skip(f"Current Windows policy cannot create a symlink: {exc}")
+
+    with pytest.raises(SoloAIError, match="link or junction"):
+        _prune(repo, kind="slot", slot="01")
+
+    assert link.is_symlink()
 
 
 def test_slot_configuration_can_expand_to_six_without_reinitializing(
