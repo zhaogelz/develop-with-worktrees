@@ -13,7 +13,8 @@ from .util import SoloAIError, redact_text, sha256_file, sha256_text, stable_jso
 
 
 CONFIG_SCHEMA = 2
-VERIFICATION_SCHEMA = 2
+VERIFICATION_SCHEMA = 3
+SUPPORTED_VERIFICATION_SCHEMAS = {2, VERIFICATION_SCHEMA}
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,10 @@ class VerificationProfile:
     external_state: str
     input_paths: tuple[str, ...]
     environment: tuple[str, ...]
+    input_closure: str
+    timeout_seconds: float
+    resource_class: str
+    level: str
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,10 @@ class VerificationConfig:
                     "external_state": profile.external_state,
                     "input_paths": list(profile.input_paths),
                     "environment": list(profile.environment),
+                    "input_closure": profile.input_closure,
+                    "timeout_seconds": profile.timeout_seconds,
+                    "resource_class": profile.resource_class,
+                    "level": profile.level,
                 }
                 for profile in self.profiles
             ],
@@ -305,12 +314,11 @@ def load_verification_config(
     repo: GitRepo, *, cwd: Path | None = None
 ) -> VerificationConfig:
     data = _read_toml((cwd or repo.policy_path()) / ".solo-ai" / "verification.toml")
-    if (
-        _integer(data.get("schema_version", 0), field="schema_version")
-        != VERIFICATION_SCHEMA
-    ):
+    schema_version = _integer(data.get("schema_version", 0), field="schema_version")
+    if schema_version not in SUPPORTED_VERIFICATION_SCHEMAS:
         raise SoloAIError(
-            f"Unsupported .solo-ai/verification.toml schema; expected {VERIFICATION_SCHEMA}"
+            "Unsupported .solo-ai/verification.toml schema; expected 2 or "
+            f"{VERIFICATION_SCHEMA}"
         )
     raw_profiles = data.get("profiles", [])
     if not isinstance(raw_profiles, list):
@@ -343,6 +351,45 @@ def load_verification_config(
             raise SoloAIError(
                 f'Profile {profile_id!r} enables cross_task_reuse but external_state is not "none"'
             )
+        input_closure = _string(
+            raw.get("input_closure", "declared"),
+            field=f"profiles[{index}].input_closure",
+            non_empty=True,
+        )
+        if input_closure not in {"declared", "complete"}:
+            raise SoloAIError(
+                f"Profile {profile_id!r} input_closure must be declared or complete"
+            )
+        if reuse and input_closure != "complete":
+            raise SoloAIError(
+                f"Profile {profile_id!r} enables cross_task_reuse but input_closure is not complete"
+            )
+        timeout_seconds = _number(
+            raw.get("timeout_seconds", 2700),
+            field=f"profiles[{index}].timeout_seconds",
+        )
+        if timeout_seconds <= 0:
+            raise SoloAIError(
+                f"Profile {profile_id!r} timeout_seconds must be positive"
+            )
+        resource_class = _string(
+            raw.get("resource_class", "normal"),
+            field=f"profiles[{index}].resource_class",
+            non_empty=True,
+        )
+        if resource_class not in {"normal", "heavy"}:
+            raise SoloAIError(
+                f"Profile {profile_id!r} resource_class must be normal or heavy"
+            )
+        level = _string(
+            raw.get("level", "ready"),
+            field=f"profiles[{index}].level",
+            non_empty=True,
+        )
+        if level not in {"development", "ready"}:
+            raise SoloAIError(
+                f"Profile {profile_id!r} level must be development or ready"
+            )
         profiles.append(
             VerificationProfile(
                 profile_id=profile_id,
@@ -360,6 +407,10 @@ def load_verification_config(
                     field=f"profiles[{index}].environment",
                     allow_empty=True,
                 ),
+                input_closure=input_closure,
+                timeout_seconds=timeout_seconds,
+                resource_class=resource_class,
+                level=level,
             )
         )
     static_only = _boolean(data.get("static_only", False), field="static_only")
@@ -367,7 +418,11 @@ def load_verification_config(
         raise SoloAIError(
             "No validation commands configured; explicitly enable static_only or add a profile"
         )
-    return VerificationConfig(VERIFICATION_SCHEMA, static_only, tuple(profiles))
+    if profiles and static_only:
+        raise SoloAIError(
+            "static_only cannot be combined with verification profiles; map every changed path explicitly"
+        )
+    return VerificationConfig(schema_version, static_only, tuple(profiles))
 
 
 def _package_json_commands(root: Path) -> list[CommandSpec]:
@@ -527,6 +582,10 @@ def render_verification_config(
                 'external_state = "unknown"',
                 'input_paths = ["**"]',
                 "environment = []",
+                'input_closure = "declared"',
+                "timeout_seconds = 2700",
+                'resource_class = "normal"',
+                'level = "ready"',
                 "commands = [",
             )
         )

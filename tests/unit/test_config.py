@@ -52,6 +52,46 @@ commands = [["git", "status"]]
         load_verification_config(GitRepo(git_repo))
 
 
+def test_verification_schema_three_requires_complete_inputs_for_cross_task_reuse(
+    git_repo: Path,
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    path = config / "verification.toml"
+    path.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "shared"
+paths = ["src/**"]
+cross_task_reuse = true
+external_state = "none"
+input_paths = ["src/**", "uv.lock"]
+input_closure = "declared"
+timeout_seconds = 12.5
+resource_class = "heavy"
+level = "ready"
+environment = ["CI"]
+commands = [["git", "status", "--short"]]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(SoloAIError, match="input_closure"):
+        load_verification_config(GitRepo(git_repo))
+
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'input_closure = "declared"', 'input_closure = "complete"'
+        ),
+        encoding="utf-8",
+    )
+    profile = load_verification_config(GitRepo(git_repo)).profiles[0]
+    assert profile.timeout_seconds == 12.5
+    assert profile.resource_class == "heavy"
+    assert profile.input_closure == "complete"
+
+
 def test_rejects_unimplemented_command_readiness(git_repo: Path) -> None:
     config = git_repo / ".solo-ai"
     config.mkdir()

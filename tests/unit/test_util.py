@@ -1,12 +1,15 @@
 import errno
+import json
 import signal
 import socket
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 import solo_ai.lifecycle as lifecycle
-from solo_ai.util import DirectoryLock, SoloAIError, redact_text
+from solo_ai.util import DirectoryLock, SoloAIError, redact_text, run_logged
 
 
 def test_redacts_common_secret_shapes() -> None:
@@ -82,3 +85,43 @@ def test_tcp_readiness_uses_a_bounded_connection_attempt(
             lifecycle.socket, "create_connection", blocking_connection_was_used
         )
         assert lifecycle._ready("tcp", f"127.0.0.1:{port}", port=port) is True
+
+
+def test_logged_run_times_out_with_heartbeat_and_receipt(tmp_path: Path) -> None:
+    log_path = tmp_path / "run.log"
+    receipt_path = tmp_path / "receipt.json"
+    heartbeats: list[dict[str, object]] = []
+
+    result = run_logged(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        cwd=tmp_path,
+        log_path=log_path,
+        timeout_seconds=0.3,
+        heartbeat_seconds=0.05,
+        on_heartbeat=heartbeats.append,
+        receipt_path=receipt_path,
+    )
+
+    assert result.timed_out is True
+    assert result.duration_seconds < 3
+    assert heartbeats
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "timed_out"
+    assert receipt["process"]["pid"] == result.process["pid"]
+    assert "timeout: owned process tree termination requested" in log_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_logged_run_finishes_when_output_is_silent(tmp_path: Path) -> None:
+    started = time.monotonic()
+    result = run_logged(
+        [sys.executable, "-c", "import time; time.sleep(0.15)"],
+        cwd=tmp_path,
+        log_path=tmp_path / "silent.log",
+        timeout_seconds=1,
+        heartbeat_seconds=0.05,
+    )
+    assert result.returncode == 0
+    assert result.timed_out is False
+    assert time.monotonic() - started < 1

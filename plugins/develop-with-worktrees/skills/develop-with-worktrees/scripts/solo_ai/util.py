@@ -5,14 +5,17 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from queue import Empty, Queue
+from typing import Any, Callable, Sequence
 
 import psutil
 
@@ -27,6 +30,16 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class LoggedRunResult:
+    """一次受控命令运行的可恢复摘要。"""
+
+    returncode: int
+    duration_seconds: float
+    timed_out: bool
+    process: dict[str, Any]
 
 
 def run(
@@ -60,12 +73,65 @@ def run(
     return result
 
 
+def _stop_owned_process_tree(snapshot: dict[str, Any]) -> bool:
+    """只终止身份仍匹配的根进程及其后代，避免误杀 PID 复用的进程。"""
+    if not process_matches(snapshot):
+        return False
+    pid = snapshot["pid"]
+    try:
+        if os.name != "nt":
+            os.killpg(pid, signal.SIGTERM)
+            return True
+        root = psutil.Process(pid)
+        children = root.children(recursive=True)
+        for child in reversed(children):
+            try:
+                child.terminate()
+            except psutil.Error:
+                continue
+        root.terminate()
+        _, alive = psutil.wait_procs([*children, root], timeout=5)
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.Error:
+                continue
+        return True
+    except (OSError, psutil.Error):
+        return False
+
+
+def _stream_reader(stream: Any, output: Queue[str | None]) -> None:
+    try:
+        for line in iter(stream.readline, ""):
+            output.put(line)
+    finally:
+        output.put(None)
+
+
 def run_logged(
-    command: Sequence[str], *, cwd: Path, log_path: Path
-) -> tuple[int, float]:
-    """Run an explicit argv command and write a redacted transient log."""
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    timeout_seconds: float | None = None,
+    heartbeat_seconds: float = 30.0,
+    environment: dict[str, str] | None = None,
+    on_heartbeat: Callable[[dict[str, Any]], None] | None = None,
+    receipt_path: Path | None = None,
+) -> LoggedRunResult:
+    """运行显式 argv，并留下可恢复的日志和运行回执。
+
+    读取输出使用独立线程，主线程始终检查超时和心跳；不会因命令沉默而永久阻塞。
+    """
+    if timeout_seconds is not None and timeout_seconds <= 0:
+        raise SoloAIError("Command timeout_seconds must be positive")
+    if heartbeat_seconds <= 0:
+        raise SoloAIError("Command heartbeat_seconds must be positive")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    started_at = utc_timestamp()
+    creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
     with log_path.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write("$ " + " ".join(redact_text(item) for item in command) + "\n")
         handle.flush()
@@ -77,15 +143,86 @@ def run_logged(
             errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=environment,
+            start_new_session=os.name != "nt",
+            creationflags=creation_flags,
         )
         assert process.stdout is not None
-        for line in process.stdout:
-            handle.write(redact_text(line))
-            handle.flush()
+        snapshot = process_snapshot(process.pid)
+        receipt: dict[str, Any] = {
+            "schema_version": 1,
+            "command": [redact_text(item) for item in command],
+            "cwd": str(cwd),
+            "status": "running",
+            "started_at": started_at,
+            "process": snapshot,
+            "timeout_seconds": timeout_seconds,
+        }
+        if receipt_path:
+            atomic_write_json(receipt_path, receipt)
+        output: Queue[str | None] = Queue()
+        reader = threading.Thread(
+            target=_stream_reader, args=(process.stdout, output), daemon=True
+        )
+        reader.start()
+        reader_finished = False
+        timed_out = False
+        next_heartbeat = started + heartbeat_seconds
+        while not reader_finished or process.poll() is None:
+            now = time.monotonic()
+            if timeout_seconds is not None and now - started >= timeout_seconds:
+                timed_out = True
+                _stop_owned_process_tree(snapshot)
+                receipt["status"] = "terminating"
+                receipt["timeout_requested_at"] = utc_timestamp()
+                if receipt_path:
+                    atomic_write_json(receipt_path, receipt)
+                handle.write("\n[timeout: owned process tree termination requested]\n")
+                handle.flush()
+                timeout_seconds = None
+            if now >= next_heartbeat:
+                heartbeat = {
+                    "status": "running",
+                    "elapsed_seconds": round(now - started, 3),
+                    "process": snapshot,
+                }
+                receipt["last_heartbeat_at"] = utc_timestamp()
+                receipt["elapsed_seconds"] = heartbeat["elapsed_seconds"]
+                if receipt_path:
+                    atomic_write_json(receipt_path, receipt)
+                handle.write(f"[heartbeat elapsed={heartbeat['elapsed_seconds']:.3f}s]\n")
+                handle.flush()
+                if on_heartbeat:
+                    on_heartbeat(heartbeat)
+                next_heartbeat = now + heartbeat_seconds
+            try:
+                line = output.get(timeout=0.2)
+            except Empty:
+                continue
+            if line is None:
+                reader_finished = True
+            else:
+                handle.write(redact_text(line))
+                handle.flush()
         returncode = process.wait()
         duration = time.monotonic() - started
-        handle.write(f"\n[exit={returncode} duration={duration:.3f}s]\n")
-    return returncode, duration
+        handle.write(
+            f"\n[exit={returncode} duration={duration:.3f}s timed_out={str(timed_out).lower()}]\n"
+        )
+    result = LoggedRunResult(returncode, duration, timed_out, snapshot)
+    if receipt_path:
+        receipt.update(
+            {
+                "status": "timed_out" if timed_out else "finished",
+                "finished_at": utc_timestamp(),
+                "exit_code": returncode,
+                "duration_seconds": round(duration, 3),
+                "timed_out": timed_out,
+                "log": str(log_path),
+            }
+        )
+        atomic_write_json(receipt_path, receipt)
+    return result
 
 
 _REDACTIONS = (

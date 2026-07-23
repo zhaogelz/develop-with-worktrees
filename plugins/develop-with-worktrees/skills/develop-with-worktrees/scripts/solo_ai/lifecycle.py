@@ -412,8 +412,8 @@ def _run_declared_secret_scanner(
     pending = (
         repo.local_dir / "logs" / "pending" / f"secret-scan-{uuid.uuid4().hex}.log"
     )
-    code, _ = run_logged(scanner.argv, cwd=cwd, log_path=pending)
-    if code:
+    result = run_logged(scanner.argv, cwd=cwd, log_path=pending)
+    if result.returncode:
         raise SoloAIError(
             f"Repository-declared secret scanner failed. Review its local redacted log: {pending}"
         )
@@ -520,7 +520,13 @@ def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
         require_safe(
             repo, cwd=worktree, base=default, allowlist=config.sensitive_allowlist
         )
-        proof = validate(repo, cwd=worktree, base=default, verification=verification)
+        proof = validate(
+            repo,
+            cwd=worktree,
+            base=default,
+            verification=verification,
+            task_id=task_id,
+        )
         return store.update_task(
             task_id,
             status="ready",
@@ -749,7 +755,11 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                     allowlist=config.sensitive_allowlist,
                 )
                 proof = validate(
-                    repo, cwd=worktree, base=default, verification=verification
+                    repo,
+                    cwd=worktree,
+                    base=default,
+                    verification=verification,
+                    task_id=task_id,
                 )
                 store.update_task(
                     task_id,
@@ -984,16 +994,16 @@ def warm_slot(repo: GitRepo, *, slot_id: str) -> dict[str, Any]:
                 / "pending"
                 / f"warm-{slot_id}-{uuid.uuid4().hex}.log"
             )
-            code, duration = run_logged(command.argv, cwd=worktree, log_path=pending)
+            result = run_logged(command.argv, cwd=worktree, log_path=pending)
             results.append(
                 {
                     "command": command.redacted(),
-                    "exit_code": code,
-                    "duration_seconds": round(duration, 3),
+                    "exit_code": result.returncode,
+                    "duration_seconds": round(result.duration_seconds, 3),
                     "log": str(pending),
                 }
             )
-            if code:
+            if result.returncode:
                 failed_log = pending
                 break
         changed = repo.changed_paths(worktree)
