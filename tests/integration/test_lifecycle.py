@@ -108,6 +108,34 @@ def test_full_managed_lifecycle_and_exact_ready_proof_reuse(git_repo: Path) -> N
     assert StateStore(repo).task(task["id"])["status"] == "finished"
 
 
+def test_finish_resumes_after_branch_cleanup_crash(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="resume finish")
+    commit_one(repo, task, "resume.txt", "resume\n", "test: resume finish")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original_release = StateStore.release
+
+    def fail_release(
+        self: StateStore, task_id: str, *, final_status: str
+    ) -> None:
+        raise RuntimeError("simulated crash before release")
+
+    monkeypatch.setattr(StateStore, "release", fail_release)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+
+    receipt = read_json(repo.local_dir / "integration-receipts" / f"{task['id']}.json", {})
+    assert receipt["stage"] == "branch-deleted"
+    assert StateStore(repo).task(task["id"])["status"] == "ready"
+
+    monkeypatch.setattr(StateStore, "release", original_release)
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert result["task_id"] == task["id"]
+    assert StateStore(repo).task(task["id"])["status"] == "finished"
+
+
 def test_finish_retains_standard_tool_caches_created_by_validation(
     git_repo: Path,
 ) -> None:

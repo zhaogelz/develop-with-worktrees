@@ -125,3 +125,25 @@ def test_logged_run_finishes_when_output_is_silent(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert result.timed_out is False
     assert time.monotonic() - started < 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM ignore is POSIX-specific")
+def test_logged_run_force_stops_a_process_that_ignores_sigterm(tmp_path: Path) -> None:
+    result = run_logged(
+        [
+            sys.executable,
+            "-c",
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+        ],
+        cwd=tmp_path,
+        log_path=tmp_path / "ignored-term.log",
+        timeout_seconds=0.1,
+        heartbeat_seconds=0.02,
+        termination_grace_seconds=0.1,
+    )
+
+    assert result.timed_out is True
+    assert result.duration_seconds < 3
+    assert "force termination requested" in (tmp_path / "ignored-term.log").read_text(
+        encoding="utf-8"
+    )

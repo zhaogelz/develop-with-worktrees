@@ -101,6 +101,27 @@ def _stop_owned_process_tree(snapshot: dict[str, Any]) -> bool:
         return False
 
 
+def _force_stop_owned_process_tree(snapshot: dict[str, Any]) -> bool:
+    """宽限期后仅强制终止仍能证明为同一进程组的验证进程。"""
+    if not process_matches(snapshot):
+        return False
+    pid = snapshot["pid"]
+    try:
+        if os.name != "nt":
+            os.killpg(pid, signal.SIGKILL)
+            return True
+        root = psutil.Process(pid)
+        processes = [*root.children(recursive=True), root]
+        for process in reversed(processes):
+            try:
+                process.kill()
+            except psutil.Error:
+                continue
+        return True
+    except (OSError, psutil.Error):
+        return False
+
+
 def _stream_reader(stream: Any, output: Queue[str | None]) -> None:
     try:
         for line in iter(stream.readline, ""):
@@ -116,6 +137,7 @@ def run_logged(
     log_path: Path,
     timeout_seconds: float | None = None,
     heartbeat_seconds: float = 30.0,
+    termination_grace_seconds: float = 5.0,
     environment: dict[str, str] | None = None,
     on_heartbeat: Callable[[dict[str, Any]], None] | None = None,
     receipt_path: Path | None = None,
@@ -129,6 +151,8 @@ def run_logged(
         raise SoloAIError("Command timeout_seconds must be positive")
     if heartbeat_seconds <= 0:
         raise SoloAIError("Command heartbeat_seconds must be positive")
+    if termination_grace_seconds <= 0:
+        raise SoloAIError("Command termination_grace_seconds must be positive")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     started_at = utc_timestamp()
@@ -170,6 +194,7 @@ def run_logged(
         reader.start()
         reader_finished = False
         timed_out = False
+        force_deadline: float | None = None
         next_heartbeat = started + heartbeat_seconds
         while not reader_finished or process.poll() is None:
             now = time.monotonic()
@@ -183,6 +208,12 @@ def run_logged(
                 handle.write("\n[timeout: owned process tree termination requested]\n")
                 handle.flush()
                 timeout_seconds = None
+                force_deadline = now + termination_grace_seconds
+            if force_deadline is not None and now >= force_deadline:
+                _force_stop_owned_process_tree(snapshot)
+                handle.write("[timeout: owned process tree force termination requested]\n")
+                handle.flush()
+                force_deadline = None
             if now >= next_heartbeat:
                 heartbeat = {
                     "status": "running",

@@ -868,6 +868,47 @@ def _integrate_pending_bootstrap(repo: GitRepo, primary: Path) -> dict[str, str]
     return result
 
 
+def _integration_receipt_path(repo: GitRepo, task_id: str) -> Path:
+    return repo.local_dir / "integration-receipts" / f"{task_id}.json"
+
+
+def _write_integration_receipt(repo: GitRepo, receipt: dict[str, Any]) -> None:
+    receipt["updated_at"] = utc_timestamp()
+    atomic_write_json(_integration_receipt_path(repo, str(receipt["task_id"])), receipt)
+
+
+def _complete_integrated_task(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any], receipt: dict[str, Any]
+) -> dict[str, Any]:
+    """根据已落盘的合入小票幂等完成 detach、删分支与状态释放。"""
+    worktree = Path(str(task["worktree"]))
+    primary = _recorded_base_worktree(repo, task)
+    integrated_head = str(receipt["integrated_head"])
+    if repo.branch(worktree) == task["branch"]:
+        repo.git(["switch", "--detach", integrated_head], cwd=worktree)
+    receipt["stage"] = "detached"
+    _write_integration_receipt(repo, receipt)
+    branch_exists = repo.git(
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{task['branch']}"],
+        cwd=primary,
+        check=False,
+    ).returncode == 0
+    if branch_exists:
+        repo.git(["branch", "-d", task["branch"]], cwd=primary)
+    receipt["stage"] = "branch-deleted"
+    _write_integration_receipt(repo, receipt)
+    store.release(task["id"], final_status="finished")
+    receipt["stage"] = "released"
+    _write_integration_receipt(repo, receipt)
+    return {
+        "task_id": task["id"],
+        "integrated_head": integrated_head,
+        "proof": receipt["proof"],
+        "proof_kind": receipt["proof_kind"],
+        "proof_reused": bool(receipt.get("proof_reused", False)),
+    }
+
+
 def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
     _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
@@ -904,6 +945,24 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                 store.require_lease(task, lease)
                 primary = _recorded_base_worktree(repo, task)
                 worktree = Path(task["worktree"])
+                receipt = read_json(_integration_receipt_path(repo, task_id), {})
+                if receipt:
+                    if (
+                        receipt.get("task_id") != task_id
+                        or receipt.get("branch") != task.get("branch")
+                        or receipt.get("candidate_head") != task.get("candidate_head")
+                        or not repo.is_ancestor(
+                            str(receipt.get("integrated_head", "")),
+                            str(task["base_ref"]),
+                            cwd=primary,
+                        )
+                    ):
+                        raise SoloAIError(
+                            "Integration receipt does not match this ready task; preserve the task for manual inspection"
+                        )
+                    return _complete_integrated_task(
+                        repo, store=store, task=task, receipt=receipt
+                    )
                 if not repo.is_clean(worktree) or repo.head(worktree) != task.get(
                     "candidate_head"
                 ):
@@ -947,16 +1006,23 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                 _stop_registered_processes(store, task)
                 repo.git(["merge", "--ff-only", task["branch"]], cwd=primary)
                 integrated_head = repo.head(primary)
-                repo.git(["switch", "--detach", integrated_head], cwd=worktree)
-                repo.git(["branch", "-d", task["branch"]], cwd=primary)
-                store.release(task_id, final_status="finished")
-                return {
+                receipt = {
+                    "schema_version": 1,
                     "task_id": task_id,
+                    "branch": task["branch"],
+                    "base_ref": task["base_ref"],
+                    "candidate_head": task["candidate_head"],
                     "integrated_head": integrated_head,
                     "proof": proof["fingerprint"],
                     "proof_kind": proof["kind"],
                     "proof_reused": proof.get("reused", False),
+                    "stage": "integrated",
+                    "created_at": utc_timestamp(),
                 }
+                _write_integration_receipt(repo, receipt)
+                return _complete_integrated_task(
+                    repo, store=store, task=task, receipt=receipt
+                )
         finally:
             ticket.unlink(missing_ok=True)
 
