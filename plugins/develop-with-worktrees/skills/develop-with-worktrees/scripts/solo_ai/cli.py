@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
 import os
 import shutil
@@ -15,6 +14,7 @@ from .config import (
     load_repo_config,
     load_verification_config,
 )
+from . import VERSION
 from .lifecycle import (
     abandon,
     approve,
@@ -42,6 +42,7 @@ from .util import (
     directory_size,
     ensure_within,
     format_bytes,
+    is_link_or_junction,
     new_id,
     read_json,
     sha256_file,
@@ -49,6 +50,7 @@ from .util import (
     stable_json,
     utc_timestamp,
 )
+from .validation_queue import estimate_validation, queue_status, set_capacity
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -68,6 +70,10 @@ def _parser() -> argparse.ArgumentParser:
         help="emit machine-readable output; task leases are still redacted",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser(
+        "version", help="show installed workflow version and runtime contract"
+    )
 
     init = sub.add_parser(
         "init", help="show or accept the one-time repository adoption plan"
@@ -92,11 +98,23 @@ def _parser() -> argparse.ArgumentParser:
         "approve", help="locally approve the current full normalized validation plan"
     )
     approval.add_argument("--accept", action="store_true", required=True)
+    approval.add_argument(
+        "--task",
+        help="approve the exact committed candidate policy of one active task",
+    )
 
     sub.add_parser(
         "disable", help="opt out on this machine without changing tracked policy"
     )
     sub.add_parser("enable", help="re-enable managed tasks on this machine")
+    settings = sub.add_parser(
+        "settings", help="show or adjust machine-local validation capacity"
+    )
+    settings.add_argument(
+        "--validation-capacity",
+        metavar="AUTO_OR_1_TO_4",
+        help="auto or 1..4; this local setting never changes tracked repository policy",
+    )
     sub.add_parser(
         "doctor",
         help="read-only mode, policy, approval, task, and uninstall readiness report",
@@ -132,11 +150,14 @@ def _parser() -> argparse.ArgumentParser:
         "--confirm", required=True, help="exactly TASK_ID:BASE_BRANCH"
     )
 
-    plan = sub.add_parser("plan", help="read the registered verification plan for one task")
+    plan = sub.add_parser(
+        "plan", help="read the registered verification plan for one task"
+    )
     plan.add_argument("--task", required=True)
 
     verify = sub.add_parser(
-        "verify", help="run only registered development, ready, or explicit full profiles"
+        "verify",
+        help="run only registered development, ready, or explicit full profiles",
     )
     verify.add_argument("--task", required=True)
     verify.add_argument("--lease", required=True)
@@ -233,6 +254,7 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
         "default_branch": repo.default_branch(),
         "primary_clean": repo.is_clean(repo.primary_path),
         "local_enabled": local_enabled(repo),
+        "validation_queue": queue_status(),
         "slots": list(state.get("slots", {}).values()),
         "tasks": [
             StateStore.public_task(task) for task in state.get("tasks", {}).values()
@@ -245,6 +267,19 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
             slot["disk"] = format_bytes(size)
         result["local_state_bytes"] = directory_size(repo.local_dir)
     return result
+
+
+def _version() -> dict[str, Any]:
+    plugin_root = Path(__file__).resolve().parents[4]
+    manifest_path = plugin_root / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return {
+        "version": VERSION,
+        "plugin_version": manifest.get("version"),
+        "verification_schema": 3,
+        "script": str(Path(sys.argv[0]).resolve()),
+        "validation_queue": queue_status(),
+    }
 
 
 def _doctor(repo: GitRepo) -> dict[str, Any]:
@@ -291,31 +326,53 @@ def _require_idle(repo: GitRepo) -> None:
 
 
 def _cleanup_target(path: Path, root: Path) -> dict[str, Any]:
-    """为两阶段清理构建内容摘要；遇到链接即停止，不沿链接走出槽位。"""
+    """为声明目标生成可复核摘要；任何保护项或链接都会停止整次清理。"""
+    if is_link_or_junction(path):
+        raise SoloAIError(f"Cleanup target contains a link or junction: {path}")
     path = ensure_within(path, root)
-    if path.is_symlink():
-        raise SoloAIError(f"Refusing symlink cleanup target: {path}")
     entries: list[dict[str, Any]] = []
+    total_bytes = 0
+
+    def add(candidate: Path, *, directory: bool) -> None:
+        nonlocal total_bytes
+        if is_link_or_junction(candidate):
+            raise SoloAIError(
+                f"Cleanup target contains a link or junction: {candidate}"
+            )
+        if candidate.name.startswith(".env"):
+            raise SoloAIError(
+                f"Cleanup target contains protected .env content: {candidate}"
+            )
+        relative = str(candidate.relative_to(root)).replace("\\", "/")
+        if directory:
+            entries.append({"path": relative, "kind": "directory"})
+            return
+        size = candidate.stat().st_size
+        total_bytes += size
+        entries.append(
+            {
+                "path": relative,
+                "kind": "file",
+                "bytes": size,
+                "sha256": sha256_file(candidate),
+            }
+        )
+
     if path.is_file():
-        entries.append({"path": path.name, "kind": "file", "sha256": sha256_file(path)})
+        add(path, directory=False)
     else:
-        for current, directories, files in os.walk(path):
+        for current, directories, files in os.walk(path, followlinks=False):
             current_path = Path(current)
-            for name in sorted([*directories, *files]):
-                candidate = current_path / name
-                if candidate.is_symlink():
-                    raise SoloAIError(f"Refusing cleanup target containing symlink: {candidate}")
-                relative = str(candidate.relative_to(root)).replace("\\", "/")
-                if candidate.is_file():
-                    entries.append(
-                        {"path": relative, "kind": "file", "sha256": sha256_file(candidate)}
-                    )
-                else:
-                    entries.append({"path": relative, "kind": "directory"})
+            for name in sorted(directories):
+                add(current_path / name, directory=True)
+            for name in sorted(files):
+                add(current_path / name, directory=False)
     return {
         "path": str(path.relative_to(root)).replace("\\", "/"),
         "kind": "file" if path.is_file() else "directory",
-        "entries": entries,
+        "bytes": total_bytes,
+        "delete_reason": "declared cleanup.owned_paths entry",
+        "contents_digest": sha256_text(stable_json(entries)),
     }
 
 
@@ -335,18 +392,16 @@ def _slot_prune_payload(repo: GitRepo, *, slot: str) -> dict[str, Any]:
             raise SoloAIError(
                 "Slot path is not registered with Git and is retained; recover or inspect it manually"
             )
-        return {"slot": slot, "worktree_retained": False, "targets": [], "protected": []}
+        return {"slot": slot, "worktree_retained": False, "targets": []}
     store.require_slot_ownership(slot, root)
-    protected = [
-        child.name
-        for child in root.iterdir()
-        if any(fnmatch.fnmatchcase(child.name, pattern) for pattern in config.cleanup_protected_paths)
-    ]
     targets: list[dict[str, Any]] = []
     for relative in config.cleanup_owned_paths:
-        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in config.cleanup_protected_paths):
-            continue
-        candidate = ensure_within(root / relative, root)
+        candidate = root / relative
+        if is_link_or_junction(candidate):
+            raise SoloAIError(
+                f"Cleanup target contains a link or junction: {candidate}"
+            )
+        candidate = ensure_within(candidate, root)
         if candidate.exists() or candidate.is_symlink():
             targets.append(_cleanup_target(candidate, root))
     return {
@@ -354,9 +409,7 @@ def _slot_prune_payload(repo: GitRepo, *, slot: str) -> dict[str, Any]:
         "worktree": str(root),
         "worktree_retained": True,
         "targets": targets,
-        "protected": sorted(protected),
         "owned_paths": list(config.cleanup_owned_paths),
-        "protected_paths": list(config.cleanup_protected_paths),
     }
 
 
@@ -402,16 +455,16 @@ def _execute_slot_prune(
             "slot": slot,
             "plan_id": plan_id,
             "removed": [],
-            "protected_retained": [],
             "worktree_retained": False,
         }
     root = Path(str(current["worktree"]))
     removed: list[str] = []
     for target in current["targets"]:
-        path = ensure_within(root / str(target["path"]), root)
-        # payload 已重新摘要；再次拒绝符号链接，防止检查和删除之间路径替换。
-        if path.is_symlink():
-            raise SoloAIError(f"Cleanup target became a symlink: {path}")
+        path = root / str(target["path"])
+        # 计划已重新摘要；再次拒绝链接或 junction，防止检查和删除之间路径替换。
+        if is_link_or_junction(path):
+            raise SoloAIError(f"Cleanup target became a link or junction: {path}")
+        path = ensure_within(path, root)
         if path.is_dir():
             shutil.rmtree(path)
         elif path.is_file():
@@ -424,7 +477,6 @@ def _execute_slot_prune(
         "slot": slot,
         "plan_id": plan_id,
         "removed": removed,
-        "protected_retained": current["protected"],
         "worktree_retained": current["worktree_retained"],
     }
 
@@ -462,9 +514,7 @@ def _prune(
             return _plan_slot_prune(repo, slot=slot)
         if not plan_id or not confirm:
             raise SoloAIError("PruneSlot execution requires both --plan and --confirm")
-        return _execute_slot_prune(
-            repo, slot=slot, plan_id=plan_id, confirm=confirm
-        )
+        return _execute_slot_prune(repo, slot=slot, plan_id=plan_id, confirm=confirm)
 
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
@@ -478,13 +528,26 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             accept_static_only=args.accept_static_only,
             decline=args.decline,
         )
+    if args.command == "version":
+        return _version()
     if args.command == "approve":
+        if args.task:
+            task = StateStore(repo).task(args.task)
+            worktree = Path(str(task["worktree"]))
+            verification = load_verification_config(repo, cwd=worktree)
+            return approve(repo, verification, cwd=worktree)
         verification = load_verification_config(repo)
         return approve(repo, verification)
     if args.command == "disable":
         return disable(repo)
     if args.command == "enable":
         return set_local_enabled(repo, enabled=True)
+    if args.command == "settings":
+        return (
+            set_capacity(args.validation_capacity)
+            if args.validation_capacity is not None
+            else queue_status()
+        )
     if args.command == "doctor":
         return _doctor(repo)
     if args.command == "start":
@@ -520,29 +583,44 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             verification=verification,
             task_id=task["id"],
         )
+        estimate = estimate_validation(
+            [
+                (
+                    profile.profile_id,
+                    [command.fingerprint for command in profile.commands],
+                )
+                for profile, _, _ in records
+            ]
+        )
+        profiles = [
+            {
+                "id": profile.profile_id,
+                "level": profile.level,
+                "resource_class": profile.resource_class,
+                "timeout_seconds": profile.timeout_seconds,
+                "commands": [command.redacted() for command in profile.commands],
+                "fingerprint": fingerprint,
+                "estimated_seconds": estimate["profile_seconds"][index],
+            }
+            for index, (profile, _, fingerprint) in enumerate(records)
+        ]
         return {
             "task_id": task["id"],
             "base_ref": task["base_ref"],
             "changed_files": inputs["files"],
             "unmapped_files": inputs["unmapped_files"],
-            "profiles": [
-                {
-                    "id": profile.profile_id,
-                    "level": profile.level,
-                    "resource_class": profile.resource_class,
-                    "timeout_seconds": profile.timeout_seconds,
-                    "commands": [command.redacted() for command in profile.commands],
-                    "fingerprint": fingerprint,
-                }
-                for profile, _, fingerprint in records
-            ],
+            "profiles": profiles,
+            "estimated_seconds": estimate["estimated_seconds"],
+            "advisory": estimate["advisory"],
         }
     if args.command == "verify":
         store = StateStore(repo)
         with store.operation(args.task, args.lease, "verify") as task:
             worktree = Path(str(task["worktree"]))
             if not repo.is_clean(worktree):
-                raise SoloAIError("Commit task changes before producing reusable verification evidence")
+                raise SoloAIError(
+                    "Commit task changes before producing reusable verification evidence"
+                )
             verification = load_verification_config(repo, cwd=worktree)
             proof = validate(
                 repo,

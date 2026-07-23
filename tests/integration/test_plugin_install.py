@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -63,6 +64,124 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     listed = call("plugin", "list", "--marketplace", "develop-with-worktrees", "--json")
     assert listed.returncode == 0, listed.stderr
     assert "develop-with-worktrees" in listed.stdout
+
+    runners = [
+        path
+        for path in codex_home.rglob("dww.py")
+        if "develop-with-worktrees" in str(path).replace("\\", "/")
+    ]
+    assert runners, "installed plugin does not expose its lifecycle runner"
+    runner = runners[0]
+    smoke_repo = tmp_path / "installed-runner-smoke"
+
+    def git(*args: str) -> None:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=smoke_repo if smoke_repo.exists() else tmp_path,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    smoke_repo.mkdir()
+    git("init", "-b", "main")
+    git("config", "user.name", "Installed runner test")
+    git("config", "user.email", "runner@example.invalid")
+    (smoke_repo / "README.md").write_text("smoke\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-m", "test: initialize installed runner smoke repository")
+
+    def run_runner(
+        *args: str, cwd: Path = smoke_repo
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["uv", "run", "--script", str(runner), "--repo", str(cwd), *args],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+
+    initialized = run_runner(
+        "--json",
+        "init",
+        "--accept",
+        "--verify",
+        '["git", "diff", "--check", "main...HEAD"]',
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    version = run_runner("--json", "version")
+    assert version.returncode == 0, version.stderr
+    assert '"verification_schema": 3' in version.stdout
+    started = run_runner("start", "--name", "installed artifact smoke")
+    assert started.returncode == 0, started.stderr
+    values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
+    task_id = values["Task"]
+    lease = values["Lease"]
+    worktree = Path(values["Worktree"])
+    (worktree / "smoke.txt").write_text("installed\n", encoding="utf-8")
+    committed = run_runner(
+        "commit",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--message",
+        "test: commit through installed runner",
+        "--path",
+        "smoke.txt",
+        cwd=worktree,
+    )
+    assert committed.returncode == 0, committed.stderr
+    planned = run_runner("--json", "plan", "--task", task_id, cwd=worktree)
+    assert planned.returncode == 0, planned.stderr
+    verified = run_runner(
+        "--json",
+        "verify",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--level",
+        "ready",
+        cwd=worktree,
+    )
+    assert verified.returncode == 0, verified.stderr
+    prepared = run_runner("ready", "--task", task_id, "--lease", lease, cwd=worktree)
+    assert prepared.returncode == 0, prepared.stderr
+    finished = run_runner("finish", "--task", task_id, "--lease", lease, cwd=worktree)
+    assert finished.returncode == 0, finished.stderr
+    assert (smoke_repo / "smoke.txt").exists()
+    pruned = run_runner("--json", "prune-slot", "--slot", "01")
+    assert pruned.returncode == 0, pruned.stderr
+    plan = json.loads(pruned.stdout)["result"]
+    pruned = run_runner(
+        "--json",
+        "prune-slot",
+        "--slot",
+        "01",
+        "--plan",
+        plan["plan_id"],
+        "--confirm",
+        plan["digest"],
+    )
+    assert pruned.returncode == 0, pruned.stderr
+    removed_policy = run_runner(
+        "deinit",
+        "--confirm",
+        "DEINIT",
+        "--message",
+        "test: deinitialize installed runner smoke repository",
+    )
+    assert removed_policy.returncode == 0, removed_policy.stderr
+    assert not (smoke_repo / ".solo-ai").exists()
+
     removed = call(
         "plugin", "remove", "develop-with-worktrees@develop-with-worktrees", "--json"
     )

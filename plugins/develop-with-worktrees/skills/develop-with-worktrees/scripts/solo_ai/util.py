@@ -156,7 +156,9 @@ def run_logged(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     started_at = utc_timestamp()
-    creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    creation_flags = (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    )
     with log_path.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write("$ " + " ".join(redact_text(item) for item in command) + "\n")
         handle.flush()
@@ -211,9 +213,13 @@ def run_logged(
                 force_deadline = now + termination_grace_seconds
             if force_deadline is not None and now >= force_deadline:
                 _force_stop_owned_process_tree(snapshot)
-                handle.write("[timeout: owned process tree force termination requested]\n")
+                handle.write(
+                    "[timeout: owned process tree force termination requested]\n"
+                )
                 handle.flush()
-                force_deadline = None
+                # 某些子进程会延迟关闭输出管道；根进程退出前持续复核，避免
+                # 忽略 SIGTERM 的进程永久卡住 Ready/verify。
+                force_deadline = now + 1.0 if process.poll() is None else None
             if now >= next_heartbeat:
                 heartbeat = {
                     "status": "running",
@@ -224,7 +230,9 @@ def run_logged(
                 receipt["elapsed_seconds"] = heartbeat["elapsed_seconds"]
                 if receipt_path:
                     atomic_write_json(receipt_path, receipt)
-                handle.write(f"[heartbeat elapsed={heartbeat['elapsed_seconds']:.3f}s]\n")
+                handle.write(
+                    f"[heartbeat elapsed={heartbeat['elapsed_seconds']:.3f}s]\n"
+                )
                 handle.flush()
                 if on_heartbeat:
                     on_heartbeat(heartbeat)
@@ -309,7 +317,8 @@ def stable_json(value: Any) -> str:
 
 def atomic_write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    # 不把长目标文件名再次拼进临时文件，避免 Windows 深层工作树超过路径限制。
+    temporary = path.parent / f".{uuid.uuid4().hex}.tmp"
     temporary.write_text(value, encoding="utf-8", newline="\n")
     os.replace(temporary, path)
 
@@ -345,6 +354,17 @@ def ensure_within(path: Path, parent: Path) -> Path:
     except ValueError as exc:
         raise SoloAIError(f"Refusing path outside managed root: {resolved}") from exc
     return resolved
+
+
+def is_link_or_junction(path: Path) -> bool:
+    """不跟随链接或 Windows junction；清理时宁可保留也不能跨边界。"""
+    try:
+        status = path.lstat()
+    except OSError:
+        return False
+    if path.is_symlink():
+        return True
+    return bool(getattr(status, "st_file_attributes", 0) & 0x0400)
 
 
 def process_snapshot(pid: int | None = None) -> dict[str, Any]:

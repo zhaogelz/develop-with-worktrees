@@ -1,96 +1,25 @@
 # Develop with Worktrees
 
-[![CI](https://github.com/zhaogelz/develop-with-worktrees/actions/workflows/ci.yml/badge.svg)](https://github.com/zhaogelz/develop-with-worktrees/actions/workflows/ci.yml)
+`0.2.0-beta.1` 是给 Codex 使用的本地优先多工作树流程：多个任务分别在隔离工作树中开发，提交时只允许精确路径，验证有证据，最后只在本地合回你开始任务时所在的分支。
 
-一个面向 Codex 的本地优先插件：把“单人 AI + Git worktree”从临时习惯变成可复用、可恢复、可卸载的开发闭环。
+它不是固定把所有任务合到 `main`。例如你在 `feature/order` 启动任务，成功 Finish 后只推进 `feature/order`；团队仍可自行推送并创建 PR。
 
-> **让一个人安全地并行推进多个 Codex 开发任务。**
-
-它不是又一个通用的 `git worktree` 命令封装，而是把独立任务隔离、明确验证、冲突预检、顺序本地集成和干净退出连成一个交付闭环。
-
-## 安装公开 beta 版
-
-需要 Git、[uv](https://docs.astral.sh/uv/) 和支持插件与 hook 的 Codex：
+## 日常怎么用
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.1.0-beta.2
-codex plugin add develop-with-worktrees@develop-with-worktrees
+doctor → start → 在返回的工作树里修改 → commit 精确路径
+       → plan / verify（可选开发期反馈）→ ready → finish
 ```
 
-安装后请新建一个 Codex 任务，让插件在任务开始时加载。新 Git 仓库的第一次修改只会展示采用计划；你确认前不会改变已跟踪文件。
+- `verification.toml` 只支持 schema 3；profile 分为 `development`、`ready`、`full`。`full` 必须显式执行，日常 Ready 不会偷偷跑它。
+- `plan` 会告诉你哪些改动被哪些验证覆盖、预计耗时和是否有未映射路径。超过十分钟只会提醒你拆分映射或减少重复准备，不会自动减少验证。
+- 所有仓库共用本机验证队列：普通验证占一个容量，重型验证独占当前容量。默认按物理 CPU 核数和内存自动计算；可运行 `dww settings --validation-capacity auto|1..4` 只调整本机，不修改仓库文件。
+- Finish 不会删除 `.venv`、依赖或缓存。只有手动 `prune-slot`，并且仓库在 `cleanup.owned_paths` 精确声明过顶层路径，才会先给你路径、原因、大小和内容摘要计划。目标内部有 `.env*`、链接/junction 或在确认后发生变化时，整次删除都会停止。
 
-卸载前先对每个已采用仓库执行下文的 `deinit`，再运行：
+## 安装与升级
 
-```text
-codex plugin remove develop-with-worktrees@develop-with-worktrees
-```
+把本仓库作为本地 Codex marketplace 添加后安装插件，再新开一个 Codex 任务加载技能。插件不会自动发布、自动更新，也不会扫描或迁移其他项目。
 
-它不是在每个项目强塞一套工作树。安装插件后，hook 只会在 Codex 支持的本地写入工具前提醒；skill 判断任务；CLI 才负责槽位、租约、精确暂存、验证证明和串行集成。当前 Codex hook 能注入强提醒，但不能作为跨 IDE、跨操作系统的硬拦截，所以项目规则和 CLI 仍是硬门禁。
+旧 schema 2 项目只迁移自己的 `.solo-ai/verification.toml` 到 schema 3 后再使用本版本。首次采用仓库时先查看 `init` 计划，只有用户明确 `init --accept` 才会写入受管策略。
 
-## 适合什么场景
-
-- 你一个人同时推进 1～5 个 Codex 开发任务，希望隔离分支、依赖和端口。
-- 你希望任务失败、验证失败或合并冲突时保留现场，而不是自动清理或重试。
-- 你希望默认只做本地 Git，不自动 fetch、pull、push、建 PR、rebase、squash 或改写历史。
-- 你希望规则能随仓库提交，但端口、缓存、日志、租约和个人停用选择绝不污染仓库。
-
-## 不会做什么
-
-- 不接管已有 Worktrunk、`scripts/worktree-flow.ps1` 或成熟智能体编排。检测到后完全让位：不写 `.solo-ai`、不改 `AGENTS.md`、不领槽位、不迁移。
-- 不在所有仓库安装后立刻改文件。新 Git 仓库第一次准备修改前先展示一次计划，用户确认后才采用；拒绝则仅在该仓库本机停用。
-- 不声称能禁止手工编辑、其他 IDE 或被停用的 hook。
-- 不自动删除未知文件、受保护 `.env*`、未知进程或非本插件的 worktree。
-
-## 首次采用
-
-```text
-uv run --script <插件内 dww.py 的绝对路径> --repo <仓库> init
-```
-
-无 `--accept` 时仅展示验证计划。用户确认后执行 `init --accept`；若没有任何验证命令，必须明确执行 `init --accept-static-only`，结果只能称“仅静态检查”，不能称“测试通过”。用户拒绝则执行 `init --decline`，只写 Git common directory 下的本地偏好。
-
-接受后提交的内容严格只有：
-
-- `.solo-ai/config.toml`
-- `.solo-ai/verification.toml`
-- `AGENTS.md` 中的精确受管区块
-
-若主工作区有未提交改动，初始化提交会在本地临时 bootstrap worktree 中等待；不会 stash、复制、提交或丢弃主工作区改动。第一个任务在主工作区变干净后完成 Finish 时，才会把 bootstrap 和任务一并快进到默认分支。
-
-## 日常开发
-
-```text
-只读分析：原地进行，不占槽位
-修改任务：Start → 返回独占 worktree → 开发/定向检查
-          → Commit（明确路径清单）→ Ready → FIFO Finish
-```
-
-`Commit` 必须带出每一个实际改动的 `--path`，CLI 会拒绝“只暂存一部分”或 `git add -A` 式的模糊提交。`Ready` 先只读预测与最新本地默认分支的合并；预测安全才执行普通 merge。`Finish` 只在一个本地 FIFO 锁中顺序快进集成。多个槽位一起改不会自动合并；后完成的任务需要先面对已经推进的默认分支，真实冲突留在原工作树处理。
-
-默认三槽位，可配 1～5。每槽位有固定百位端口段，依赖和缓存各自保留；首次检出、首次依赖准备可能慢，之后快。`warm-slot` 是显式、串行的预热，不复制主工作区 `.venv`、`node_modules` 或 `.env`。若预热改写源码、产生未知忽略文件或 `.env*`，槽位会隔离，人工清理后再执行 `warm-slot` 才会恢复。
-
-## 验证与安全
-
-验证命令是 argv 数组，不经 shell 解释。每台电脑都要确认一次完整标准化计划；计划变更、解析到的工具路径/版本变化、平台变化、依赖锁变化都会重新要求确认。
-
-- Ready → Finish 默认只复用同一候选的精确证明。
-- 跨任务 profile 复用默认关闭；只有显式声明完整输入闭包、`cross_task_reuse = true` 和 `external_state = "none"` 才可能复用。
-- 数据库、容器、网络、浏览器、时间或未知外部状态的验证不能跨任务复用。
-- 本地日志会脱敏并内容寻址；日志缺失或改变即令证明失效。环境变量仅保存哈希，不保存原值。
-- 若仓库声明专业 secret scanner，会先跑它，再跑内置低误报敏感内容门禁。
-
-## 干净卸载
-
-先在每个已采用的仓库运行：
-
-```text
-uv run --script <插件内 dww.py 的绝对路径> --repo <仓库> deinit --confirm DEINIT --message <遵循仓库规范的清理提交信息>
-```
-
-它会先预检全部受管槽位，并在临时分支准备策略删除；只有精确登记的空槽位都安全释放后，才合入策略删除并移除本地状态。若后续槽位的二次检查失败，会先恢复本轮已释放的槽位，再保留策略和本地状态。活跃任务、队列、脏主工作区、未知未跟踪或忽略文件、`.env*`、未登记槽位目录或标记不一致都会阻止操作。成功后才可从 Codex 移除插件；插件注册表不会扫描磁盘，也不会影响别的项目。
-
-## 当前状态
-
-`0.1.0-beta.2` 是公开测试版。已包含 Windows、Linux、macOS CI 配置目标，以及本地 CLI/生命周期/hook/卸载测试；发布前已完成临时 `CODEX_HOME` 的安装、信任、升级与卸载演练。
-
-开发时，完整生命周期测试会反复创建、释放和恢复临时 Git worktree，在 Windows 上可能需要数分钟；外层超时至少预留十分钟。若外层先超时，先确认原 `pytest` 子进程是否仍在运行，不能立即并发重跑。
+它从不 fetch、pull、push、创建 PR、rebase、squash、amend 或改写历史。发现仓库已有成熟工作树流程时，会完全让位、不写任何状态。

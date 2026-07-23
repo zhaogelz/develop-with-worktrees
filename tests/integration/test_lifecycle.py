@@ -49,6 +49,21 @@ def initialized(path: Path) -> GitRepo:
     return repo
 
 
+def declare_cleanup(repo: GitRepo, *owned_paths: str) -> None:
+    config = repo.root / ".solo-ai" / "config.toml"
+    rendered = ", ".join(json.dumps(path) for path in owned_paths)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "cleanup = { owned_paths = [] }",
+            f"cleanup = {{ owned_paths = [{rendered}] }}",
+        ),
+        encoding="utf-8",
+    )
+    git(repo.root, "add", ".solo-ai/config.toml")
+    git(repo.root, "commit", "-m", "test: declare local cleanup ownership")
+    approve(repo, load_verification_config(repo))
+
+
 def commit_one(
     repo: GitRepo, task: dict[str, str], relative: str, contents: str, message: str
 ) -> None:
@@ -63,7 +78,7 @@ def merge_verification_policy(repo: GitRepo, command: CommandSpec) -> None:
     task = start(repo, name="change validation policy")
     worktree = Path(task["worktree"])
     (worktree / ".solo-ai" / "verification.toml").write_text(
-        f"""schema_version = 2
+        f"""schema_version = 3
 static_only = false
 
 [[profiles]]
@@ -117,16 +132,16 @@ def test_finish_resumes_after_branch_cleanup_crash(
     ready(repo, task_id=task["id"], lease=task["lease"])
     original_release = StateStore.release
 
-    def fail_release(
-        self: StateStore, task_id: str, *, final_status: str
-    ) -> None:
+    def fail_release(self: StateStore, task_id: str, *, final_status: str) -> None:
         raise RuntimeError("simulated crash before release")
 
     monkeypatch.setattr(StateStore, "release", fail_release)
     with pytest.raises(RuntimeError, match="simulated crash"):
         finish(repo, task_id=task["id"], lease=task["lease"])
 
-    receipt = read_json(repo.local_dir / "integration-receipts" / f"{task['id']}.json", {})
+    receipt = read_json(
+        repo.local_dir / "integration-receipts" / f"{task['id']}.json", {}
+    )
     assert receipt["stage"] == "branch-deleted"
     assert StateStore(repo).task(task["id"])["status"] == "ready"
 
@@ -313,7 +328,7 @@ def test_validation_policy_change_requires_full_local_reapproval(
     worktree = Path(task["worktree"])
     verification = worktree / ".solo-ai" / "verification.toml"
     verification.write_text(
-        """schema_version = 2
+        """schema_version = 3
 static_only = false
 
 [[profiles]]
@@ -574,12 +589,18 @@ def test_prune_slot_removes_only_declared_local_dependency_paths(
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
     task = start(repo, name="prepare local cache")
     worktree = Path(task["worktree"])
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     (worktree / ".venv").mkdir()
     (worktree / ".venv" / "marker").write_text("cache", encoding="utf-8")
     plan = _prune(repo, kind="slot", slot="01")
+    target = plan["targets"][0]
+    assert target["path"] == ".venv"
+    assert target["bytes"] == len("cache")
+    assert target["delete_reason"] == "declared cleanup.owned_paths entry"
+    assert len(target["contents_digest"]) == 64
     result = _prune(
         repo,
         kind="slot",
@@ -594,6 +615,7 @@ def test_prune_slot_removes_only_declared_local_dependency_paths(
 
 def test_prune_slot_rejects_a_plan_when_declared_target_changed(git_repo: Path) -> None:
     repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
     task = start(repo, name="prepare changing cache")
     worktree = Path(task["worktree"])
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
@@ -615,28 +637,23 @@ def test_prune_slot_rejects_a_plan_when_declared_target_changed(git_repo: Path) 
     assert (worktree / ".venv" / "after").exists()
 
 
-def test_prune_slot_retains_protected_paths_even_when_other_cleanup_runs(
+def test_prune_slot_stops_when_a_declared_target_contains_protected_content(
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
     task = start(repo, name="preserve credentials")
     worktree = Path(task["worktree"])
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     (worktree / ".venv").mkdir()
-    (worktree / ".env.local").write_text("marker=kept\n", encoding="utf-8")
+    (worktree / ".venv" / ".env.local").write_text("marker=kept\n", encoding="utf-8")
 
-    plan = _prune(repo, kind="slot", slot="01")
-    result = _prune(
-        repo,
-        kind="slot",
-        slot="01",
-        plan_id=plan["plan_id"],
-        confirm=plan["digest"],
-    )
+    with pytest.raises(SoloAIError, match="protected .env"):
+        _prune(repo, kind="slot", slot="01")
 
-    assert not (worktree / ".venv").exists()
-    assert (worktree / ".env.local").read_text(encoding="utf-8") == "marker=kept\n"
-    assert result["protected_retained"] == [".env.local"]
+    assert (worktree / ".venv" / ".env.local").read_text(
+        encoding="utf-8"
+    ) == "marker=kept\n"
 
 
 def test_slot_configuration_can_expand_to_six_without_reinitializing(

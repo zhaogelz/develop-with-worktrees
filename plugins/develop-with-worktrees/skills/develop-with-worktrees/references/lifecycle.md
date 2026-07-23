@@ -1,43 +1,11 @@
 # Lifecycle reference
 
-## Mode precedence
+Mode precedence is local disable, detected mature workflow, managed policy, then uninitialized confirmation. A mature workflow always wins and receives zero writes.
 
-```text
-local disable -> defer to detected mature workflow -> managed adoption -> uninitialized confirmation
-```
+`init` shows a plan first. `init --accept` commits the policy and managed AGENTS block; `init --decline` stores only a local preference. Dirty primary worktrees are never stashed, copied, committed, or discarded.
 
-Detection is checked on every managed action. Existing Worktrunk, repository `scripts/worktree-flow.ps1`, and other configured markers always win. In defer mode the plugin writes no tracked policy, slot, process, validation, or compatibility state.
+`start` chooses the least-recently-used idle slot and uses the current local branch of the invocation worktree as its base. It records the base branch, base commit, and base worktree. Detached HEAD requires `--base`; an active managed task cannot be a base. `retarget` changes the base only after exact confirmation and invalidates Ready evidence.
 
-## First adoption
+`commit` requires an exact complete path manifest. `ready` requires a clean committed branch, verifies a safe synchronization with the recorded base, validates the Ready closure, and records a proof. `finish` takes a local FIFO integration ticket, rechecks the recorded base worktree, reuses only exact compatible evidence, then fast-forwards that base branch. A durable integration receipt makes detach, branch cleanup, and release retryable after interruption.
 
-`init` with no acceptance flag only returns a plan. The user chooses one of:
-
-- `init --accept`: commit the three tracked policy artifacts.
-- `init --accept-static-only`: only after reviewing that no test command will run.
-- `init --decline`: save a local disable preference, with no tracked edit.
-
-The bootstrap is made in a temporary worktree from committed local default HEAD. If the primary worktree is clean it fast-forwards immediately. If it is dirty, the bootstrap reference and temporary policy checkout remain under Git common metadata; Start branches from that reference, and the first Finish after the primary is clean fast-forwards the bootstrap before integrating the task. Primary dirt is never stashed, copied, committed, or discarded.
-
-## Task state and lease
-
-```text
-inactive / idle -> starting -> active -> ready -> finished
-                              |              |
-                              +-> quarantined +-> active (after a new commit)
-```
-
-Excess reduced slots transition `active -> draining -> inactive`. Each task gets a random lease returned only by Start or explicit Recover. `status`, `doctor`, and JSON status redact it. Each mutable action atomically records `active_operation` plus process identity first, then clears it on exit. Recover rotates a lease only if that recorded operation is no longer live; it never repairs a quarantined task by guessing.
-
-Start chooses the least-recently-used idle configured slot. It is lazy: it checks out source on first use and does not install dependencies. The configured slot root is immutable after adoption, and every lifecycle entry parses the full policy strictly: Start, Ready, and Finish reject mismatched or invalid candidate policy before a task can be allocated or integrated. `warm-slot` resets a clean detached idle slot to the latest local default branch before preparation, so its dependencies match current source. It quarantines source-changing or protected-output slots and only releases a quarantined slot after manual cleanup plus an explicit rerun. A repository-wide maintenance lock prevents it from overlapping Start, pruning, or removal. All slot caches and environments remain local to that slot.
-
-## Commit, Ready, Finish
-
-Commit requires `--path` for every changed tracked or untracked path. The exact manifest must equal the task change set; a rename is counted as its removed source plus added destination, so both paths are required. After the exact check, the lifecycle stages tracked deletions and modifications plus listed existing paths, then checks the complete change set again before committing; it never uses an unscoped `git add -A`. It runs a repository-declared scanner when configured and then the built-in sensitive-content gate.
-
-Ready requires a clean committed branch. It predicts the merge of the current local default branch without writing, then performs a normal merge only when prediction succeeds. A conflict remains in the current task worktree. Ready scans and validates the candidate and records its proof.
-
-Finish creates a local FIFO ticket, takes one integration lock, checks both worktrees, synchronizes again, validates or reuses an exact proof, and performs only `git merge --ff-only` into the local default branch. A conflicting later task leaves the queue and keeps its worktree; it does not hold the queue hostage. No remote Git operation is part of this lifecycle.
-
-## Recover, abandon, deinit
-
-`disable` refuses while an active or quarantined task, or an integration ticket, exists; finish, stop, abandon, or recover first. `abandon` needs an exact task id and current lease. It preserves unknown/protected ignored files by quarantining instead of cleaning. `deinit` takes the same maintenance lock, preflights every managed slot for registration, cleanliness, and protected data, then prepares the exact tracked-policy deletion in a temporary branch. It removes only the preflighted registered worktrees and restores any earlier release if a later release fails; it fast-forwards deletion only after every release succeeds. Any cleanup failure leaves the tracked policy and local state available for recovery. It never scans disks for repositories and never removes another tool's worktree.
+`recover` rotates a lease only after recorded operations and validation children are no longer live. `abandon`, `prune-slot`, and `deinit` require explicit confirmation. `deinit` removes only registered, ownership-matching managed worktrees after preflight and never scans disks for repositories.

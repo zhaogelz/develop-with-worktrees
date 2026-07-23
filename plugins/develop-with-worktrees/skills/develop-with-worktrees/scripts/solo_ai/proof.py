@@ -21,6 +21,7 @@ from .util import (
     stable_json,
     utc_timestamp,
 )
+from .validation_queue import claim_validation_slot, record_profile_duration
 
 
 LOCKFILES = (
@@ -56,7 +57,10 @@ def changed_files(repo: GitRepo, *, cwd: Path, base: str) -> list[str]:
 
 
 def select_profiles(
-    config: VerificationConfig, files: list[str], *, levels: tuple[str, ...] = ("ready",)
+    config: VerificationConfig,
+    files: list[str],
+    *,
+    levels: tuple[str, ...] = ("ready",),
 ) -> list[VerificationProfile]:
     selected: list[VerificationProfile] = []
     for profile in config.profiles:
@@ -71,7 +75,10 @@ def select_profiles(
 
 
 def unmapped_files(
-    config: VerificationConfig, files: list[str], *, levels: tuple[str, ...] = ("ready",)
+    config: VerificationConfig,
+    files: list[str],
+    *,
+    levels: tuple[str, ...] = ("ready",),
 ) -> list[str]:
     """只要候选改动没有 Ready 映射，就拒绝猜测该运行什么验证。"""
     available = [profile for profile in config.profiles if profile.level in levels]
@@ -254,7 +261,9 @@ def proof_inputs(
         scope = (
             "cross-task"
             if profile.cross_task_reuse and profile.external_state == "none"
-            else f"task:{task_id}" if task_id else f"candidate:{candidate_head}"
+            else f"task:{task_id}"
+            if task_id
+            else f"candidate:{candidate_head}"
         )
         inputs["reuse_scope"] = scope
         records.append((profile, inputs, sha256_text(stable_json(inputs))))
@@ -312,57 +321,72 @@ def _run_profile(
     run_id = new_id(f"profile-{profile.profile_id}")
     temp_dir = repo.local_dir / "logs" / "pending" / run_id
     runs: list[dict[str, Any]] = []
-    for index, command in enumerate(profile.commands, 1):
-        pending = temp_dir / f"{index:02d}.log"
-        receipt_path = (
-            repo.local_dir / "validation-runs" / run_id / f"{index:02d}.json"
-        )
-        result = run_logged(
-            command.argv,
-            cwd=cwd,
-            log_path=pending,
-            timeout_seconds=profile.timeout_seconds,
-            environment=_execution_environment(profile),
-            receipt_path=receipt_path,
-            receipt_metadata={
-                "task_id": task_id,
-                "profile_id": profile.profile_id,
-                "profile_fingerprint": fingerprint,
-            },
-        )
-        log_path, log_digest = _content_address_log(repo, pending)
-        runs.append(
-            {
-                "command_digest": command.fingerprint,
-                "command": command.redacted(),
-                "exit_code": result.returncode,
-                "duration_seconds": round(result.duration_seconds, 3),
-                "timed_out": result.timed_out,
-                "process": result.process,
-                "receipt": str(receipt_path),
-                "log": str(log_path),
-                "log_sha256": log_digest,
-            }
-        )
-        if result.returncode != 0:
-            proof = {
-                "schema_version": PROOF_SCHEMA,
-                "fingerprint": fingerprint,
-                "result": "failed",
-                "inputs": inputs,
-                "runs": runs,
-                "created_at": utc_timestamp(),
-            }
-            atomic_write_json(proof_path, proof)
-            raise SoloAIError(
-                f"Validation {'timed out' if result.timed_out else 'failed'} in profile {profile.profile_id}. Local redacted log: {log_path}"
+    with claim_validation_slot(profile.resource_class) as queue_claim:
+        for index, command in enumerate(profile.commands, 1):
+            pending = temp_dir / f"{index:02d}.log"
+            receipt_path = (
+                repo.local_dir / "validation-runs" / run_id / f"{index:02d}.json"
             )
+            result = run_logged(
+                command.argv,
+                cwd=cwd,
+                log_path=pending,
+                timeout_seconds=profile.timeout_seconds,
+                environment=_execution_environment(profile),
+                receipt_path=receipt_path,
+                receipt_metadata={
+                    "task_id": task_id,
+                    "profile_id": profile.profile_id,
+                    "profile_fingerprint": fingerprint,
+                    "queue_ticket": queue_claim["id"],
+                },
+            )
+            log_path, log_digest = _content_address_log(repo, pending)
+            runs.append(
+                {
+                    "command_digest": command.fingerprint,
+                    "command": command.redacted(),
+                    "exit_code": result.returncode,
+                    "duration_seconds": round(result.duration_seconds, 3),
+                    "timed_out": result.timed_out,
+                    "process": result.process,
+                    "receipt": str(receipt_path),
+                    "log": str(log_path),
+                    "log_sha256": log_digest,
+                }
+            )
+            if result.returncode != 0:
+                proof = {
+                    "schema_version": PROOF_SCHEMA,
+                    "fingerprint": fingerprint,
+                    "result": "failed",
+                    "inputs": inputs,
+                    "runs": runs,
+                    "queue": {
+                        "resource_class": profile.resource_class,
+                        "wait_seconds": queue_claim["wait_seconds"],
+                    },
+                    "created_at": utc_timestamp(),
+                }
+                atomic_write_json(proof_path, proof)
+                raise SoloAIError(
+                    f"Validation {'timed out' if result.timed_out else 'failed'} in profile {profile.profile_id}. Local redacted log: {log_path}"
+                )
+    record_profile_duration(
+        profile_id=profile.profile_id,
+        command_digests=[command.fingerprint for command in profile.commands],
+        duration_seconds=sum(float(run["duration_seconds"]) for run in runs),
+    )
     proof = {
         "schema_version": PROOF_SCHEMA,
         "fingerprint": fingerprint,
         "result": "passed",
         "inputs": inputs,
         "runs": runs,
+        "queue": {
+            "resource_class": profile.resource_class,
+            "wait_seconds": queue_claim["wait_seconds"],
+        },
         "created_at": utc_timestamp(),
     }
     atomic_write_json(proof_path, proof)

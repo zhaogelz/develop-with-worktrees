@@ -62,7 +62,9 @@ class StateStore:
             except ValueError as exc:
                 raise SoloAIError(f"Invalid managed slot id: {slot_id}") from exc
             if not 1 <= number <= 32:
-                raise SoloAIError(f"Managed slot id is outside supported range: {slot_id}")
+                raise SoloAIError(
+                    f"Managed slot id is outside supported range: {slot_id}"
+                )
             expected = (
                 self.repo.primary_path
                 / config.worktree_directory
@@ -123,11 +125,11 @@ class StateStore:
         def update(state: dict[str, Any]) -> dict[str, Any]:
             self._assert_slot_layout(state, config)
             existing_numbers = [
-                int(slot_id)
-                for slot_id in state["slots"]
-                if slot_id.isdigit()
+                int(slot_id) for slot_id in state["slots"] if slot_id.isdigit()
             ]
-            for number in range(1, max(config.slots, max(existing_numbers, default=0)) + 1):
+            for number in range(
+                1, max(config.slots, max(existing_numbers, default=0)) + 1
+            ):
                 slot_id = f"{number:02d}"
                 path = (
                     self.repo.primary_path

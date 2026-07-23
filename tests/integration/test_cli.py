@@ -3,7 +3,73 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
+
+
+def test_release_version_contract_matches_manifest_metadata_and_cli(
+    git_repo: Path,
+) -> None:
+    repository_root = Path(__file__).parents[2]
+    runner = (
+        repository_root
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(runner), "--repo", str(git_repo), "--json", "version"],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)["result"]
+    manifest = json.loads(
+        (
+            repository_root
+            / "plugins"
+            / "develop-with-worktrees"
+            / ".codex-plugin"
+            / "plugin.json"
+        ).read_text(encoding="utf-8")
+    )
+    pyproject = tomllib.loads(
+        (repository_root / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert payload["version"] == "0.2.0-beta.1"
+    assert payload["version"] == payload["plugin_version"] == manifest["version"]
+    assert payload["version"] == pyproject["project"]["version"]
+    assert payload["verification_schema"] == 3
+    assert Path(payload["script"]).name == "dww.py"
+
+
+def test_user_facing_docs_describe_only_the_current_contract() -> None:
+    repository_root = Path(__file__).parents[2]
+    documents = [
+        repository_root / "README.md",
+        repository_root / "README.zh-CN.md",
+        repository_root / "CHANGELOG.md",
+        repository_root / "总体规划.md",
+        repository_root / "需求.md",
+        repository_root / "方案.md",
+        repository_root
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "SKILL.md",
+    ]
+    text = "\n".join(path.read_text(encoding="utf-8") for path in documents)
+    assert "0.1.0-beta.2" not in text
+    assert "01..05" not in text
+    assert "schema 3 only" in text
+    assert "machine-global weighted FIFO" in text
 
 
 def test_cli_json_status_masks_uninitialized_state(git_repo: Path) -> None:

@@ -1,83 +1,51 @@
 ---
 name: develop-with-worktrees
-description: "Use for any Git-repository task that may modify files. Before editing, apply this local-first lifecycle: detect and defer to a repository's mature workflow, otherwise obtain the one-time adoption decision, then isolate work in a managed worktree, commit exact reviewed paths, validate, and safely integrate. Do not use for read-only analysis."
+description: "Use for any Git-repository task that may modify files. Use the local-first lifecycle: inspect or defer, adopt only with approval, start from the current local branch, commit exact paths, validate registered profiles, then Finish locally. Do not use for read-only analysis."
 ---
 
 # Develop with Worktrees
 
-Use this plugin's lifecycle for a modifying Git task. Explain in the user's language. Keep repository policy, commands, and commit messages consistent with the target repository's conventions.
+Use the lifecycle for every modifying Git task. Explain in the user's language. The hook is only a Codex reminder; the CLI below is the lifecycle gate.
 
-The plugin hook is a Codex guardrail that reminds you before supported local write tools. It is not an OS-level lock and Codex's current `PreToolUse` protocol cannot portably hard-deny a tool call. The CLI below is the hard lifecycle gate. Never claim that manual edits, another IDE, or an untrusted/disabled hook are prevented.
-
-## Locate and run the lifecycle
-
-Set `DWW` to this skill's absolute `scripts/dww.py` path. Invoke it only through uv:
+Set `DWW` to this skill's absolute `scripts/dww.py` and invoke it only with `uv`:
 
 ```text
-uv run --script <DWW> --repo <path-inside-target-repository> <subcommand>
+uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
 ```
 
-Do not install the runner globally or into the target repository. Do not use an undocumented bypass flag; none exists.
+## Before writing
 
-## Decide before a write
+- For read-only analysis, do not claim a slot.
+- Read repository instructions, then run `doctor` or `status` when mode is uncertain.
+- If a mature workflow is detected, defer completely: no policy, slot, or local lifecycle state is written.
+- In an uninitialized repository, run `init` to show the plan. Only the user may choose `init --accept`, `init --accept-static-only`, or `init --decline`.
+- Every machine approves the exact normalized validation plan. Use `approve --accept` for the tracked policy; use `approve --accept --task <id>` only when reviewing a committed candidate policy change before Ready.
 
-- Read-only inspection, planning, review, and diagnosis: stay in place and do not claim a slot.
-- First inspect the target repository's own instructions.
-- Run `doctor` or `status` when mode is uncertain.
-- If a mature workflow is detected (including `scripts/worktree-flow.ps1` or Worktrunk), defer completely. Do not create `.solo-ai`, edit `AGENTS.md`, claim a slot, or try to migrate it automatically.
-- If local mode is disabled, respect it. Only the user may ask to run `enable`.
-- If uninitialized, show the one-time plan first:
+## Modifying task
 
-```text
-uv run --script <DWW> --repo <repo> init
-```
+1. Run `start --name <purpose>`. It branches from the invocation worktree's current local branch; detached HEAD requires `--base`.
+2. Work only in the returned worktree. Keep the returned lease private.
+3. Commit exactly the reviewed paths with repeated `--path`; never use unscoped staging.
+4. Use `plan --task <id>` for mappings, profile levels, queue class, and local duration estimate. Its slow-validation advisory is informational only.
+5. Use `verify --level development` for registered development feedback. `verify --level full` is explicit; it runs ready plus full profiles.
+6. Run `ready`, then `finish` with the same task and lease.
 
-This command is read-only until the user chooses. On acceptance, run `init --accept`; if no validation command exists, require the user's explicit `--accept-static-only`. If the user declines, run `init --decline`; this writes only a local disable preference and must not be bypassed by an agent.
+Ready/Finish synchronize only the recorded base branch. A deleted, rewound, or rewritten base requires explicit `retarget`; Finish only fast-forwards the recorded clean base worktree. It never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 
-`init --accept` creates exactly one bootstrap commit: `.solo-ai/config.toml`, `.solo-ai/verification.toml`, and the exact managed `AGENTS.md` block. A dirty primary worktree is never stashed, committed, discarded, or copied: the bootstrap stays pending in local Git metadata and is brought into the default branch by the first successful Finish after the primary becomes clean.
+## Validation and queue
 
-Every machine must approve the complete normalized plan once. After a clone, or when config/tool/platform/dependency/validation policy changes, run `approve --accept` from the checkout whose policy is being approved.
+- `verification.toml` supports schema 3 only. Commands are registered argv arrays, never shell strings.
+- Development, ready, and full evidence are separate. Only exact compatible Ready evidence can satisfy Finish.
+- Every changed candidate path needs a Ready mapping unless the repository explicitly uses static-only mode.
+- Validation uses a machine-global weighted FIFO queue: normal profiles use one unit; heavy profiles consume the computed capacity exclusively. Repository policy chooses only `normal` or `heavy` and cannot raise the machine limit.
+- Default capacity is computed once from physical cores and total memory. `settings --validation-capacity auto|1..4` changes only the current machine. `status` and `version` show the capacity rationale and queue state.
+- Successful local profile durations produce estimates. If the estimate exceeds ten minutes, show the advisory; never silently reduce coverage.
 
-## Perform a modifying task
+## Cleanup and recovery
 
-1. Run `start --name <short-purpose>`.
-2. Record its task id, lease, branch, and returned worktree. The lease is secret-like operational state: do not put it in reports, files, or tickets.
-3. Work only in that returned worktree. Re-read repository instructions there.
-4. Run focused project checks while developing.
-5. Inspect every changed path and commit only the exact reviewed list:
+- Finish never removes dependencies or caches.
+- `prune-slot --slot <id>` first prints a plan. Execute only with its exact plan id and digest.
+- Only exact top-level `cleanup.owned_paths` are candidates. A `.env*`, symlink, junction, or any content change inside a declared target stops the entire prune. Files outside declared targets are retained and do not expand deletion scope.
+- `recover` only rotates a stale lease; it refuses live operations or live validation processes. `abandon` and `deinit` require explicit confirmation and preserve uncertain content.
 
-```text
-uv run --script <DWW> --repo <worktree> commit --task <id> --lease <lease> --message <message> --path <path> [--path <path> ...]
-```
-
-The supplied paths must equal all task changes. A rename is deliberately treated as two paths (the deleted source and added destination), so list both. After verifying that exact manifest, the lifecycle stages tracked deletions and modifications plus listed existing paths, then checks the complete change set again. Never use an unscoped `git add -A`, do not absorb unrelated files, and stop for user direction if the exact list is unclear.
-
-6. Run `ready --task <id> --lease <lease>`.
-7. Immediately run `finish --task <id> --lease <lease>` after Ready succeeds.
-
-Ready predicts a merge before changing the task branch, then performs an ordinary merge of the latest local default branch when safe. It never rebases or auto-resolves a semantic conflict. Finish queues only integration (never Start), requires a clean primary worktree, uses one FIFO local lock, and fast-forwards only the local default branch. It never fetches, pulls, pushes, opens PRs, squashes, amends, or rewrites history.
-
-Parallel slots never merge merely because they are active. A later task integrates only after it synchronizes with the then-current default branch and passes validation again.
-
-## Validation and proofs
-
-Policy commands are explicit argv arrays, not shell strings. Verification approval binds the Git-common identity, full normalized policy, profile paths and commands, declared input/environment closure, dependency locks, resolved executable paths and versions, and platform.
-
-- Ready-to-Finish reuses only an exact candidate proof with persistent, content-addressed redacted logs.
-- Cross-task profile reuse is off by default. It is allowed only when a profile explicitly declares `cross_task_reuse = true`, `external_state = "none"`, and a complete file/dependency/environment closure.
-- Database, container, network, browser, time-sensitive, unknown, or otherwise external validation must not reuse across tasks.
-- Static-only is explicit and must be described as static checks only; never say tests passed.
-
-## Recover and clean up deliberately
-
-- `status` masks leases. Add `--detailed` only for exact disk measurement.
-- `recover --task <id>` is only for a user-confirmed stale operator. It refuses a live recorded operation and rotates the old lease.
-- Fix a conflict or validation failure in the preserved task worktree, then commit and repeat Ready/Finish.
-- `abandon --task <id> --lease <lease> --confirm <exact-id>` requires explicit user authorization to discard that task.
-- `warm-slot --slot <01..05>` resets a clean detached idle slot to the latest local default branch, then serially runs only repository-declared dependency preparation. It quarantines a slot if preparation changes source files, creates unknown ignored files, or creates `.env*`; inspect and clean that slot manually, then rerun `warm-slot` to release it. A maintenance lock prevents overlap with Start, pruning, or removal. Slots are lazy by default; their first checkout/dependency preparation can be slow.
-- `prune-proofs`, `prune-logs`, and `prune-slot` are separate explicit `--confirm PRUNE` actions. They refuse active tasks/tickets; deleting logs invalidates proof reuse.
-- `disable` / `enable` are per-machine preferences only. `disable` refuses active or quarantined tasks and integration tickets, so it cannot strand cleanup; an agent may not self-disable to bypass a gate.
-
-For a clean repository removal, first run `deinit --confirm DEINIT --message <repository-conventional-message>`. It refuses active tasks, queues, dirty primary state, changed managed markers, unknown untracked or ignored files, and protected `.env*` data. It prepares tracked policy removal, releases only exact managed worktrees, restores already released slots if a later release fails, then fast-forwards the policy deletion and deletes exact local state. Only after a successful `deinit` may the user uninstall the Codex plugin.
-
-Read [configuration.md](references/configuration.md), [lifecycle.md](references/lifecycle.md), and [safety.md](references/safety.md) before changing policy or handling an exceptional state.
+Read [configuration.md](references/configuration.md), [lifecycle.md](references/lifecycle.md), and [safety.md](references/safety.md) before changing policy or handling an exception.

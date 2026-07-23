@@ -583,9 +583,13 @@ def _recorded_base_worktree(repo: GitRepo, task: dict[str, Any]) -> Path:
         )
     path = Path(str(value)).resolve()
     if not any(item.path == path for item in repo.worktrees()):
-        raise SoloAIError("Recorded base worktree no longer exists; explicitly retarget")
+        raise SoloAIError(
+            "Recorded base worktree no longer exists; explicitly retarget"
+        )
     if repo.branch(path) != task.get("base_ref"):
-        raise SoloAIError("Recorded base worktree no longer has the recorded base branch")
+        raise SoloAIError(
+            "Recorded base worktree no longer has the recorded base branch"
+        )
     if not repo.is_clean(path):
         raise SoloAIError("Recorded base worktree must be clean before integration")
     return path
@@ -624,7 +628,9 @@ def retarget(
             if item.get("id") != task_id and item.get("status") not in FINAL_TASK_STATES
         }
         if base_worktree.resolve() in active_paths:
-            raise SoloAIError("New base worktree is owned by another active managed task")
+            raise SoloAIError(
+                "New base worktree is owned by another active managed task"
+            )
         base_head = repo.git(["rev-parse", base], cwd=base_worktree).stdout.strip()
         if not repo.is_ancestor(base_head, "HEAD", cwd=worktree):
             raise SoloAIError(
@@ -888,11 +894,14 @@ def _complete_integrated_task(
         repo.git(["switch", "--detach", integrated_head], cwd=worktree)
     receipt["stage"] = "detached"
     _write_integration_receipt(repo, receipt)
-    branch_exists = repo.git(
-        ["show-ref", "--verify", "--quiet", f"refs/heads/{task['branch']}"],
-        cwd=primary,
-        check=False,
-    ).returncode == 0
+    branch_exists = (
+        repo.git(
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{task['branch']}"],
+            cwd=primary,
+            check=False,
+        ).returncode
+        == 0
+    )
     if branch_exists:
         repo.git(["branch", "-d", task["branch"]], cwd=primary)
     receipt["stage"] = "branch-deleted"
@@ -931,8 +940,7 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                     task = store.task(task_id)
                     if (
                         bootstrap_result
-                        and task.get("base_ref")
-                        == bootstrap_result["bootstrap_branch"]
+                        and task.get("base_ref") == bootstrap_result["bootstrap_branch"]
                     ):
                         task = store.update_task(
                             task_id,

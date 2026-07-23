@@ -14,17 +14,7 @@ from .util import SoloAIError, redact_text, sha256_file, sha256_text, stable_jso
 
 CONFIG_SCHEMA = 2
 VERIFICATION_SCHEMA = 3
-SUPPORTED_VERIFICATION_SCHEMAS = {2, VERIFICATION_SCHEMA}
-DEFAULT_CLEANUP_OWNED_PATHS = (
-    ".venv",
-    "node_modules",
-    ".cache",
-    ".tmp",
-    "__pycache__",
-    ".pytest_cache",
-    ".ruff_cache",
-)
-DEFAULT_CLEANUP_PROTECTED_PATHS = (".env", ".env.*")
+DEFAULT_CLEANUP_OWNED_PATHS: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,7 +52,6 @@ class RepoConfig:
     dev_start: CommandSpec | None
     readiness: ReadinessSpec | None
     cleanup_owned_paths: tuple[str, ...]
-    cleanup_protected_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -351,12 +340,6 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
             default=DEFAULT_CLEANUP_OWNED_PATHS,
             allow_patterns=False,
         ),
-        cleanup_protected_paths=_cleanup_paths(
-            cleanup.get("protected_paths"),
-            field="cleanup.protected_paths",
-            default=DEFAULT_CLEANUP_PROTECTED_PATHS,
-            allow_patterns=True,
-        ),
     )
 
 
@@ -365,9 +348,9 @@ def load_verification_config(
 ) -> VerificationConfig:
     data = _read_toml((cwd or repo.policy_path()) / ".solo-ai" / "verification.toml")
     schema_version = _integer(data.get("schema_version", 0), field="schema_version")
-    if schema_version not in SUPPORTED_VERIFICATION_SCHEMAS:
+    if schema_version != VERIFICATION_SCHEMA:
         raise SoloAIError(
-            "Unsupported .solo-ai/verification.toml schema; expected 2 or "
+            "Unsupported .solo-ai/verification.toml schema; expected "
             f"{VERIFICATION_SCHEMA}"
         )
     raw_profiles = data.get("profiles", [])
@@ -605,9 +588,9 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # Optional serial preparation commands for an idle slot. No environment is copied.
 # warm = [["uv", "sync"]]
 
-# Only these top-level paths may be removed by the two-step prune command.
-# Protected paths always win, even when a name appears in owned_paths.
-cleanup = {{ owned_paths = [".venv", "node_modules", ".cache", ".tmp", "__pycache__", ".pytest_cache", ".ruff_cache"], protected_paths = [".env", ".env.*"] }}
+# Only exact top-level paths explicitly declared here may be removed by prune-slot.
+# An empty list means no dependencies or caches are ever removed automatically.
+cleanup = {{ owned_paths = [] }}
 
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{{port}}"]
