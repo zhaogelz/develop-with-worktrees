@@ -13,9 +13,16 @@
 
 It never fetches, pulls, pushes, creates PRs, rebases, squashes, amends, or rewrites history.
 
-## Local installation
+## Installation
 
-Add this repository as a local Codex marketplace, then install `develop-with-worktrees`. Start a new Codex task after installation so its skill is loaded. The plugin does not publish or update itself automatically.
+Install from the public GitHub marketplace:
+
+```text
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref main
+codex plugin add develop-with-worktrees@develop-with-worktrees
+```
+
+Start a new Codex task after installation so its skill is loaded. To install from a local checkout instead, add that checkout as a local Codex marketplace and install the same plugin identifier. The plugin does not update itself automatically; refresh the marketplace and reinstall only when you choose to adopt a newer release.
 
 The first modifying task in a repository shows an adoption plan. `init --accept` is required before tracked policy is written. Existing repositories upgrading from schema 2 must migrate their own verification policy to schema 3 before using this release.
 

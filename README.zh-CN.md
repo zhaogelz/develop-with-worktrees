@@ -18,7 +18,14 @@ doctor → start → 在返回的工作树里修改 → commit 精确路径
 
 ## 安装与升级
 
-把本仓库作为本地 Codex marketplace 添加后安装插件，再新开一个 Codex 任务加载技能。插件不会自动发布、自动更新，也不会扫描或迁移其他项目。
+其他人可直接从公开 GitHub marketplace 安装：
+
+```text
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref main
+codex plugin add develop-with-worktrees@develop-with-worktrees
+```
+
+安装后新开一个 Codex 任务，技能才会加载。若从本地检出安装，则把该检出目录作为本地 Codex marketplace 添加，再安装同一个插件标识。插件不会自动更新；只有你选择采用新版时，才刷新 marketplace 并重新安装。它也不会扫描或迁移其他项目。
 
 旧 schema 2 项目只迁移自己的 `.solo-ai/verification.toml` 到 schema 3 后再使用本版本。首次采用仓库时先查看 `init` 计划，只有用户明确 `init --accept` 才会写入受管策略。
 
