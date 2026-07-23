@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from solo_ai.config import CommandSpec, load_verification_config
+from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.cli import _prune
 from solo_ai.lifecycle import (
     abandon,
@@ -31,7 +31,7 @@ from solo_ai.lifecycle import (
 import solo_ai.lifecycle as lifecycle
 from solo_ai.repo import GitRepo
 from solo_ai.state import StateStore
-from solo_ai.util import SoloAIError
+from solo_ai.util import SoloAIError, atomic_write_json, process_snapshot, read_json
 
 from conftest import git
 
@@ -355,6 +355,33 @@ def test_status_never_reveals_lease_and_recover_rejects_live_operation(
     abandon(repo, task_id=task["id"], lease=recovered["lease"], confirm=task["id"])
 
 
+def test_recover_rejects_live_validation_and_marks_stale_receipt_interrupted(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="validation recovery")
+    receipt_path = repo.local_dir / "validation-runs" / "test" / "01.json"
+    atomic_write_json(
+        receipt_path,
+        {
+            "schema_version": 1,
+            "status": "running",
+            "process": process_snapshot(),
+            "metadata": {"task_id": task["id"]},
+        },
+    )
+    with pytest.raises(SoloAIError, match="live validation"):
+        StateStore(repo).recover(task["id"])
+
+    stale = read_json(receipt_path, {})
+    stale["process"] = {"pid": -1}
+    atomic_write_json(receipt_path, stale)
+    recovered = StateStore(repo).recover(task["id"])
+    assert recovered["lease"] != task["lease"]
+    assert read_json(receipt_path, {})["status"] == "interrupted"
+    abandon(repo, task_id=task["id"], lease=recovered["lease"], confirm=task["id"])
+
+
 def test_cross_task_profile_reuse_is_off_by_default(git_repo: Path) -> None:
     repo = initialized(git_repo)
     first = start(repo, name="first")
@@ -524,10 +551,78 @@ def test_prune_slot_removes_only_declared_local_dependency_paths(
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     (worktree / ".venv").mkdir()
     (worktree / ".venv" / "marker").write_text("cache", encoding="utf-8")
-    result = _prune(repo, kind="slot", slot="01")
+    plan = _prune(repo, kind="slot", slot="01")
+    result = _prune(
+        repo,
+        kind="slot",
+        slot="01",
+        plan_id=plan["plan_id"],
+        confirm=plan["digest"],
+    )
     assert result["worktree_retained"] is True
     assert not (worktree / ".venv").exists()
     assert (worktree / "README.md").exists()
+
+
+def test_prune_slot_rejects_a_plan_when_declared_target_changed(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="prepare changing cache")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    (worktree / ".venv").mkdir()
+    (worktree / ".venv" / "before").write_text("before", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01")
+    (worktree / ".venv" / "after").write_text("after", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="changed after review"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            plan_id=plan["plan_id"],
+            confirm=plan["digest"],
+        )
+
+    assert (worktree / ".venv" / "before").exists()
+    assert (worktree / ".venv" / "after").exists()
+
+
+def test_prune_slot_retains_protected_paths_even_when_other_cleanup_runs(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="preserve credentials")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    (worktree / ".venv").mkdir()
+    (worktree / ".env.local").write_text("marker=kept\n", encoding="utf-8")
+
+    plan = _prune(repo, kind="slot", slot="01")
+    result = _prune(
+        repo,
+        kind="slot",
+        slot="01",
+        plan_id=plan["plan_id"],
+        confirm=plan["digest"],
+    )
+
+    assert not (worktree / ".venv").exists()
+    assert (worktree / ".env.local").read_text(encoding="utf-8") == "marker=kept\n"
+    assert result["protected_retained"] == [".env.local"]
+
+
+def test_slot_configuration_can_expand_to_six_without_reinitializing(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    config_path = git_repo / ".solo-ai" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("slots = 3", "slots = 6"),
+        encoding="utf-8",
+    )
+
+    state = StateStore(repo).ensure_slots(load_repo_config(repo))
+    assert state["slots"]["06"]["status"] == "idle"
 
 
 def test_prune_slot_retains_an_unregistered_slot_directory(git_repo: Path) -> None:

@@ -124,6 +124,15 @@ def test_rejects_worktree_directory_outside_repository(git_repo: Path) -> None:
             load_repo_config(GitRepo(git_repo))
 
 
+def test_accepts_up_to_thirty_two_configured_slots(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "config.toml").write_text(
+        render_repo_config(slots=32), encoding="utf-8"
+    )
+    assert load_repo_config(GitRepo(git_repo)).slots == 32
+
+
 @pytest.mark.parametrize(
     ("replacement", "message"),
     [

@@ -56,11 +56,13 @@ class StateStore:
 
     def _assert_slot_layout(self, state: dict[str, Any], config: RepoConfig) -> None:
         """受管槽位目录在首次采用后不可被配置文件静默迁移。"""
-        for number in range(1, 6):
-            slot_id = f"{number:02d}"
-            slot = state["slots"].get(slot_id)
-            if slot is None:
-                continue
+        for slot_id, slot in state["slots"].items():
+            try:
+                number = int(slot_id)
+            except ValueError as exc:
+                raise SoloAIError(f"Invalid managed slot id: {slot_id}") from exc
+            if not 1 <= number <= 32:
+                raise SoloAIError(f"Managed slot id is outside supported range: {slot_id}")
             expected = (
                 self.repo.primary_path
                 / config.worktree_directory
@@ -79,10 +81,53 @@ class StateStore:
         self._assert_slot_layout(state, config)
         return copy.deepcopy(state)
 
+    def _ownership_path(self, slot_id: str) -> Path:
+        return self.repo.local_dir / "ownership" / f"{slot_id}.json"
+
+    def _ensure_slot_ownership(self, slot: dict[str, Any]) -> None:
+        path = self._ownership_path(str(slot["id"]))
+        expected = {
+            "schema_version": 1,
+            "slot_id": str(slot["id"]),
+            "path": str(Path(str(slot["path"])).resolve()),
+            "managed_root": str((self.repo.primary_path).resolve()),
+        }
+        existing = read_json(path, {})
+        if existing:
+            if any(existing.get(key) != value for key, value in expected.items()):
+                raise SoloAIError(
+                    f"Managed slot ownership record does not match: {slot['id']}"
+                )
+            return
+        atomic_write_json(path, {**expected, "created_at": utc_timestamp()})
+
+    def require_slot_ownership(self, slot_id: str, path: Path) -> dict[str, Any]:
+        ownership = read_json(self._ownership_path(slot_id), {})
+        if not ownership:
+            raise SoloAIError(
+                f"Managed slot has no ownership record and is retained: {slot_id}"
+            )
+        if (
+            ownership.get("schema_version") != 1
+            or ownership.get("slot_id") != slot_id
+            or Path(str(ownership.get("path", ""))).resolve() != path.resolve()
+            or Path(str(ownership.get("managed_root", ""))).resolve()
+            != self.repo.primary_path.resolve()
+        ):
+            raise SoloAIError(
+                f"Managed slot ownership record does not match and is retained: {slot_id}"
+            )
+        return ownership
+
     def ensure_slots(self, config: RepoConfig) -> dict[str, Any]:
         def update(state: dict[str, Any]) -> dict[str, Any]:
             self._assert_slot_layout(state, config)
-            for number in range(1, 6):
+            existing_numbers = [
+                int(slot_id)
+                for slot_id in state["slots"]
+                if slot_id.isdigit()
+            ]
+            for number in range(1, max(config.slots, max(existing_numbers, default=0)) + 1):
                 slot_id = f"{number:02d}"
                 path = (
                     self.repo.primary_path
@@ -109,7 +154,10 @@ class StateStore:
                         slot["status"] = "inactive"
             return copy.deepcopy(state)
 
-        return self.mutate(update)
+        result = self.mutate(update)
+        for slot in result["slots"].values():
+            self._ensure_slot_ownership(slot)
+        return result
 
     def allocate(
         self,
@@ -221,8 +269,25 @@ class StateStore:
             return copy.deepcopy(task)
 
         task = self.mutate(begin)
+        receipt_path = self.repo.local_dir / "operations" / f"{operation_id}.json"
+        atomic_write_json(
+            receipt_path,
+            {
+                "schema_version": 1,
+                "id": operation_id,
+                "task_id": task_id,
+                "kind": kind,
+                "status": "running",
+                "started_at": task["active_operation"]["started_at"],
+                "owner": task["active_operation"]["owner"],
+            },
+        )
+        outcome = "succeeded"
         try:
             yield task
+        except Exception:
+            outcome = "failed"
+            raise
         finally:
 
             def end(state: dict[str, Any]) -> None:
@@ -233,6 +298,10 @@ class StateStore:
                     current["updated_at"] = utc_timestamp()
 
             self.mutate(end)
+            receipt = read_json(receipt_path, {})
+            if receipt.get("id") == operation_id:
+                receipt.update({"status": outcome, "finished_at": utc_timestamp()})
+                atomic_write_json(receipt_path, receipt)
 
     def quarantine(self, task_id: str, reason: str) -> None:
         def update(state: dict[str, Any]) -> None:
@@ -298,6 +367,29 @@ class StateStore:
             active = task.get("active_operation")
             if active and process_matches(active.get("owner", {})):
                 raise SoloAIError("Task still has a live operation; recovery is unsafe")
+            live_runs: list[str] = []
+            interrupted_runs: list[Path] = []
+            run_root = self.repo.local_dir / "validation-runs"
+            for receipt_path in run_root.glob("**/*.json") if run_root.exists() else ():
+                receipt = read_json(receipt_path, {})
+                if receipt.get("metadata", {}).get("task_id") != task_id:
+                    continue
+                if receipt.get("status") in {"running", "terminating"}:
+                    if process_matches(receipt.get("process", {})):
+                        live_runs.append(str(receipt_path))
+                    else:
+                        interrupted_runs.append(receipt_path)
+            if live_runs:
+                raise SoloAIError(
+                    "Task still has a live validation process; recovery is unsafe:\n"
+                    + "\n".join(f"- {path}" for path in live_runs)
+                )
+            for receipt_path in interrupted_runs:
+                receipt = read_json(receipt_path, {})
+                receipt.update(
+                    {"status": "interrupted", "recovered_at": utc_timestamp()}
+                )
+                atomic_write_json(receipt_path, receipt)
             task["lease"] = uuid.uuid4().hex
             task["lease_owner"] = process_snapshot()
             task["active_operation"] = None

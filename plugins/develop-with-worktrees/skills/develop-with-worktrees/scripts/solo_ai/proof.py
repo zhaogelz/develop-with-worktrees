@@ -297,6 +297,7 @@ def _run_profile(
     profile: VerificationProfile,
     inputs: dict[str, Any],
     fingerprint: str,
+    task_id: str | None,
 ) -> dict[str, Any]:
     proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
     from .util import read_json
@@ -321,6 +322,11 @@ def _run_profile(
             timeout_seconds=profile.timeout_seconds,
             environment=_execution_environment(profile),
             receipt_path=receipt_path,
+            receipt_metadata={
+                "task_id": task_id,
+                "profile_id": profile.profile_id,
+                "profile_fingerprint": fingerprint,
+            },
         )
         log_path, log_digest = _content_address_log(repo, pending)
         runs.append(
@@ -400,6 +406,7 @@ def validate(
             profile=profile,
             inputs=profile_inputs,
             fingerprint=profile_fingerprint,
+            task_id=task_id,
         )
         profile_proofs.append(
             {

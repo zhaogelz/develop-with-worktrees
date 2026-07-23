@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -34,7 +36,19 @@ from .lifecycle import (
 from .proof import approval_plan
 from .repo import GitRepo
 from .state import FINAL_TASK_STATES, StateStore
-from .util import SoloAIError, directory_size, ensure_within, format_bytes
+from .util import (
+    SoloAIError,
+    atomic_write_json,
+    directory_size,
+    ensure_within,
+    format_bytes,
+    new_id,
+    read_json,
+    sha256_file,
+    sha256_text,
+    stable_json,
+    utc_timestamp,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -153,10 +167,13 @@ def _parser() -> argparse.ArgumentParser:
         prune.add_argument("--confirm", choices=["PRUNE"], required=True)
     prune_slot = sub.add_parser(
         "prune-slot",
-        help="explicitly remove local dependencies from one empty managed slot",
+        help="plan or execute cleanup of declared paths in one empty managed slot",
     )
     prune_slot.add_argument("--slot", required=True)
-    prune_slot.add_argument("--confirm", choices=["PRUNE"], required=True)
+    prune_slot.add_argument("--plan", help="plan id returned by a previous prune-slot")
+    prune_slot.add_argument(
+        "--confirm", help="exact digest returned by a previous prune-slot plan"
+    )
 
     deinitialize = sub.add_parser(
         "deinit", help="safely remove adopted policy and exact managed slots"
@@ -261,13 +278,161 @@ def _require_idle(repo: GitRepo) -> None:
         raise SoloAIError("A lifecycle lock exists; pruning is unsafe")
 
 
-def _prune(repo: GitRepo, *, kind: str, slot: str | None = None) -> dict[str, Any]:
+def _cleanup_target(path: Path, root: Path) -> dict[str, Any]:
+    """为两阶段清理构建内容摘要；遇到链接即停止，不沿链接走出槽位。"""
+    path = ensure_within(path, root)
+    if path.is_symlink():
+        raise SoloAIError(f"Refusing symlink cleanup target: {path}")
+    entries: list[dict[str, Any]] = []
+    if path.is_file():
+        entries.append({"path": path.name, "kind": "file", "sha256": sha256_file(path)})
+    else:
+        for current, directories, files in os.walk(path):
+            current_path = Path(current)
+            for name in sorted([*directories, *files]):
+                candidate = current_path / name
+                if candidate.is_symlink():
+                    raise SoloAIError(f"Refusing cleanup target containing symlink: {candidate}")
+                relative = str(candidate.relative_to(root)).replace("\\", "/")
+                if candidate.is_file():
+                    entries.append(
+                        {"path": relative, "kind": "file", "sha256": sha256_file(candidate)}
+                    )
+                else:
+                    entries.append({"path": relative, "kind": "directory"})
+    return {
+        "path": str(path.relative_to(root)).replace("\\", "/"),
+        "kind": "file" if path.is_file() else "directory",
+        "entries": entries,
+    }
+
+
+def _slot_prune_payload(repo: GitRepo, *, slot: str) -> dict[str, Any]:
+    policy = repo.policy_path()
+    config = load_repo_config(repo, cwd=policy)
+    store = StateStore(repo)
+    state = store.require_slot_layout(config)
+    details = state["slots"].get(slot)
+    if not details or details.get("status") not in {"idle", "inactive"}:
+        raise SoloAIError("Only an empty idle or inactive slot can be pruned")
+    root = ensure_within(
+        Path(details["path"]), repo.primary_path / config.worktree_directory
+    )
+    if not any(item.path == root for item in repo.worktrees()):
+        if root.exists():
+            raise SoloAIError(
+                "Slot path is not registered with Git and is retained; recover or inspect it manually"
+            )
+        return {"slot": slot, "worktree_retained": False, "targets": [], "protected": []}
+    store.require_slot_ownership(slot, root)
+    protected = [
+        child.name
+        for child in root.iterdir()
+        if any(fnmatch.fnmatchcase(child.name, pattern) for pattern in config.cleanup_protected_paths)
+    ]
+    targets: list[dict[str, Any]] = []
+    for relative in config.cleanup_owned_paths:
+        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in config.cleanup_protected_paths):
+            continue
+        candidate = ensure_within(root / relative, root)
+        if candidate.exists() or candidate.is_symlink():
+            targets.append(_cleanup_target(candidate, root))
+    return {
+        "slot": slot,
+        "worktree": str(root),
+        "worktree_retained": True,
+        "targets": targets,
+        "protected": sorted(protected),
+        "owned_paths": list(config.cleanup_owned_paths),
+        "protected_paths": list(config.cleanup_protected_paths),
+    }
+
+
+def _plan_slot_prune(repo: GitRepo, *, slot: str) -> dict[str, Any]:
+    payload = _slot_prune_payload(repo, slot=slot)
+    digest = sha256_text(stable_json(payload))
+    plan_id = new_id(f"cleanup-slot-{slot}")
+    plan = {
+        "schema_version": 1,
+        "id": plan_id,
+        "digest": digest,
+        "created_at": utc_timestamp(),
+        "payload": payload,
+    }
+    atomic_write_json(repo.local_dir / "cleanup-plans" / f"{plan_id}.json", plan)
+    return {
+        "status": "planned",
+        "plan_id": plan_id,
+        "digest": digest,
+        **payload,
+        "next": f"prune-slot --slot {slot} --plan {plan_id} --confirm {digest}",
+    }
+
+
+def _execute_slot_prune(
+    repo: GitRepo, *, slot: str, plan_id: str, confirm: str
+) -> dict[str, Any]:
+    plan = read_json(repo.local_dir / "cleanup-plans" / f"{plan_id}.json", {})
+    if not plan or plan.get("schema_version") != 1:
+        raise SoloAIError("Unknown cleanup plan; generate a new plan before pruning")
+    if plan.get("payload", {}).get("slot") != slot:
+        raise SoloAIError("Cleanup plan belongs to a different slot")
+    if confirm != plan.get("digest"):
+        raise SoloAIError("Cleanup confirmation must exactly match the planned digest")
+    current = _slot_prune_payload(repo, slot=slot)
+    if sha256_text(stable_json(current)) != plan["digest"]:
+        raise SoloAIError(
+            "Cleanup plan changed after review; nothing was deleted. Generate and review a new plan."
+        )
+    if not current["worktree_retained"]:
+        return {
+            "status": "pruned",
+            "slot": slot,
+            "plan_id": plan_id,
+            "removed": [],
+            "protected_retained": [],
+            "worktree_retained": False,
+        }
+    root = Path(str(current["worktree"]))
+    removed: list[str] = []
+    for target in current["targets"]:
+        path = ensure_within(root / str(target["path"]), root)
+        # payload 已重新摘要；再次拒绝符号链接，防止检查和删除之间路径替换。
+        if path.is_symlink():
+            raise SoloAIError(f"Cleanup target became a symlink: {path}")
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.is_file():
+            path.unlink()
+        else:
+            raise SoloAIError(f"Cleanup target changed type: {path}")
+        removed.append(str(path))
+    return {
+        "status": "pruned",
+        "slot": slot,
+        "plan_id": plan_id,
+        "removed": removed,
+        "protected_retained": current["protected"],
+        "worktree_retained": current["worktree_retained"],
+    }
+
+
+def _prune(
+    repo: GitRepo,
+    *,
+    kind: str,
+    slot: str | None = None,
+    plan_id: str | None = None,
+    confirm: str | None = None,
+) -> dict[str, Any]:
     with maintenance_lock(repo):
         _require_idle(repo)
         if kind in {"proofs", "logs"}:
             targets = [repo.local_dir / kind]
             if kind == "proofs":
                 targets.append(repo.local_dir / "profile-proofs")
+            else:
+                targets.append(repo.local_dir / "validation-runs")
             removed: list[str] = []
             for target in targets:
                 if target.exists():
@@ -281,55 +446,13 @@ def _prune(repo: GitRepo, *, kind: str, slot: str | None = None) -> dict[str, An
             }
         if not slot:
             raise SoloAIError("Slot is required")
-        policy = repo.policy_path()
-        config = load_repo_config(repo, cwd=policy)
-        state = StateStore(repo).require_slot_layout(config)
-        details = state["slots"].get(slot)
-        if not details or details.get("status") not in {"idle", "inactive"}:
-            raise SoloAIError("Only an empty idle or inactive slot can be pruned")
-        path = ensure_within(
-            Path(details["path"]), repo.primary_path / config.worktree_directory
+        if plan_id is None and confirm is None:
+            return _plan_slot_prune(repo, slot=slot)
+        if not plan_id or not confirm:
+            raise SoloAIError("PruneSlot execution requires both --plan and --confirm")
+        return _execute_slot_prune(
+            repo, slot=slot, plan_id=plan_id, confirm=confirm
         )
-        if any(item.path == path for item in repo.worktrees()):
-            protected = [
-                item
-                for item in repo.ignored_untracked(path)
-                if Path(item).name.startswith(".env")
-            ]
-            if protected:
-                raise SoloAIError(
-                    "Protected .env files block PruneSlot; it never deletes local credentials"
-                )
-            allowed = {
-                ".venv",
-                "node_modules",
-                ".cache",
-                ".tmp",
-                "__pycache__",
-                ".pytest_cache",
-                ".ruff_cache",
-            }
-            removed: list[str] = []
-            for child in path.iterdir():
-                if child.name in allowed and child.exists():
-                    if child.is_dir():
-                        shutil.rmtree(child)
-                    else:
-                        child.unlink()
-                    removed.append(str(child))
-                elif (
-                    child.name == "uv.toml"
-                    and child.is_file()
-                    and not repo.tracked("uv.toml", cwd=path)
-                ):
-                    child.unlink()
-                    removed.append(str(child))
-            return {"slot": slot, "removed": removed, "worktree_retained": True}
-        if path.exists():
-            raise SoloAIError(
-                "Slot path is not registered with Git and is retained; recover or inspect it manually"
-            )
-        return {"slot": slot, "removed": [], "worktree_retained": False}
 
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
@@ -391,7 +514,13 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "prune-logs":
         return _prune(repo, kind="logs")
     if args.command == "prune-slot":
-        return _prune(repo, kind="slot", slot=args.slot)
+        return _prune(
+            repo,
+            kind="slot",
+            slot=args.slot,
+            plan_id=args.plan,
+            confirm=args.confirm,
+        )
     if args.command == "deinit":
         return deinit(repo, confirm=args.confirm, message=args.message)
     raise SoloAIError("Unsupported command")

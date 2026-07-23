@@ -15,6 +15,16 @@ from .util import SoloAIError, redact_text, sha256_file, sha256_text, stable_jso
 CONFIG_SCHEMA = 2
 VERIFICATION_SCHEMA = 3
 SUPPORTED_VERIFICATION_SCHEMAS = {2, VERIFICATION_SCHEMA}
+DEFAULT_CLEANUP_OWNED_PATHS = (
+    ".venv",
+    "node_modules",
+    ".cache",
+    ".tmp",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+)
+DEFAULT_CLEANUP_PROTECTED_PATHS = (".env", ".env.*")
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,8 @@ class RepoConfig:
     warm_commands: tuple[CommandSpec, ...]
     dev_start: CommandSpec | None
     readiness: ReadinessSpec | None
+    cleanup_owned_paths: tuple[str, ...]
+    cleanup_protected_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -191,6 +203,29 @@ def _sensitive_allowlist(raw: Any) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _cleanup_paths(
+    raw: Any, *, field: str, default: tuple[str, ...], allow_patterns: bool
+) -> tuple[str, ...]:
+    values = default if raw is None else _strings(raw, field=field, allow_empty=True)
+    normalized: list[str] = []
+    for value in values:
+        path = value.replace("\\", "/")
+        candidate = PurePosixPath(path)
+        if (
+            path.startswith("/")
+            or (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/")
+            or candidate == PurePosixPath(".")
+            or ".." in candidate.parts
+            or len(candidate.parts) != 1
+            or (not allow_patterns and any(character in path for character in "*?["))
+        ):
+            raise SoloAIError(
+                f"{field} must contain only top-level repository-relative {'patterns' if allow_patterns else 'paths'}"
+            )
+        normalized.append(path)
+    return tuple(normalized)
+
+
 def _commands(raw: Any, *, field: str) -> tuple[CommandSpec, ...]:
     if raw is None:
         return ()
@@ -247,14 +282,14 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     if not isinstance(lifecycle, dict):
         raise SoloAIError("lifecycle must be a TOML table")
     slots = _integer(data.get("slots", 3), field="slots")
-    if not 1 <= slots <= 5:
-        raise SoloAIError("slots must be between 1 and 5")
+    if not 1 <= slots <= 32:
+        raise SoloAIError("slots must be between 1 and 32")
     mode = _string(data.get("mode", "managed"), field="mode")
     if mode != "managed":
         raise SoloAIError('Only mode = "managed" is valid in an adopted repository')
     port_base = _integer(data.get("port_base", 20000), field="port_base")
-    if not 1024 <= port_base <= 65036:
-        raise SoloAIError("port_base must leave room for all 100-port slot blocks")
+    if not 1024 <= port_base <= 62436:
+        raise SoloAIError("port_base must leave room for all 32 100-port slot blocks")
     remote_policy = _string(
         data.get("remote_policy", "local-only"), field="remote_policy"
     )
@@ -262,6 +297,9 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         raise SoloAIError('Version 1 supports only remote_policy = "local-only"')
     readiness: ReadinessSpec | None = None
     dev_start: CommandSpec | None = None
+    cleanup = data.get("cleanup", {})
+    if not isinstance(cleanup, dict):
+        raise SoloAIError("cleanup must be a TOML table")
     readiness_raw = lifecycle.get("readiness")
     if "dev_start" in lifecycle:
         dev_start = _command(lifecycle["dev_start"], field="lifecycle.dev_start")
@@ -307,6 +345,18 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         warm_commands=_commands(data.get("warm"), field="warm"),
         dev_start=dev_start,
         readiness=readiness,
+        cleanup_owned_paths=_cleanup_paths(
+            cleanup.get("owned_paths"),
+            field="cleanup.owned_paths",
+            default=DEFAULT_CLEANUP_OWNED_PATHS,
+            allow_patterns=False,
+        ),
+        cleanup_protected_paths=_cleanup_paths(
+            cleanup.get("protected_paths"),
+            field="cleanup.protected_paths",
+            default=DEFAULT_CLEANUP_PROTECTED_PATHS,
+            allow_patterns=True,
+        ),
     )
 
 
@@ -554,6 +604,10 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # secret_scanner = []
 # Optional serial preparation commands for an idle slot. No environment is copied.
 # warm = [["uv", "sync"]]
+
+# Only these top-level paths may be removed by the two-step prune command.
+# Protected paths always win, even when a name appears in owned_paths.
+cleanup = {{ owned_paths = [".venv", "node_modules", ".cache", ".tmp", "__pycache__", ".pytest_cache", ".ruff_cache"], protected_paths = [".env", ".env.*"] }}
 
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{{port}}"]

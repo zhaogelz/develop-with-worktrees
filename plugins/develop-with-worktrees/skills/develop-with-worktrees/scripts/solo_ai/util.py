@@ -119,6 +119,7 @@ def run_logged(
     environment: dict[str, str] | None = None,
     on_heartbeat: Callable[[dict[str, Any]], None] | None = None,
     receipt_path: Path | None = None,
+    receipt_metadata: dict[str, Any] | None = None,
 ) -> LoggedRunResult:
     """运行显式 argv，并留下可恢复的日志和运行回执。
 
@@ -158,6 +159,8 @@ def run_logged(
             "process": snapshot,
             "timeout_seconds": timeout_seconds,
         }
+        if receipt_metadata:
+            receipt["metadata"] = receipt_metadata
         if receipt_path:
             atomic_write_json(receipt_path, receipt)
         output: Queue[str | None] = Queue()
@@ -338,11 +341,11 @@ def process_snapshot(pid: int | None = None) -> dict[str, Any]:
 
 def process_matches(snapshot: dict[str, Any]) -> bool:
     pid = snapshot.get("pid")
-    if not isinstance(pid, int):
+    if not isinstance(pid, int) or pid <= 0:
         return False
     try:
         current = process_snapshot(pid)
-    except (psutil.Error, OSError):
+    except (psutil.Error, OSError, ValueError):
         return False
     expected_time = snapshot.get("create_time")
     current_time = current.get("create_time")

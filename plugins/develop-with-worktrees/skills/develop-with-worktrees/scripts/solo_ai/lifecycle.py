@@ -217,8 +217,8 @@ def initialize(
         raise SoloAIError(
             "This repository is locally disabled; run enable before adopting it"
         )
-    if not 1 <= slots <= 5:
-        raise SoloAIError("--slots must be between 1 and 5")
+    if not 1 <= slots <= 32:
+        raise SoloAIError("--slots must be between 1 and 32")
     existing = detect_existing_workflows(repo.root)
     if existing:
         # Do this before acquiring a local lifecycle lock: defer mode must not
