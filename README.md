@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.2.0-beta.2` is a local-first workflow for safe parallel AI Git work. Its core lifecycle is host-neutral; this plugin supplies the Codex adapter and guard.
+`0.2.0-beta.3` is a local-first workflow for safe parallel AI Git work. Its core lifecycle is host-neutral; this plugin supplies the Codex adapter and guard.
 
 ## Default: isolated work
 

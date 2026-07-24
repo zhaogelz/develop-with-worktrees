@@ -75,50 +75,26 @@ def run(
     return result
 
 
-def _stop_owned_process_tree(snapshot: dict[str, Any]) -> bool:
-    """只终止身份仍匹配的根进程及其后代，避免误杀 PID 复用的进程。"""
-    if not process_matches(snapshot):
-        return False
-    pid = snapshot["pid"]
+def _stop_process_tree(pid: int, *, force: bool) -> bool:
+    """终止已由当前调用持有的进程树，POSIX 场景中 PID 是独立进程组组长。"""
     try:
         if os.name != "nt":
-            os.killpg(pid, signal.SIGTERM)
-            return True
-        root = psutil.Process(pid)
-        children = root.children(recursive=True)
-        for child in reversed(children):
-            try:
-                child.terminate()
-            except psutil.Error:
-                continue
-        root.terminate()
-        _, alive = psutil.wait_procs([*children, root], timeout=5)
-        for process in alive:
-            try:
-                process.kill()
-            except psutil.Error:
-                continue
-        return True
-    except (OSError, psutil.Error):
-        return False
-
-
-def _force_stop_owned_process_tree(snapshot: dict[str, Any]) -> bool:
-    """宽限期后仅强制终止仍能证明为同一进程组的验证进程。"""
-    if not process_matches(snapshot):
-        return False
-    pid = snapshot["pid"]
-    try:
-        if os.name != "nt":
-            os.killpg(pid, signal.SIGKILL)
+            os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
             return True
         root = psutil.Process(pid)
         processes = [*root.children(recursive=True), root]
         for process in reversed(processes):
             try:
-                process.kill()
+                (process.kill if force else process.terminate)()
             except psutil.Error:
                 continue
+        if not force:
+            _, alive = psutil.wait_procs(processes, timeout=5)
+            for process in alive:
+                try:
+                    process.kill()
+                except psutil.Error:
+                    continue
         return True
     except (OSError, psutil.Error):
         return False
@@ -204,7 +180,11 @@ def run_logged(
             now = time.monotonic()
             if timeout_seconds is not None and now - started >= timeout_seconds:
                 timed_out = True
-                _stop_owned_process_tree(snapshot)
+                # 当前 Popen 是本调用刚创建且仍持有的对象；不能再依赖
+                # 用于跨调用恢复的快照比对，否则 macOS 上的进程元数据差异会
+                # 让超时命令自然跑完。
+                if process.poll() is None:
+                    _stop_process_tree(process.pid, force=False)
                 receipt["status"] = "terminating"
                 receipt["timeout_requested_at"] = utc_timestamp()
                 if receipt_path:
@@ -214,7 +194,8 @@ def run_logged(
                 timeout_seconds = None
                 force_deadline = now + termination_grace_seconds
             if force_deadline is not None and now >= force_deadline:
-                _force_stop_owned_process_tree(snapshot)
+                if process.poll() is None:
+                    _stop_process_tree(process.pid, force=True)
                 handle.write(
                     "[timeout: owned process tree force termination requested]\n"
                 )

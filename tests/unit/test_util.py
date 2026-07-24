@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
-from solo_ai import lifecycle
+from solo_ai import lifecycle, util
 from solo_ai.util import DirectoryLock, SoloAIError, redact_text, run_logged
 
 
@@ -112,6 +112,23 @@ def test_logged_run_times_out_with_heartbeat_and_receipt(tmp_path: Path) -> None
     assert "timeout: owned process tree termination requested" in log_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_logged_run_timeout_owns_its_popen_without_snapshot_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(util, "process_matches", lambda snapshot: False)
+
+    result = run_logged(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        cwd=tmp_path,
+        log_path=tmp_path / "owned-timeout.log",
+        timeout_seconds=0.1,
+        heartbeat_seconds=0.02,
+    )
+
+    assert result.timed_out is True
+    assert result.duration_seconds < 3
 
 
 def test_logged_run_finishes_when_output_is_silent(tmp_path: Path) -> None:

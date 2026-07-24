@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0-beta.3 — 2026-07-24
+
+- Fixes validation timeouts on macOS: a validation process launched by the current `run_logged` call is now terminated through its owned `Popen` process group, rather than being blocked by cross-call process-snapshot matching. Cross-call PID-reuse protection remains unchanged.
+
 ## 0.2.0-beta.2 — 2026-07-24
 
 - Adds one explicit, session-bound `in-place` task mode for current-worktree-only work; it keeps an immutable validation start commit and never merges, switches, resets, cleans, or deletes that worktree on Finish or failure.
