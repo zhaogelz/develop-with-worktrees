@@ -18,6 +18,7 @@ from .config import (
 from .lifecycle import (
     abandon,
     approve,
+    choose,
     commit_task,
     deinit,
     dev_start,
@@ -92,7 +93,33 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--decline",
         action="store_true",
-        help="disable this repository locally without editing tracked files",
+        help="advanced compatibility alias for choosing this repository's local direct mode",
+    )
+
+    choose_parser = sub.add_parser(
+        "choose",
+        help="record one repository modification choice from the first-write prompt",
+    )
+    choose_parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["isolated", "current-task", "current-repository"],
+    )
+    choose_parser.add_argument("--slots", type=int, default=3)
+    choose_parser.add_argument(
+        "--verify",
+        action="append",
+        default=None,
+        metavar="JSON_ARGV",
+        help="advanced explicit command argv for isolated setup",
+    )
+    choose_parser.add_argument(
+        "--session",
+        help="Codex session identifier from the trusted hook; only for current-task",
+    )
+    choose_parser.add_argument(
+        "--delegate",
+        help="one-time parent-task delegation code; only for a child current-task session",
     )
 
     approval = sub.add_parser(
@@ -559,6 +586,15 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             accept_static_only=args.accept_static_only,
             decline=args.decline,
         )
+    if args.command == "choose":
+        return choose(
+            repo,
+            mode=args.mode,
+            slots=args.slots,
+            commands=_parse_commands(args.verify),
+            session_id=args.session,
+            delegation_code=args.delegate,
+        )
     if args.command == "version":
         return _version()
     if args.command == "approve":
@@ -738,6 +774,21 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _human(command: str, result: dict[str, Any]) -> str:
+    if command == "choose":
+        choice = result.get("choice")
+        if choice == "isolated":
+            return "已选择独立目录开发；之后的普通修改会自动隔离。"
+        if choice == "current-repository":
+            return "已记住：此仓库在本机以后直接在当前目录修改。"
+        if result.get("delegated"):
+            return "已加入本次当前目录修改授权；不要启动 DWW 生命周期。"
+        return "\n".join(
+            (
+                "本次已切换为当前目录直接修改；不要启动 DWW 生命周期。",
+                "仅在委托子智能体修改时传递此一次性委托码：",
+                str(result["delegation_code"]),
+            )
+        )
     if command == "start":
         mode = result.get("mode", "isolated")
         return "\n".join(
@@ -771,7 +822,8 @@ def _redact_leases(value: Any) -> Any:
         return {
             key: _redact_leases(item)
             for key, item in value.items()
-            if key not in {"lease", "lease_owner", "session_fingerprint"}
+            if key
+            not in {"lease", "lease_owner", "session_fingerprint", "delegation_code"}
         }
     if isinstance(value, list):
         return [_redact_leases(item) for item in value]

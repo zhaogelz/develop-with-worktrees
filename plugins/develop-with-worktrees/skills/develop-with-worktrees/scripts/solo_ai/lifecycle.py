@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import platform
+import secrets
 import shutil
 import signal
 import socket
@@ -51,6 +52,7 @@ from .util import (
 )
 
 BOOTSTRAP_SCHEMA = 1
+TASK_GRANT_SCHEMA = 1
 LOCKFILE_NAMES = (
     "uv.lock",
     "package-lock.json",
@@ -65,6 +67,101 @@ def _preferences(repo: GitRepo) -> dict[str, Any]:
     return read_json(
         repo.local_dir / "preferences.json", {"schema_version": 1, "enabled": True}
     )
+
+
+def _task_grants_path(repo: GitRepo) -> Path:
+    """临时直改授权只保存在 Git common-dir，绝不写入工作区。"""
+    return repo.local_dir / "session-overrides.json"
+
+
+def _task_grants(repo: GitRepo) -> dict[str, Any]:
+    return read_json(
+        _task_grants_path(repo), {"schema_version": TASK_GRANT_SCHEMA, "grants": []}
+    )
+
+
+def _session_fingerprint(session_id: str) -> str:
+    if not session_id:
+        raise SoloAIError("Current-task choice requires the Codex session identifier")
+    return sha256_text(session_id)
+
+
+def task_bypass_active(repo: GitRepo, *, session_id: str) -> bool:
+    """判断本次 Codex 会话是否被明确授权完全跳过本技能。"""
+    if not session_id:
+        return False
+    session = _session_fingerprint(session_id)
+    worktree = str(repo.root.resolve())
+    payload = _task_grants(repo)
+    return any(
+        isinstance(grant, dict)
+        and grant.get("worktree") == worktree
+        and session in grant.get("sessions", [])
+        for grant in payload.get("grants", [])
+    )
+
+
+def _grant_current_task(
+    repo: GitRepo, *, session_id: str, delegation_code: str | None
+) -> dict[str, Any]:
+    """登记一次会话授权；子智能体只能凭父任务的委托码加入同一授权。"""
+    session = _session_fingerprint(session_id)
+    worktree = str(repo.root.resolve())
+    active_here = [
+        task["id"]
+        for task in StateStore(repo).read()["tasks"].values()
+        if task.get("status") not in FINAL_TASK_STATES
+        and Path(str(task.get("worktree", ""))).resolve() == repo.root.resolve()
+    ]
+    if active_here:
+        raise SoloAIError(
+            "Finish or abandon the active DWW task in this directory before choosing normal current-directory development: "
+            + ", ".join(active_here)
+        )
+    with DirectoryLock(repo.local_dir / "locks" / "session-overrides.lock", wait=True):
+        payload = _task_grants(repo)
+        grants = payload.get("grants")
+        if not isinstance(grants, list):
+            raise SoloAIError(
+                "Current-task local authorization state is invalid; preserve it and run doctor"
+            )
+
+        if delegation_code:
+            code_hash = sha256_text(delegation_code)
+            for grant in grants:
+                if (
+                    isinstance(grant, dict)
+                    and grant.get("worktree") == worktree
+                    and secrets.compare_digest(
+                        str(grant.get("delegation_hash", "")), code_hash
+                    )
+                ):
+                    sessions = grant.setdefault("sessions", [])
+                    if session not in sessions:
+                        sessions.append(session)
+                    grant["updated_at"] = utc_timestamp()
+                    atomic_write_json(_task_grants_path(repo), payload)
+                    return {"choice": "current-task", "delegated": True}
+            raise SoloAIError(
+                "The current-task delegation code is invalid for this directory"
+            )
+
+        code = secrets.token_urlsafe(24)
+        grants.append(
+            {
+                "worktree": worktree,
+                "delegation_hash": sha256_text(code),
+                "sessions": [session],
+                "created_at": utc_timestamp(),
+            }
+        )
+        payload["schema_version"] = TASK_GRANT_SCHEMA
+        atomic_write_json(_task_grants_path(repo), payload)
+        return {
+            "choice": "current-task",
+            "delegated": False,
+            "delegation_code": code,
+        }
 
 
 def set_local_enabled(repo: GitRepo, *, enabled: bool) -> dict[str, Any]:
@@ -91,6 +188,46 @@ def disable(repo: GitRepo) -> dict[str, Any]:
 
 def local_enabled(repo: GitRepo) -> bool:
     return bool(_preferences(repo).get("enabled", True))
+
+
+def choose(
+    repo: GitRepo,
+    *,
+    mode: str,
+    slots: int,
+    commands: list[CommandSpec] | None,
+    session_id: str | None = None,
+    delegation_code: str | None = None,
+) -> dict[str, Any]:
+    """将首次三选一交互收敛为唯一入口，避免把内部初始化细节暴露给用户。"""
+    if mode == "current-task":
+        if not session_id:
+            raise SoloAIError(
+                "Current-task choice requires --session from the trusted Codex hook"
+            )
+        return _grant_current_task(
+            repo, session_id=session_id, delegation_code=delegation_code
+        )
+    if session_id or delegation_code:
+        raise SoloAIError("--session and --delegate only apply to --mode current-task")
+    if mode == "current-repository":
+        preference = disable(repo)
+        return {"choice": "current-repository", "local_preference": preference}
+    if mode != "isolated":
+        raise SoloAIError(f"Unknown repository choice: {mode}")
+    if not local_enabled(repo):
+        # 用户明确重新选择隔离开发时，安全地撤销本机长期退出。
+        set_local_enabled(repo, enabled=True)
+    if (repo.root / ".solo-ai" / "config.toml").exists():
+        return {"choice": "isolated", "decision": "already-adopted"}
+    result = initialize(
+        repo,
+        slots=slots,
+        commands=commands,
+        accept=True,
+        accept_static_only=True,
+    )
+    return {"choice": "isolated", **result}
 
 
 def _bootstrap(repo: GitRepo) -> dict[str, Any]:
@@ -210,7 +347,7 @@ def initialize(
             raise SoloAIError("--decline cannot be combined with acceptance flags")
         return {
             "decision": "declined",
-            "local_preference": set_local_enabled(repo, enabled=False),
+            "local_preference": disable(repo),
         }
     if not local_enabled(repo):
         raise SoloAIError(
@@ -338,7 +475,7 @@ def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
         )
     if mode != "managed":
         raise SoloAIError(
-            "Repository is not adopted. Review the one-time plan with `init`, then pass --accept or --decline"
+            "Repository is not set up for isolated tasks. Record the repository choice with `choose` first"
         )
     policy = repo.policy_path()
     config = load_repo_config(repo, cwd=policy)

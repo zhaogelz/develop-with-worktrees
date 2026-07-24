@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-beta.4 — 2026-07-24
+
+- Replaces the multi-step repository adoption conversation with one plain-language three-choice prompt: isolate normal tasks, use the current directory for this task only, or remember current-directory development locally for this repository.
+- Makes the one-task current-directory choice behave as if the plugin were absent: no policy files, DWW task, lifecycle gates, or guard alerts. The local authorization is bound to the exact worktree and hashed Codex session.
+- Adds explicit one-time child-session delegation, rather than unsafe repository-wide or time-window bypasses, because current Codex hook payloads do not provide a reliable parent-agent identifier.
+- Reuses existing disable safety checks for the long-term local choice and accepts internal static checks without a second user prompt when no test command is discovered.
+
 ## 0.2.0-beta.3 — 2026-07-24
 
 - Fixes validation timeouts on macOS: a validation process launched by the current `run_logged` call is now terminated through its owned `Popen` process group, rather than being blocked by cross-call process-snapshot matching. Cross-call PID-reuse protection remains unchanged.

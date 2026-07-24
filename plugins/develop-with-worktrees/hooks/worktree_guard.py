@@ -35,6 +35,7 @@ READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "branch", "rev-par
 DWW_SUBCOMMANDS = {
     "version",
     "init",
+    "choose",
     "approve",
     "disable",
     "enable",
@@ -233,6 +234,26 @@ def preference_disabled(root: Path) -> bool:
         return False
 
 
+def task_bypass_active(root: Path, payload: dict[str, Any]) -> bool:
+    """仅放行已登记的当前会话，不能把临时选择扩大为仓库级时间窗。"""
+    session = _session(payload)
+    common = common_dir(root)
+    if not session or common is None:
+        return False
+    path = common / "solo-ai" / "session-overrides.json"
+    try:
+        overrides = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    session_fingerprint = _fingerprint(session)
+    return any(
+        isinstance(grant, dict)
+        and grant.get("worktree") == str(root.resolve())
+        and session_fingerprint in grant.get("sessions", [])
+        for grant in overrides.get("grants", [])
+    )
+
+
 def _task_for_worktree(
     state: dict[str, Any], guard: dict[str, Any], root: Path
 ) -> dict[str, Any] | None:
@@ -401,10 +422,10 @@ def _session_context(
     session = _session(payload)
     base = (
         "Repository adopts develop-with-worktrees. For ordinary modifications, proactively use Start → exact-path Commit → Ready → Finish in the returned worktree. "
-        "The trusted Codex hook hard-denies writes in the current base worktree unless a task has explicit in-place authorization."
+        "The trusted Codex hook hard-denies writes in the current base worktree unless a task has explicit authorization."
     )
     if session:
-        base += f" This Codex session identifier is `{session}`; only use it with `dww start --in-place` after the user clearly requests current-worktree execution."
+        base += f" This Codex session identifier is `{session}`. If the user explicitly requests direct changes in this directory for this task, choose current-task first, then do not run the DWW lifecycle."
     active = _task_for_worktree(state, guard, root)
     if active and active.get("mode") == "in-place":
         base += f" Active in-place task: {active.get('id')} (status {active.get('status')})."
@@ -419,8 +440,12 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
     if preference_disabled(root):
         return _context(
             event,
-            "develop-with-worktrees is locally disabled for this repository; follow the user's explicit direction.",
+            "The user chose normal current-directory development for this repository on this machine. Do not initialize or run develop-with-worktrees for this task; follow the user's explicit direction.",
         )
+    if task_bypass_active(root, payload):
+        # 用户明确要求“像没安装一样”时，连 PostToolUse 脏基线告警也必须退出，
+        # 否则仍会把本次普通开发误报为逃逸写入。
+        return None
     markers = [marker for marker in WORKFLOW_MARKERS if (root / marker).exists()]
     if markers:
         return _context(
@@ -437,7 +462,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             return _context(event, _session_context(root, state, guard, payload))
         return _context(
             event,
-            "For a new Git repository modifying task, show the develop-with-worktrees init plan and obtain explicit acceptance or local decline before creating policy files.",
+            "Only when the user first intends to modify this unchosen repository, ask exactly:\n\n此仓库怎么修改？\n\n1. 每个任务使用独立目录（推荐）\n   任务互不影响，完成后自动合回。\n\n2. 这一次直接改当前目录\n   只跳过这一次，下次还会询问。\n\n3. 以后都直接改当前目录\n   记住此选择，这个仓库不再询问。\n\n只影响本机，可随时修改。\n\nAsk only this one question. After the user chooses, carry out the matching choice silently without any further confirmation. A child-agent instruction that already includes a one-time delegation code must register that code before asking the user anything.",
         )
     if event not in {"PreToolUse", "PostToolUse"}:
         return None
@@ -469,10 +494,10 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
     if tool == "Bash" and _strict_read_only_bash(command):
         return None
     if not adopted:
-        if dww_command in {"init", "doctor", "status", "version"}:
+        if dww_command in {"init", "choose", "doctor", "status", "version"}:
             return None
         return _deny(
-            "Potential repository write is blocked until develop-with-worktrees adoption is explicitly accepted or declined. Run the read-only init plan first."
+            "Potential repository write is blocked until the user chooses how this repository should be modified. Show the one compact three-choice question, then use the matching trusted dww choose command."
         )
     task = _task_for_worktree(state, guard, root)
     if task and task.get("mode", "isolated") == "isolated":
@@ -517,7 +542,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             + detail
         )
     return _deny(
-        "Protected base-worktree write blocked. For ordinary work, run dww Start and edit only its returned worktree. Only after the user explicitly requests current-worktree execution may you run dww start --in-place with this Codex session, then use exact-path Commit → Ready → Finish."
+        "Protected base-worktree write blocked. For ordinary work, run dww Start and edit only its returned worktree. If the user explicitly asks to change this directory for this task, first choose current-task and then follow normal development without a DWW lifecycle."
     )
 
 

@@ -1,6 +1,12 @@
 # Lifecycle reference
 
-Mode precedence is local disable, detected mature workflow, managed policy, then uninitialized confirmation. A mature workflow always wins and receives zero writes.
+Mode precedence is local long-term current-directory choice, detected mature workflow, managed policy, then the first-modification choice. A mature workflow always wins and receives zero writes.
+
+## First-modification choice
+
+The Codex adapter asks one plain-language question only when the user first intends to write an unchosen repository. `choose --mode isolated` adopts the normal lifecycle and accepts internal static-only checks when no test command is discovered. `choose --mode current-task --session` creates no tracked file, task, slot, or policy and makes that session behave as if DWW were absent; it refuses if this exact directory already owns an active DWW task, which must first Finish or be abandoned. `choose --mode current-repository` uses the same no-active-task, no-queue, and no-lock checks as `disable`, then stores the local preference without touching tracked files.
+
+The host hook exposes no reliable parent-agent or task identifier. A writing child session therefore joins a current-task choice only through an explicit one-time delegation code. This is deliberately narrower than a time-window or repository-wide bypass, which would allow unrelated concurrent tasks. A new session without a registered delegation returns to the normal first-choice behavior.
 
 ## Isolated task (default)
 

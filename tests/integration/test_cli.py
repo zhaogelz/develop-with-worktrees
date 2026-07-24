@@ -45,7 +45,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.2.0-beta.3"
+    assert payload["version"] == "0.2.0-beta.4"
     assert payload["version"] == payload["plugin_version"] == manifest["version"]
     assert payload["version"] == pyproject["project"]["version"]
     assert payload["version"] == __version__
@@ -167,6 +167,48 @@ def test_cli_static_only_first_shows_a_plan(git_repo: Path) -> None:
     payload = json.loads(completed.stdout)
     assert payload["result"]["decision"] == "needs-approval"
     assert payload["result"]["plan"]["static_only"] is True
+
+
+def test_cli_choose_current_task_redacts_session_and_delegation_code(
+    git_repo: Path,
+) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+    completed = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--script",
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "choose",
+            "--mode",
+            "current-task",
+            "--session",
+            "private-session",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+        timeout=90,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["result"] == {"choice": "current-task", "delegated": False}
+    assert "private-session" not in completed.stdout
+    assert "delegation_code" not in completed.stdout
 
 
 def test_cli_plan_and_verify_cover_registered_development_ready_and_full_levels(

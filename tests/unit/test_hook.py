@@ -8,7 +8,7 @@ from pathlib import Path
 from conftest import git
 from solo_ai.cli import _doctor
 from solo_ai.config import CommandSpec
-from solo_ai.lifecycle import initialize, resume_in_place, start
+from solo_ai.lifecycle import choose, initialize, resume_in_place, start
 from solo_ai.repo import GitRepo
 from solo_ai.state import StateStore
 
@@ -87,6 +87,96 @@ def test_hook_denies_unadopted_write_and_permits_strict_read(git_repo: Path) -> 
         compound_read_then_write["hookSpecificOutput"]["permissionDecision"] == "deny"
     )
     assert alias_like["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_hook_allows_only_the_session_that_chose_current_task(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    choice = choose(
+        repo,
+        mode="current-task",
+        slots=3,
+        commands=None,
+        session_id="parent-session",
+    )
+
+    for tool, command in (("apply_patch", ""), ("Bash", "git add README.md")):
+        assert (
+            HOOK.decide(
+                _payload(git_repo, tool=tool, command=command, session="parent-session")
+            )
+            is None
+        )
+    (git_repo / "ordinary.txt").write_text("ordinary\n", encoding="utf-8")
+    post = HOOK.decide(
+        {
+            **_payload(git_repo, tool="apply_patch", session="parent-session"),
+            "hook_event_name": "PostToolUse",
+        }
+    )
+    assert post is None
+    assert _doctor(repo)["guard_alerts"] == []
+
+    denied = HOOK.decide(
+        _payload(git_repo, tool="apply_patch", session="unrelated-session")
+    )
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    choose(
+        repo,
+        mode="current-task",
+        slots=3,
+        commands=None,
+        session_id="child-session",
+        delegation_code=choice["delegation_code"],
+    )
+    assert (
+        HOOK.decide(_payload(git_repo, tool="apply_patch", session="child-session"))
+        is None
+    )
+
+
+def test_hook_allows_choose_as_the_only_unadopted_write_entrypoint(
+    git_repo: Path,
+) -> None:
+    allowed = HOOK.decide(
+        _payload(
+            git_repo,
+            tool="Bash",
+            command=(
+                f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
+                "choose --mode current-task --session session-a"
+            ),
+        )
+    )
+    assert allowed is None
+
+
+def test_hook_long_term_current_directory_choice_steps_aside(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    choose(repo, mode="current-repository", slots=3, commands=None)
+
+    result = HOOK.decide(_payload(git_repo, tool="apply_patch"))
+    assert result is not None
+    output = result["hookSpecificOutput"]
+    assert "Do not initialize" in output["additionalContext"]
+    assert not (git_repo / ".solo-ai").exists()
+
+
+def test_hook_session_start_uses_the_single_plain_language_choice(
+    git_repo: Path,
+) -> None:
+    result = HOOK.decide(
+        {
+            **_payload(git_repo, tool="apply_patch", session="session-a"),
+            "hook_event_name": "SessionStart",
+        }
+    )
+    message = result["hookSpecificOutput"]["additionalContext"]
+    assert "此仓库怎么修改？" in message
+    assert "每个任务使用独立目录（推荐）" in message
+    assert "这一次直接改当前目录" in message
+    assert "以后都直接改当前目录" in message
+    assert "static mode" not in message
 
 
 def test_hook_hard_denies_adopted_base_write_and_allows_isolated_task(

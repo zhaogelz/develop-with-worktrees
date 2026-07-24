@@ -16,6 +16,7 @@ from solo_ai.config import CommandSpec, load_repo_config, load_verification_conf
 from solo_ai.lifecycle import (
     abandon,
     approve,
+    choose,
     commit_task,
     deinit,
     dev_start,
@@ -29,6 +30,7 @@ from solo_ai.lifecycle import (
     retarget,
     set_local_enabled,
     start,
+    task_bypass_active,
     warm_slot,
 )
 from solo_ai.repo import GitRepo
@@ -446,6 +448,186 @@ def test_decline_is_local_and_blocks_future_start(git_repo: Path) -> None:
     with pytest.raises(SoloAIError, match="disabled"):
         start(repo, name="must not start")
     set_local_enabled(repo, enabled=True)
+
+
+def test_choose_isolated_adopts_static_repository_without_a_second_choice(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+
+    result = choose(
+        repo,
+        mode="isolated",
+        slots=2,
+        commands=[],
+    )
+
+    assert result["choice"] == "isolated"
+    assert result["decision"] == "adopted"
+    assert result["static_only"] is True
+    assert (git_repo / ".solo-ai" / "config.toml").exists()
+    assert (git_repo / "AGENTS.md").exists()
+
+
+def test_choose_current_task_is_session_bound_and_delegates_only_by_code(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+
+    chosen = choose(
+        repo,
+        mode="current-task",
+        slots=3,
+        commands=None,
+        session_id="parent-session",
+    )
+
+    assert chosen["choice"] == "current-task"
+    assert task_bypass_active(repo, session_id="parent-session") is True
+    assert task_bypass_active(repo, session_id="other-session") is False
+    assert not (git_repo / ".solo-ai").exists()
+    assert not (git_repo / "AGENTS.md").exists()
+    state = (repo.local_dir / "session-overrides.json").read_text(encoding="utf-8")
+    assert "parent-session" not in state
+    assert chosen["delegation_code"] not in state
+
+    delegated = choose(
+        repo,
+        mode="current-task",
+        slots=3,
+        commands=None,
+        session_id="child-session",
+        delegation_code=chosen["delegation_code"],
+    )
+    assert delegated == {"choice": "current-task", "delegated": True}
+    assert task_bypass_active(repo, session_id="child-session") is True
+
+    with pytest.raises(SoloAIError, match="delegation code"):
+        choose(
+            repo,
+            mode="current-task",
+            slots=3,
+            commands=None,
+            session_id="unrelated-session",
+            delegation_code="not-the-parent-code",
+        )
+
+
+def test_choose_current_task_serializes_parallel_child_delegation(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    parent = choose(
+        repo,
+        mode="current-task",
+        slots=3,
+        commands=None,
+        session_id="parent-session",
+    )
+    errors: list[Exception] = []
+
+    def delegate(session_id: str) -> None:
+        try:
+            choose(
+                repo,
+                mode="current-task",
+                slots=3,
+                commands=None,
+                session_id=session_id,
+                delegation_code=parent["delegation_code"],
+            )
+        except Exception as exc:  # noqa: BLE001 - 断言并发登记没有丢失或异常。
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=delegate, args=(f"child-{number}",))
+        for number in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert all(
+        task_bypass_active(repo, session_id=f"child-{number}") for number in range(4)
+    )
+
+
+def test_choose_current_task_refuses_to_strand_an_active_task_in_the_directory(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(
+        repo, name="existing current-worktree task", in_place=True, session_id="old"
+    )
+
+    with pytest.raises(SoloAIError, match="Finish or abandon"):
+        choose(
+            repo,
+            mode="current-task",
+            slots=3,
+            commands=None,
+            session_id="new",
+        )
+
+    assert task_bypass_active(repo, session_id="new") is False
+    assert StateStore(repo).task(task["id"])["status"] == "active"
+
+
+def test_choose_current_repository_reuses_disable_safety_checks(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="cannot strand a managed task")
+
+    with pytest.raises(SoloAIError, match="Active or quarantined tasks"):
+        choose(
+            repo,
+            mode="current-repository",
+            slots=3,
+            commands=None,
+        )
+
+    assert local_enabled(repo) is True
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    result = choose(
+        repo,
+        mode="current-repository",
+        slots=3,
+        commands=None,
+    )
+    assert result["choice"] == "current-repository"
+    assert local_enabled(repo) is False
+
+
+def test_choose_current_repository_is_local_and_creates_no_tracked_policy(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+
+    result = choose(
+        repo,
+        mode="current-repository",
+        slots=3,
+        commands=None,
+    )
+
+    assert result["choice"] == "current-repository"
+    assert local_enabled(repo) is False
+    assert not (git_repo / ".solo-ai").exists()
+    assert not (git_repo / "AGENTS.md").exists()
+
+
+def test_choose_isolated_reenables_a_repository_after_local_direct_choice(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    choose(repo, mode="current-repository", slots=3, commands=None)
+
+    result = choose(repo, mode="isolated", slots=1, commands=[VERIFY])
+
+    assert result["choice"] == "isolated"
+    assert result["decision"] == "adopted"
+    assert local_enabled(repo) is True
 
 
 def test_disable_refuses_to_strand_an_active_task(git_repo: Path) -> None:

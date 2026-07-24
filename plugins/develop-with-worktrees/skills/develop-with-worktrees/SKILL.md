@@ -1,11 +1,11 @@
 ---
 name: develop-with-worktrees
-description: "Use for any Git-repository task that may modify files. Default to an isolated local worktree lifecycle; only use the session-bound current-worktree mode when the user clearly requires it. Do not use for read-only analysis."
+description: "Use for any Git-repository task that may modify files. Ask one plain-language repository choice on the first write, then default to isolated local worktrees. Do not use for read-only analysis."
 ---
 
 # Develop with Worktrees
 
-Use this lifecycle for every modifying Git task. Explain in the user's language. The core CLI is host-neutral; the trusted Codex hook is a hard write guard for Codex-supported local tool paths, not an operating-system sandbox.
+Use this lifecycle for every modifying Git task unless the user chooses ordinary current-directory development. Explain in the user's language. The core CLI is host-neutral; the trusted Codex hook is a hard write guard for Codex-supported local tool paths, not an operating-system sandbox.
 
 Set `DWW` to this skill's absolute `scripts/dww.py` and invoke it only with `uv`:
 
@@ -13,40 +13,54 @@ Set `DWW` to this skill's absolute `scripts/dww.py` and invoke it only with `uv`
 uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
 ```
 
-## Before writing
+## First modifying intent in an unchosen repository
 
-- For read-only analysis, do not claim a task.
-- Read repository instructions, then run `doctor` or `status` when mode is uncertain.
-- If a mature workflow is detected, defer completely: no policy, slot, or lifecycle state is written.
-- In an uninitialized repository, run `init` to show the plan. Only the user may choose `init --accept`, `init --accept-static-only`, or `init --decline`.
-- In Codex, after plugin install or a hook update, tell the user to open `/hooks`, trust this plugin, and start a new task. Until trusted, do not claim current-worktree writes are protected.
+Read-only analysis never asks a question or claims a task. After repository instructions are read, when the user first intends to modify an unchosen Git repository, ask exactly this one question:
 
-## Default modifying task
+```text
+此仓库怎么修改？
 
-1. Proactively run `start --name <purpose>` when a modifying intent is clear. It derives from the invocation worktree's current local branch.
-2. Work only in the returned worktree. Keep its lease private.
-3. Commit exactly the reviewed paths with repeated `--path`; never use unscoped staging.
-4. Use `plan` or `verify --level development` as useful feedback. Slow estimates are advice only.
-5. Run `ready`, then `finish` with the same task and lease.
+1. 每个任务使用独立目录（推荐）
+   任务互不影响，完成后自动合回。
+
+2. 这一次直接改当前目录
+   只跳过这一次，下次还会询问。
+
+3. 以后都直接改当前目录
+   记住此选择，这个仓库不再询问。
+
+只影响本机，可随时修改。
+```
+
+Do not add an initialization, test-discovery, or static-validation question. Do not explain internal terms unless the user asks.
+
+- Choice 1: run `choose --mode isolated`. It sets up the managed lifecycle once. If no automated test is found, it silently uses its internal basic checks; it does not ask again.
+- Choice 2: obtain the session identifier from trusted hook context and run `choose --mode current-task --session <id>`. For the rest of this session, work in the current directory exactly as if this skill were absent: do not create policy files, start a task, or run Commit/Ready/Finish. A new task asks again.
+- Choice 3: run `choose --mode current-repository`. It locally disables this repository on this machine without changing tracked files; do not initialize or run this skill later unless the user changes the choice.
+
+The choices are local to the current clone/common Git directory. A different clone or machine chooses independently. Natural-language changes such as “以后使用独立目录开发” and “以后直接在当前目录开发” are explicit new choices; apply them with `choose` without repeating the prompt. “在主分支完成 / 合到 main / 提交到 main” is not a bypass: ask whether current-directory execution is required if the intent is unclear.
+
+When choice 2 needs a writing child agent, pass its returned one-time delegation code only in that child’s task instruction. The child registers its own hook session with `choose --mode current-task --session <child-id> --delegate <code>` before writing. Do not reuse the code for an unrelated task. Codex currently supplies no reliable parent-agent hook identifier, so this explicit delegation is the only safe way to extend the one-task choice without opening concurrent unrelated tasks.
+
+## Default managed task
+
+For an adopted repository, proactively run `start --name <purpose>` when a modifying intent is clear. It derives from the invocation worktree's current local branch.
+
+1. Work only in the returned worktree. Keep its lease private.
+2. Commit exactly the reviewed paths with repeated `--path`; never use unscoped staging.
+3. Use `plan` or `verify --level development` as useful feedback. Slow estimates are advice only.
+4. Run `ready`, then `finish` with the same task and lease.
 
 Ready/Finish synchronize only the recorded base branch. A deleted, rewound, or rewritten base requires explicit `retarget`; Finish only fast-forwards the recorded clean base worktree. It never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 
-## Explicit current-worktree task
+## Advanced guarded current-worktree task
 
-Use this only if the user clearly says that execution must stay in the current worktree (for example, “直接在主分支改”, “只在当前工作树执行”). “在主分支完成” is ambiguous: ask whether current-worktree execution is required or isolation is acceptable.
-
-1. Obtain the current Codex session identifier from the trusted SessionStart hook context, then run `start --in-place --name <purpose> --session <id>` in that current worktree.
-2. It requires a clean Git worktree; ignored caches/data may remain. It creates no branch and no slot.
-3. Pass the same `--session <id>` to `commit`, `verify`, `ready`, `finish`, and `abandon`. Commit still requires the exact changed path list.
-4. Never use ordinary `recover` for it. On a session/branch/HEAD mismatch, preserve everything. If the prior Codex task ended, explicitly confirm `resume-in-place` after checking the recorded branch and expected HEAD; it rotates the lease/session, clears Ready evidence, and changes no project files. A mismatch still needs manual restoration first.
-5. Finish never merges, changes checkout, resets, cleans, deletes a branch, or deletes ignored runtime data. It validates relative to the start commit and its proof is task-scoped.
-
-Other isolated tasks may Start while an in-place task is active. Do not promise their Finish will proceed: the CLI blocks a Finish into the same base until current-worktree work ends, then synchronization and affected validation occur normally.
+`start --in-place` remains a compatibility path only when the user explicitly asks to retain DWW's exact Commit/Ready/Finish safeguards while using the current clean worktree. It is not the meaning of choice 2. Follow [lifecycle.md](references/lifecycle.md) for its session, identity, and recovery requirements.
 
 ## Validation, cleanup, and limits
 
 - `verification.toml` supports schema 3 only. Commands are registered argv arrays, never shell strings.
-- Development, Ready, and Full evidence are separate. All changed candidate paths need Ready coverage unless static-only is explicit.
+- Development, Ready, and Full evidence are separate. All changed candidate paths need Ready coverage unless internal static-only policy is active.
 - Validation uses a machine-global weighted FIFO queue. `settings --validation-capacity auto|1..4` is local-only.
 - Finish never removes dependencies or caches. `prune-slot` requires a reviewed exact plan and digest; `.env*`, symlinks, junctions, or changes stop the whole deletion.
 
