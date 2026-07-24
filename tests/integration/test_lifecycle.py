@@ -9,33 +9,31 @@ import time
 from pathlib import Path
 
 import pytest
-
-from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
+from conftest import git
+from solo_ai import lifecycle
 from solo_ai.cli import _prune
+from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
     abandon,
     approve,
     commit_task,
     deinit,
-    disable,
     dev_start,
     dev_stop,
+    disable,
     finish,
     initialize,
     local_enabled,
     ready,
+    resume_in_place,
     retarget,
     set_local_enabled,
     start,
     warm_slot,
 )
-import solo_ai.lifecycle as lifecycle
 from solo_ai.repo import GitRepo
 from solo_ai.state import StateStore
 from solo_ai.util import SoloAIError, atomic_write_json, process_snapshot, read_json
-
-from conftest import git
-
 
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
 STRICT_VERIFY = CommandSpec(("git", "status", "--short"))
@@ -124,6 +122,207 @@ def test_full_managed_lifecycle_and_exact_ready_proof_reuse(git_repo: Path) -> N
     assert StateStore(repo).task(task["id"])["status"] == "finished"
 
 
+def test_in_place_lifecycle_preserves_current_branch_and_uses_immutable_start_head(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    start_head = repo.head(git_repo)
+    task = start(
+        repo, name="use current test state", in_place=True, session_id="codex-a"
+    )
+
+    assert task["mode"] == "in-place"
+    assert task["slot_id"] is None
+    assert task["branch"] == "main"
+    assert task["start_head"] == start_head
+    (git_repo / "current.txt").write_text("current\n", encoding="utf-8")
+    committed = commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: current worktree task",
+        paths=["current.txt"],
+        session_id="codex-a",
+    )
+    assert committed["expected_head"] == repo.head(git_repo)
+    prepared = ready(
+        repo, task_id=task["id"], lease=task["lease"], session_id="codex-a"
+    )
+    proof = read_json(repo.local_dir / "proofs" / f"{prepared['ready_proof']}.json", {})
+    assert proof["inputs"]["files"] == ["current.txt"]
+    (git_repo / "current-second.txt").write_text("second\n", encoding="utf-8")
+    revised = commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: revise ready current worktree task",
+        paths=["current-second.txt"],
+        session_id="codex-a",
+    )
+    assert revised["status"] == "active"
+    assert revised["ready_proof"] is None
+    with pytest.raises(SoloAIError, match="requires a successful Ready"):
+        finish(repo, task_id=task["id"], lease=task["lease"], session_id="codex-a")
+    ready(repo, task_id=task["id"], lease=task["lease"], session_id="codex-a")
+    result = finish(repo, task_id=task["id"], lease=task["lease"], session_id="codex-a")
+
+    assert result["mode"] == "in-place"
+    assert repo.branch(git_repo) == "main"
+    assert (git_repo / "current.txt").exists()
+    assert (git_repo / "current-second.txt").exists()
+    assert StateStore(repo).task(task["id"])["status"] == "finished"
+
+
+def test_in_place_session_mismatch_quarantines_without_cleaning_files(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="bound session", in_place=True, session_id="codex-a")
+    (git_repo / "preserved.txt").write_text("keep\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="quarantined"):
+        commit_task(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            message="test: wrong session",
+            paths=["preserved.txt"],
+            session_id="codex-b",
+        )
+
+    assert (git_repo / "preserved.txt").read_text(encoding="utf-8") == "keep\n"
+    assert StateStore(repo).task(task["id"])["status"] == "quarantined"
+    with pytest.raises(SoloAIError, match="requires an active"):
+        commit_task(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            message="test: original session cannot revive task",
+            paths=["preserved.txt"],
+            session_id="codex-a",
+        )
+    with pytest.raises(SoloAIError, match="cannot enter Ready"):
+        ready(repo, task_id=task["id"], lease=task["lease"], session_id="codex-a")
+    git(git_repo, "add", "preserved.txt")
+    git(git_repo, "commit", "-m", "test: manually preserve direct work")
+    with pytest.raises(SoloAIError, match="still differs"):
+        resume_in_place(
+            repo,
+            task_id=task["id"],
+            session_id="codex-c",
+            confirm=f"{task['id']}:main:{task['expected_head']}",
+        )
+
+
+def test_active_in_place_task_blocks_only_same_base_integration(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    direct = start(
+        repo, name="urgent current state", in_place=True, session_id="codex-a"
+    )
+    isolated = start(repo, name="parallel isolated work")
+    commit_one(repo, isolated, "parallel.txt", "parallel\n", "test: parallel change")
+    ready(repo, task_id=isolated["id"], lease=isolated["lease"])
+
+    with pytest.raises(SoloAIError, match="in-place task is active"):
+        finish(repo, task_id=isolated["id"], lease=isolated["lease"])
+
+    (git_repo / "urgent.txt").write_text("urgent\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=direct["id"],
+        lease=direct["lease"],
+        message="test: urgent current change",
+        paths=["urgent.txt"],
+        session_id="codex-a",
+    )
+    ready(repo, task_id=direct["id"], lease=direct["lease"], session_id="codex-a")
+    finish(repo, task_id=direct["id"], lease=direct["lease"], session_id="codex-a")
+    finish(repo, task_id=isolated["id"], lease=isolated["lease"])
+    assert (git_repo / "parallel.txt").exists()
+
+
+def test_in_place_start_rejects_an_active_isolated_worktree(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    isolated = start(repo, name="isolated owner")
+
+    with pytest.raises(SoloAIError, match="active isolated"):
+        start(
+            GitRepo(Path(isolated["worktree"])),
+            name="must not share slot",
+            in_place=True,
+            session_id="codex-a",
+        )
+
+
+def test_resume_in_place_explicitly_transfers_a_stalled_active_task(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="active current state", in_place=True, session_id="codex-a")
+    store = StateStore(repo)
+    store.update_task(task["id"], status="ready", ready_proof={"fingerprint": "stale"})
+    before = store.task(task["id"])
+
+    resumed = resume_in_place(
+        repo,
+        task_id=task["id"],
+        session_id="codex-b",
+        confirm=f"{task['id']}:main:{task['expected_head']}",
+    )
+
+    assert resumed["status"] == "active"
+    assert resumed["lease"] != before["lease"]
+    assert resumed["session_fingerprint"] != before["session_fingerprint"]
+    assert resumed["ready_proof"] is None
+
+
+def test_resume_in_place_rejects_a_live_validation_process(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(
+        repo, name="interrupted direct validation", in_place=True, session_id="codex-a"
+    )
+    StateStore(repo).quarantine(task["id"], "simulate interrupted Codex session")
+    receipt = repo.local_dir / "validation-runs" / "direct" / "01.json"
+    atomic_write_json(
+        receipt,
+        {
+            "schema_version": 1,
+            "status": "running",
+            "process": process_snapshot(),
+            "metadata": {"task_id": task["id"]},
+        },
+    )
+
+    with pytest.raises(SoloAIError, match="live validation process"):
+        resume_in_place(
+            repo,
+            task_id=task["id"],
+            session_id="codex-b",
+            confirm=f"{task['id']}:main:{task['expected_head']}",
+        )
+
+
+def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="old local state")
+    commit_one(repo, task, "state.txt", "state\n", "test: old state candidate")
+    state_path = repo.local_dir / "state.json"
+    old_state = read_json(state_path, {})
+    old_state["schema_version"] = 2
+    for item in old_state["tasks"].values():
+        item.pop("mode", None)
+    atomic_write_json(state_path, old_state)
+
+    assert StateStore(repo).task(task["id"])["mode"] == "isolated"
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    assert read_json(state_path, {})["schema_version"] == 3
+
+
 def test_finish_resumes_after_branch_cleanup_crash(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -159,11 +358,13 @@ def test_finish_retains_standard_tool_caches_created_by_validation(
         (
             sys.executable,
             "-c",
-            "from pathlib import Path\n"
-            "for name in ('.pytest_cache', '.ruff_cache'):\n"
-            "    cache = Path(name)\n"
-            "    cache.mkdir(exist_ok=True)\n"
-            "    (cache / 'marker').write_text('cache', encoding='utf-8')\n",
+            (
+                "from pathlib import Path\n"
+                "for name in ('.pytest_cache', '.ruff_cache'):\n"
+                "    cache = Path(name)\n"
+                "    cache.mkdir(exist_ok=True)\n"
+                "    (cache / 'marker').write_text('cache', encoding='utf-8')\n"
+            ),
         )
     )
     (git_repo / ".gitignore").write_text(
@@ -391,9 +592,11 @@ def test_status_never_reveals_lease_and_recover_rejects_live_operation(
     assert task["lease"] not in json.dumps(
         {"tasks": [StateStore.public_task(StateStore(repo).task(task["id"]))]}
     )
-    with StateStore(repo).operation(task["id"], task["lease"], "test"):
-        with pytest.raises(SoloAIError, match="live operation"):
-            StateStore(repo).recover(task["id"])
+    with (
+        StateStore(repo).operation(task["id"], task["lease"], "test"),
+        pytest.raises(SoloAIError, match="live operation"),
+    ):
+        StateStore(repo).recover(task["id"])
     recovered = StateStore(repo).recover(task["id"])
     assert recovered["lease"] != task["lease"]
     abandon(repo, task_id=task["id"], lease=recovered["lease"], confirm=task["id"])
@@ -727,7 +930,7 @@ def test_warm_slot_blocks_concurrent_start(git_repo: Path) -> None:
     def run_warm() -> None:
         try:
             warm_slot(repo, slot_id="01")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - test captures worker failures.
             errors.append(exc)
 
     worker = threading.Thread(target=run_warm)

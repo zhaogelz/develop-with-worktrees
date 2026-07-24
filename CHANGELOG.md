@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-beta.2 — 2026-07-24
+
+- Adds one explicit, session-bound `in-place` task mode for current-worktree-only work; it keeps an immutable validation start commit and never merges, switches, resets, cleans, or deletes that worktree on Finish or failure.
+- Blocks same-base isolated Finish while an in-place task is active, so a parallel merge cannot silently invalidate its checked-out branch or HEAD.
+- Upgrades local task state to schema 3 with read compatibility for existing schema 2 isolated tasks.
+- Replaces the advisory Codex hook with supported `PreToolUse permissionDecision: deny` responses for protected base-worktree writes, plus preserved dirty-state alerts for escaped specialised paths.
+- Requires explicit hook trust after install or hook changes and documents the boundary between Codex hard guardrails and operating-system enforcement.
+
 ## 0.2.0-beta.1 — 2026-07-23
 
 - Clean breaking release: verification policy is schema 3 only.

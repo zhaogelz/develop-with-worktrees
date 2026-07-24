@@ -1,8 +1,8 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.2.0-beta.1",
-  "description": "A local-first Codex workflow for isolated worktrees, explicit validation, safe integration, and clean removal.",
+  "version": "0.2.0-beta.2",
+  "description": "A local-first Codex workflow with isolated worktrees, explicit current-worktree authorization, validation, and safe local integration.",
   "skills": "skills",
   "author": {
     "name": "develop-with-worktrees contributors"
@@ -10,11 +10,12 @@
   "interface": {
     "displayName": "Develop with Worktrees",
     "shortDescription": "Local-first Codex worktree lifecycle for safe solo AI development.",
-    "longDescription": "Use fixed reusable worktree slots, exact-path commits, approval-bound validation, FIFO local integration, and safe deinitialization for Codex coding tasks.",
+    "longDescription": "Use isolated task worktrees by default, exact-path commits, approval-bound validation, session-bound current-worktree tasks when explicitly needed, FIFO local integration, and safe deinitialization for Codex coding tasks.",
     "developerName": "develop-with-worktrees contributors",
     "category": "developer-tools",
     "capabilities": [
       "Git worktree task isolation",
+      "Session-bound current-worktree task authorization",
       "Local validation and integration gates",
       "Safe local lifecycle cleanup"
     ],

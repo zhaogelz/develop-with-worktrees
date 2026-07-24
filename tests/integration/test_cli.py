@@ -6,9 +6,8 @@ import sys
 import tomllib
 from pathlib import Path
 
-from solo_ai import __version__
-
 from conftest import git
+from solo_ai import __version__
 
 
 def test_release_version_contract_matches_manifest_metadata_and_cli(
@@ -46,7 +45,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.2.0-beta.1"
+    assert payload["version"] == "0.2.0-beta.2"
     assert payload["version"] == payload["plugin_version"] == manifest["version"]
     assert payload["version"] == pyproject["project"]["version"]
     assert payload["version"] == __version__
@@ -54,6 +53,8 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
         encoding="utf-8"
     )
     assert payload["verification_schema"] == 3
+    assert payload["state_schema"] == 3
+    assert "PreToolUse deny" in payload["codex_guard"]
     assert Path(payload["script"]).name == "dww.py"
 
 
@@ -399,3 +400,84 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
         "finish", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
     )
     assert (git_repo / "cli.txt").exists()
+
+    started_direct = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--script",
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "start",
+            "--name",
+            "cli current worktree",
+            "--in-place",
+            "--session",
+            "cli-session",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+        timeout=90,
+    )
+    assert started_direct.returncode == 0, started_direct.stderr
+    direct_values = dict(
+        line.split(": ", 1) for line in started_direct.stdout.splitlines()
+    )
+    assert direct_values["Mode"] == "in-place"
+    assert direct_values["Worktree"] == str(git_repo)
+    (git_repo / "cli-current.txt").write_text("current\n", encoding="utf-8")
+    call_json(
+        "commit",
+        "--task",
+        direct_values["Task"],
+        "--lease",
+        direct_values["Lease"],
+        "--session",
+        "cli-session",
+        "--message",
+        "test: cli current worktree",
+        "--path",
+        "cli-current.txt",
+    )
+    direct_plan = call_json(
+        "plan",
+        "--task",
+        direct_values["Task"],
+    )
+    direct_ready = call_json(
+        "ready",
+        "--task",
+        direct_values["Task"],
+        "--lease",
+        direct_values["Lease"],
+        "--session",
+        "cli-session",
+    )
+    direct_proof = json.loads(
+        (
+            git_repo
+            / ".git"
+            / "solo-ai"
+            / "proofs"
+            / f"{direct_ready['ready_proof']}.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert (
+        direct_plan["profiles"][0]["fingerprint"]
+        == direct_proof["profile_proofs"][0]["fingerprint"]
+    )
+    finished_direct = call_json(
+        "finish",
+        "--task",
+        direct_values["Task"],
+        "--lease",
+        direct_values["Lease"],
+        "--session",
+        "cli-session",
+    )
+    assert finished_direct["mode"] == "in-place"
+    assert (git_repo / "cli-current.txt").exists()

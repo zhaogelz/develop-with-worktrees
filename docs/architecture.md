@@ -1,20 +1,23 @@
 # Architecture
 
 ```text
-Codex hook (reminder)
+Codex adapter
+  Skill: chooses default isolation or explicit in-place task
+  Hook: supported-path PreToolUse deny / post-write preservation alert
         ↓
-Skill (decide read-only / defer / lifecycle)
+Host-neutral CLI lifecycle
+  isolated task ── exact commit ── Ready/Finish ── local fast-forward
+  in-place task ── exact commit ── Ready/Finish ── release only
         ↓
-CLI (hard lifecycle gate)
-        ├─ tracked repository policy
-        ├─ Git-common task state, proofs, receipts
-        └─ machine-user validation queue, settings, duration metrics
+Git-common local state: leases, task identity, proofs, receipts, alerts
 ```
 
-The repository policy is small: `config.toml` controls lifecycle and explicit cleanup ownership; `verification.toml` schema 3 maps paths to registered argv profiles. Local task state follows Git common metadata. The machine queue deliberately lives outside any repository so independent projects do not overcommit the same computer.
+Normal tasks record `base_ref`, `base_head`, `base_worktree`, a generated branch, and a managed slot. They may synchronize a forward-moving base before Ready/Finish and merge only with fast-forward semantics.
 
-Task state records `base_ref`, `base_head`, and `base_worktree`. Ready and Finish operate only against that recorded base. Integration receipts make post-merge cleanup idempotent.
+An in-place task records the exact invoking worktree, attached branch, immutable `start_head`, mutable-only-by-DWW `expected_head`, and a hash of the Codex session identifier. It owns no slot or branch. All validation uses `start_head...HEAD`; profile proof inputs force `task:<id>` scope even if policy otherwise permits cross-task reuse. Finish writes an in-place receipt, releases the lease, and leaves Git checkout and ignored runtime data untouched.
 
-Validation profiles are classified only as normal or heavy. The machine computes capacity from physical CPU cores and total RAM, then admits profile execution in strict FIFO order. Waiters never hold repository state locks. Local duration medians are advisory data only.
+The integration lock serializes an in-place Start with isolated merges. While an active in-place task binds one base worktree/branch, an isolated task may work normally but cannot Finish into that base. This avoids an invisible external HEAD advance that would invalidate current-worktree authorization.
 
-Cleanup has a smaller deletion boundary than task state: Finish deletes nothing. Manual prune accepts only exact top-level ownership paths, stores an immutable review plan, and refuses any declared target containing `.env*`, a symlink/junction, or changed content.
+The Codex hook is a strong adapter layer, not the core authority. It reads local state and returns the standard `PreToolUse` deny output before supported Bash/editor actions run. A mature external workflow still causes complete deferral. The hook cannot cover specialised execution paths that do not invoke it; a later hooked call or `doctor` can record a local alert and tell the agent to preserve the dirty worktree, but no immediate observation is promised. It never rolls back user files.
+
+Validation profiles remain schema 3. The machine-global weighted FIFO queue and duration estimates are host-independent local services. Cleanup remains separately bounded: Finish deletes nothing; only an explicitly reviewed `prune-slot` can delete declared owned paths.

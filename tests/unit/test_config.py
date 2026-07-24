@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from solo_ai.config import (
     CommandSpec,
     discover_validation_commands,

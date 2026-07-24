@@ -1,9 +1,11 @@
 # Safety reference
 
-The CLI is the lifecycle gate. The optional hook is a reminder, not operating-system enforcement.
+The CLI owns lifecycle identity; the Codex adapter supplies a strong but scoped guard. After the user trusts the plugin hook in `/hooks`, `PreToolUse` returns the supported `permissionDecision: deny` response before protected base-worktree writes made through supported Codex local tool paths. Strictly read-only Bash and the DWW lifecycle command are whitelisted; unknown Bash, `apply_patch`, Edit, and Write are fail-closed on a protected base worktree.
 
-Commands use explicit argv and `shell=False`. Logs redact common credentials; proofs persist command digests, hashes, and redacted displays but not environment values, leases, or raw command lines. Validation subprocesses have identity snapshots, heartbeats, hard timeouts, and persistent receipts. Recovery never kills or adopts an unverified process.
+This is not operating-system enforcement. A specialised path may not invoke the hook. When a later hook call or `doctor` observes a dirty unowned base, it stores a local alert and tells the agent to preserve it; immediate observation of an opt-out path is not promised. It never resets, cleans, rolls back, moves, or silently adopts those files. Hook failures also fail closed for a supported PreToolUse call.
 
-The built-in content gate blocks newly added `.env*`, private keys, credential files, and recognizable secret patterns. A repository scanner may supplement it only when explicitly configured.
+An active in-place task is allowed only when its current worktree, branch, expected HEAD, and hashed Codex session identifier still match local state. A mismatch quarantines it before a new write. The task cannot be recovered around that mismatch. After a Codex task ends, an explicit exact-confirmation resume may transfer an unchanged active, ready, or quarantined task only after identity, live-operation, and live-validation checks; a mismatch still needs manual restoration first.
 
-Finish never cleans caches or dependencies. Manual `prune-slot` is bounded to declared top-level ownership paths and requires a reviewed plan id plus digest. The plan records path, reason, byte size, and content digest. If any declared target contains `.env*`, a symlink or junction, or changes before execution, the whole prune stops without deleting anything. Content outside declared targets is retained.
+Commands use explicit argv and `shell=False`. Logs redact common credentials; proofs persist command digests, hashes, and redacted displays but not environment values, leases, raw session identifiers, or raw command lines. Validation subprocesses have identity snapshots, heartbeats, hard timeouts, and persistent receipts. Recovery never kills or adopts an unverified process.
+
+Finish never cleans caches or dependencies. Manual `prune-slot` is bounded to declared top-level ownership paths and requires a reviewed plan id plus digest. If any declared target contains `.env*`, a symlink or junction, or changes before execution, the whole prune stops without deleting anything.

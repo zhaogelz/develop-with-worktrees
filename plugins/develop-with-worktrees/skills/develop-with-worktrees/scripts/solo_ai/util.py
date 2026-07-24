@@ -5,17 +5,19 @@ import hashlib
 import json
 import os
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Callable, Sequence
+from types import TracebackType
+from typing import Any, Self
 
 import psutil
 
@@ -436,7 +438,7 @@ class DirectoryLock:
         except OSError:
             return False
 
-    def __enter__(self) -> "DirectoryLock":
+    def __enter__(self) -> Self:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         last_report = time.monotonic()
         while True:
@@ -469,7 +471,12 @@ class DirectoryLock:
                 shutil.rmtree(prepared, ignore_errors=True)
                 raise
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         if self.acquired:
             try:
                 shutil.rmtree(self.path)

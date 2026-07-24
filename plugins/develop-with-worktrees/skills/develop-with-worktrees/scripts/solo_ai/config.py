@@ -11,7 +11,6 @@ from typing import Any
 from .repo import GitRepo
 from .util import SoloAIError, redact_text, sha256_file, sha256_text, stable_json
 
-
 CONFIG_SCHEMA = 2
 VERIFICATION_SCHEMA = 3
 DEFAULT_CLEANUP_OWNED_PATHS: tuple[str, ...] = ()

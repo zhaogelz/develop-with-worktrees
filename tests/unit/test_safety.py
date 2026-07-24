@@ -1,9 +1,8 @@
 from pathlib import Path
 
+from conftest import git
 from solo_ai.repo import GitRepo
 from solo_ai.safety import scan
-
-from conftest import git
 
 
 def test_reports_secret_location_without_value(git_repo: Path) -> None:

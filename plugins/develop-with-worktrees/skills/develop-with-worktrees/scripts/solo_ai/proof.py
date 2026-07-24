@@ -23,7 +23,6 @@ from .util import (
 )
 from .validation_queue import claim_validation_slot, record_profile_duration
 
-
 LOCKFILES = (
     "uv.lock",
     "package-lock.json",
@@ -245,6 +244,7 @@ def proof_inputs(
     verification: VerificationConfig,
     task_id: str | None = None,
     levels: tuple[str, ...] = ("ready",),
+    force_task_scope: bool = False,
 ) -> tuple[dict[str, Any], list[tuple[VerificationProfile, dict[str, Any], str]]]:
     files = changed_files(repo, cwd=cwd, base=base)
     profiles = select_profiles(verification, files, levels=levels)
@@ -258,13 +258,14 @@ def proof_inputs(
     for profile in profiles:
         inputs = _profile_inputs(profile, cwd=cwd, tracked=tracked, shared=shared)
         # 同一任务可在输入闭包未变时复用；跨任务复用仍需显式闭包和无外部状态。
-        scope = (
-            "cross-task"
-            if profile.cross_task_reuse and profile.external_state == "none"
-            else f"task:{task_id}"
-            if task_id
-            else f"candidate:{candidate_head}"
-        )
+        if force_task_scope and task_id:
+            scope = f"task:{task_id}"
+        elif profile.cross_task_reuse and profile.external_state == "none":
+            scope = "cross-task"
+        elif task_id:
+            scope = f"task:{task_id}"
+        else:
+            scope = f"candidate:{candidate_head}"
         inputs["reuse_scope"] = scope
         records.append((profile, inputs, sha256_text(stable_json(inputs))))
     candidate = {
@@ -401,6 +402,7 @@ def validate(
     verification: VerificationConfig,
     task_id: str | None = None,
     level: str = "ready",
+    force_task_scope: bool = False,
 ) -> dict[str, Any]:
     from .util import read_json
 
@@ -412,6 +414,7 @@ def validate(
         verification=verification,
         task_id=task_id,
         levels=levels,
+        force_task_scope=force_task_scope,
     )
     if inputs["unmapped_files"] and not verification.static_only:
         raise SoloAIError(

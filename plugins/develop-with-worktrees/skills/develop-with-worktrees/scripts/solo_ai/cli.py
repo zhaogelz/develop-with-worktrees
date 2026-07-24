@@ -8,26 +8,27 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import VERSION
 from .config import (
     CommandSpec,
     detect_existing_workflows,
     load_repo_config,
     load_verification_config,
 )
-from . import VERSION
 from .lifecycle import (
     abandon,
     approve,
     commit_task,
     deinit,
-    disable,
     dev_start,
     dev_stop,
+    disable,
     finish,
     initialize,
     local_enabled,
     maintenance_lock,
     ready,
+    resume_in_place,
     retarget,
     set_local_enabled,
     start,
@@ -126,6 +127,15 @@ def _parser() -> argparse.ArgumentParser:
         "--base",
         help="local branch to use as the task base; defaults to the invocation worktree's current branch",
     )
+    start_parser.add_argument(
+        "--in-place",
+        action="store_true",
+        help="use the current clean worktree for this one Codex session; no slot or branch is created",
+    )
+    start_parser.add_argument(
+        "--session",
+        help="Codex session identifier supplied by the trusted hook; required for in-place tasks",
+    )
 
     commit = sub.add_parser(
         "commit", help="stage only an exact reviewed task path list and commit it"
@@ -134,11 +144,13 @@ def _parser() -> argparse.ArgumentParser:
     commit.add_argument("--lease", required=True)
     commit.add_argument("--message", required=True)
     commit.add_argument("--path", action="append", default=[], required=True)
+    commit.add_argument("--session")
 
     for name in ("ready", "finish"):
         item = sub.add_parser(name)
         item.add_argument("--task", required=True)
         item.add_argument("--lease", required=True)
+        item.add_argument("--session")
 
     retarget_parser = sub.add_parser(
         "retarget", help="explicitly rebind a task after its base branch changed"
@@ -161,6 +173,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify.add_argument("--task", required=True)
     verify.add_argument("--lease", required=True)
+    verify.add_argument("--session")
     verify.add_argument(
         "--level", choices=["development", "ready", "full"], default="development"
     )
@@ -179,6 +192,15 @@ def _parser() -> argparse.ArgumentParser:
     abandoned.add_argument("--task", required=True)
     abandoned.add_argument("--lease", required=True)
     abandoned.add_argument("--confirm", required=True)
+    abandoned.add_argument("--session")
+
+    resume = sub.add_parser(
+        "resume-in-place",
+        help="resume a quarantined in-place task after manually restoring its recorded branch and HEAD",
+    )
+    resume.add_argument("--task", required=True)
+    resume.add_argument("--session", required=True)
+    resume.add_argument("--confirm", required=True)
 
     warm = sub.add_parser(
         "warm-slot", help="serially prepare declared dependencies in one idle slot"
@@ -240,7 +262,8 @@ def _parse_commands(values: list[str] | None) -> list[CommandSpec] | None:
 
 
 def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
-    state = StateStore(repo).read()
+    store = StateStore(repo)
+    state = store.read()
     result: dict[str, Any] = {
         "repository": str(repo.root),
         "mode": "disabled"
@@ -253,12 +276,15 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
         "existing_workflows": detect_existing_workflows(repo.root),
         "default_branch": repo.default_branch(),
         "primary_clean": repo.is_clean(repo.primary_path),
+        "invocation_worktree": str(repo.root),
+        "invocation_worktree_clean": repo.is_clean(repo.root),
         "local_enabled": local_enabled(repo),
         "validation_queue": queue_status(),
         "slots": list(state.get("slots", {}).values()),
         "tasks": [
             StateStore.public_task(task) for task in state.get("tasks", {}).values()
         ],
+        "guard_alerts": store.guard_alerts(),
     }
     if detailed:
         for slot in result["slots"]:
@@ -277,6 +303,8 @@ def _version() -> dict[str, Any]:
         "version": VERSION,
         "plugin_version": manifest.get("version"),
         "verification_schema": 3,
+        "state_schema": 3,
+        "codex_guard": "PreToolUse deny on supported local tool paths after user trusts this plugin hook",
         "script": str(Path(sys.argv[0]).resolve()),
         "validation_queue": queue_status(),
     }
@@ -307,6 +335,9 @@ def _doctor(repo: GitRepo) -> dict[str, Any]:
     )
     report["uninstall_rule"] = (
         "Run deinit successfully before removing the Codex plugin. The plugin registry never scans disks."
+    )
+    report["hook_trust"] = (
+        "Codex plugin hooks require a user trust decision after install or hook changes. Run /hooks and start a new task before relying on in-place protection."
     )
     return report
 
@@ -551,7 +582,13 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "doctor":
         return _doctor(repo)
     if args.command == "start":
-        return start(repo, name=args.name, base=args.base)
+        return start(
+            repo,
+            name=args.name,
+            base=args.base,
+            in_place=args.in_place,
+            session_id=args.session,
+        )
     if args.command == "commit":
         return commit_task(
             repo,
@@ -559,11 +596,14 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             lease=args.lease,
             message=args.message,
             paths=args.path,
+            session_id=args.session,
         )
     if args.command == "ready":
-        return ready(repo, task_id=args.task, lease=args.lease)
+        return ready(repo, task_id=args.task, lease=args.lease, session_id=args.session)
     if args.command == "finish":
-        return finish(repo, task_id=args.task, lease=args.lease)
+        return finish(
+            repo, task_id=args.task, lease=args.lease, session_id=args.session
+        )
     if args.command == "retarget":
         return retarget(
             repo,
@@ -576,21 +616,25 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         task = StateStore(repo).task(args.task)
         worktree = Path(str(task["worktree"]))
         verification = load_verification_config(repo, cwd=worktree)
+        verification_base = str(task.get("start_head") or task["base_ref"])
+        force_task_scope = task.get("mode") == "in-place"
         inputs, _ = proof_inputs(
             repo,
             cwd=worktree,
-            base=str(task["base_ref"]),
+            base=verification_base,
             verification=verification,
             task_id=task["id"],
             levels=("ready",),
+            force_task_scope=force_task_scope,
         )
         _, records = proof_inputs(
             repo,
             cwd=worktree,
-            base=str(task["base_ref"]),
+            base=verification_base,
             verification=verification,
             task_id=task["id"],
             levels=("development", "ready", "full"),
+            force_task_scope=force_task_scope,
         )
         estimate = estimate_validation(
             [
@@ -615,7 +659,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         ]
         return {
             "task_id": task["id"],
-            "base_ref": task["base_ref"],
+            "base_ref": verification_base,
             "changed_files": inputs["files"],
             "unmapped_files": inputs["unmapped_files"],
             "profiles": profiles,
@@ -626,6 +670,10 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         store = StateStore(repo)
         with store.operation(args.task, args.lease, "verify") as task:
             worktree = Path(str(task["worktree"]))
+            from .lifecycle import _assert_in_place_binding, _is_in_place
+
+            if _is_in_place(task):
+                _assert_in_place_binding(repo, store, task, session_id=args.session)
             if not repo.is_clean(worktree):
                 raise SoloAIError(
                     "Commit task changes before producing reusable verification evidence"
@@ -634,10 +682,11 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             proof = validate(
                 repo,
                 cwd=worktree,
-                base=str(task["base_ref"]),
+                base=str(task.get("start_head") or task["base_ref"]),
                 verification=verification,
                 task_id=task["id"],
                 level=args.level,
+                force_task_scope=_is_in_place(task),
             )
             return {
                 "task_id": task["id"],
@@ -650,8 +699,21 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return _status(repo, detailed=args.detailed)
     if args.command == "recover":
         return StateStore(repo).recover(args.task)
+    if args.command == "resume-in-place":
+        return resume_in_place(
+            repo,
+            task_id=args.task,
+            session_id=args.session,
+            confirm=args.confirm,
+        )
     if args.command == "abandon":
-        return abandon(repo, task_id=args.task, lease=args.lease, confirm=args.confirm)
+        return abandon(
+            repo,
+            task_id=args.task,
+            lease=args.lease,
+            confirm=args.confirm,
+            session_id=args.session,
+        )
     if args.command == "warm-slot":
         return warm_slot(repo, slot_id=args.slot)
     if args.command == "dev" and args.dev_command == "start":
@@ -677,9 +739,11 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
 
 def _human(command: str, result: dict[str, Any]) -> str:
     if command == "start":
+        mode = result.get("mode", "isolated")
         return "\n".join(
             (
                 f"Task: {result['id']}",
+                f"Mode: {mode}",
                 f"Worktree: {result['worktree']}",
                 f"Branch: {result['branch']}",
                 f"Lease: {result['lease']}",
@@ -691,10 +755,11 @@ def _human(command: str, result: dict[str, Any]) -> str:
             if result.get("proof_kind") == "static-only"
             else "validation commands passed"
         )
-        return (
-            f"Integrated {result['task_id']} at {result['integrated_head']} ({label})."
+        verb = (
+            "Completed in place" if result.get("mode") == "in-place" else "Integrated"
         )
-    if command == "recover":
+        return f"{verb} {result['task_id']} at {result['integrated_head']} ({label})."
+    if command in {"recover", "resume-in-place"}:
         return "\n".join((f"Task: {result['id']}", f"Lease: {result['lease']}"))
     return json.dumps(
         _redact_leases(result), ensure_ascii=False, indent=2, sort_keys=True
@@ -706,7 +771,7 @@ def _redact_leases(value: Any) -> Any:
         return {
             key: _redact_leases(item)
             for key, item in value.items()
-            if key not in {"lease", "lease_owner"}
+            if key not in {"lease", "lease_owner", "session_fingerprint"}
         }
     if isinstance(value, list):
         return [_redact_leases(item) for item in value]

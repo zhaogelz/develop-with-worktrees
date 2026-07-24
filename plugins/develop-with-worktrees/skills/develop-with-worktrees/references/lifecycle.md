@@ -2,10 +2,22 @@
 
 Mode precedence is local disable, detected mature workflow, managed policy, then uninitialized confirmation. A mature workflow always wins and receives zero writes.
 
-`init` shows a plan first. `init --accept` commits the policy and managed AGENTS block; `init --decline` stores only a local preference. Dirty primary worktrees are never stashed, copied, committed, or discarded.
+## Isolated task (default)
 
-`start` chooses the least-recently-used idle slot and uses the current local branch of the invocation worktree as its base. It records the base branch, base commit, and base worktree. Detached HEAD requires `--base`; an active managed task cannot be a base. `retarget` changes the base only after exact confirmation and invalidates Ready evidence.
+`start` selects the least-recently-used idle slot and derives a task branch from the invocation worktree's current local branch. It records the branch, base commit, and base worktree. `commit` requires an exact complete path manifest. `ready` safely synchronizes a forward base, validates the Ready closure, and records proof. `finish` takes the local FIFO integration turn, verifies the clean recorded base, validates again after synchronization, and fast-forwards only that base. Durable integration receipts make detach, branch cleanup, and release retryable after interruption.
 
-`commit` requires an exact complete path manifest. `ready` requires a clean committed branch, verifies a safe synchronization with the recorded base, validates the Ready closure, and records a proof. `finish` takes a local FIFO integration ticket, rechecks the recorded base worktree, reuses only exact compatible evidence, then fast-forwards that base branch. A durable integration receipt makes detach, branch cleanup, and release retryable after interruption.
+## In-place task (explicit only)
 
-`recover` rotates a lease only after recorded operations and validation children are no longer live. `abandon`, `prune-slot`, and `deinit` require explicit confirmation. `deinit` removes only registered, ownership-matching managed worktrees after preflight and never scans disks for repositories.
+`start --in-place --session` is a separate task type, not a flag that disables the workflow. It runs only in the current clean attached worktree, requires a Codex session identifier, creates no slot or branch, and records:
+
+```text
+base_worktree + branch + start_head + expected_head + session fingerprint + lease
+```
+
+Ignored data is allowed at start; Git tracked or nonignored changes are not. `commit`, `verify`, `ready`, `finish`, and `abandon` recheck the identical worktree, branch, expected HEAD, and session. Only exact-path `dww commit` advances `expected_head`. The verification base is always immutable `start_head`, never the moving branch ref. In-place validation forces task-scoped proofs.
+
+In-place Finish writes a completion receipt and releases the task only. It does not merge, detach, switch, reset, clean, remove branches, or delete caches. A mismatch quarantines the task and preserves every file. Ordinary `recover` refuses it. After a prior Codex task ended, explicit `resume-in-place --confirm TASK:BRANCH:EXPECTED_HEAD` may transfer an unchanged active, ready, or quarantined task: it rechecks the recorded branch and expected HEAD, rejects live operations or validation, rotates the lease/session, clears Ready evidence, and changes no project files. A mismatch still requires manual restoration first.
+
+An active in-place task blocks isolated Finish into its same recorded base worktree and branch. Isolated tasks may still Start from currently committed base content and work in parallel.
+
+`abandon`, `prune-slot`, and `deinit` require explicit confirmation. In-place abandon never cleans or resets: it releases only a clean, still-bound task; dirty work remains preserved.

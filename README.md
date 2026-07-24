@@ -1,38 +1,39 @@
 # Develop with Worktrees
 
-`0.2.0-beta.1` is a local-first Codex workflow for safe parallel Git tasks: isolated reusable worktrees, exact-path commits, registered validation, and local-only integration back to the branch you started from.
+`0.2.0-beta.2` is a local-first workflow for safe parallel AI Git work. Its core lifecycle is host-neutral; this plugin supplies the Codex adapter and guard.
 
-## What it does
+## Default: isolated work
 
-- Starts from the current checked-out local branch, not a fixed `main` assumption.
-- Keeps tasks isolated with leases, deterministic slots, conflict prediction, recovery receipts, and fast-forward-only local integration.
-- Uses schema 3 validation profiles with development, ready, and explicit full levels.
-- Shares a machine-global weighted FIFO validation queue. Capacity is automatic by default and adjustable locally with `dww settings --validation-capacity auto|1..4`.
-- Keeps cleanup manual: Finish never deletes caches. `prune-slot` deletes only exact declared paths after a reviewed plan and digest confirmation.
-- Defers with zero writes when the repository already has a mature worktree workflow.
+```text
+doctor → start → edit only in returned worktree → commit exact paths
+       → plan / verify → ready → finish
+```
 
-It never fetches, pulls, pushes, creates PRs, rebases, squashes, amends, or rewrites history.
+- `start` derives from the invoking worktree's current local branch, never an assumed `main`.
+- Each normal task receives its own reusable managed worktree and lease. Finish fast-forwards only the recorded clean base worktree, locally.
+- Validation uses schema 3 profiles and a machine-global weighted FIFO queue. Slow estimates advise splitting profiles or removing repeated preparation; they never weaken coverage.
+- Finish preserves caches and dependencies. Destructive cleanup remains an explicit reviewed `prune-slot` action.
+
+## Explicit current-worktree work
+
+When the user clearly requires the current environment—for example, data or a test cache that only exists there—use one session-bound task instead:
+
+```text
+start --in-place --session <Codex-session-id>
+→ edit current worktree → commit exact paths → ready → finish
+```
+
+It starts only from a clean Git worktree (ignored test data may stay), creates no slot or branch, and validates every change against its immutable start commit. Finish neither merges, switches branches, deletes files, nor clears ignored test data. If a prior Codex task ended, an exact-confirmation resume may transfer an unchanged active, ready, or quarantined task without changing files; a branch/HEAD mismatch must still be manually restored first. While it is active, isolated work may continue, but another task cannot Finish into the same base branch.
+
+In Codex, the trusted `PreToolUse` hook hard-denies protected base-worktree writes on supported local tool paths. It is a strong guardrail, not operating-system enforcement: specialised paths can opt out. When a later hooked call or `doctor` observes escaped dirty state, it preserves and records an alert; it never promises to see an opt-out path immediately. After every install or hook change, open `/hooks`, trust this plugin's hook, then start a new task. Until then, do not rely on in-place protection.
 
 ## Installation
-
-Install from the public GitHub marketplace:
 
 ```text
 codex plugin marketplace add zhaogelz/develop-with-worktrees --ref main
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-Start a new Codex task after installation so its skill is loaded. To install from a local checkout instead, add that checkout as a local Codex marketplace and install the same plugin identifier. The plugin does not update itself automatically; refresh the marketplace and reinstall only when you choose to adopt a newer release.
+Start a new Codex task, trust the hook in `/hooks`, and run `doctor` before modifying a repository. The plugin never updates itself, fetches, pulls, pushes, creates PRs, rebases, squashes, amends, or rewrites history.
 
-The first modifying task in a repository shows an adoption plan. `init --accept` is required before tracked policy is written. Existing repositories upgrading from schema 2 must migrate their own verification policy to schema 3 before using this release.
-
-## Everyday flow
-
-```text
-doctor → start → edit in returned worktree → commit exact paths
-       → plan / verify (optional development feedback) → ready → finish
-```
-
-`plan` includes mapped profiles, resource class, local duration estimates, and any unmapped paths. A slow-validation notice is advice to split mappings or remove repeated preparation; it never weakens coverage.
-
-See [README.zh-CN.md](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), and [architecture](docs/architecture.md).
+See [Chinese documentation](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), and [architecture](docs/architecture.md).

@@ -48,7 +48,7 @@ resource_class = "normal"       # normal or heavy
 commands = [["uv", "run", "pytest"]]
 ```
 
-All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported in 0.2.0-beta.1; migrate the repository policy before installing this release.
+All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy in 0.2.0-beta.2; migrate the repository policy before installing this release. Local task state from beta.1 is read-upgraded from schema 2 to schema 3 with existing tasks treated as isolated.
 
 ## Machine-local validation capacity
 

@@ -100,7 +100,7 @@ def main() -> int:
         ):
             raise ValueError("argv must be a non-empty string array")
         if not isinstance(cwd, str):
-            raise ValueError("cwd must be a string")
+            raise TypeError("cwd must be a string")
         job = _windows_job()
         child = subprocess.Popen(
             argv,

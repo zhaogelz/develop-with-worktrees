@@ -7,9 +7,6 @@ on:
 permissions:
   contents: read
 
-env:
-  DWW_SKIP_CODEX_CLI_INTEGRATION: "1"
-
 jobs:
   test:
     strategy:
@@ -22,6 +19,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --dev
       - run: uv run pytest -vv -o faulthandler_timeout=30
-      - run: uv run python -m compileall -q plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts
+      - run: uv run python -m compileall -q plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts plugins/develop-with-worktrees/hooks
       - run: uvx ruff check .
       - run: uvx ruff format --check .

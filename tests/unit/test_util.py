@@ -7,8 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
-
-import solo_ai.lifecycle as lifecycle
+from solo_ai import lifecycle
 from solo_ai.util import DirectoryLock, SoloAIError, redact_text, run_logged
 
 
@@ -43,9 +42,11 @@ def test_directory_lock_normalizes_nonempty_destination_error(
 
     with DirectoryLock(path):
         monkeypatch.setattr(Path, "rename", raise_nonempty_for_pending)
-        with pytest.raises(SoloAIError, match="Operation is already active"):
-            with DirectoryLock(path):
-                raise AssertionError("lock was acquired twice")
+        with (
+            pytest.raises(SoloAIError, match="Operation is already active"),
+            DirectoryLock(path),
+        ):
+            raise AssertionError("lock was acquired twice")
 
 
 def test_unix_process_group_stops_with_term_before_waiting(

@@ -118,7 +118,13 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert initialized.returncode == 0, initialized.stderr
     version = run_runner("--json", "version")
     assert version.returncode == 0, version.stderr
+    expected_version = json.loads(
+        (source / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )["version"]
+    assert f'"version": "{expected_version}"' in version.stdout
+    assert f'"plugin_version": "{expected_version}"' in version.stdout
     assert '"verification_schema": 3' in version.stdout
+    assert '"state_schema": 3' in version.stdout
     started = run_runner("start", "--name", "installed artifact smoke")
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
@@ -158,6 +164,53 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     finished = run_runner("finish", "--task", task_id, "--lease", lease, cwd=worktree)
     assert finished.returncode == 0, finished.stderr
     assert (smoke_repo / "smoke.txt").exists()
+    in_place = run_runner(
+        "start",
+        "--name",
+        "installed current worktree",
+        "--in-place",
+        "--session",
+        "installed-codex",
+    )
+    assert in_place.returncode == 0, in_place.stderr
+    direct = dict(line.split(": ", 1) for line in in_place.stdout.splitlines())
+    assert direct["Worktree"] == str(smoke_repo)
+    (smoke_repo / "current.txt").write_text("current\n", encoding="utf-8")
+    committed = run_runner(
+        "commit",
+        "--task",
+        direct["Task"],
+        "--lease",
+        direct["Lease"],
+        "--session",
+        "installed-codex",
+        "--message",
+        "test: commit through installed current worktree runner",
+        "--path",
+        "current.txt",
+    )
+    assert committed.returncode == 0, committed.stderr
+    prepared = run_runner(
+        "ready",
+        "--task",
+        direct["Task"],
+        "--lease",
+        direct["Lease"],
+        "--session",
+        "installed-codex",
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    completed_direct = run_runner(
+        "finish",
+        "--task",
+        direct["Task"],
+        "--lease",
+        direct["Lease"],
+        "--session",
+        "installed-codex",
+    )
+    assert completed_direct.returncode == 0, completed_direct.stderr
+    assert (smoke_repo / "current.txt").exists()
     pruned = run_runner("--json", "prune-slot", "--slot", "01")
     assert pruned.returncode == 0, pruned.stderr
     plan = json.loads(pruned.stdout)["result"]
