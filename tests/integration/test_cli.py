@@ -127,7 +127,9 @@ def test_cli_route_is_compact_and_read_only_for_mature_workflow(
 
     completed = subprocess.run(
         [
-            sys.executable,
+            "uv",
+            "run",
+            "--script",
             str(runner),
             "--repo",
             str(git_repo),
@@ -139,6 +141,7 @@ def test_cli_route_is_compact_and_read_only_for_mature_workflow(
         errors="replace",
         capture_output=True,
         check=False,
+        timeout=90,
     )
 
     assert completed.returncode == 0, completed.stderr
