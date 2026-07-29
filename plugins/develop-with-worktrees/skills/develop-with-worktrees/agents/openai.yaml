@@ -1,6 +1,6 @@
 interface:
   display_name: "Develop with Worktrees"
   short_description: "Safely isolate, verify, and integrate Git tasks"
-  default_prompt: "Use $develop-with-worktrees to complete this coding task in an isolated worktree and integrate it safely."
+  default_prompt: "Use $develop-with-worktrees to route this Git task first, silently defer to a mature repository workflow, or otherwise isolate and integrate it safely."
 policy:
   allow_implicit_invocation: true

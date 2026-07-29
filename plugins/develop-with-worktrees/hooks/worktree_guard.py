@@ -23,13 +23,17 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-WORKFLOW_MARKERS = (
-    ".config/wt.toml",
-    ".conductor",
-    ".parallel-code",
-    "scripts/worktree-flow.ps1",
-    ".sdd",
+SKILL_SCRIPTS = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "develop-with-worktrees"
+    / "scripts"
 )
+if str(SKILL_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SKILL_SCRIPTS))
+
+from solo_ai.routing import decide_route, detect_existing_workflows
+
 FINAL_TASK_STATES = {"finished", "abandoned"}
 READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
 DWW_SUBCOMMANDS = {
@@ -41,6 +45,7 @@ DWW_SUBCOMMANDS = {
     "enable",
     "settings",
     "doctor",
+    "route",
     "start",
     "commit",
     "ready",
@@ -437,28 +442,42 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
     root = git_root(str(payload.get("cwd") or "."))
     if root is None:
         return None
-    if preference_disabled(root):
+    workflows = detect_existing_workflows(root)
+    adopted = (root / ".solo-ai" / "config.toml").exists()
+    route = decide_route(
+        workflows=workflows,
+        local_enabled=not preference_disabled(root),
+        current_task=task_bypass_active(root, payload),
+        adopted=adopted,
+    )
+    action = route["action"]
+    if action == "defer":
+        if event != "SessionStart":
+            return None
+        return _context(
+            event,
+            "This repository has a mature workflow ("
+            + ", ".join(route["workflows"])
+            + "). develop-with-worktrees silently defers: do not ask its repository-choice question or change DWW state; follow the repository's own instructions.",
+        )
+    if action == "disabled":
         return _context(
             event,
             "The user chose normal current-directory development for this repository on this machine. Do not initialize or run develop-with-worktrees for this task; follow the user's explicit direction.",
         )
-    if task_bypass_active(root, payload):
+    if action == "current-task":
         # 用户明确要求“像没安装一样”时，连 PostToolUse 脏基线告警也必须退出，
         # 否则仍会把本次普通开发误报为逃逸写入。
+        if event == "SessionStart":
+            return _context(
+                event,
+                "A develop-with-worktrees current-task override is active for this exact session. Do not ask the repository-choice question or run the DWW lifecycle.",
+            )
         return None
-    markers = [marker for marker in WORKFLOW_MARKERS if (root / marker).exists()]
-    if markers:
-        return _context(
-            event,
-            "This repository has a mature worktree/orchestration workflow ("
-            + ", ".join(markers)
-            + "). develop-with-worktrees defers and must not modify its workflow files.",
-        )
-    adopted = (root / ".solo-ai" / "config.toml").exists()
     state, _ = read_state(root)
     guard, _ = read_guard_state(root)
     if event == "SessionStart":
-        if adopted:
+        if action == "managed":
             return _context(event, _session_context(root, state, guard, payload))
         return _context(
             event,
@@ -493,8 +512,8 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
     dww_command = _dww_subcommand(command, root) if tool == "Bash" else None
     if tool == "Bash" and _strict_read_only_bash(command):
         return None
-    if not adopted:
-        if dww_command in {"init", "choose", "doctor", "status", "version"}:
+    if action == "ask":
+        if dww_command in {"init", "choose", "doctor", "route", "status", "version"}:
             return None
         return _deny(
             "Potential repository write is blocked until the user chooses how this repository should be modified. Show the one compact three-choice question, then use the matching trusted dww choose command."

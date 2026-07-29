@@ -1,16 +1,16 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.2.0-beta.4",
-  "description": "A local-first Codex workflow with one plain-language repository choice, isolated worktrees by default, and safe local integration.",
+  "version": "0.2.0-beta.5",
+  "description": "A local-first Codex workflow that silently defers to mature repository workflows and otherwise offers one plain-language choice with safe isolated integration.",
   "skills": "skills",
   "author": {
     "name": "develop-with-worktrees contributors"
   },
   "interface": {
     "displayName": "Develop with Worktrees",
-    "shortDescription": "One simple repository choice, then safe isolated AI development by default.",
-    "longDescription": "Ask once whether to isolate each task, use this directory for one task, or remember normal current-directory development. Isolated work uses exact-path commits, approval-bound validation, FIFO local integration, and safe deinitialization.",
+    "shortDescription": "Respect mature workflows; otherwise choose safe task isolation once.",
+    "longDescription": "Silently defer to a repository's mature workflow. Otherwise ask once whether to isolate each task, use this directory for one task, or remember normal current-directory development. Isolated work uses exact-path commits, approval-bound validation, FIFO local integration, and safe deinitialization.",
     "developerName": "develop-with-worktrees contributors",
     "category": "developer-tools",
     "capabilities": [
@@ -19,7 +19,7 @@
       "Local validation and integration gates",
       "Safe local lifecycle cleanup"
     ],
-    "defaultPrompt": "Use develop-with-worktrees for this modifying Git task. Respect an existing mature workflow; otherwise, on the first intended write ask the single plain-language repository choice before making changes."
+    "defaultPrompt": "Route this modifying Git task first. Silently defer to an existing mature workflow; otherwise follow the managed, local-choice, or single first-write question returned by the route."
   },
   "license": "MIT",
   "keywords": [

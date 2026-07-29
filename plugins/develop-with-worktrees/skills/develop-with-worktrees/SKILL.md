@@ -1,6 +1,6 @@
 ---
 name: develop-with-worktrees
-description: "Use for any Git-repository task that may modify files. Ask one plain-language repository choice on the first write, then default to isolated local worktrees. Do not use for read-only analysis."
+description: "Use for any Git-repository task that may modify files. Route first and silently defer to mature repository workflows; otherwise ask one plain-language choice on the first write, then default to isolated local worktrees. Do not use for read-only analysis."
 ---
 
 # Develop with Worktrees
@@ -13,9 +13,24 @@ Set `DWW` to this skill's absolute `scripts/dww.py` and invoke it only with `uv`
 uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
 ```
 
+## Route before any repository choice
+
+At the first modifying intent, use the compact route already injected by the trusted `SessionStart` hook. If no route context is available, run exactly one read-only fallback:
+
+```text
+uv run --script <DWW> --repo <repository-or-worktree> --json route
+```
+
+Do not use the full `doctor` report for routing.
+
+- `defer`: the repository's mature workflow has absolute priority over choices 2/3 and DWW policy. Do not ask the DWW repository-choice question, initialize DWW, or change DWW state. Follow the repository's own instructions.
+- `disabled` or `current-task`: do not ask again or run the DWW lifecycle; use normal current-directory development.
+- `managed`: proactively start the normal isolated task.
+- `ask`: and only `ask`, show the single question below.
+
 ## First modifying intent in an unchosen repository
 
-Read-only analysis never asks a question or claims a task. After repository instructions are read, when the user first intends to modify an unchosen Git repository, ask exactly this one question:
+Read-only analysis never asks a question or claims a task. After repository instructions and the compact route are read, when the result is `ask`, show exactly this one question:
 
 ```text
 此仓库怎么修改？
@@ -37,6 +52,8 @@ Do not add an initialization, test-discovery, or static-validation question. Do 
 - Choice 1: run `choose --mode isolated`. It sets up the managed lifecycle once. If no automated test is found, it silently uses its internal basic checks; it does not ask again.
 - Choice 2: obtain the session identifier from trusted hook context and run `choose --mode current-task --session <id>`. For the rest of this session, work in the current directory exactly as if this skill were absent: do not create policy files, start a task, or run Commit/Ready/Finish. A new task asks again.
 - Choice 3: run `choose --mode current-repository`. It locally disables this repository on this machine without changing tracked files; do not initialize or run this skill later unless the user changes the choice.
+
+If a mature workflow appears before `choose`, the command returns `deferred` for every mode and changes no DWW state.
 
 The choices are local to the current clone/common Git directory. A different clone or machine chooses independently. Natural-language changes such as “以后使用独立目录开发” and “以后直接在当前目录开发” are explicit new choices; apply them with `choose` without repeating the prompt. “在主分支完成 / 合到 main / 提交到 main” is not a bypass: ask whether current-directory execution is required if the intent is unclear.
 

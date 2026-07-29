@@ -21,7 +21,6 @@ import psutil
 from .config import (
     CommandSpec,
     VerificationConfig,
-    detect_existing_workflows,
     discover_validation_commands,
     load_repo_config,
     load_verification_config,
@@ -33,6 +32,7 @@ from .config import (
 )
 from .proof import approval_plan, validate
 from .repo import GitRepo
+from .routing import decide_route, detect_existing_workflows
 from .safety import require_safe
 from .state import FINAL_TASK_STATES, IN_PLACE_MODE, ISOLATED_MODE, StateStore
 from .util import (
@@ -200,6 +200,14 @@ def choose(
     delegation_code: str | None = None,
 ) -> dict[str, Any]:
     """将首次三选一交互收敛为唯一入口，避免把内部初始化细节暴露给用户。"""
+    route = repository_route(repo, session_id=session_id)
+    if route["action"] == "defer":
+        return {
+            "choice": mode,
+            "decision": "deferred",
+            "reason": route["reason"],
+            "workflows": route["workflows"],
+        }
     if mode == "current-task":
         if not session_id:
             raise SoloAIError(
@@ -234,15 +242,21 @@ def _bootstrap(repo: GitRepo) -> dict[str, Any]:
     return read_json(repo.local_dir / "bootstrap.json", {})
 
 
+def repository_route(repo: GitRepo, *, session_id: str | None = None) -> dict[str, Any]:
+    workflows = detect_existing_workflows(repo.root)
+    return decide_route(
+        workflows=workflows,
+        local_enabled=local_enabled(repo),
+        current_task=bool(
+            session_id and task_bypass_active(repo, session_id=session_id)
+        ),
+        adopted=(repo.policy_path() / ".solo-ai" / "config.toml").exists(),
+    )
+
+
 def _effective_mode(repo: GitRepo) -> str:
-    if not local_enabled(repo):
-        return "disabled"
-    existing = detect_existing_workflows(repo.root)
-    if existing:
-        return "defer"
-    if (repo.policy_path() / ".solo-ai" / "config.toml").exists():
-        return "managed"
-    return "uninitialized"
+    action = repository_route(repo)["action"]
+    return "uninitialized" if action == "ask" else str(action)
 
 
 def _approval_path(repo: GitRepo) -> Path:

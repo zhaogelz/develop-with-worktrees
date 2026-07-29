@@ -65,11 +65,105 @@ def test_hook_defers_to_existing_workflow_without_writing(git_repo: Path) -> Non
     marker.parent.mkdir()
     marker.write_text("# existing\n", encoding="utf-8")
     before = git(git_repo, "status", "--porcelain")
-    result = HOOK.decide(_payload(git_repo, tool="apply_patch"))
+    result = HOOK.decide(
+        {
+            **_payload(git_repo, tool="apply_patch"),
+            "hook_event_name": "SessionStart",
+        }
+    )
     assert result is not None
-    assert "defers" in result["hookSpecificOutput"]["additionalContext"]
+    assert "silently defers" in result["hookSpecificOutput"]["additionalContext"]
+    assert HOOK.decide(_payload(git_repo, tool="apply_patch")) is None
     assert git(git_repo, "status", "--porcelain") == before
     assert not (git_repo / ".solo-ai").exists()
+
+
+def test_hook_mature_workflow_precedes_current_task_choice(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    choose(
+        repo,
+        mode="current-task",
+        slots=3,
+        commands=None,
+        session_id="current-session",
+    )
+    marker = git_repo / "scripts" / "worktree-flow.ps1"
+    marker.parent.mkdir()
+    marker.write_text("# existing\n", encoding="utf-8")
+    local_state_before = (repo.local_dir / "session-overrides.json").read_bytes()
+
+    result = HOOK.decide(
+        {
+            **_payload(
+                git_repo,
+                tool="apply_patch",
+                session="current-session",
+            ),
+            "hook_event_name": "SessionStart",
+        }
+    )
+
+    assert result is not None
+    assert "silently defers" in result["hookSpecificOutput"]["additionalContext"]
+    assert (
+        repo.local_dir / "session-overrides.json"
+    ).read_bytes() == local_state_before
+    assert (
+        HOOK.decide(_payload(git_repo, tool="apply_patch", session="current-session"))
+        is None
+    )
+
+
+def test_hook_mature_workflow_precedes_long_term_direct_choice(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    choose(repo, mode="current-repository", slots=3, commands=None)
+    marker = git_repo / "scripts" / "worktree-flow.ps1"
+    marker.parent.mkdir()
+    marker.write_text("# existing\n", encoding="utf-8")
+    preference_before = (repo.local_dir / "preferences.json").read_bytes()
+
+    result = HOOK.decide(
+        {
+            **_payload(git_repo, tool="apply_patch"),
+            "hook_event_name": "SessionStart",
+        }
+    )
+
+    assert result is not None
+    assert "silently defers" in result["hookSpecificOutput"]["additionalContext"]
+    assert (repo.local_dir / "preferences.json").read_bytes() == preference_before
+    assert HOOK.decide(_payload(git_repo, tool="apply_patch")) is None
+
+
+def test_hook_session_start_reports_current_task_without_reasking(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    choose(
+        repo,
+        mode="current-task",
+        slots=3,
+        commands=None,
+        session_id="current-session",
+    )
+
+    result = HOOK.decide(
+        {
+            **_payload(
+                git_repo,
+                tool="apply_patch",
+                session="current-session",
+            ),
+            "hook_event_name": "SessionStart",
+        }
+    )
+
+    assert result is not None
+    message = result["hookSpecificOutput"]["additionalContext"]
+    assert "current-task" in message
+    assert "此仓库怎么修改？" not in message
 
 
 def test_hook_denies_unadopted_write_and_permits_strict_read(git_repo: Path) -> None:

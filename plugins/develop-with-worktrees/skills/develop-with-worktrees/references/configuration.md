@@ -12,6 +12,8 @@ AGENTS.md managed block        Codex lifecycle reminder
 
 `preferences.json` in the Git common directory is the machine-local long-term choice for this repository. `enabled = false` means normal current-directory development and never changes tracked files. `session-overrides.json` contains only hashed current-task session authorizations and delegated capability hashes; it contains neither raw session identifiers nor delegation codes and never enters version control.
 
+`dww route --json` is a compact read-only adapter query. It returns one action: `defer`, `disabled`, `current-task`, `managed`, or `ask`. A detected mature workflow always returns `defer`; existing preference and session files are left untouched but inactive while that workflow marker remains.
+
 ## `config.toml`
 
 ```toml
@@ -50,7 +52,7 @@ resource_class = "normal"       # normal or heavy
 commands = [["uv", "run", "pytest"]]
 ```
 
-All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy in 0.2.0-beta.4; migrate the repository policy before installing this release. Local task state from beta.1 is read-upgraded from schema 2 to schema 3 with existing tasks treated as isolated.
+All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy in 0.2.0-beta.5; migrate the repository policy before installing this release. Local task state from beta.1 is read-upgraded from schema 2 to schema 3 with existing tasks treated as isolated.
 
 ## Machine-local validation capacity
 

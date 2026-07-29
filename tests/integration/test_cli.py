@@ -45,7 +45,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.2.0-beta.4"
+    assert payload["version"] == "0.2.0-beta.5"
     assert payload["version"] == payload["plugin_version"] == manifest["version"]
     assert payload["version"] == pyproject["project"]["version"]
     assert payload["version"] == __version__
@@ -79,6 +79,8 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "01..05" not in text
     assert "schema 3 only" in text
     assert "machine-global weighted FIFO" in text
+    assert "--json route" in text
+    assert "mature workflow" in text
 
 
 def test_cli_json_status_masks_uninitialized_state(git_repo: Path) -> None:
@@ -104,6 +106,53 @@ def test_cli_json_status_masks_uninitialized_state(git_repo: Path) -> None:
     assert payload["ok"] is True
     assert payload["result"]["mode"] == "uninitialized"
     assert "lease" not in json.dumps(payload["result"])
+
+
+def test_cli_route_is_compact_and_read_only_for_mature_workflow(
+    git_repo: Path,
+) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+    marker = git_repo / "scripts" / "worktree-flow.ps1"
+    marker.parent.mkdir()
+    marker.write_text("# existing\n", encoding="utf-8")
+    before = git(git_repo, "status", "--porcelain")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "route",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload == {
+        "ok": True,
+        "result": {
+            "action": "defer",
+            "reason": "existing-workflow",
+            "workflows": ["repository worktree-flow"],
+        },
+    }
+    assert git(git_repo, "status", "--porcelain") == before
+    assert not (git_repo / ".solo-ai").exists()
 
 
 def test_cli_init_only_shows_plan_until_acceptance(git_repo: Path) -> None:

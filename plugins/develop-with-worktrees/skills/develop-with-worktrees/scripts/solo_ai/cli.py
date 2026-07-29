@@ -11,7 +11,6 @@ from typing import Any
 from . import VERSION
 from .config import (
     CommandSpec,
-    detect_existing_workflows,
     load_repo_config,
     load_verification_config,
 )
@@ -29,6 +28,7 @@ from .lifecycle import (
     local_enabled,
     maintenance_lock,
     ready,
+    repository_route,
     resume_in_place,
     retarget,
     set_local_enabled,
@@ -37,6 +37,7 @@ from .lifecycle import (
 )
 from .proof import approval_plan, proof_inputs, validate
 from .repo import GitRepo
+from .routing import detect_existing_workflows
 from .state import FINAL_TASK_STATES, StateStore
 from .util import (
     SoloAIError,
@@ -146,6 +147,14 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "doctor",
         help="read-only mode, policy, approval, task, and uninstall readiness report",
+    )
+    route = sub.add_parser(
+        "route",
+        help="return one compact read-only repository action for the Codex adapter",
+    )
+    route.add_argument(
+        "--session",
+        help="optional Codex session identifier supplied by the trusted hook",
     )
 
     start_parser = sub.add_parser("start", help="claim a slot and create a task branch")
@@ -291,15 +300,10 @@ def _parse_commands(values: list[str] | None) -> list[CommandSpec] | None:
 def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
     store = StateStore(repo)
     state = store.read()
+    route = repository_route(repo)
     result: dict[str, Any] = {
         "repository": str(repo.root),
-        "mode": "disabled"
-        if not local_enabled(repo)
-        else "defer"
-        if detect_existing_workflows(repo.root)
-        else "managed"
-        if (repo.policy_path() / ".solo-ai" / "config.toml").exists()
-        else "uninitialized",
+        "mode": "uninitialized" if route["action"] == "ask" else route["action"],
         "existing_workflows": detect_existing_workflows(repo.root),
         "default_branch": repo.default_branch(),
         "primary_clean": repo.is_clean(repo.primary_path),
@@ -617,6 +621,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "doctor":
         return _doctor(repo)
+    if args.command == "route":
+        return repository_route(repo, session_id=args.session)
     if args.command == "start":
         return start(
             repo,
@@ -775,6 +781,11 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
 
 def _human(command: str, result: dict[str, Any]) -> str:
     if command == "choose":
+        if result.get("decision") == "deferred":
+            return (
+                "检测到仓库已有成熟工作流；develop-with-worktrees 已静默让路，"
+                "未更改任何 DWW 状态。"
+            )
         choice = result.get("choice")
         if choice == "isolated":
             return "已选择独立目录开发；之后的普通修改会自动隔离。"

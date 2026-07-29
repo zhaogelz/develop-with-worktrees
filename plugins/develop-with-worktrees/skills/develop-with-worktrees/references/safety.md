@@ -2,6 +2,8 @@
 
 The CLI owns lifecycle identity; the Codex adapter supplies a strong but scoped guard. After the user trusts the plugin hook in `/hooks`, `PreToolUse` returns the supported `permissionDecision: deny` response before protected base-worktree writes made through supported Codex local tool paths. Strictly read-only Bash and the DWW lifecycle command are whitelisted; unknown Bash, `apply_patch`, Edit, and Write are fail-closed on a protected base worktree.
 
+A mature repository workflow has absolute routing priority. `SessionStart` injects one short deferral context; later Pre/Post Tool hooks step aside. The route reads but never deletes or rewrites existing DWW preferences and session authorizations.
+
 An explicit current-task choice is intentionally outside that protected mode. Its local authorization is bound to the exact worktree and a hash of the current Codex session, so both PreToolUse and PostToolUse step aside for that session. A child session must present a one-time parent delegation code, which is stored only as a hash. The adapter never widens this choice to every session in the repository or to a guessed time period. The long-term current-directory choice is also local-only and is blocked while active managed tasks, queue tickets, or lifecycle locks exist.
 
 This is not operating-system enforcement. A specialised path may not invoke the hook. When a later hook call or `doctor` observes a dirty unowned base, it stores a local alert and tells the agent to preserve it; immediate observation of an opt-out path is not promised. It never resets, cleans, rolls back, moves, or silently adopts those files. Hook failures also fail closed for a supported PreToolUse call.

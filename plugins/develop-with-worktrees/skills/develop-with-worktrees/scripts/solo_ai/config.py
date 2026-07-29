@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .repo import GitRepo
+from .routing import WORKFLOW_MARKERS
 from .util import SoloAIError, redact_text, sha256_file, sha256_text, stable_json
 
 CONFIG_SCHEMA = 2
@@ -533,23 +534,6 @@ def discover_validation_commands(root: Path) -> list[CommandSpec]:
             unique.append(command)
             seen.add(command.argv)
     return unique
-
-
-WORKFLOW_MARKERS = {
-    ".config/wt.toml": "Worktrunk",
-    ".conductor": "Conductor",
-    ".parallel-code": "Parallel Code",
-    "scripts/worktree-flow.ps1": "repository worktree-flow",
-    ".sdd": "agent orchestrator workspace",
-}
-
-
-def detect_existing_workflows(root: Path) -> list[str]:
-    return [
-        name
-        for relative, name in WORKFLOW_MARKERS.items()
-        if (root / relative).exists()
-    ]
 
 
 def workflow_marker_fingerprint(root: Path) -> str:

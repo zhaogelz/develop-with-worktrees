@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-beta.5 — 2026-07-29
+
+- Gives detected mature repository workflows absolute routing priority over DWW's long-term and current-task direct-development choices.
+- Adds compact read-only `dww route --json` output and a dependency-free shared routing decision used by both CLI and Codex Hook.
+- Makes `SessionStart` inject mature-workflow deferral once while later Pre/Post Tool hooks silently step aside, avoiding repeated context cost.
+- Makes every `choose` mode return `deferred` without changing DWW state when a mature workflow exists.
+
 ## 0.2.0-beta.4 — 2026-07-24
 
 - Replaces the multi-step repository adoption conversation with one plain-language three-choice prompt: isolate normal tasks, use the current directory for this task only, or remember current-directory development locally for this repository.

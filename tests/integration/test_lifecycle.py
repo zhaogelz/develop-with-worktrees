@@ -469,6 +469,43 @@ def test_choose_isolated_adopts_static_repository_without_a_second_choice(
     assert (git_repo / "AGENTS.md").exists()
 
 
+@pytest.mark.parametrize(
+    ("mode", "session_id"),
+    [
+        ("isolated", None),
+        ("current-task", "current-session"),
+        ("current-repository", None),
+    ],
+)
+def test_choose_defers_to_mature_workflow_without_writing_state(
+    git_repo: Path,
+    mode: str,
+    session_id: str | None,
+) -> None:
+    marker = git_repo / "scripts" / "worktree-flow.ps1"
+    marker.parent.mkdir()
+    marker.write_text("# existing\n", encoding="utf-8")
+    repo = GitRepo(git_repo)
+    before = git(git_repo, "status", "--porcelain")
+
+    result = choose(
+        repo,
+        mode=mode,
+        slots=3,
+        commands=None,
+        session_id=session_id,
+    )
+
+    assert result == {
+        "choice": mode,
+        "decision": "deferred",
+        "reason": "existing-workflow",
+        "workflows": ["repository worktree-flow"],
+    }
+    assert git(git_repo, "status", "--porcelain") == before
+    assert not repo.local_dir.exists()
+
+
 def test_choose_current_task_is_session_bound_and_delegates_only_by_code(
     git_repo: Path,
 ) -> None:

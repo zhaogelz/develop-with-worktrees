@@ -1,6 +1,12 @@
 # Develop with Worktrees
 
-`0.2.0-beta.4` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, skill, and write guard.
+`0.2.0-beta.5` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, skill, and write guard.
+
+## Mature repository workflows win
+
+Before any repository choice, a compact read-only route checks for a mature worktree or orchestration workflow. When one exists, DWW silently defers: it asks no three-choice question, writes no DWW state, and follows the repository's own instructions. This has absolute priority over previously stored one-task or long-term direct-directory choices; those local records remain untouched and can become active again only after the mature workflow marker is removed.
+
+The trusted `SessionStart` hook normally injects this route once. If hook context is unavailable, the skill runs one lightweight `dww route --json` fallback; it does not load the full `doctor` report.
 
 ## One question on the first modification
 
@@ -30,7 +36,7 @@ If no automated test is found, choice 1 still isolates the task and uses interna
 ## After choosing isolated work
 
 ```text
-doctor → start → edit only in returned directory → commit exact paths
+route → start → edit only in returned directory → commit exact paths
        → plan / verify → ready → finish
 ```
 
