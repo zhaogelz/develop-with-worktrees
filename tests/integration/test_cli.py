@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -45,7 +46,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.3.0-beta.2"
+    assert payload["version"] == "0.3.0-beta.3"
     assert payload["version"] == payload["plugin_version"] == manifest["version"]
     assert payload["version"] == pyproject["project"]["version"]
     assert payload["version"] == __version__
@@ -56,6 +57,22 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     assert payload["state_schema"] == 3
     assert "PreToolUse deny" in payload["codex_guard"]
     assert Path(payload["script"]).name == "dww.py"
+
+
+def test_hook_definition_remains_the_stable_trust_contract() -> None:
+    repository_root = Path(__file__).parents[2]
+    hook_definition = (
+        repository_root
+        / "plugins"
+        / "develop-with-worktrees"
+        / "hooks"
+        / "hooks.json"
+    )
+
+    assert (
+        hashlib.sha256(hook_definition.read_bytes()).hexdigest()
+        == "3749d6d42cfabe6a958832cb1c47e6a41e6a7d3eb1460de930ff9595ddd82d44"
+    )
 
 
 def test_user_facing_docs_describe_only_the_current_contract() -> None:
@@ -84,6 +101,9 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "multi-AI" in text
     assert "one-confirmation" in text
     assert "post-Finish publishing" in text
+    assert "stable compatibility contract" in text
+    assert "After every install or hook change" not in text
+    assert "每次安装或钩子升级后" not in text
 
 
 def test_cli_json_status_masks_uninitialized_state(git_repo: Path) -> None:

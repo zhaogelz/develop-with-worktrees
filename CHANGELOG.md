@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0-beta.3 — 2026-07-30
+
+- Treats `hooks/hooks.json` as a stable trust-compatibility contract so ordinary plugin, skill, and guard-script updates require no repeated user action.
+- Changes the AI flow to ask once only when Codex actually reports a first-install or changed-definition review, then use available host UI control after approval.
+- Explicitly forbids editing Codex trust storage, using the broad hook-trust bypass flag, or misusing enterprise managed hooks.
+
 ## 0.3.0-beta.2 — 2026-07-30
 
 - Clarifies that `remote_policy = "local-only"` constrains DWW and orchestration, rather than blocking an explicit user-requested publish after Finish.

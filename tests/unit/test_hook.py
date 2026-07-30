@@ -60,6 +60,17 @@ def _initialized(path: Path) -> GitRepo:
     return repo
 
 
+def test_doctor_describes_stable_hook_trust_without_repeated_user_work(
+    git_repo: Path,
+) -> None:
+    report = _doctor(GitRepo(git_repo))
+
+    assert "exact hook definition" in report["hook_trust"]
+    assert "need no repeated review" in report["hook_trust"]
+    assert "ask once" in report["hook_trust"]
+    assert "Run /hooks" not in report["hook_trust"]
+
+
 def test_hook_defers_to_existing_workflow_without_writing(git_repo: Path) -> None:
     marker = git_repo / "scripts" / "worktree-flow.ps1"
     marker.parent.mkdir()

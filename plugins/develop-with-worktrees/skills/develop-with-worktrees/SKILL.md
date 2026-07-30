@@ -13,6 +13,14 @@ Set `DWW` to this skill's absolute `scripts/dww.py` and invoke it only with `uv`
 uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
 ```
 
+## Hook trust without repeated user work
+
+Codex persists trust against the exact hook definition. Treat `hooks/hooks.json` as a stable compatibility contract: ordinary plugin, skill, and guard-script updates must not change it and must not cause a repeated trust request. Missing `SessionStart` context alone is not evidence that trust is missing; use the read-only route fallback without asking.
+
+Only act when Codex actually reports that a new or changed hook needs review. Explain the exact guard behavior change in plain language and ask for one confirmation. After explicit approval, if the current host exposes UI control, use it to open `/hooks` and complete the trust action instead of instructing the user to click through the interface. If host UI control is unavailable, state that product-surface limitation and do not claim the hard guard is active.
+
+The plugin and hook cannot approve their own trust. Never edit Codex trust storage, use `--dangerously-bypass-hook-trust`, or convert this personal plugin to an enterprise managed hook to avoid review.
+
 ## Route before any repository choice
 
 At the first modifying intent, use the compact route already injected by the trusted `SessionStart` hook. If no route context is available, run exactly one read-only fallback:

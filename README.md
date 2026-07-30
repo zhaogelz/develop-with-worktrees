@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.2` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.3.0-beta.3` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
 
 ## One conversation for complex work
 
@@ -54,7 +54,7 @@ route → start → edit only in returned directory → commit exact paths
 
 `start --in-place` remains an advanced compatibility path for a user who explicitly wants DWW's exact Commit/Ready/Finish safeguards in the current clean worktree; it is not choice 2.
 
-In Codex, the trusted `PreToolUse` hook hard-denies protected-worktree writes on supported local tool paths. It is a strong guardrail, not operating-system enforcement: specialised paths can opt out. When a later hooked call or `doctor` observes escaped dirty state, it preserves and records an alert; it never promises immediate observation. After every install or hook change, open `/hooks`, trust this plugin's hook, then start a new task. Until then, do not rely on the guard.
+In Codex, the trusted `PreToolUse` hook hard-denies protected-worktree writes on supported local tool paths. It is a strong guardrail, not operating-system enforcement: specialised paths can opt out. When a later hooked call or `doctor` observes escaped dirty state, it preserves and records an alert; it never promises immediate observation. Codex persists trust against the exact hook definition, so ordinary plugin updates keep the stable definition and require no repeated user action. Only a first install or an intentional definition change needs review. When Codex actually reports pending review, the AI explains the change and asks once; after approval it uses available host UI control to complete `/hooks` instead of asking the user to click through it. A surface without host UI control must report that limitation and must not claim the hard guard is active.
 
 ## Installation
 

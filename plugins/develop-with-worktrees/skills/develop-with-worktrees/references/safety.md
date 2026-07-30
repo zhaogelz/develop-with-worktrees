@@ -1,6 +1,8 @@
 # Safety reference
 
-The CLI owns lifecycle identity; the Codex adapter supplies a strong but scoped guard. After the user trusts the plugin hook in `/hooks`, `PreToolUse` returns the supported `permissionDecision: deny` response before protected base-worktree writes made through supported Codex local tool paths. Strictly read-only Bash and the DWW lifecycle command are whitelisted; unknown Bash, `apply_patch`, Edit, and Write are fail-closed on a protected base worktree.
+The CLI owns lifecycle identity; the Codex adapter supplies a strong but scoped guard. After the plugin hook is trusted, `PreToolUse` returns the supported `permissionDecision: deny` response before protected base-worktree writes made through supported Codex local tool paths. Strictly read-only Bash and the DWW lifecycle command are whitelisted; unknown Bash, `apply_patch`, Edit, and Write are fail-closed on a protected base worktree.
+
+Codex persists trust against the exact hook definition. `hooks/hooks.json` is therefore a stable compatibility contract: ordinary plugin, skill, and guard-script updates keep it unchanged and require no repeated user action. Only an actual first install or intentional definition change may trigger review. When Codex reports pending review, the AI asks once after explaining the changed guard behavior and, after approval, uses host UI control when available to complete `/hooks`. The plugin never edits Codex trust storage, bypasses hook trust, or claims a skipped hook is active.
 
 A mature repository workflow has absolute routing priority. `SessionStart` injects one short deferral context; later Pre/Post Tool hooks step aside. The route reads but never deletes or rewrites existing DWW preferences and session authorizations.
 

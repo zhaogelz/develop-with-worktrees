@@ -533,7 +533,11 @@ def _doctor(repo: GitRepo) -> dict[str, Any]:
         "Run deinit successfully before removing the Codex plugin. The plugin registry never scans disks."
     )
     report["hook_trust"] = (
-        "Codex plugin hooks require a user trust decision after install or hook changes. Run /hooks and start a new task before relying on in-place protection."
+        "Codex persists trust against the exact hook definition. Ordinary updates keep "
+        "hooks/hooks.json stable and need no repeated review. Only when Codex reports a "
+        "new or changed hook pending review should the AI explain it, ask once, and use "
+        "available host UI control after approval. Otherwise it must not claim the hard "
+        "guard is active."
     )
     return report
 
