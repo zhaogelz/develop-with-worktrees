@@ -583,8 +583,9 @@ def test_choose_current_task_serializes_parallel_child_delegation(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=5)
 
+    assert all(not thread.is_alive() for thread in threads)
     assert errors == []
     assert all(
         task_bypass_active(repo, session_id=f"child-{number}") for number in range(4)

@@ -408,7 +408,18 @@ class DirectoryLock:
 
     def _remove_stale(self) -> bool:
         owner_path = self.path / "owner.json"
-        owner = read_json(owner_path, {}) if owner_path.exists() else {}
+        try:
+            owner = read_json(owner_path, {}) if owner_path.exists() else {}
+        except SoloAIError as error:
+            # Windows 可能在锁目录刚被另一线程删除时短暂拒绝读取。
+            # 此时保守地视为锁仍有效；若目录已消失则直接重试抢锁。
+            cause = error.__cause__
+            if isinstance(cause, OSError) and cause.errno in {
+                errno.EACCES,
+                errno.ENOENT,
+            }:
+                return not self.path.exists()
+            raise
         if owner and process_matches(owner):
             return False
         try:
@@ -459,11 +470,35 @@ class DirectoryLock:
         traceback: TracebackType | None,
     ) -> None:
         if self.acquired:
-            try:
-                shutil.rmtree(self.path)
-            except FileNotFoundError:
-                pass
+            releasing: Path | None = self.path.with_name(
+                f".{self.path.name}.{uuid.uuid4().hex}.releasing"
+            )
+            deadline = time.monotonic() + 2.0
+            while True:
+                try:
+                    self.path.rename(releasing)
+                    break
+                except FileNotFoundError:
+                    releasing = None
+                    break
+                except OSError:
+                    # Windows 可能仍有并发读取者短暂占用 owner.json。
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
             self.acquired = False
+            if releasing is not None:
+                deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        shutil.rmtree(releasing)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.05)
 
 
 def directory_size(path: Path) -> int:

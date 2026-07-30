@@ -3,6 +3,7 @@ import json
 import signal
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -47,6 +48,64 @@ def test_directory_lock_normalizes_nonempty_destination_error(
             DirectoryLock(path),
         ):
             raise AssertionError("lock was acquired twice")
+
+
+def test_directory_lock_retries_transient_owner_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "lock"
+    original_read_json = util.read_json
+    owner_read_failed = threading.Event()
+    acquired = threading.Event()
+    errors: list[Exception] = []
+
+    def transient_owner_read(target: Path, default: object) -> object:
+        if target == path / "owner.json" and not owner_read_failed.is_set():
+            owner_read_failed.set()
+            cause = PermissionError(errno.EACCES, "Windows transient owner read failure")
+            raise SoloAIError("Local state is temporarily unreadable") from cause
+        return original_read_json(target, default)
+
+    def wait_for_lock() -> None:
+        try:
+            with DirectoryLock(path, wait=True):
+                acquired.set()
+        except Exception as exc:  # noqa: BLE001 - 断言等待线程不会泄漏异常。
+            errors.append(exc)
+
+    with DirectoryLock(path):
+        monkeypatch.setattr(util, "read_json", transient_owner_read)
+        thread = threading.Thread(target=wait_for_lock)
+        thread.start()
+        assert owner_read_failed.wait(timeout=2)
+        assert not acquired.is_set()
+
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert errors == []
+    assert acquired.is_set()
+
+
+def test_directory_lock_retries_transient_release_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "lock"
+    original_rename = Path.rename
+    release_attempts = 0
+
+    def transient_release(self: Path, target: Path) -> Path:
+        nonlocal release_attempts
+        if self == path and target.name.endswith(".releasing") and release_attempts == 0:
+            release_attempts += 1
+            raise PermissionError(errno.EACCES, "Windows transient release failure")
+        return original_rename(self, target)
+
+    with DirectoryLock(path):
+        monkeypatch.setattr(Path, "rename", transient_release)
+
+    assert release_attempts == 1
+    assert not path.exists()
+    assert not list(tmp_path.glob("*.releasing"))
 
 
 def test_unix_process_group_stops_with_term_before_waiting(
