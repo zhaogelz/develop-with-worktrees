@@ -7,6 +7,7 @@ from solo_ai.config import (
     discover_validation_commands,
     load_repo_config,
     load_verification_config,
+    managed_block,
     render_repo_config,
     render_verification_config,
 )
@@ -30,6 +31,15 @@ def test_renders_safe_default_reuse_policy() -> None:
     assert 'external_state = "unknown"' in rendered
     assert "{port}" in render_repo_config()
     assert "cleanup = { owned_paths = [] }" in render_repo_config()
+
+
+def test_managed_policy_separates_local_lifecycle_from_explicit_publish() -> None:
+    policy = managed_block()
+
+    assert "The DWW lifecycle is local-only" in policy
+    assert "After a successful Finish, an explicit user request" in policy
+    assert "ordinary non-force push" in policy
+    assert "separate from DWW" in policy
 
 
 def test_rejects_schema_two_verification_policy(git_repo: Path) -> None:

@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.1` 是一套默认不让并行 AI 改动互相覆盖的本地 Git 工作流。生命周期内核不绑定 Codex；本插件提供 Codex 的首次选择、多 AI 指挥中心、技能和写入保护适配。
+`0.3.0-beta.2` 是一套默认不让并行 AI 改动互相覆盖的本地 Git 工作流。生命周期内核不绑定 Codex；本插件提供 Codex 的首次选择、多 AI 指挥中心、技能和写入保护适配。
 
 ## 复杂任务只用一个中央对话
 
@@ -61,4 +61,4 @@ codex plugin marketplace add zhaogelz/develop-with-worktrees --ref main
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-插件不会自动升级，也绝不会 fetch、pull、push、创建 PR、rebase、squash、amend 或改写历史；团队仍按自己的节奏提交和创建 PR。
+插件和 DWW 生命周期不会自动升级，也绝不会 fetch、pull、push、创建 PR、rebase、squash、amend 或改写历史。Finish 成功后，用户可以明确要求从干净基线工作区执行一次独立的普通推送；必须先 dry-run、只推当前分支且禁止强推。

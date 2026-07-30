@@ -32,6 +32,8 @@ cleanup = { owned_paths = [] }
 
 `slots` is 1–32. Existing extra slots drain when the configured count is reduced and are never allocated until re-enabled. The worktree root is immutable after adoption. `cleanup.owned_paths` does not cause automatic deletion: it only names potential manual `prune-slot` targets.
 
+`remote_policy = "local-only"` governs DWW itself: Start, Ready, Finish, orchestration, and recovery never contact or mutate a remote. It does not prohibit a separate ordinary push after Finish when the user explicitly requests publishing. That push must come from the clean base worktree, use a dry-run first, and must not force-update a remote ref.
+
 ## `verification.toml` schema 3
 
 ```toml

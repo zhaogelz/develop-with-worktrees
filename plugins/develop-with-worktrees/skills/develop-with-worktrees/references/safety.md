@@ -13,3 +13,5 @@ An active in-place task is allowed only when its current worktree, branch, expec
 Commands use explicit argv and `shell=False`. Logs redact common credentials; proofs persist command digests, hashes, and redacted displays but not environment values, leases, raw session identifiers, or raw command lines. Validation subprocesses have identity snapshots, heartbeats, hard timeouts, and persistent receipts. Recovery never kills or adopts an unverified process.
 
 Finish never cleans caches or dependencies. Manual `prune-slot` is bounded to declared top-level ownership paths and requires a reviewed plan id plus digest. If any declared target contains `.env*`, a symlink or junction, or changes before execution, the whole prune stops without deleting anything.
+
+Remote publishing is never implicit. A user-requested post-Finish push must use the clean base worktree, verify the branch and remote, succeed in a dry-run, and avoid force, deletion, tags, PR creation, or deployment unless each additional action is separately authorized. Remote divergence stops the publish rather than triggering an automatic pull, rebase, merge, or history rewrite.

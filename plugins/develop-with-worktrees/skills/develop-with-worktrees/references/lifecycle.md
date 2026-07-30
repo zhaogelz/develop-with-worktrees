@@ -16,6 +16,8 @@ The host hook exposes no reliable parent-agent or task identifier. A writing chi
 
 `start` selects the least-recently-used idle slot and derives a task branch from the invocation worktree's current local branch. It records the branch, base commit, and base worktree. `commit` requires an exact complete path manifest. `ready` safely synchronizes a forward base, validates the Ready closure, and records proof. `finish` takes the local FIFO integration turn, verifies the clean recorded base, validates again after synchronization, and fast-forwards only that base. Durable integration receipts make detach, branch cleanup, and release retryable after interruption.
 
+Finish is the terminal DWW operation and remains local-only. An explicit user-requested remote sync occurs only after Finish as a separate ordinary Git operation from the clean base worktree. It starts with a push dry-run and permits only a non-force push of the current branch; DWW state, leases, and lifecycle locks are not extended to cover publishing.
+
 ## In-place task (explicit only)
 
 `start --in-place --session` is a separate task type, not a flag that disables the workflow. It runs only in the current clean attached worktree, requires a Codex session identifier, creates no slot or branch, and records:

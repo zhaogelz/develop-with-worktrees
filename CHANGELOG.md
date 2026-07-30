@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0-beta.2 — 2026-07-30
+
+- Clarifies that `remote_policy = "local-only"` constrains DWW and orchestration, rather than blocking an explicit user-requested publish after Finish.
+- Adds one bounded post-Finish publish contract: clean base worktree, current branch, push dry-run first, ordinary non-force push only.
+- Keeps fetch, pull, remote deletion, tags, PR creation, deployment, and history rewriting outside that permission unless separately requested.
+
 ## 0.3.0-beta.1 — 2026-07-30
 
 - Adds a local multi-AI command-center layer with one-confirmation batches, dependency frontiers, a five-worker development ceiling, pause/resume/cancel/handoff, and compact completion receipts.

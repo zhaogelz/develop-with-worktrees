@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.1` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.3.0-beta.2` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
 
 ## One conversation for complex work
 
@@ -63,6 +63,6 @@ codex plugin marketplace add zhaogelz/develop-with-worktrees --ref main
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-The plugin never updates itself, fetches, pulls, pushes, creates PRs, rebases, squashes, amends, or rewrites history.
+The plugin and DWW lifecycle never update themselves, fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After Finish, a user may explicitly request a separate ordinary push from the clean base worktree; it is dry-run first, current-branch only, and never forced.
 
 See [Chinese documentation](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), and [architecture](docs/architecture.md).

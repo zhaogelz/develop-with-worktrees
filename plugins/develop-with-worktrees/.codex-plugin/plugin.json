@@ -1,7 +1,7 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.3.0-beta.1",
+  "version": "0.3.0-beta.2",
   "description": "A local-first Codex workflow with a one-confirmation multi-AI command center, safe isolated integration, and mature-workflow deferral.",
   "skills": "skills",
   "author": {
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Develop with Worktrees",
     "shortDescription": "One confirmed plan for complex multi-AI work; safe local integration.",
-    "longDescription": "Silently defer to a repository's mature workflow. Simple work keeps the familiar isolated lifecycle; complex work gets one plain-language plan confirmation, then a central controller schedules up to five independent workers with local-only DWW integration and evidence-led completion.",
+    "longDescription": "Silently defer to a repository's mature workflow. Simple work keeps the familiar isolated lifecycle; complex work gets one plain-language plan confirmation, then a central controller schedules up to five independent workers with local-only DWW integration and evidence-led completion. Explicit publishing remains a separate dry-run-first, non-force operation after Finish.",
     "developerName": "develop-with-worktrees contributors",
     "category": "developer-tools",
     "capabilities": [

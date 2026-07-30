@@ -89,6 +89,16 @@ For an adopted repository, proactively run `start --name <purpose>` when a modif
 
 Ready/Finish synchronize only the recorded base branch. A deleted, rewound, or rewritten base requires explicit `retarget`; Finish only fast-forwards the recorded clean base worktree. It never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 
+## Explicit post-Finish publishing
+
+DWW and the orchestration layer never publish automatically. When the user explicitly asks to sync a completed result to a remote after a successful Finish, treat publishing as a separate operation outside the DWW lifecycle:
+
+1. Work only from the clean recorded base worktree and confirm its current branch and remote.
+2. Run a normal push dry-run for that current branch first.
+3. If the dry-run succeeds, use an ordinary non-force push of that branch. Set its upstream only when it has none.
+
+Do not fetch, pull, force-push, delete a remote ref, push tags, create a PR, or deploy unless the user separately and explicitly asks for that action. A failed or non-fast-forward dry-run stops publishing; preserve local work and report the remote divergence.
+
 ## Advanced guarded current-worktree task
 
 `start --in-place` remains a compatibility path only when the user explicitly asks to retain DWW's exact Commit/Ready/Finish safeguards while using the current clean worktree. It is not the meaning of choice 2. Follow [lifecycle.md](references/lifecycle.md) for its session, identity, and recovery requirements.
