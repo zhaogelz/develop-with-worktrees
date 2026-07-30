@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0-beta.1 — 2026-07-30
+
+- Adds a local multi-AI command-center layer with one-confirmation batches, dependency frontiers, a five-worker development ceiling, pause/resume/cancel/handoff, and compact completion receipts.
+- Keeps orchestration state separate from DWW lifecycle state; records only minimal task, decision, and proof references, never chat transcripts, raw reasoning, leases, or secrets.
+- Keeps same-file work optimistic by default, serializes only explicit high-risk resources, and escalates repeated unchanged failures rather than blindly retrying.
+- Adds explicit `dww` and `delegated` lifecycle adapter boundaries; orchestration remains local-only and never pushes, opens PRs, deploys, or guesses semantic merges.
+
 ## 0.2.0-beta.5 — 2026-07-29
 
 - Gives detected mature repository workflows absolute routing priority over DWW's long-term and current-task direct-development choices.

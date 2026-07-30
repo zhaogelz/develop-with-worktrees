@@ -35,6 +35,9 @@ from .lifecycle import (
     start,
     warm_slot,
 )
+from .orchestration import BatchStore, create_batch
+from .orchestration.adapters import adapter_for
+from .orchestration.models import MAX_DEVELOPMENT_PARALLELISM
 from .proof import approval_plan, proof_inputs, validate
 from .repo import GitRepo
 from .routing import detect_existing_workflows
@@ -156,6 +159,122 @@ def _parser() -> argparse.ArgumentParser:
         "--session",
         help="optional Codex session identifier supplied by the trusted hook",
     )
+
+    orchestration = sub.add_parser(
+        "orchestrate",
+        help="record and schedule a confirmed multi-AI task batch in local state",
+    )
+    orchestration_sub = orchestration.add_subparsers(
+        dest="orchestration_command", required=True
+    )
+    orchestration_plan = orchestration_sub.add_parser(
+        "plan", help="create a batch plan; it never dispatches workers"
+    )
+    orchestration_plan.add_argument("--goal", required=True)
+    orchestration_plan.add_argument(
+        "--task",
+        action="append",
+        default=[],
+        metavar="JSON_TASK",
+        help='task JSON, for example {"id":"api","title":"提供接口","acceptance":["可查询"]}',
+    )
+    orchestration_plan.add_argument("--controller", required=True)
+    orchestration_plan.add_argument(
+        "--adapter", choices=["dww", "delegated"], default="dww"
+    )
+    orchestration_plan.add_argument(
+        "--max-parallel", type=int, default=MAX_DEVELOPMENT_PARALLELISM
+    )
+    orchestration_plan.add_argument("--max-effective-changes", type=int, default=3)
+    orchestration_plan.add_argument("--max-repair-minutes", type=int, default=20)
+    orchestration_confirm = orchestration_sub.add_parser(
+        "confirm", help="mark the once-approved plan as schedulable"
+    )
+    orchestration_confirm.add_argument("--batch", required=True)
+    orchestration_confirm.add_argument("--controller", required=True)
+    orchestration_status = orchestration_sub.add_parser(
+        "status", help="show local batch state and the current schedulable frontier"
+    )
+    orchestration_status.add_argument("--batch")
+    orchestration_status.add_argument("--available-slots", type=int)
+    orchestration_frontier = orchestration_sub.add_parser(
+        "frontier", help="return only tasks the central controller may dispatch now"
+    )
+    orchestration_frontier.add_argument("--batch", required=True)
+    orchestration_frontier.add_argument("--available-slots", type=int)
+    orchestration_claim = orchestration_sub.add_parser(
+        "claim", help="central controller assigns one writer to a frontier task"
+    )
+    orchestration_claim.add_argument("--batch", required=True)
+    orchestration_claim.add_argument("--task", required=True)
+    orchestration_claim.add_argument("--worker", required=True)
+    orchestration_claim.add_argument("--controller", required=True)
+    orchestration_link = orchestration_sub.add_parser(
+        "link", help="record the DWW or delegated lifecycle task reference"
+    )
+    orchestration_link.add_argument("--batch", required=True)
+    orchestration_link.add_argument("--task", required=True)
+    orchestration_link.add_argument("--lifecycle-task", required=True)
+    orchestration_link.add_argument("--controller", required=True)
+    orchestration_complete = orchestration_sub.add_parser(
+        "complete", help="record a completed task with existing acceptance evidence"
+    )
+    orchestration_complete.add_argument("--batch", required=True)
+    orchestration_complete.add_argument("--task", required=True)
+    orchestration_complete.add_argument(
+        "--evidence", action="append", default=[], metavar="JSON_EVIDENCE"
+    )
+    orchestration_complete.add_argument("--controller", required=True)
+    orchestration_block = orchestration_sub.add_parser(
+        "block", help="locally pause one task while unrelated work can continue"
+    )
+    orchestration_block.add_argument("--batch", required=True)
+    orchestration_block.add_argument("--task", required=True)
+    orchestration_block.add_argument("--reason", required=True)
+    orchestration_block.add_argument("--controller", required=True)
+    orchestration_attempt = orchestration_sub.add_parser(
+        "record-attempt", help="record a repair attempt without blindly rerunning"
+    )
+    orchestration_attempt.add_argument("--batch", required=True)
+    orchestration_attempt.add_argument("--task", required=True)
+    orchestration_attempt.add_argument("--changed", choices=["true", "false"], required=True)
+    orchestration_attempt.add_argument("--summary", required=True)
+    orchestration_attempt.add_argument("--controller", required=True)
+    for command_name, help_text in (
+        ("pause", "stop dispatching while preserving in-flight work"),
+        ("resume", "resume dispatching preserved work"),
+    ):
+        item = orchestration_sub.add_parser(command_name, help=help_text)
+        item.add_argument("--batch", required=True)
+        item.add_argument("--controller", required=True)
+    orchestration_takeover = orchestration_sub.add_parser(
+        "take-over", help="let a new central session resume the preserved local batch"
+    )
+    orchestration_takeover.add_argument("--batch", required=True)
+    orchestration_takeover.add_argument("--controller", required=True)
+    orchestration_takeover.add_argument("--confirm", required=True)
+    orchestration_add = orchestration_sub.add_parser(
+        "add-task", help="add an internal task that stays inside the approved goal"
+    )
+    orchestration_add.add_argument("--batch", required=True)
+    orchestration_add.add_argument("--task", required=True, metavar="JSON_TASK")
+    orchestration_add.add_argument("--inside-approved-goal", action="store_true")
+    orchestration_add.add_argument("--controller", required=True)
+    orchestration_repair = orchestration_sub.add_parser(
+        "repair", help="create a fresh repair task for an attributed completed or blocked task"
+    )
+    orchestration_repair.add_argument("--batch", required=True)
+    orchestration_repair.add_argument("--source", action="append", default=[], required=True)
+    orchestration_repair.add_argument("--task", required=True, metavar="JSON_TASK")
+    orchestration_repair.add_argument("--reason", required=True)
+    orchestration_repair.add_argument("--controller", required=True)
+    orchestration_cancel = orchestration_sub.add_parser(
+        "cancel", help="cancel scheduling only; it never deletes task code"
+    )
+    orchestration_cancel.add_argument("--batch", required=True)
+    orchestration_cancel.add_argument("--task", required=True)
+    orchestration_cancel.add_argument("--confirm", required=True)
+    orchestration_cancel.add_argument("--controller", required=True)
 
     start_parser = sub.add_parser("start", help="claim a slot and create a task branch")
     start_parser.add_argument("--name", required=True)
@@ -295,6 +414,52 @@ def _parse_commands(values: list[str] | None) -> list[CommandSpec] | None:
             raise SoloAIError("--verify must be a non-empty JSON argv array of strings")
         commands.append(CommandSpec(tuple(raw)))
     return commands
+
+
+def _parse_json_objects(values: list[str], *, option: str) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for value in values:
+        try:
+            item = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise SoloAIError(f"{option} must be valid JSON: {exc}") from exc
+        if not isinstance(item, dict):
+            raise SoloAIError(f"{option} must be a JSON object")
+        result.append(item)
+    return result
+
+
+def _orchestration_available_slots(
+    repo: GitRepo, batch: dict[str, Any], requested: int | None
+) -> int:
+    if requested is not None:
+        if requested < 0:
+            raise SoloAIError("available_slots must not be negative")
+        return requested
+    return adapter_for(str(batch["adapter"])).available_slots(
+        repo, batch_limit=int(batch["max_parallel"])
+    )
+
+
+def _orchestration_status(
+    repo: GitRepo, *, batch_id: str | None, available_slots: int | None
+) -> dict[str, Any]:
+    store = BatchStore(repo)
+    batches = [store.batch(batch_id)] if batch_id else store.list()
+    return {
+        "batches": [
+            {
+                **batch,
+                "frontier": store.frontier(
+                    str(batch["id"]),
+                    available_slots=_orchestration_available_slots(
+                        repo, batch, available_slots
+                    ),
+                ),
+            }
+            for batch in batches
+        ]
+    }
 
 
 def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
@@ -581,6 +746,108 @@ def _prune(
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     repo = GitRepo(args.repo)
+    if args.command == "orchestrate":
+        store = BatchStore(repo)
+        command = args.orchestration_command
+        if command == "plan":
+            return create_batch(
+                repo,
+                goal=args.goal,
+                tasks=_parse_json_objects(args.task, option="--task"),
+                controller=args.controller,
+                adapter=args.adapter,
+                max_parallel=args.max_parallel,
+                max_effective_changes=args.max_effective_changes,
+                max_repair_minutes=args.max_repair_minutes,
+            )
+        if command == "confirm":
+            return store.confirm(args.batch, controller=args.controller)
+        if command == "status":
+            return _orchestration_status(
+                repo,
+                batch_id=args.batch,
+                available_slots=args.available_slots,
+            )
+        if command == "frontier":
+            batch = store.batch(args.batch)
+            return {
+                "batch_id": args.batch,
+                "tasks": store.frontier(
+                    args.batch,
+                    available_slots=_orchestration_available_slots(
+                        repo, batch, args.available_slots
+                    ),
+                ),
+            }
+        if command == "claim":
+            batch = store.batch(args.batch)
+            return store.claim(
+                args.batch,
+                task_id=args.task,
+                worker=args.worker,
+                controller=args.controller,
+                available_slots=_orchestration_available_slots(repo, batch, None),
+            )
+        if command == "link":
+            return store.link_lifecycle_task(
+                args.batch,
+                task_id=args.task,
+                lifecycle_task=args.lifecycle_task,
+                controller=args.controller,
+            )
+        if command == "complete":
+            return store.complete(
+                args.batch,
+                task_id=args.task,
+                evidence=_parse_json_objects(args.evidence, option="--evidence"),
+                controller=args.controller,
+            )
+        if command == "block":
+            return store.block(
+                args.batch,
+                task_id=args.task,
+                reason=args.reason,
+                controller=args.controller,
+            )
+        if command == "record-attempt":
+            return store.record_attempt(
+                args.batch,
+                task_id=args.task,
+                changed=args.changed == "true",
+                summary=args.summary,
+                controller=args.controller,
+            )
+        if command == "pause":
+            return store.pause(args.batch, controller=args.controller)
+        if command == "resume":
+            return store.resume(args.batch, controller=args.controller)
+        if command == "take-over":
+            return store.take_over(
+                args.batch, controller=args.controller, confirm=args.confirm
+            )
+        if command == "add-task":
+            return store.add_task(
+                args.batch,
+                raw_task=_parse_json_objects([args.task], option="--task")[0],
+                inside_approved_goal=args.inside_approved_goal,
+                controller=args.controller,
+            )
+        if command == "repair":
+            return store.create_repair(
+                args.batch,
+                source_ids=args.source,
+                raw_task=_parse_json_objects([args.task], option="--task")[0],
+                reason=args.reason,
+                controller=args.controller,
+            )
+        if command == "cancel":
+            return store.cancel(
+                args.batch,
+                task_id=args.task,
+                confirm=args.confirm,
+                controller=args.controller,
+            )
+        raise SoloAIError(f"Unknown orchestration command: {command}")
     if args.command == "init":
         return initialize(
             repo,
@@ -834,7 +1101,13 @@ def _redact_leases(value: Any) -> Any:
             key: _redact_leases(item)
             for key, item in value.items()
             if key
-            not in {"lease", "lease_owner", "session_fingerprint", "delegation_code"}
+            not in {
+                "lease",
+                "lease_owner",
+                "session_fingerprint",
+                "delegation_code",
+                "controller",
+            }
         }
     if isinstance(value, list):
         return [_redact_leases(item) for item in value]

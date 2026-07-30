@@ -1,25 +1,26 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.2.0-beta.5",
-  "description": "A local-first Codex workflow that silently defers to mature repository workflows and otherwise offers one plain-language choice with safe isolated integration.",
+  "version": "0.3.0-beta.1",
+  "description": "A local-first Codex workflow with a one-confirmation multi-AI command center, safe isolated integration, and mature-workflow deferral.",
   "skills": "skills",
   "author": {
     "name": "develop-with-worktrees contributors"
   },
   "interface": {
     "displayName": "Develop with Worktrees",
-    "shortDescription": "Respect mature workflows; otherwise choose safe task isolation once.",
-    "longDescription": "Silently defer to a repository's mature workflow. Otherwise ask once whether to isolate each task, use this directory for one task, or remember normal current-directory development. Isolated work uses exact-path commits, approval-bound validation, FIFO local integration, and safe deinitialization.",
+    "shortDescription": "One confirmed plan for complex multi-AI work; safe local integration.",
+    "longDescription": "Silently defer to a repository's mature workflow. Simple work keeps the familiar isolated lifecycle; complex work gets one plain-language plan confirmation, then a central controller schedules up to five independent workers with local-only DWW integration and evidence-led completion.",
     "developerName": "develop-with-worktrees contributors",
     "category": "developer-tools",
     "capabilities": [
       "Git worktree task isolation",
+      "One-confirmation multi-AI task orchestration",
       "Session-bound one-task direct-development choice",
       "Local validation and integration gates",
       "Safe local lifecycle cleanup"
     ],
-    "defaultPrompt": "Route this modifying Git task first. Silently defer to an existing mature workflow; otherwise follow the managed, local-choice, or single first-write question returned by the route."
+    "defaultPrompt": "Route this modifying Git task first. Silently defer to an existing mature workflow; use one plain-language confirmed plan for a complex goal, otherwise follow the managed or local-choice route."
   },
   "license": "MIT",
   "keywords": [

@@ -1,6 +1,14 @@
 # Develop with Worktrees
 
-`0.2.0-beta.5` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, skill, and write guard.
+`0.3.0-beta.1` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+
+## One conversation for complex work
+
+Simple work stays simple: one AI uses the normal isolated lifecycle. For a complex goal, Codex first presents a short plan in plain language and waits for one confirmation. Only then does the central conversation dispatch independently verifiable tasks, up to `min(5, configured slots, idle slots)` at once.
+
+The command center keeps only a compact local task graph, dependencies, task status, lifecycle/proof references, and key decisions in Git common-dir state. It does not keep chat transcripts, raw reasoning, leases, or secrets. Pausing, cancelling, or moving to a new central conversation preserves branches and files; cancellation never deletes work.
+
+Same-file predictions are allowed to run optimistically. Only explicit high-risk resources such as migrations, lockfiles, and shared contracts are serialized. Clean Git merges that pass Ready/Finish integrate locally; text or semantic conflicts are sent to a fresh repair task instead of guessed. There is no default reviewer AI, resident daemon, push, PR, deploy, or full-repository final test.
 
 ## Mature repository workflows win
 

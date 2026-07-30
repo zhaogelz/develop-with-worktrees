@@ -1,6 +1,6 @@
 ---
 name: develop-with-worktrees
-description: "Use for any Git-repository task that may modify files. Route first and silently defer to mature repository workflows; otherwise ask one plain-language choice on the first write, then default to isolated local worktrees. Do not use for read-only analysis."
+description: "Use for any Git-repository task that may modify files. Route first, let mature workflows win, and use one plain-language plan confirmation for complex multi-AI work; otherwise use safe isolated local worktrees. Do not use for read-only analysis."
 ---
 
 # Develop with Worktrees
@@ -28,9 +28,28 @@ Do not use the full `doctor` report for routing.
 - `managed`: proactively start the normal isolated task.
 - `ask`: and only `ask`, show the single question below.
 
+## Complex multi-AI work: one central conversation
+
+Treat a request as complex only when it has multiple independently verifiable outcomes, real dependencies, or an explicit shared contract. Keep a simple request as one normal DWW task: do not create a batch, extra worker, review worker, or status dashboard by default.
+
+For a complex request, the current Codex conversation is the **only controller**. First give the user a short, plain-language plan made of vertical outcomes (or a contract-first task followed by its consumers), including the result each task will make visible. Ask for one confirmation. Do not dispatch a worker, create a DWW task, or write orchestration state before that confirmation.
+
+If route is `ask`, fold the default isolated-directory choice into this same plan confirmation: say that confirmation will use separate directories and local-only integration. After the user confirms, run `choose --mode isolated`, then create and confirm the orchestration batch. Do not show the separate three-choice prompt as well. If the user instead explicitly asks for one AI or current-directory work, follow that explicit choice and do not create a batch.
+
+After confirmation, create one opaque controller identifier locally, pass it to `dww orchestrate plan` and `dww orchestrate confirm`, and never give it to workers. The scheduler may dispatch at most `min(5, configured DWW slots, idle DWW slots)` development tasks. Validation remains governed by DWW's machine-global weighted queue.
+
+- Only the controller may call `orchestrate claim`, start workers, add an internal task, or hand off the controller. A worker receives one task and has no authority to spawn another worker.
+- Give each worker exactly one writer task. Same-file predictions do not serialize work. Only an explicit high-risk `exclusive_resources` value (for example a migration, lockfile, or shared contract) serializes tasks.
+- Let each worker use its own ordinary DWW lifecycle. Git-clean merges with Ready/Finish evidence integrate locally; never guess text or semantic conflicts. Assign a new repair task from the latest base to the original owner when possible, otherwise make a dedicated integration repair task.
+- A blocked task stops only its dependents. Continue unrelated frontier tasks. Record a repair attempt only when the diagnosis changed; two unchanged failures, business ambiguity, safety, data, permission, or scope changes require the central conversation to ask the user.
+- Record existing proof/receipt references with `orchestrate complete`. At batch end, run only a targeted combination check that lacks evidence; do not add a default full repository test or review AI.
+- `orchestrate pause`, `resume`, `cancel`, and `take-over` preserve code and local state. Cancellation never deletes a branch or file. A future central conversation can inspect status, take over with the exact batch id, and continue; no resident daemon is implied.
+
+`dww` is the adapter for a `managed` repository. A mature repository may participate only through an explicit `delegated` adapter chosen by its own workflow; never parse arbitrary instructions or invent an external command. If it already has an external orchestrator, fully defer.
+
 ## First modifying intent in an unchosen repository
 
-Read-only analysis never asks a question or claims a task. After repository instructions and the compact route are read, when the result is `ask`, show exactly this one question:
+Read-only analysis never asks a question or claims a task. For a simple request, after repository instructions and the compact route are read, when the result is `ask`, show exactly this one question:
 
 ```text
 此仓库怎么修改？

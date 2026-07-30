@@ -46,6 +46,7 @@ DWW_SUBCOMMANDS = {
     "settings",
     "doctor",
     "route",
+    "orchestrate",
     "start",
     "commit",
     "ready",

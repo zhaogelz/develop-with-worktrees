@@ -78,6 +78,17 @@ def test_hook_defers_to_existing_workflow_without_writing(git_repo: Path) -> Non
     assert not (git_repo / ".solo-ai").exists()
 
 
+def test_hook_recognizes_local_orchestration_commands_in_a_managed_repository(
+    git_repo: Path,
+) -> None:
+    _initialized(git_repo)
+    command = (
+        f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
+        "orchestrate status"
+    )
+    assert HOOK.decide(_payload(git_repo, tool="Bash", command=command)) is None
+
+
 def test_hook_mature_workflow_precedes_current_task_choice(git_repo: Path) -> None:
     repo = GitRepo(git_repo)
     choose(
