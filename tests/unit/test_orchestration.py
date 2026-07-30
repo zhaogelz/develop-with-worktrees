@@ -218,6 +218,26 @@ def test_new_controller_can_take_over_and_add_an_internal_task(git_repo) -> None
     assert added["task"]["kind"] == "repair"
 
 
+def test_pause_and_resume_stop_only_new_dispatch_and_preserve_running_work(git_repo) -> None:
+    repo = GitRepo(git_repo)
+    batch = _create(repo)
+    store = BatchStore(repo)
+    batch_id = str(batch["id"])
+    store.confirm(batch_id, controller="central-controller")
+    store.claim(batch_id, task_id="api", worker="worker-api", controller="central-controller")
+
+    paused = store.pause(batch_id, controller="central-controller")
+    assert paused["status"] == "paused"
+    assert paused["tasks"]["api"]["status"] == "running"
+    assert store.frontier(batch_id, available_slots=5) == []
+
+    resumed = store.resume(batch_id, controller="central-controller")
+    assert resumed["status"] == "running"
+    assert [item["id"] for item in store.frontier(batch_id, available_slots=5)] == [
+        "copy"
+    ]
+
+
 def test_fresh_repair_task_unblocks_downstream_without_reopening_old_task(git_repo) -> None:
     repo = GitRepo(git_repo)
     batch = _create(repo)
