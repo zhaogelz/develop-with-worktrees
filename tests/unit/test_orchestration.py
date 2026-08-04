@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from solo_ai.orchestration import BatchStore, create_batch
 from solo_ai.orchestration.scheduler import frontier
 from solo_ai.repo import GitRepo
@@ -50,7 +49,9 @@ def test_complex_batch_waits_for_one_confirmation_and_uses_a_separate_namespace(
 
     assert batch["status"] == "awaiting-confirmation"
     assert frontier(batch, available_slots=5) == []
-    assert (repo.common_dir / "solo-ai-orchestration" / "batches" / f"{batch['id']}.json").exists()
+    assert (
+        repo.common_dir / "solo-ai-orchestration" / "batches" / f"{batch['id']}.json"
+    ).exists()
     assert not (repo.local_dir / "state.json").exists()
 
     store = BatchStore(repo)
@@ -118,7 +119,9 @@ def test_blocked_task_only_stops_its_downstream_and_repeated_unchanged_failure_e
     store = BatchStore(repo)
     batch_id = str(batch["id"])
     store.confirm(batch_id, controller="central-controller")
-    store.claim(batch_id, task_id="api", worker="worker-api", controller="central-controller")
+    store.claim(
+        batch_id, task_id="api", worker="worker-api", controller="central-controller"
+    )
     first = store.record_attempt(
         batch_id,
         task_id="api",
@@ -150,17 +153,19 @@ def test_acceptance_ledger_requires_evidence_and_cancel_preserves_code(
         goal="完成一个小改动",
         controller="central-controller",
         adapter="delegated",
-        tasks=[
-            {"id": "one", "title": "完成改动", "acceptance": ["测试通过"]}
-        ],
+        tasks=[{"id": "one", "title": "完成改动", "acceptance": ["测试通过"]}],
     )
     store = BatchStore(repo)
     batch_id = str(batch["id"])
     store.confirm(batch_id, controller="central-controller")
-    store.claim(batch_id, task_id="one", worker="worker-one", controller="central-controller")
+    store.claim(
+        batch_id, task_id="one", worker="worker-one", controller="central-controller"
+    )
 
     with pytest.raises(SoloAIError, match="acceptance evidence"):
-        store.complete(batch_id, task_id="one", evidence=[], controller="central-controller")
+        store.complete(
+            batch_id, task_id="one", evidence=[], controller="central-controller"
+        )
 
     done = store.complete(
         batch_id,
@@ -170,7 +175,9 @@ def test_acceptance_ledger_requires_evidence_and_cancel_preserves_code(
     )
     assert done["status"] == "completed"
     assert done["acceptance"]["missing"] == []
-    receipt = repo.common_dir / "solo-ai-orchestration" / "receipts" / f"{batch_id}.json"
+    receipt = (
+        repo.common_dir / "solo-ai-orchestration" / "receipts" / f"{batch_id}.json"
+    )
     assert receipt.exists()
 
     cancelled = create_batch(
@@ -218,13 +225,17 @@ def test_new_controller_can_take_over_and_add_an_internal_task(git_repo) -> None
     assert added["task"]["kind"] == "repair"
 
 
-def test_pause_and_resume_stop_only_new_dispatch_and_preserve_running_work(git_repo) -> None:
+def test_pause_and_resume_stop_only_new_dispatch_and_preserve_running_work(
+    git_repo,
+) -> None:
     repo = GitRepo(git_repo)
     batch = _create(repo)
     store = BatchStore(repo)
     batch_id = str(batch["id"])
     store.confirm(batch_id, controller="central-controller")
-    store.claim(batch_id, task_id="api", worker="worker-api", controller="central-controller")
+    store.claim(
+        batch_id, task_id="api", worker="worker-api", controller="central-controller"
+    )
 
     paused = store.pause(batch_id, controller="central-controller")
     assert paused["status"] == "paused"
@@ -238,13 +249,17 @@ def test_pause_and_resume_stop_only_new_dispatch_and_preserve_running_work(git_r
     ]
 
 
-def test_fresh_repair_task_unblocks_downstream_without_reopening_old_task(git_repo) -> None:
+def test_fresh_repair_task_unblocks_downstream_without_reopening_old_task(
+    git_repo,
+) -> None:
     repo = GitRepo(git_repo)
     batch = _create(repo)
     store = BatchStore(repo)
     batch_id = str(batch["id"])
     store.confirm(batch_id, controller="central-controller")
-    store.claim(batch_id, task_id="api", worker="worker-api", controller="central-controller")
+    store.claim(
+        batch_id, task_id="api", worker="worker-api", controller="central-controller"
+    )
     store.block(
         batch_id,
         task_id="api",

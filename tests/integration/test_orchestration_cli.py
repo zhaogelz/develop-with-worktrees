@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,10 +20,20 @@ def _runner() -> Path:
 
 def _call(repo: Path, *arguments: str) -> dict[str, object]:
     completed = subprocess.run(
-        ["uv", "run", "--script", str(_runner()), "--repo", str(repo), "--json", *arguments],
+        [
+            "uv",
+            "run",
+            "--script",
+            str(_runner()),
+            "--repo",
+            str(repo),
+            "--json",
+            *arguments,
+        ],
         text=True,
         encoding="utf-8",
         errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"},
         capture_output=True,
         check=False,
         timeout=90,
@@ -33,7 +44,9 @@ def _call(repo: Path, *arguments: str) -> dict[str, object]:
     return payload["result"]
 
 
-def test_orchestration_cli_requires_confirmation_then_returns_frontier(git_repo: Path) -> None:
+def test_orchestration_cli_requires_confirmation_then_returns_frontier(
+    git_repo: Path,
+) -> None:
     planned = _call(
         git_repo,
         "orchestrate",
@@ -57,6 +70,8 @@ def test_orchestration_cli_requires_confirmation_then_returns_frontier(git_repo:
         ),
     )
     batch_id = str(planned["id"])
+    assert planned["goal"] == "让用户看见结果"
+    assert planned["tasks"]["api"]["title"] == "提供结果"
     assert planned["status"] == "awaiting-confirmation"
     assert "controller" not in planned
 

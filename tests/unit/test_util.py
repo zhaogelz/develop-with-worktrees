@@ -62,7 +62,9 @@ def test_directory_lock_retries_transient_owner_read_failure(
     def transient_owner_read(target: Path, default: object) -> object:
         if target == path / "owner.json" and not owner_read_failed.is_set():
             owner_read_failed.set()
-            cause = PermissionError(errno.EACCES, "Windows transient owner read failure")
+            cause = PermissionError(
+                errno.EACCES, "Windows transient owner read failure"
+            )
             raise SoloAIError("Local state is temporarily unreadable") from cause
         return original_read_json(target, default)
 
@@ -95,7 +97,11 @@ def test_directory_lock_retries_transient_release_failure(
 
     def transient_release(self: Path, target: Path) -> Path:
         nonlocal release_attempts
-        if self == path and target.name.endswith(".releasing") and release_attempts == 0:
+        if (
+            self == path
+            and target.name.endswith(".releasing")
+            and release_attempts == 0
+        ):
             release_attempts += 1
             raise PermissionError(errno.EACCES, "Windows transient release failure")
         return original_rename(self, target)

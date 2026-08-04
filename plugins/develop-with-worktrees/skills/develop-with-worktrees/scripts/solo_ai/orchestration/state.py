@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import copy
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..repo import GitRepo
-from ..util import DirectoryLock, SoloAIError, atomic_write_json, new_id, read_json, utc_timestamp
+from ..util import (
+    DirectoryLock,
+    SoloAIError,
+    atomic_write_json,
+    new_id,
+    read_json,
+    utc_timestamp,
+)
 from .adapters import adapter_for
 from .models import (
     MAX_DEVELOPMENT_PARALLELISM,
@@ -165,7 +173,9 @@ class BatchStore:
     @staticmethod
     def _controller(batch: dict[str, Any], controller: str) -> None:
         if controller != batch.get("controller"):
-            raise SoloAIError("Only the recorded central controller can schedule this batch")
+            raise SoloAIError(
+                "Only the recorded central controller can schedule this batch"
+            )
 
     @staticmethod
     def _task(batch: dict[str, Any], task_id: str) -> dict[str, Any]:
@@ -187,7 +197,11 @@ class BatchStore:
                 raise SoloAIError("Batch is not waiting for confirmation")
             batch["status"] = "running"
             batch["events"].append(
-                {"at": utc_timestamp(), "kind": "confirmed", "summary": "用户已确认计划"}
+                {
+                    "at": utc_timestamp(),
+                    "kind": "confirmed",
+                    "summary": "用户已确认计划",
+                }
             )
             return batch
 
@@ -200,7 +214,11 @@ class BatchStore:
                 raise SoloAIError("Only a running batch can be paused")
             batch["status"] = "paused"
             batch["events"].append(
-                {"at": utc_timestamp(), "kind": "paused", "summary": "停止派发，已有任务保留"}
+                {
+                    "at": utc_timestamp(),
+                    "kind": "paused",
+                    "summary": "停止派发，已有任务保留",
+                }
             )
             return batch
 
@@ -213,7 +231,11 @@ class BatchStore:
                 raise SoloAIError("Only a paused batch can be resumed")
             batch["status"] = "running"
             batch["events"].append(
-                {"at": utc_timestamp(), "kind": "resumed", "summary": "继续派发未完成任务"}
+                {
+                    "at": utc_timestamp(),
+                    "kind": "resumed",
+                    "summary": "继续派发未完成任务",
+                }
             )
             return batch
 
@@ -224,7 +246,9 @@ class BatchStore:
     ) -> dict[str, Any]:
         """新总控会话接手已保留的本地批次；不会触碰任何 worker 文件。"""
         if confirm != batch_id:
-            raise SoloAIError("Controller handoff confirmation must exactly match the batch id")
+            raise SoloAIError(
+                "Controller handoff confirmation must exactly match the batch id"
+            )
         if not isinstance(controller, str) or not controller.strip():
             raise SoloAIError("controller must be a non-empty opaque identifier")
 
@@ -233,7 +257,11 @@ class BatchStore:
                 raise SoloAIError("Completed batches do not need a controller handoff")
             batch["controller"] = controller.strip()
             batch["events"].append(
-                {"at": utc_timestamp(), "kind": "controller-handoff", "summary": "新总控会话已接手"}
+                {
+                    "at": utc_timestamp(),
+                    "kind": "controller-handoff",
+                    "summary": "新总控会话已接手",
+                }
             )
             return batch
 
@@ -417,13 +445,17 @@ class BatchStore:
         controller: str,
     ) -> dict[str, Any]:
         if confirm != task_id:
-            raise SoloAIError("Cancellation confirmation must exactly match the task id")
+            raise SoloAIError(
+                "Cancellation confirmation must exactly match the task id"
+            )
 
         def update(batch: dict[str, Any]) -> dict[str, Any]:
             self._controller(batch, controller)
             task = self._task(batch, task_id)
             if task["status"] in {"completed", "cancelled"}:
-                raise SoloAIError("Completed or cancelled tasks cannot be cancelled again")
+                raise SoloAIError(
+                    "Completed or cancelled tasks cannot be cancelled again"
+                )
             task.update({"status": "cancelled", "code_preserved": True})
             _event(task, kind="cancelled", summary="已取消调度，分支和文件保留")
             return {"batch_id": batch_id, "task": copy.deepcopy(task)}
@@ -448,7 +480,9 @@ class BatchStore:
         def update(batch: dict[str, Any]) -> dict[str, Any]:
             self._controller(batch, controller)
             if batch["status"] not in {"running", "paused"}:
-                raise SoloAIError("Tasks can be added only after the approved batch has started")
+                raise SoloAIError(
+                    "Tasks can be added only after the approved batch has started"
+                )
             if planned.task_id in batch["tasks"]:
                 raise SoloAIError("An orchestration task already uses this id")
             unknown = sorted(set(planned.depends_on) - set(batch["tasks"]))
@@ -459,9 +493,16 @@ class BatchStore:
             batch["tasks"][planned.task_id] = planned.to_state()
             validate_batch(batch)
             batch["events"].append(
-                {"at": utc_timestamp(), "kind": "task-added", "summary": "已在原批准目标内补充内部任务"}
+                {
+                    "at": utc_timestamp(),
+                    "kind": "task-added",
+                    "summary": "已在原批准目标内补充内部任务",
+                }
             )
-            return {"batch_id": batch_id, "task": copy.deepcopy(batch["tasks"][planned.task_id])}
+            return {
+                "batch_id": batch_id,
+                "task": copy.deepcopy(batch["tasks"][planned.task_id]),
+            }
 
         return self._mutate(batch_id, update)
 
@@ -493,7 +534,9 @@ class BatchStore:
                 raise SoloAIError("An orchestration task already uses this repair id")
             sources = [self._task(batch, source_id) for source_id in source_ids]
             if any(source["status"] == "running" for source in sources):
-                raise SoloAIError("A running task must be blocked before creating its repair")
+                raise SoloAIError(
+                    "A running task must be blocked before creating its repair"
+                )
             dependencies = sorted(
                 {
                     dependency
@@ -518,7 +561,11 @@ class BatchStore:
                 )
             validate_batch(batch)
             batch["events"].append(
-                {"at": utc_timestamp(), "kind": "repair-created", "summary": reason.strip()}
+                {
+                    "at": utc_timestamp(),
+                    "kind": "repair-created",
+                    "summary": reason.strip(),
+                }
             )
             return {"batch_id": batch_id, "task": copy.deepcopy(repair_state)}
 

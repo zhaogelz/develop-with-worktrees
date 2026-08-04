@@ -72,7 +72,9 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         if "develop-with-worktrees" in str(path).replace("\\", "/")
         and path.parent.name == "hooks"
     ]
-    assert installed_hook_definitions, "installed plugin does not expose its hook definition"
+    assert installed_hook_definitions, (
+        "installed plugin does not expose its hook definition"
+    )
     source_hook_definition = source / "hooks" / "hooks.json"
     assert hashlib.sha256(installed_hook_definitions[0].read_bytes()).digest() == (
         hashlib.sha256(source_hook_definition.read_bytes()).digest()

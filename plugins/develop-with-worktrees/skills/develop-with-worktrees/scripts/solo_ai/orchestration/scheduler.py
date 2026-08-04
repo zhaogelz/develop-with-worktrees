@@ -17,9 +17,7 @@ def frontier(batch: dict[str, Any], *, available_slots: int) -> list[dict[str, A
     if remaining <= 0:
         return []
     occupied = {
-        resource
-        for task in running
-        for resource in task.get("exclusive_resources", [])
+        resource for task in running for resource in task.get("exclusive_resources", [])
     }
     ready: list[dict[str, Any]] = []
     for task_id in sorted(tasks):

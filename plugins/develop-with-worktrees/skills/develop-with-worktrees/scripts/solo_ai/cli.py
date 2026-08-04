@@ -237,7 +237,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     orchestration_attempt.add_argument("--batch", required=True)
     orchestration_attempt.add_argument("--task", required=True)
-    orchestration_attempt.add_argument("--changed", choices=["true", "false"], required=True)
+    orchestration_attempt.add_argument(
+        "--changed", choices=["true", "false"], required=True
+    )
     orchestration_attempt.add_argument("--summary", required=True)
     orchestration_attempt.add_argument("--controller", required=True)
     for command_name, help_text in (
@@ -261,10 +263,13 @@ def _parser() -> argparse.ArgumentParser:
     orchestration_add.add_argument("--inside-approved-goal", action="store_true")
     orchestration_add.add_argument("--controller", required=True)
     orchestration_repair = orchestration_sub.add_parser(
-        "repair", help="create a fresh repair task for an attributed completed or blocked task"
+        "repair",
+        help="create a fresh repair task for an attributed completed or blocked task",
     )
     orchestration_repair.add_argument("--batch", required=True)
-    orchestration_repair.add_argument("--source", action="append", default=[], required=True)
+    orchestration_repair.add_argument(
+        "--source", action="append", default=[], required=True
+    )
     orchestration_repair.add_argument("--task", required=True, metavar="JSON_TASK")
     orchestration_repair.add_argument("--reason", required=True)
     orchestration_repair.add_argument("--controller", required=True)
@@ -1125,7 +1130,7 @@ def main(argv: list[str] | None = None) -> int:
         result = _dispatch(args)
     except SoloAIError as exc:
         if args.json:
-            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=True))
         else:
             print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1133,7 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 {"ok": True, "result": _redact_leases(result)},
-                ensure_ascii=False,
+                ensure_ascii=True,
                 sort_keys=True,
             )
         )

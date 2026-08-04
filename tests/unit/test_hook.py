@@ -93,10 +93,7 @@ def test_hook_recognizes_local_orchestration_commands_in_a_managed_repository(
     git_repo: Path,
 ) -> None:
     _initialized(git_repo)
-    command = (
-        f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
-        "orchestrate status"
-    )
+    command = f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" orchestrate status'
     assert HOOK.decide(_payload(git_repo, tool="Bash", command=command)) is None
 
 

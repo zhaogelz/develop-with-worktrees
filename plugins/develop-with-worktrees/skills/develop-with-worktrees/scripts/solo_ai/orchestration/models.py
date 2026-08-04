@@ -44,7 +44,7 @@ class PlannedTask:
     kind: str = "vertical"
 
     @classmethod
-    def from_mapping(cls, raw: Any) -> "PlannedTask":
+    def from_mapping(cls, raw: Any) -> PlannedTask:
         if not isinstance(raw, dict):
             raise SoloAIError("task must be an object")
         task_id = _string(raw.get("id"), field="task.id")
@@ -52,7 +52,9 @@ class PlannedTask:
             raise SoloAIError(
                 "task.id must start with a lowercase letter and use only lowercase letters, numbers, _ or -"
             )
-        acceptance = _strings(raw.get("acceptance"), field=f"task[{task_id}].acceptance")
+        acceptance = _strings(
+            raw.get("acceptance"), field=f"task[{task_id}].acceptance"
+        )
         if not acceptance:
             raise SoloAIError(f"task[{task_id}].acceptance must not be empty")
         kind = str(raw.get("kind", "vertical"))
@@ -64,8 +66,12 @@ class PlannedTask:
             task_id=task_id,
             title=_string(raw.get("title"), field=f"task[{task_id}].title"),
             acceptance=acceptance,
-            depends_on=_strings(raw.get("depends_on"), field=f"task[{task_id}].depends_on"),
-            write_scope=_strings(raw.get("write_scope"), field=f"task[{task_id}].write_scope"),
+            depends_on=_strings(
+                raw.get("depends_on"), field=f"task[{task_id}].depends_on"
+            ),
+            write_scope=_strings(
+                raw.get("write_scope"), field=f"task[{task_id}].write_scope"
+            ),
             exclusive_resources=_strings(
                 raw.get("exclusive_resources"),
                 field=f"task[{task_id}].exclusive_resources",
@@ -127,7 +133,9 @@ def _assert_acyclic(tasks: list[PlannedTask]) -> None:
     dependencies = {task.task_id: set(task.depends_on) for task in tasks}
     completed: set[str] = set()
     while dependencies:
-        ready = sorted(task_id for task_id, values in dependencies.items() if not values)
+        ready = sorted(
+            task_id for task_id, values in dependencies.items() if not values
+        )
         if not ready:
             raise SoloAIError("tasks contain a dependency cycle")
         for task_id in ready:
@@ -154,7 +162,11 @@ def validate_batch(batch: dict[str, Any]) -> None:
     }:
         raise SoloAIError("orchestration state has an invalid batch status")
     parallelism = batch.get("max_parallel")
-    if isinstance(parallelism, bool) or not isinstance(parallelism, int) or not 1 <= parallelism <= MAX_DEVELOPMENT_PARALLELISM:
+    if (
+        isinstance(parallelism, bool)
+        or not isinstance(parallelism, int)
+        or not 1 <= parallelism <= MAX_DEVELOPMENT_PARALLELISM
+    ):
         raise SoloAIError(
             f"orchestration max_parallel must be between 1 and {MAX_DEVELOPMENT_PARALLELISM}"
         )

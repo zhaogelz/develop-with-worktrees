@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from solo_ai.config import CommandSpec
 from solo_ai.lifecycle import initialize
 from solo_ai.orchestration.adapters import adapter_for

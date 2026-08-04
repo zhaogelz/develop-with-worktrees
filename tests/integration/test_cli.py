@@ -62,11 +62,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
 def test_hook_definition_remains_the_stable_trust_contract() -> None:
     repository_root = Path(__file__).parents[2]
     hook_definition = (
-        repository_root
-        / "plugins"
-        / "develop-with-worktrees"
-        / "hooks"
-        / "hooks.json"
+        repository_root / "plugins" / "develop-with-worktrees" / "hooks" / "hooks.json"
     )
 
     assert (
