@@ -6,3 +6,6 @@ __pycache__/
 .cache/
 build/
 dist/
+
+# HyperFrames 渲染产物
+/videos/**/renders/
