@@ -21,7 +21,7 @@ from .util import (
     stable_json,
     utc_timestamp,
 )
-
+from .validation_queue import claim_validation_slot, record_profile_duration
 
 LOCKFILES = (
     "uv.lock",
@@ -31,7 +31,21 @@ LOCKFILES = (
     "Cargo.lock",
     "go.sum",
 )
-PROOF_SCHEMA = 2
+PROOF_SCHEMA = 3
+_EXECUTION_BASELINE = (
+    "PATH",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+)
 
 
 def changed_files(repo: GitRepo, *, cwd: Path, base: str) -> list[str]:
@@ -42,16 +56,39 @@ def changed_files(repo: GitRepo, *, cwd: Path, base: str) -> list[str]:
 
 
 def select_profiles(
-    config: VerificationConfig, files: list[str]
+    config: VerificationConfig,
+    files: list[str],
+    *,
+    levels: tuple[str, ...] = ("ready",),
 ) -> list[VerificationProfile]:
     selected: list[VerificationProfile] = []
     for profile in config.profiles:
+        if profile.level not in levels:
+            continue
         if not files or any(
             any(fnmatch.fnmatchcase(path, pattern) for pattern in profile.paths)
             for path in files
         ):
             selected.append(profile)
     return selected
+
+
+def unmapped_files(
+    config: VerificationConfig,
+    files: list[str],
+    *,
+    levels: tuple[str, ...] = ("ready",),
+) -> list[str]:
+    """只要候选改动没有 Ready 映射，就拒绝猜测该运行什么验证。"""
+    available = [profile for profile in config.profiles if profile.level in levels]
+    return [
+        path
+        for path in files
+        if not any(
+            any(fnmatch.fnmatchcase(path, pattern) for pattern in profile.paths)
+            for profile in available
+        )
+    ]
 
 
 def _tool(command: CommandSpec, cwd: Path) -> dict[str, str | None]:
@@ -149,12 +186,22 @@ def _profile_inputs(
         "command_digests": [command.fingerprint for command in profile.commands],
         "cross_task_reuse": profile.cross_task_reuse,
         "external_state": profile.external_state,
+        "input_closure": profile.input_closure,
+        "timeout_seconds": profile.timeout_seconds,
+        "resource_class": profile.resource_class,
+        "level": profile.level,
         "tracked_inputs": _matching_hashes(cwd, tracked, profile.input_paths),
         "environment": {
             name: sha256_text(os.environ[name]) if name in os.environ else "absent"
             for name in profile.environment
         },
     }
+
+
+def _execution_environment(profile: VerificationProfile) -> dict[str, str]:
+    """命令仅继承运行所需的受控基线和策略显式列出的变量。"""
+    names = (*_EXECUTION_BASELINE, *profile.environment)
+    return {name: os.environ[name] for name in names if name in os.environ}
 
 
 def approval_plan(
@@ -178,6 +225,10 @@ def approval_plan(
                 "external_state": profile.external_state,
                 "input_paths": list(profile.input_paths),
                 "environment": list(profile.environment),
+                "input_closure": profile.input_closure,
+                "timeout_seconds": profile.timeout_seconds,
+                "resource_class": profile.resource_class,
+                "level": profile.level,
             }
             for profile in verification.profiles
         ],
@@ -186,10 +237,18 @@ def approval_plan(
 
 
 def proof_inputs(
-    repo: GitRepo, *, cwd: Path, base: str, verification: VerificationConfig
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    base: str,
+    verification: VerificationConfig,
+    task_id: str | None = None,
+    levels: tuple[str, ...] = ("ready",),
+    force_task_scope: bool = False,
 ) -> tuple[dict[str, Any], list[tuple[VerificationProfile, dict[str, Any], str]]]:
     files = changed_files(repo, cwd=cwd, base=base)
-    profiles = select_profiles(verification, files)
+    profiles = select_profiles(verification, files, levels=levels)
+    missing = unmapped_files(verification, files, levels=levels)
     commands = [command for profile in profiles for command in profile.commands]
     tracked = _tracked(repo, cwd)
     shared = _shared_inputs(repo, cwd, commands, verification)
@@ -198,13 +257,15 @@ def proof_inputs(
     records: list[tuple[VerificationProfile, dict[str, Any], str]] = []
     for profile in profiles:
         inputs = _profile_inputs(profile, cwd=cwd, tracked=tracked, shared=shared)
-        # A default profile may only reuse in the identical candidate. Reuse across
-        # task branches is opt-in and only legal for a declared closed environment.
-        scope = (
-            "cross-task"
-            if profile.cross_task_reuse and profile.external_state == "none"
-            else f"candidate:{candidate_head}"
-        )
+        # 同一任务可在输入闭包未变时复用；跨任务复用仍需显式闭包和无外部状态。
+        if force_task_scope and task_id:
+            scope = f"task:{task_id}"
+        elif profile.cross_task_reuse and profile.external_state == "none":
+            scope = "cross-task"
+        elif task_id:
+            scope = f"task:{task_id}"
+        else:
+            scope = f"candidate:{candidate_head}"
         inputs["reuse_scope"] = scope
         records.append((profile, inputs, sha256_text(stable_json(inputs))))
     candidate = {
@@ -214,6 +275,8 @@ def proof_inputs(
         "candidate_tree": candidate_tree,
         "base_head": repo.git(["rev-parse", base], cwd=cwd).stdout.strip(),
         "files": files,
+        "unmapped_files": missing,
+        "levels": list(levels),
         "profiles": [profile.profile_id for profile in profiles],
         "profile_fingerprints": [item[2] for item in records],
     }
@@ -246,6 +309,7 @@ def _run_profile(
     profile: VerificationProfile,
     inputs: dict[str, Any],
     fingerprint: str,
+    task_id: str | None,
 ) -> dict[str, Any]:
     proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
     from .util import read_json
@@ -258,39 +322,72 @@ def _run_profile(
     run_id = new_id(f"profile-{profile.profile_id}")
     temp_dir = repo.local_dir / "logs" / "pending" / run_id
     runs: list[dict[str, Any]] = []
-    for index, command in enumerate(profile.commands, 1):
-        pending = temp_dir / f"{index:02d}.log"
-        code, duration = run_logged(command.argv, cwd=cwd, log_path=pending)
-        log_path, log_digest = _content_address_log(repo, pending)
-        runs.append(
-            {
-                "command_digest": command.fingerprint,
-                "command": command.redacted(),
-                "exit_code": code,
-                "duration_seconds": round(duration, 3),
-                "log": str(log_path),
-                "log_sha256": log_digest,
-            }
-        )
-        if code != 0:
-            proof = {
-                "schema_version": PROOF_SCHEMA,
-                "fingerprint": fingerprint,
-                "result": "failed",
-                "inputs": inputs,
-                "runs": runs,
-                "created_at": utc_timestamp(),
-            }
-            atomic_write_json(proof_path, proof)
-            raise SoloAIError(
-                f"Validation failed in profile {profile.profile_id}. Local redacted log: {log_path}"
+    with claim_validation_slot(profile.resource_class) as queue_claim:
+        for index, command in enumerate(profile.commands, 1):
+            pending = temp_dir / f"{index:02d}.log"
+            receipt_path = (
+                repo.local_dir / "validation-runs" / run_id / f"{index:02d}.json"
             )
+            result = run_logged(
+                command.argv,
+                cwd=cwd,
+                log_path=pending,
+                timeout_seconds=profile.timeout_seconds,
+                environment=_execution_environment(profile),
+                receipt_path=receipt_path,
+                receipt_metadata={
+                    "task_id": task_id,
+                    "profile_id": profile.profile_id,
+                    "profile_fingerprint": fingerprint,
+                    "queue_ticket": queue_claim["id"],
+                },
+            )
+            log_path, log_digest = _content_address_log(repo, pending)
+            runs.append(
+                {
+                    "command_digest": command.fingerprint,
+                    "command": command.redacted(),
+                    "exit_code": result.returncode,
+                    "duration_seconds": round(result.duration_seconds, 3),
+                    "timed_out": result.timed_out,
+                    "process": result.process,
+                    "receipt": str(receipt_path),
+                    "log": str(log_path),
+                    "log_sha256": log_digest,
+                }
+            )
+            if result.returncode != 0:
+                proof = {
+                    "schema_version": PROOF_SCHEMA,
+                    "fingerprint": fingerprint,
+                    "result": "failed",
+                    "inputs": inputs,
+                    "runs": runs,
+                    "queue": {
+                        "resource_class": profile.resource_class,
+                        "wait_seconds": queue_claim["wait_seconds"],
+                    },
+                    "created_at": utc_timestamp(),
+                }
+                atomic_write_json(proof_path, proof)
+                raise SoloAIError(
+                    f"Validation {'timed out' if result.timed_out else 'failed'} in profile {profile.profile_id}. Local redacted log: {log_path}"
+                )
+    record_profile_duration(
+        profile_id=profile.profile_id,
+        command_digests=[command.fingerprint for command in profile.commands],
+        duration_seconds=sum(float(run["duration_seconds"]) for run in runs),
+    )
     proof = {
         "schema_version": PROOF_SCHEMA,
         "fingerprint": fingerprint,
         "result": "passed",
         "inputs": inputs,
         "runs": runs,
+        "queue": {
+            "resource_class": profile.resource_class,
+            "wait_seconds": queue_claim["wait_seconds"],
+        },
         "created_at": utc_timestamp(),
     }
     atomic_write_json(proof_path, proof)
@@ -298,11 +395,32 @@ def _run_profile(
 
 
 def validate(
-    repo: GitRepo, *, cwd: Path, base: str, verification: VerificationConfig
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    base: str,
+    verification: VerificationConfig,
+    task_id: str | None = None,
+    level: str = "ready",
+    force_task_scope: bool = False,
 ) -> dict[str, Any]:
     from .util import read_json
 
-    inputs, records = proof_inputs(repo, cwd=cwd, base=base, verification=verification)
+    levels = ("ready", "full") if level == "full" else (level,)
+    inputs, records = proof_inputs(
+        repo,
+        cwd=cwd,
+        base=base,
+        verification=verification,
+        task_id=task_id,
+        levels=levels,
+        force_task_scope=force_task_scope,
+    )
+    if inputs["unmapped_files"] and not verification.static_only:
+        raise SoloAIError(
+            "No Ready verification profile covers every candidate path; add explicit path mappings:\n"
+            + "\n".join(f"- {path}" for path in inputs["unmapped_files"][:20])
+        )
     if not records and not verification.static_only:
         raise SoloAIError(
             "No verification profile covers the candidate changes; add an explicit path mapping or opt into static_only"
@@ -324,6 +442,7 @@ def validate(
             profile=profile,
             inputs=profile_inputs,
             fingerprint=profile_fingerprint,
+            task_id=task_id,
         )
         profile_proofs.append(
             {

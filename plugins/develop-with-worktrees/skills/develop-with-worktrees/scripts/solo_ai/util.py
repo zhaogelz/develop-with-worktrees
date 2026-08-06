@@ -6,13 +6,18 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from queue import Empty, Queue
+from types import TracebackType
+from typing import Any, Self
 
 import psutil
 
@@ -27,6 +32,16 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class LoggedRunResult:
+    """一次受控命令运行的可恢复摘要。"""
+
+    returncode: int
+    duration_seconds: float
+    timed_out: bool
+    process: dict[str, Any]
 
 
 def run(
@@ -60,12 +75,68 @@ def run(
     return result
 
 
+def _stop_process_tree(pid: int, *, force: bool) -> bool:
+    """终止已由当前调用持有的进程树，POSIX 场景中 PID 是独立进程组组长。"""
+    try:
+        if os.name != "nt":
+            os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
+            return True
+        root = psutil.Process(pid)
+        processes = [*root.children(recursive=True), root]
+        for process in reversed(processes):
+            try:
+                (process.kill if force else process.terminate)()
+            except psutil.Error:
+                continue
+        if not force:
+            _, alive = psutil.wait_procs(processes, timeout=5)
+            for process in alive:
+                try:
+                    process.kill()
+                except psutil.Error:
+                    continue
+        return True
+    except (OSError, psutil.Error):
+        return False
+
+
+def _stream_reader(stream: Any, output: Queue[str | None]) -> None:
+    try:
+        for line in iter(stream.readline, ""):
+            output.put(line)
+    finally:
+        output.put(None)
+
+
 def run_logged(
-    command: Sequence[str], *, cwd: Path, log_path: Path
-) -> tuple[int, float]:
-    """Run an explicit argv command and write a redacted transient log."""
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    timeout_seconds: float | None = None,
+    heartbeat_seconds: float = 30.0,
+    termination_grace_seconds: float = 5.0,
+    environment: dict[str, str] | None = None,
+    on_heartbeat: Callable[[dict[str, Any]], None] | None = None,
+    receipt_path: Path | None = None,
+    receipt_metadata: dict[str, Any] | None = None,
+) -> LoggedRunResult:
+    """运行显式 argv，并留下可恢复的日志和运行回执。
+
+    读取输出使用独立线程，主线程始终检查超时和心跳；不会因命令沉默而永久阻塞。
+    """
+    if timeout_seconds is not None and timeout_seconds <= 0:
+        raise SoloAIError("Command timeout_seconds must be positive")
+    if heartbeat_seconds <= 0:
+        raise SoloAIError("Command heartbeat_seconds must be positive")
+    if termination_grace_seconds <= 0:
+        raise SoloAIError("Command termination_grace_seconds must be positive")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    started_at = utc_timestamp()
+    creation_flags = (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    )
     with log_path.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write("$ " + " ".join(redact_text(item) for item in command) + "\n")
         handle.flush()
@@ -77,15 +148,106 @@ def run_logged(
             errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=environment,
+            start_new_session=os.name != "nt",
+            creationflags=creation_flags,
         )
         assert process.stdout is not None
-        for line in process.stdout:
-            handle.write(redact_text(line))
-            handle.flush()
+        snapshot = process_snapshot(process.pid)
+        receipt: dict[str, Any] = {
+            "schema_version": 1,
+            "command": [redact_text(item) for item in command],
+            "cwd": str(cwd),
+            "status": "running",
+            "started_at": started_at,
+            "process": snapshot,
+            "timeout_seconds": timeout_seconds,
+        }
+        if receipt_metadata:
+            receipt["metadata"] = receipt_metadata
+        if receipt_path:
+            atomic_write_json(receipt_path, receipt)
+        output: Queue[str | None] = Queue()
+        reader = threading.Thread(
+            target=_stream_reader, args=(process.stdout, output), daemon=True
+        )
+        reader.start()
+        reader_finished = False
+        timed_out = False
+        force_deadline: float | None = None
+        next_heartbeat = started + heartbeat_seconds
+        while not reader_finished or process.poll() is None:
+            now = time.monotonic()
+            if timeout_seconds is not None and now - started >= timeout_seconds:
+                timed_out = True
+                # 当前 Popen 是本调用刚创建且仍持有的对象；不能再依赖
+                # 用于跨调用恢复的快照比对，否则 macOS 上的进程元数据差异会
+                # 让超时命令自然跑完。
+                if process.poll() is None:
+                    _stop_process_tree(process.pid, force=False)
+                receipt["status"] = "terminating"
+                receipt["timeout_requested_at"] = utc_timestamp()
+                if receipt_path:
+                    atomic_write_json(receipt_path, receipt)
+                handle.write("\n[timeout: owned process tree termination requested]\n")
+                handle.flush()
+                timeout_seconds = None
+                force_deadline = now + termination_grace_seconds
+            if force_deadline is not None and now >= force_deadline:
+                if process.poll() is None:
+                    _stop_process_tree(process.pid, force=True)
+                handle.write(
+                    "[timeout: owned process tree force termination requested]\n"
+                )
+                handle.flush()
+                # 某些子进程会延迟关闭输出管道；根进程退出前持续复核，避免
+                # 忽略 SIGTERM 的进程永久卡住 Ready/verify。
+                force_deadline = now + 1.0 if process.poll() is None else None
+            if now >= next_heartbeat:
+                heartbeat = {
+                    "status": "running",
+                    "elapsed_seconds": round(now - started, 3),
+                    "process": snapshot,
+                }
+                receipt["last_heartbeat_at"] = utc_timestamp()
+                receipt["elapsed_seconds"] = heartbeat["elapsed_seconds"]
+                if receipt_path:
+                    atomic_write_json(receipt_path, receipt)
+                handle.write(
+                    f"[heartbeat elapsed={heartbeat['elapsed_seconds']:.3f}s]\n"
+                )
+                handle.flush()
+                if on_heartbeat:
+                    on_heartbeat(heartbeat)
+                next_heartbeat = now + heartbeat_seconds
+            try:
+                line = output.get(timeout=0.2)
+            except Empty:
+                continue
+            if line is None:
+                reader_finished = True
+            else:
+                handle.write(redact_text(line))
+                handle.flush()
         returncode = process.wait()
         duration = time.monotonic() - started
-        handle.write(f"\n[exit={returncode} duration={duration:.3f}s]\n")
-    return returncode, duration
+        handle.write(
+            f"\n[exit={returncode} duration={duration:.3f}s timed_out={str(timed_out).lower()}]\n"
+        )
+    result = LoggedRunResult(returncode, duration, timed_out, snapshot)
+    if receipt_path:
+        receipt.update(
+            {
+                "status": "timed_out" if timed_out else "finished",
+                "finished_at": utc_timestamp(),
+                "exit_code": returncode,
+                "duration_seconds": round(duration, 3),
+                "timed_out": timed_out,
+                "log": str(log_path),
+            }
+        )
+        atomic_write_json(receipt_path, receipt)
+    return result
 
 
 _REDACTIONS = (
@@ -138,7 +300,8 @@ def stable_json(value: Any) -> str:
 
 def atomic_write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    # 不把长目标文件名再次拼进临时文件，避免 Windows 深层工作树超过路径限制。
+    temporary = path.parent / f".{uuid.uuid4().hex}.tmp"
     temporary.write_text(value, encoding="utf-8", newline="\n")
     os.replace(temporary, path)
 
@@ -176,6 +339,17 @@ def ensure_within(path: Path, parent: Path) -> Path:
     return resolved
 
 
+def is_link_or_junction(path: Path) -> bool:
+    """不跟随链接或 Windows junction；清理时宁可保留也不能跨边界。"""
+    try:
+        status = path.lstat()
+    except OSError:
+        return False
+    if path.is_symlink():
+        return True
+    return bool(getattr(status, "st_file_attributes", 0) & 0x0400)
+
+
 def process_snapshot(pid: int | None = None) -> dict[str, Any]:
     actual_pid = pid or os.getpid()
     try:
@@ -201,11 +375,11 @@ def process_snapshot(pid: int | None = None) -> dict[str, Any]:
 
 def process_matches(snapshot: dict[str, Any]) -> bool:
     pid = snapshot.get("pid")
-    if not isinstance(pid, int):
+    if not isinstance(pid, int) or pid <= 0:
         return False
     try:
         current = process_snapshot(pid)
-    except (psutil.Error, OSError):
+    except (psutil.Error, OSError, ValueError):
         return False
     expected_time = snapshot.get("create_time")
     current_time = current.get("create_time")
@@ -234,7 +408,18 @@ class DirectoryLock:
 
     def _remove_stale(self) -> bool:
         owner_path = self.path / "owner.json"
-        owner = read_json(owner_path, {}) if owner_path.exists() else {}
+        try:
+            owner = read_json(owner_path, {}) if owner_path.exists() else {}
+        except SoloAIError as error:
+            # Windows 可能在锁目录刚被另一线程删除时短暂拒绝读取。
+            # 此时保守地视为锁仍有效；若目录已消失则直接重试抢锁。
+            cause = error.__cause__
+            if isinstance(cause, OSError) and cause.errno in {
+                errno.EACCES,
+                errno.ENOENT,
+            }:
+                return not self.path.exists()
+            raise
         if owner and process_matches(owner):
             return False
         try:
@@ -245,7 +430,7 @@ class DirectoryLock:
         except OSError:
             return False
 
-    def __enter__(self) -> "DirectoryLock":
+    def __enter__(self) -> Self:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         last_report = time.monotonic()
         while True:
@@ -278,13 +463,42 @@ class DirectoryLock:
                 shutil.rmtree(prepared, ignore_errors=True)
                 raise
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         if self.acquired:
-            try:
-                shutil.rmtree(self.path)
-            except FileNotFoundError:
-                pass
+            releasing: Path | None = self.path.with_name(
+                f".{self.path.name}.{uuid.uuid4().hex}.releasing"
+            )
+            deadline = time.monotonic() + 2.0
+            while True:
+                try:
+                    self.path.rename(releasing)
+                    break
+                except FileNotFoundError:
+                    releasing = None
+                    break
+                except OSError:
+                    # Windows 可能仍有并发读取者短暂占用 owner.json。
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
             self.acquired = False
+            if releasing is not None:
+                deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        shutil.rmtree(releasing)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.05)
 
 
 def directory_size(path: Path) -> int:

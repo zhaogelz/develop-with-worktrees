@@ -1,43 +1,35 @@
 # Lifecycle reference
 
-## Mode precedence
+Mode precedence is detected mature workflow, local long-term current-directory choice, exact current-task authorization, managed policy, then the first-modification choice. A mature workflow always wins, including over choices 2/3, and receives zero writes.
+
+The trusted `SessionStart` hook normally injects one compact route. When that context is unavailable, the skill runs one read-only `dww route --json`; it never uses the full `doctor` report for first-write routing. The actions are `defer`, `disabled`, `current-task`, `managed`, and `ask`.
+
+## First-modification choice
+
+The Codex adapter asks one plain-language question only when the user first intends to write an unchosen repository. `choose --mode isolated` adopts the normal lifecycle and accepts internal static-only checks when no test command is discovered. `choose --mode current-task --session` creates no tracked file, task, slot, or policy and makes that session behave as if DWW were absent; it refuses if this exact directory already owns an active DWW task, which must first Finish or be abandoned. `choose --mode current-repository` uses the same no-active-task, no-queue, and no-lock checks as `disable`, then stores the local preference without touching tracked files.
+
+Before applying any of those modes, `choose` routes again. If a mature workflow exists, it returns `deferred` and does not write policy, preference, session, task, or slot state.
+
+The host hook exposes no reliable parent-agent or task identifier. A writing child session therefore joins a current-task choice only through an explicit one-time delegation code. This is deliberately narrower than a time-window or repository-wide bypass, which would allow unrelated concurrent tasks. A new session without a registered delegation returns to the normal first-choice behavior.
+
+## Isolated task (default)
+
+`start` selects the least-recently-used idle slot and derives a task branch from the invocation worktree's current local branch. It records the branch, base commit, and base worktree. `commit` requires an exact complete path manifest. `ready` safely synchronizes a forward base, validates the Ready closure, and records proof. `finish` takes the local FIFO integration turn, verifies the clean recorded base, validates again after synchronization, and fast-forwards only that base. Durable integration receipts make detach, branch cleanup, and release retryable after interruption.
+
+Finish is the terminal DWW operation and remains local-only. An explicit user-requested remote sync occurs only after Finish as a separate ordinary Git operation from the clean base worktree. It starts with a push dry-run and permits only a non-force push of the current branch; DWW state, leases, and lifecycle locks are not extended to cover publishing.
+
+## In-place task (explicit only)
+
+`start --in-place --session` is a separate task type, not a flag that disables the workflow. It runs only in the current clean attached worktree, requires a Codex session identifier, creates no slot or branch, and records:
 
 ```text
-local disable -> defer to detected mature workflow -> managed adoption -> uninitialized confirmation
+base_worktree + branch + start_head + expected_head + session fingerprint + lease
 ```
 
-Detection is checked on every managed action. Existing Worktrunk, repository `scripts/worktree-flow.ps1`, and other configured markers always win. In defer mode the plugin writes no tracked policy, slot, process, validation, or compatibility state.
+Ignored data is allowed at start; Git tracked or nonignored changes are not. `commit`, `verify`, `ready`, `finish`, and `abandon` recheck the identical worktree, branch, expected HEAD, and session. Only exact-path `dww commit` advances `expected_head`. The verification base is always immutable `start_head`, never the moving branch ref. In-place validation forces task-scoped proofs.
 
-## First adoption
+In-place Finish writes a completion receipt and releases the task only. It does not merge, detach, switch, reset, clean, remove branches, or delete caches. A mismatch quarantines the task and preserves every file. Ordinary `recover` refuses it. After a prior Codex task ended, explicit `resume-in-place --confirm TASK:BRANCH:EXPECTED_HEAD` may transfer an unchanged active, ready, or quarantined task: it rechecks the recorded branch and expected HEAD, rejects live operations or validation, rotates the lease/session, clears Ready evidence, and changes no project files. A mismatch still requires manual restoration first.
 
-`init` with no acceptance flag only returns a plan. The user chooses one of:
+An active in-place task blocks isolated Finish into its same recorded base worktree and branch. Isolated tasks may still Start from currently committed base content and work in parallel.
 
-- `init --accept`: commit the three tracked policy artifacts.
-- `init --accept-static-only`: only after reviewing that no test command will run.
-- `init --decline`: save a local disable preference, with no tracked edit.
-
-The bootstrap is made in a temporary worktree from committed local default HEAD. If the primary worktree is clean it fast-forwards immediately. If it is dirty, the bootstrap reference and temporary policy checkout remain under Git common metadata; Start branches from that reference, and the first Finish after the primary is clean fast-forwards the bootstrap before integrating the task. Primary dirt is never stashed, copied, committed, or discarded.
-
-## Task state and lease
-
-```text
-inactive / idle -> starting -> active -> ready -> finished
-                              |              |
-                              +-> quarantined +-> active (after a new commit)
-```
-
-Excess reduced slots transition `active -> draining -> inactive`. Each task gets a random lease returned only by Start or explicit Recover. `status`, `doctor`, and JSON status redact it. Each mutable action atomically records `active_operation` plus process identity first, then clears it on exit. Recover rotates a lease only if that recorded operation is no longer live; it never repairs a quarantined task by guessing.
-
-Start chooses the least-recently-used idle configured slot. It is lazy: it checks out source on first use and does not install dependencies. The configured slot root is immutable after adoption, and every lifecycle entry parses the full policy strictly: Start, Ready, and Finish reject mismatched or invalid candidate policy before a task can be allocated or integrated. `warm-slot` resets a clean detached idle slot to the latest local default branch before preparation, so its dependencies match current source. It quarantines source-changing or protected-output slots and only releases a quarantined slot after manual cleanup plus an explicit rerun. A repository-wide maintenance lock prevents it from overlapping Start, pruning, or removal. All slot caches and environments remain local to that slot.
-
-## Commit, Ready, Finish
-
-Commit requires `--path` for every changed tracked or untracked path. The exact manifest must equal the task change set; a rename is counted as its removed source plus added destination, so both paths are required. After the exact check, the lifecycle stages tracked deletions and modifications plus listed existing paths, then checks the complete change set again before committing; it never uses an unscoped `git add -A`. It runs a repository-declared scanner when configured and then the built-in sensitive-content gate.
-
-Ready requires a clean committed branch. It predicts the merge of the current local default branch without writing, then performs a normal merge only when prediction succeeds. A conflict remains in the current task worktree. Ready scans and validates the candidate and records its proof.
-
-Finish creates a local FIFO ticket, takes one integration lock, checks both worktrees, synchronizes again, validates or reuses an exact proof, and performs only `git merge --ff-only` into the local default branch. A conflicting later task leaves the queue and keeps its worktree; it does not hold the queue hostage. No remote Git operation is part of this lifecycle.
-
-## Recover, abandon, deinit
-
-`disable` refuses while an active or quarantined task, or an integration ticket, exists; finish, stop, abandon, or recover first. `abandon` needs an exact task id and current lease. It preserves unknown/protected ignored files by quarantining instead of cleaning. `deinit` takes the same maintenance lock, preflights every managed slot for registration, cleanliness, and protected data, then prepares the exact tracked-policy deletion in a temporary branch. It removes only the preflighted registered worktrees and restores any earlier release if a later release fails; it fast-forwards deletion only after every release succeeds. Any cleanup failure leaves the tracked policy and local state available for recovery. It never scans disks for repositories and never removes another tool's worktree.
+`abandon`, `prune-slot`, and `deinit` require explicit confirmation. In-place abandon never cleans or resets: it releases only a clean, still-bound task; dirty work remains preserved.

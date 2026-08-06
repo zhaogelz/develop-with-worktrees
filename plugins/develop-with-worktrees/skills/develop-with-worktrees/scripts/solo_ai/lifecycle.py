@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import errno
-import os
 import json
+import os
 import platform
-import signal
+import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -20,7 +21,6 @@ import psutil
 from .config import (
     CommandSpec,
     VerificationConfig,
-    detect_existing_workflows,
     discover_validation_commands,
     load_repo_config,
     load_verification_config,
@@ -32,8 +32,9 @@ from .config import (
 )
 from .proof import approval_plan, validate
 from .repo import GitRepo
+from .routing import decide_route, detect_existing_workflows
 from .safety import require_safe
-from .state import FINAL_TASK_STATES, StateStore
+from .state import FINAL_TASK_STATES, IN_PLACE_MODE, ISOLATED_MODE, StateStore
 from .util import (
     DirectoryLock,
     SoloAIError,
@@ -41,8 +42,8 @@ from .util import (
     ensure_within,
     process_matches,
     process_snapshot,
-    redact_text,
     read_json,
+    redact_text,
     run_logged,
     safe_slug,
     sha256_text,
@@ -50,8 +51,8 @@ from .util import (
     utc_timestamp,
 )
 
-
 BOOTSTRAP_SCHEMA = 1
+TASK_GRANT_SCHEMA = 1
 LOCKFILE_NAMES = (
     "uv.lock",
     "package-lock.json",
@@ -66,6 +67,101 @@ def _preferences(repo: GitRepo) -> dict[str, Any]:
     return read_json(
         repo.local_dir / "preferences.json", {"schema_version": 1, "enabled": True}
     )
+
+
+def _task_grants_path(repo: GitRepo) -> Path:
+    """临时直改授权只保存在 Git common-dir，绝不写入工作区。"""
+    return repo.local_dir / "session-overrides.json"
+
+
+def _task_grants(repo: GitRepo) -> dict[str, Any]:
+    return read_json(
+        _task_grants_path(repo), {"schema_version": TASK_GRANT_SCHEMA, "grants": []}
+    )
+
+
+def _session_fingerprint(session_id: str) -> str:
+    if not session_id:
+        raise SoloAIError("Current-task choice requires the Codex session identifier")
+    return sha256_text(session_id)
+
+
+def task_bypass_active(repo: GitRepo, *, session_id: str) -> bool:
+    """判断本次 Codex 会话是否被明确授权完全跳过本技能。"""
+    if not session_id:
+        return False
+    session = _session_fingerprint(session_id)
+    worktree = str(repo.root.resolve())
+    payload = _task_grants(repo)
+    return any(
+        isinstance(grant, dict)
+        and grant.get("worktree") == worktree
+        and session in grant.get("sessions", [])
+        for grant in payload.get("grants", [])
+    )
+
+
+def _grant_current_task(
+    repo: GitRepo, *, session_id: str, delegation_code: str | None
+) -> dict[str, Any]:
+    """登记一次会话授权；子智能体只能凭父任务的委托码加入同一授权。"""
+    session = _session_fingerprint(session_id)
+    worktree = str(repo.root.resolve())
+    active_here = [
+        task["id"]
+        for task in StateStore(repo).read()["tasks"].values()
+        if task.get("status") not in FINAL_TASK_STATES
+        and Path(str(task.get("worktree", ""))).resolve() == repo.root.resolve()
+    ]
+    if active_here:
+        raise SoloAIError(
+            "Finish or abandon the active DWW task in this directory before choosing normal current-directory development: "
+            + ", ".join(active_here)
+        )
+    with DirectoryLock(repo.local_dir / "locks" / "session-overrides.lock", wait=True):
+        payload = _task_grants(repo)
+        grants = payload.get("grants")
+        if not isinstance(grants, list):
+            raise SoloAIError(
+                "Current-task local authorization state is invalid; preserve it and run doctor"
+            )
+
+        if delegation_code:
+            code_hash = sha256_text(delegation_code)
+            for grant in grants:
+                if (
+                    isinstance(grant, dict)
+                    and grant.get("worktree") == worktree
+                    and secrets.compare_digest(
+                        str(grant.get("delegation_hash", "")), code_hash
+                    )
+                ):
+                    sessions = grant.setdefault("sessions", [])
+                    if session not in sessions:
+                        sessions.append(session)
+                    grant["updated_at"] = utc_timestamp()
+                    atomic_write_json(_task_grants_path(repo), payload)
+                    return {"choice": "current-task", "delegated": True}
+            raise SoloAIError(
+                "The current-task delegation code is invalid for this directory"
+            )
+
+        code = secrets.token_urlsafe(24)
+        grants.append(
+            {
+                "worktree": worktree,
+                "delegation_hash": sha256_text(code),
+                "sessions": [session],
+                "created_at": utc_timestamp(),
+            }
+        )
+        payload["schema_version"] = TASK_GRANT_SCHEMA
+        atomic_write_json(_task_grants_path(repo), payload)
+        return {
+            "choice": "current-task",
+            "delegated": False,
+            "delegation_code": code,
+        }
 
 
 def set_local_enabled(repo: GitRepo, *, enabled: bool) -> dict[str, Any]:
@@ -94,19 +190,73 @@ def local_enabled(repo: GitRepo) -> bool:
     return bool(_preferences(repo).get("enabled", True))
 
 
+def choose(
+    repo: GitRepo,
+    *,
+    mode: str,
+    slots: int,
+    commands: list[CommandSpec] | None,
+    session_id: str | None = None,
+    delegation_code: str | None = None,
+) -> dict[str, Any]:
+    """将首次三选一交互收敛为唯一入口，避免把内部初始化细节暴露给用户。"""
+    route = repository_route(repo, session_id=session_id)
+    if route["action"] == "defer":
+        return {
+            "choice": mode,
+            "decision": "deferred",
+            "reason": route["reason"],
+            "workflows": route["workflows"],
+        }
+    if mode == "current-task":
+        if not session_id:
+            raise SoloAIError(
+                "Current-task choice requires --session from the trusted Codex hook"
+            )
+        return _grant_current_task(
+            repo, session_id=session_id, delegation_code=delegation_code
+        )
+    if session_id or delegation_code:
+        raise SoloAIError("--session and --delegate only apply to --mode current-task")
+    if mode == "current-repository":
+        preference = disable(repo)
+        return {"choice": "current-repository", "local_preference": preference}
+    if mode != "isolated":
+        raise SoloAIError(f"Unknown repository choice: {mode}")
+    if not local_enabled(repo):
+        # 用户明确重新选择隔离开发时，安全地撤销本机长期退出。
+        set_local_enabled(repo, enabled=True)
+    if (repo.root / ".solo-ai" / "config.toml").exists():
+        return {"choice": "isolated", "decision": "already-adopted"}
+    result = initialize(
+        repo,
+        slots=slots,
+        commands=commands,
+        accept=True,
+        accept_static_only=True,
+    )
+    return {"choice": "isolated", **result}
+
+
 def _bootstrap(repo: GitRepo) -> dict[str, Any]:
     return read_json(repo.local_dir / "bootstrap.json", {})
 
 
+def repository_route(repo: GitRepo, *, session_id: str | None = None) -> dict[str, Any]:
+    workflows = detect_existing_workflows(repo.root)
+    return decide_route(
+        workflows=workflows,
+        local_enabled=local_enabled(repo),
+        current_task=bool(
+            session_id and task_bypass_active(repo, session_id=session_id)
+        ),
+        adopted=(repo.policy_path() / ".solo-ai" / "config.toml").exists(),
+    )
+
+
 def _effective_mode(repo: GitRepo) -> str:
-    if not local_enabled(repo):
-        return "disabled"
-    existing = detect_existing_workflows(repo.root)
-    if existing:
-        return "defer"
-    if (repo.policy_path() / ".solo-ai" / "config.toml").exists():
-        return "managed"
-    return "uninitialized"
+    action = repository_route(repo)["action"]
+    return "uninitialized" if action == "ask" else str(action)
 
 
 def _approval_path(repo: GitRepo) -> Path:
@@ -211,14 +361,14 @@ def initialize(
             raise SoloAIError("--decline cannot be combined with acceptance flags")
         return {
             "decision": "declined",
-            "local_preference": set_local_enabled(repo, enabled=False),
+            "local_preference": disable(repo),
         }
     if not local_enabled(repo):
         raise SoloAIError(
             "This repository is locally disabled; run enable before adopting it"
         )
-    if not 1 <= slots <= 5:
-        raise SoloAIError("--slots must be between 1 and 5")
+    if not 1 <= slots <= 32:
+        raise SoloAIError("--slots must be between 1 and 32")
     existing = detect_existing_workflows(repo.root)
     if existing:
         # Do this before acquiring a local lifecycle lock: defer mode must not
@@ -339,7 +489,7 @@ def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
         )
     if mode != "managed":
         raise SoloAIError(
-            "Repository is not adopted. Review the one-time plan with `init`, then pass --accept or --decline"
+            "Repository is not set up for isolated tasks. Record the repository choice with `choose` first"
         )
     policy = repo.policy_path()
     config = load_repo_config(repo, cwd=policy)
@@ -349,20 +499,123 @@ def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
 
 
 def _base_ref(repo: GitRepo) -> str:
+    """保留给空闲槽位等没有调用方上下文的场景。"""
     bootstrap = _bootstrap(repo)
     return str(bootstrap.get("branch") or repo.default_branch())
 
 
-def start(repo: GitRepo, *, name: str) -> dict[str, Any]:
+def _checked_out_branch_worktree(repo: GitRepo, branch: str) -> Path:
+    for item in repo.worktrees():
+        if repo.branch(item.path) == branch:
+            return item.path
+    raise SoloAIError(
+        f"Base branch {branch!r} must be checked out in a local worktree before starting a task"
+    )
+
+
+def _resolve_start_base(
+    repo: GitRepo, store: StateStore, explicit_base: str | None
+) -> tuple[str, str, Path]:
+    """确定任务基线；默认以调用处当前分支为准，不把 main 当成隐含前提。"""
+    try:
+        owner = store.task_for_worktree(repo.root)
+    except SoloAIError:
+        owner = None
+    if owner and StateStore.mode(owner) == ISOLATED_MODE:
+        raise SoloAIError(
+            f"Cannot start a child task from active managed task {owner['id']}; finish, abandon, or use its recorded base worktree"
+        )
+    bootstrap = _bootstrap(repo)
+    if explicit_base:
+        base_ref = explicit_base
+    elif bootstrap.get("branch") and not (repo.root / ".solo-ai").exists():
+        # 脏主工作树的首次采用尚未合入策略时，唯一可验证的基线是 bootstrap。
+        base_ref = str(bootstrap["branch"])
+    else:
+        base_ref = repo.branch(repo.root)
+        if base_ref is None:
+            raise SoloAIError(
+                "Current worktree is detached; pass --base with a checked-out local branch"
+            )
+    exists = repo.git(
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{base_ref}"], check=False
+    )
+    if exists.returncode != 0:
+        raise SoloAIError(f"Base branch does not exist locally: {base_ref}")
+    base_worktree = _checked_out_branch_worktree(repo, base_ref)
+    active_paths = {
+        Path(str(task["worktree"])).resolve()
+        for task in store.read()["tasks"].values()
+        if StateStore.mode(task) == ISOLATED_MODE
+        if task.get("status") not in FINAL_TASK_STATES
+    }
+    if base_worktree.resolve() in active_paths:
+        raise SoloAIError(
+            "Base branch is checked out by an active managed task; use a stable base worktree instead"
+        )
+    return (
+        base_ref,
+        repo.git(["rev-parse", base_ref], cwd=base_worktree).stdout.strip(),
+        base_worktree,
+    )
+
+
+def start(
+    repo: GitRepo,
+    *,
+    name: str,
+    base: str | None = None,
+    in_place: bool = False,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     with maintenance_lock(repo):
         config, _, _ = _config_and_mode(repo)
         store = StateStore(repo)
         store.ensure_slots(config)
-        base_ref = _base_ref(repo)
-        base_head = repo.git(["rev-parse", base_ref]).stdout.strip()
+        if in_place:
+            # 与隔离任务的实际合入使用同一把锁，避免刚登记直改后基线被并发推进。
+            with DirectoryLock(
+                repo.local_dir / "locks" / "integration.lock", wait=True
+            ):
+                if base:
+                    raise SoloAIError(
+                        "In-place tasks always use the current checked-out branch"
+                    )
+                if not session_id:
+                    raise SoloAIError(
+                        "In-place tasks require --session from the trusted Codex hook"
+                    )
+                try:
+                    owner = store.task_for_worktree(repo.root)
+                except SoloAIError:
+                    owner = None
+                if owner and StateStore.mode(owner) == ISOLATED_MODE:
+                    raise SoloAIError(
+                        "Cannot start an in-place task inside an active isolated task worktree"
+                    )
+                branch = repo.branch(repo.root)
+                if branch is None:
+                    raise SoloAIError("In-place tasks require an attached local branch")
+                if not repo.is_clean(repo.root):
+                    raise SoloAIError(
+                        "In-place Start requires a clean Git worktree; ignored test data may remain, but tracked or untracked changes must be preserved and handled first"
+                    )
+                return store.allocate_in_place(
+                    name=name,
+                    branch=branch,
+                    head=repo.head(repo.root),
+                    base_worktree=repo.root,
+                    session_id=session_id,
+                )
+        base_ref, base_head, base_worktree = _resolve_start_base(repo, store, base)
         branch = f"{config.branch_prefix}{safe_slug(name)}-{uuid.uuid4().hex[:6]}"
         task = store.allocate(
-            config, name=name, branch=branch, base_head=base_head, base_ref=base_ref
+            config,
+            name=name,
+            branch=branch,
+            base_head=base_head,
+            base_ref=base_ref,
+            base_worktree=base_worktree,
         )
         worktree = ensure_within(
             Path(task["worktree"]), repo.primary_path / config.worktree_directory
@@ -404,6 +657,62 @@ def _path_is_safe(path: str) -> bool:
     )
 
 
+def _is_in_place(task: dict[str, Any]) -> bool:
+    return StateStore.mode(task) == IN_PLACE_MODE
+
+
+def _verification_base(task: dict[str, Any]) -> str:
+    """直改分支会前进，验证必须始终相对不可变的起点。"""
+    return str(task.get("start_head") if _is_in_place(task) else task["base_ref"])
+
+
+def _assert_in_place_binding(
+    repo: GitRepo,
+    store: StateStore,
+    task: dict[str, Any],
+    *,
+    session_id: str | None,
+) -> None:
+    """拒绝会话、工作树、分支或 HEAD 漂移；只隔离现场，绝不回滚。"""
+    if task.get("status") not in {"active", "ready"}:
+        raise SoloAIError(
+            "In-place task is not active. Preserve the current worktree and use resume-in-place only after manually restoring its recorded identity."
+        )
+    failures: list[str] = []
+    worktree = Path(str(task["worktree"])).resolve()
+    if repo.root.resolve() != worktree:
+        failures.append("invocation worktree changed")
+    if not session_id or sha256_text(session_id) != task.get("session_fingerprint"):
+        failures.append("Codex session changed")
+    if repo.branch(worktree) != task.get("branch"):
+        failures.append("checked-out branch changed")
+    if repo.head(worktree) != task.get("expected_head"):
+        failures.append("HEAD changed outside exact-path dww commit")
+    if failures:
+        reason = "; ".join(failures)
+        store.quarantine(task["id"], reason)
+        raise SoloAIError(
+            "In-place task was quarantined; files were preserved without rollback: "
+            + reason
+            + ". Restore the recorded branch and expected HEAD manually, then use resume-in-place."
+        )
+
+
+def _assert_no_in_place_integration_conflict(
+    store: StateStore, task: dict[str, Any]
+) -> None:
+    """直改会话绑定当前分支；任何其他任务都不能在其完成前推进该基线。"""
+    blocker = store.active_in_place()
+    if not blocker or blocker.get("id") == task.get("id"):
+        return
+    if Path(str(blocker.get("base_worktree"))).resolve() == Path(
+        str(task.get("base_worktree"))
+    ).resolve() and blocker.get("base_ref") == task.get("base_ref"):
+        raise SoloAIError(
+            "An in-place task is active on this base branch. Its current-worktree identity must remain stable, so this isolated task cannot Finish yet. Finish, abandon, or explicitly resume the in-place task first."
+        )
+
+
 def _run_declared_secret_scanner(
     repo: GitRepo, *, cwd: Path, scanner: CommandSpec | None
 ) -> None:
@@ -412,22 +721,34 @@ def _run_declared_secret_scanner(
     pending = (
         repo.local_dir / "logs" / "pending" / f"secret-scan-{uuid.uuid4().hex}.log"
     )
-    code, _ = run_logged(scanner.argv, cwd=cwd, log_path=pending)
-    if code:
+    result = run_logged(scanner.argv, cwd=cwd, log_path=pending)
+    if result.returncode:
         raise SoloAIError(
             f"Repository-declared secret scanner failed. Review its local redacted log: {pending}"
         )
 
 
 def commit_task(
-    repo: GitRepo, *, task_id: str, lease: str, message: str, paths: list[str]
+    repo: GitRepo,
+    *,
+    task_id: str,
+    lease: str,
+    message: str,
+    paths: list[str],
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     with store.operation(task_id, lease, "commit") as task:
         worktree = Path(task["worktree"])
+        if _is_in_place(task):
+            if task.get("status") not in {"active", "ready"}:
+                raise SoloAIError("In-place Commit requires an active or ready task")
+            _assert_in_place_binding(repo, store, task, session_id=session_id)
         if repo.branch(worktree) != task["branch"]:
-            raise SoloAIError("Task branch identity no longer matches its slot")
+            raise SoloAIError(
+                "Task branch identity no longer matches its recorded task"
+            )
         if not paths:
             raise SoloAIError(
                 "Commit requires one or more exact --path values; inspect the task diff before staging"
@@ -473,59 +794,185 @@ def commit_task(
             allowlist=config.sensitive_allowlist,
         )
         repo.git(["commit", "-m", message, "--", *paths], cwd=worktree)
-        return store.update_task(
-            task_id,
-            candidate_head=repo.head(worktree),
-            ready_proof=None,
-            status="active",
-        )
+        changes: dict[str, Any] = {
+            "candidate_head": repo.head(worktree),
+            "ready_proof": None,
+            "status": "active",
+        }
+        if _is_in_place(task):
+            changes["expected_head"] = changes["candidate_head"]
+        updated = store.update_task(task_id, **changes)
+        overlaps: list[dict[str, Any]] = []
+        if _is_in_place(task):
+            requested = set(paths)
+            for other in store.read()["tasks"].values():
+                if (
+                    other.get("id") == task_id
+                    or StateStore.mode(other) != ISOLATED_MODE
+                    or other.get("status") in FINAL_TASK_STATES
+                ):
+                    continue
+                other_paths = set(repo.changed_paths(Path(str(other["worktree"]))))
+                shared = sorted(requested & other_paths)
+                if shared:
+                    overlaps.append({"task_id": other["id"], "paths": shared})
+        return {**updated, "overlaps": overlaps}
 
 
-def _sync_default(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
+def _sync_base(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
     worktree = Path(task["worktree"])
-    default = repo.default_branch()
-    default_head = repo.git(["rev-parse", default], cwd=worktree).stdout.strip()
-    if not repo.is_ancestor(default_head, "HEAD", cwd=worktree):
+    base_ref = str(task["base_ref"])
+    current = repo.git(
+        ["rev-parse", "--verify", f"refs/heads/{base_ref}"],
+        cwd=worktree,
+        check=False,
+    )
+    if current.returncode != 0:
+        raise SoloAIError(
+            f"Recorded base branch {base_ref!r} no longer exists; explicitly retarget this task before Ready or Finish"
+        )
+    base_head = current.stdout.strip()
+    recorded_head = str(task["base_head"])
+    if not repo.is_ancestor(recorded_head, base_head, cwd=worktree):
+        raise SoloAIError(
+            f"Recorded base branch {base_ref!r} was rewritten or moved backward; explicitly retarget this task before Ready or Finish"
+        )
+    if not repo.is_ancestor(base_head, "HEAD", cwd=worktree):
         prediction = repo.git(
-            ["merge-tree", "--write-tree", default, "HEAD"], cwd=worktree, check=False
+            ["merge-tree", "--write-tree", base_ref, "HEAD"],
+            cwd=worktree,
+            check=False,
         )
         if prediction.returncode != 0:
             raise SoloAIError(
                 "Read-only merge prediction found a conflict. Resolve it in this task worktree; no automatic semantic merge was attempted."
             )
-        repo.git(["merge", "--no-edit", default], cwd=worktree)
+        repo.git(["merge", "--no-edit", base_ref], cwd=worktree)
     task["candidate_head"] = repo.head(worktree)
+    task["base_head"] = base_head
     return task
 
 
-def ready(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
+def _recorded_base_worktree(repo: GitRepo, task: dict[str, Any]) -> Path:
+    value = task.get("base_worktree")
+    if not value:
+        raise SoloAIError(
+            "Task has no recorded base worktree; recover it by explicitly retargeting before Finish"
+        )
+    path = Path(str(value)).resolve()
+    if not any(item.path == path for item in repo.worktrees()):
+        raise SoloAIError(
+            "Recorded base worktree no longer exists; explicitly retarget"
+        )
+    if repo.branch(path) != task.get("base_ref"):
+        raise SoloAIError(
+            "Recorded base worktree no longer has the recorded base branch"
+        )
+    if not repo.is_clean(path):
+        raise SoloAIError("Recorded base worktree must be clean before integration")
+    return path
+
+
+def retarget(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    lease: str,
+    base: str,
+    confirm: str,
+) -> dict[str, Any]:
+    """在用户显式确认后重绑基线；不替用户改写历史或猜测合并策略。"""
+    expected = f"{task_id}:{base}"
+    if confirm != expected:
+        raise SoloAIError(f"Retarget requires --confirm {expected!r}")
+    _, _, _ = _config_and_mode(repo)
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "retarget") as task:
+        if _is_in_place(task):
+            raise SoloAIError(
+                "In-place tasks keep their original branch and start point; use resume-in-place only after manually restoring that identity"
+            )
+        if task.get("status") not in {"active", "ready"}:
+            raise SoloAIError("Only active or ready tasks can be retargeted")
+        worktree = Path(str(task["worktree"]))
+        if not repo.is_clean(worktree):
+            raise SoloAIError("Commit task changes before retargeting its base")
+        exists = repo.git(
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{base}"],
+            check=False,
+        )
+        if exists.returncode != 0:
+            raise SoloAIError(f"Base branch does not exist locally: {base}")
+        base_worktree = _checked_out_branch_worktree(repo, base)
+        active_paths = {
+            Path(str(item["worktree"])).resolve()
+            for item in store.read()["tasks"].values()
+            if item.get("id") != task_id and item.get("status") not in FINAL_TASK_STATES
+        }
+        if base_worktree.resolve() in active_paths:
+            raise SoloAIError(
+                "New base worktree is owned by another active managed task"
+            )
+        base_head = repo.git(["rev-parse", base], cwd=base_worktree).stdout.strip()
+        if not repo.is_ancestor(base_head, "HEAD", cwd=worktree):
+            raise SoloAIError(
+                "The task does not yet contain the chosen base. Resolve or merge it manually, then retry retarget; history is never rewritten automatically."
+            )
+        return store.update_task(
+            task_id,
+            base_ref=base,
+            base_head=base_head,
+            base_worktree=str(base_worktree.resolve()),
+            status="active",
+            ready_proof=None,
+        )
+
+
+def ready(
+    repo: GitRepo, *, task_id: str, lease: str, session_id: str | None = None
+) -> dict[str, Any]:
     _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     with store.operation(task_id, lease, "ready") as task:
         worktree = Path(task["worktree"])
         if task.get("status") not in {"active", "ready"}:
             raise SoloAIError(f"Task cannot enter Ready from {task.get('status')}")
+        if _is_in_place(task):
+            _assert_in_place_binding(repo, store, task, session_id=session_id)
         if not repo.is_clean(worktree):
             raise SoloAIError("Commit all task changes before Ready")
-        task = _sync_default(repo, task)
+        if not _is_in_place(task):
+            task = _sync_base(repo, task)
         if not repo.is_clean(worktree):
-            raise SoloAIError("Default-branch synchronization left the task dirty")
+            raise SoloAIError("Base-branch synchronization left the task dirty")
         # 同步可能带入新的受管策略；必须按同步后的策略重新确认和验证。
         config = load_repo_config(repo, cwd=worktree)
         store.require_slot_layout(config)
         verification = load_verification_config(repo, cwd=worktree)
         require_approval(repo, verification, cwd=worktree)
-        default = repo.default_branch()
+        base_ref = _verification_base(task)
         _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
         require_safe(
-            repo, cwd=worktree, base=default, allowlist=config.sensitive_allowlist
+            repo, cwd=worktree, base=base_ref, allowlist=config.sensitive_allowlist
         )
-        proof = validate(repo, cwd=worktree, base=default, verification=verification)
+        proof = validate(
+            repo,
+            cwd=worktree,
+            base=base_ref,
+            verification=verification,
+            task_id=task_id,
+            force_task_scope=_is_in_place(task),
+        )
+        updates: dict[str, Any] = {
+            "status": "ready",
+            "candidate_head": repo.head(worktree),
+            "ready_proof": proof["fingerprint"],
+        }
+        if not _is_in_place(task):
+            updates["base_head"] = task["base_head"]
         return store.update_task(
             task_id,
-            status="ready",
-            candidate_head=repo.head(worktree),
-            ready_proof=proof["fingerprint"],
+            **updates,
         )
 
 
@@ -577,9 +1024,7 @@ def _unknown_ignored(repo: GitRepo, worktree: Path) -> list[str]:
     unknown: list[str] = []
     for item in repo.ignored_untracked(worktree):
         parts = Path(item).parts
-        if Path(item).name.startswith(".env"):
-            unknown.append(item)
-        elif (
+        if Path(item).name.startswith(".env") or (
             not any(part in known_roots for part in parts)
             and Path(item).name != "uv.toml"
         ):
@@ -696,23 +1141,185 @@ def _stop_registered_processes(store: StateStore, task: dict[str, Any]) -> None:
         store.update_task(task["id"], processes=[])
 
 
-def _integrate_pending_bootstrap(repo: GitRepo, primary: Path) -> None:
+def _integrate_pending_bootstrap(repo: GitRepo, primary: Path) -> dict[str, str] | None:
     pending = _bootstrap(repo)
     if not pending:
-        return
+        return None
     branch = str(pending["branch"])
     repo.git(["merge", "--ff-only", branch], cwd=primary)
+    target_ref = repo.branch(primary)
+    if target_ref is None:
+        raise SoloAIError("Primary worktree detached while integrating bootstrap")
+    result = {
+        "bootstrap_branch": branch,
+        "base_ref": target_ref,
+        "base_head": repo.head(primary),
+        "base_worktree": str(primary.resolve()),
+    }
     worktree = Path(str(pending["worktree"]))
     if worktree.exists():
         repo.git(["worktree", "remove", str(worktree)], cwd=primary)
     repo.git(["branch", "-d", branch], cwd=primary)
     (repo.local_dir / "bootstrap.json").unlink(missing_ok=True)
+    return result
 
 
-def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
+def _integration_receipt_path(repo: GitRepo, task_id: str) -> Path:
+    return repo.local_dir / "integration-receipts" / f"{task_id}.json"
+
+
+def _write_integration_receipt(repo: GitRepo, receipt: dict[str, Any]) -> None:
+    receipt["updated_at"] = utc_timestamp()
+    atomic_write_json(_integration_receipt_path(repo, str(receipt["task_id"])), receipt)
+
+
+def _in_place_receipt_path(repo: GitRepo, task_id: str) -> Path:
+    return repo.local_dir / "in-place-receipts" / f"{task_id}.json"
+
+
+def _write_in_place_receipt(repo: GitRepo, receipt: dict[str, Any]) -> None:
+    receipt["updated_at"] = utc_timestamp()
+    atomic_write_json(_in_place_receipt_path(repo, str(receipt["task_id"])), receipt)
+
+
+def _complete_integrated_task(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any], receipt: dict[str, Any]
+) -> dict[str, Any]:
+    """根据已落盘的合入小票幂等完成 detach、删分支与状态释放。"""
+    worktree = Path(str(task["worktree"]))
+    primary = _recorded_base_worktree(repo, task)
+    integrated_head = str(receipt["integrated_head"])
+    if repo.branch(worktree) == task["branch"]:
+        repo.git(["switch", "--detach", integrated_head], cwd=worktree)
+    receipt["stage"] = "detached"
+    _write_integration_receipt(repo, receipt)
+    branch_exists = (
+        repo.git(
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{task['branch']}"],
+            cwd=primary,
+            check=False,
+        ).returncode
+        == 0
+    )
+    if branch_exists:
+        repo.git(["branch", "-d", task["branch"]], cwd=primary)
+    receipt["stage"] = "branch-deleted"
+    _write_integration_receipt(repo, receipt)
+    store.release(task["id"], final_status="finished")
+    receipt["stage"] = "released"
+    _write_integration_receipt(repo, receipt)
+    return {
+        "task_id": task["id"],
+        "integrated_head": integrated_head,
+        "proof": receipt["proof"],
+        "proof_kind": receipt["proof_kind"],
+        "proof_reused": bool(receipt.get("proof_reused", False)),
+    }
+
+
+def _finish_in_place(
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    lease: str,
+    session_id: str | None,
+) -> dict[str, Any]:
+    """完成当前工作树任务；不合并、不切换、不删除分支或测试数据。"""
+    if task.get("status") != "ready":
+        raise SoloAIError("Finish requires a successful Ready")
+    _assert_in_place_binding(repo, store, task, session_id=session_id)
+    worktree = Path(str(task["worktree"]))
+    if not repo.is_clean(worktree) or repo.head(worktree) != task.get("candidate_head"):
+        raise SoloAIError(
+            "Candidate changed after Ready; commit exact paths and run Ready again"
+        )
+    receipt = read_json(_in_place_receipt_path(repo, task["id"]), {})
+    if receipt:
+        if (
+            receipt.get("task_id") != task["id"]
+            or receipt.get("mode") != IN_PLACE_MODE
+            or receipt.get("head") != task.get("expected_head")
+            or receipt.get("start_head") != task.get("start_head")
+        ):
+            raise SoloAIError(
+                "In-place completion receipt does not match this task; preserve the worktree for manual inspection"
+            )
+        store.release(task["id"], final_status="finished")
+        receipt["stage"] = "released"
+        _write_in_place_receipt(repo, receipt)
+        return {
+            "task_id": task["id"],
+            "integrated_head": receipt["head"],
+            "proof": receipt["proof"],
+            "proof_kind": receipt["proof_kind"],
+            "proof_reused": bool(receipt.get("proof_reused", False)),
+            "mode": IN_PLACE_MODE,
+        }
+    config = load_repo_config(repo, cwd=worktree)
+    store.require_slot_layout(config)
+    verification = load_verification_config(repo, cwd=worktree)
+    require_approval(repo, verification, cwd=worktree)
+    _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
+    require_safe(
+        repo,
+        cwd=worktree,
+        base=_verification_base(task),
+        allowlist=config.sensitive_allowlist,
+    )
+    proof = validate(
+        repo,
+        cwd=worktree,
+        base=_verification_base(task),
+        verification=verification,
+        task_id=task["id"],
+        force_task_scope=True,
+    )
+    if not repo.is_clean(worktree):
+        raise SoloAIError(
+            "In-place validation left tracked or nonignored changes. They were preserved; commit exact paths and run Ready again before Finish."
+        )
+    receipt = {
+        "schema_version": 1,
+        "task_id": task["id"],
+        "mode": IN_PLACE_MODE,
+        "branch": task["branch"],
+        "start_head": task["start_head"],
+        "head": task["expected_head"],
+        "proof": proof["fingerprint"],
+        "proof_kind": proof["kind"],
+        "proof_reused": proof.get("reused", False),
+        "stage": "completed",
+        "created_at": utc_timestamp(),
+    }
+    _write_in_place_receipt(repo, receipt)
+    store.release(task["id"], final_status="finished")
+    receipt["stage"] = "released"
+    _write_in_place_receipt(repo, receipt)
+    return {
+        "task_id": task["id"],
+        "integrated_head": task["expected_head"],
+        "proof": proof["fingerprint"],
+        "proof_kind": proof["kind"],
+        "proof_reused": proof.get("reused", False),
+        "mode": IN_PLACE_MODE,
+    }
+
+
+def finish(
+    repo: GitRepo, *, task_id: str, lease: str, session_id: str | None = None
+) -> dict[str, Any]:
     _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
-    with store.operation(task_id, lease, "finish"):
+    with store.operation(task_id, lease, "finish") as active_task:
+        if _is_in_place(active_task):
+            return _finish_in_place(
+                repo,
+                store=store,
+                task=active_task,
+                lease=lease,
+                session_id=session_id,
+            )
         initial = store.task(task_id)
         if initial.get("status") != "ready":
             raise SoloAIError("Finish requires a successful Ready")
@@ -722,18 +1329,52 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
             with DirectoryLock(
                 repo.local_dir / "locks" / "integration.lock", wait=True
             ):
-                if sorted(ticket.parent.glob("*.json"))[0] != ticket:
+                if min(ticket.parent.glob("*.json")) != ticket:
                     raise SoloAIError("Integration queue order changed unexpectedly")
-                primary, default = repo.ensure_default_primary_clean()
-                _integrate_pending_bootstrap(repo, primary)
+                pending = _bootstrap(repo)
+                if pending:
+                    primary, _ = repo.ensure_default_primary_clean()
+                    bootstrap_result = _integrate_pending_bootstrap(repo, primary)
+                    task = store.task(task_id)
+                    if (
+                        bootstrap_result
+                        and task.get("base_ref") == bootstrap_result["bootstrap_branch"]
+                    ):
+                        task = store.update_task(
+                            task_id,
+                            base_ref=bootstrap_result["base_ref"],
+                            base_head=bootstrap_result["base_head"],
+                            base_worktree=bootstrap_result["base_worktree"],
+                            ready_proof=None,
+                        )
                 task = store.task(task_id)
                 store.require_lease(task, lease)
+                _assert_no_in_place_integration_conflict(store, task)
+                primary = _recorded_base_worktree(repo, task)
                 worktree = Path(task["worktree"])
+                receipt = read_json(_integration_receipt_path(repo, task_id), {})
+                if receipt:
+                    if (
+                        receipt.get("task_id") != task_id
+                        or receipt.get("branch") != task.get("branch")
+                        or receipt.get("candidate_head") != task.get("candidate_head")
+                        or not repo.is_ancestor(
+                            str(receipt.get("integrated_head", "")),
+                            str(task["base_ref"]),
+                            cwd=primary,
+                        )
+                    ):
+                        raise SoloAIError(
+                            "Integration receipt does not match this ready task; preserve the task for manual inspection"
+                        )
+                    return _complete_integrated_task(
+                        repo, store=store, task=task, receipt=receipt
+                    )
                 if not repo.is_clean(worktree) or repo.head(worktree) != task.get(
                     "candidate_head"
                 ):
                     raise SoloAIError("Candidate changed after Ready; run Ready again")
-                task = _sync_default(repo, task)
+                task = _sync_base(repo, task)
                 # 不能用同步前的策略证明同步后的候选；策略变化必须重新绑定。
                 config = load_repo_config(repo, cwd=worktree)
                 store.require_slot_layout(config)
@@ -745,15 +1386,20 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                 require_safe(
                     repo,
                     cwd=worktree,
-                    base=default,
+                    base=str(task["base_ref"]),
                     allowlist=config.sensitive_allowlist,
                 )
                 proof = validate(
-                    repo, cwd=worktree, base=default, verification=verification
+                    repo,
+                    cwd=worktree,
+                    base=str(task["base_ref"]),
+                    verification=verification,
+                    task_id=task_id,
                 )
                 store.update_task(
                     task_id,
                     candidate_head=repo.head(worktree),
+                    base_head=task["base_head"],
                     ready_proof=proof["fingerprint"],
                 )
                 if not repo.is_clean(primary) or not repo.is_clean(worktree):
@@ -767,26 +1413,82 @@ def finish(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
                 _stop_registered_processes(store, task)
                 repo.git(["merge", "--ff-only", task["branch"]], cwd=primary)
                 integrated_head = repo.head(primary)
-                repo.git(["switch", "--detach", integrated_head], cwd=worktree)
-                repo.git(["branch", "-d", task["branch"]], cwd=primary)
-                store.release(task_id, final_status="finished")
-                return {
+                receipt = {
+                    "schema_version": 1,
                     "task_id": task_id,
+                    "branch": task["branch"],
+                    "base_ref": task["base_ref"],
+                    "candidate_head": task["candidate_head"],
                     "integrated_head": integrated_head,
                     "proof": proof["fingerprint"],
                     "proof_kind": proof["kind"],
                     "proof_reused": proof.get("reused", False),
+                    "stage": "integrated",
+                    "created_at": utc_timestamp(),
                 }
+                _write_integration_receipt(repo, receipt)
+                return _complete_integrated_task(
+                    repo, store=store, task=task, receipt=receipt
+                )
         finally:
             ticket.unlink(missing_ok=True)
 
 
-def abandon(repo: GitRepo, *, task_id: str, lease: str, confirm: str) -> dict[str, Any]:
+def resume_in_place(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    session_id: str,
+    confirm: str,
+) -> dict[str, Any]:
+    """显式接管未漂移的直改任务；绝不接纳外部 HEAD。"""
+    _, _, _ = _config_and_mode(repo)
+    store = StateStore(repo)
+    task = store.task(task_id)
+    if not _is_in_place(task):
+        raise SoloAIError("resume-in-place only applies to an in-place task")
+    expected = f"{task_id}:{task['branch']}:{task['expected_head']}"
+    if confirm != expected:
+        raise SoloAIError(f"resume-in-place requires --confirm {expected!r}")
+    worktree = Path(str(task["worktree"])).resolve()
+    if repo.root.resolve() != worktree:
+        raise SoloAIError("Run resume-in-place from the recorded in-place worktree")
+    if repo.branch(worktree) != task.get("branch") or repo.head(worktree) != task.get(
+        "expected_head"
+    ):
+        raise SoloAIError(
+            "In-place branch or HEAD still differs from the recorded identity. Files were preserved; inspect and restore it manually before resuming."
+        )
+    return store.resume_in_place(task_id, session_id=session_id)
+
+
+def abandon(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    lease: str,
+    confirm: str,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     if confirm != task_id:
         raise SoloAIError("Abandon requires --confirm with the exact task id")
     config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     with store.operation(task_id, lease, "abandon") as task:
+        if _is_in_place(task):
+            _assert_in_place_binding(repo, store, task, session_id=session_id)
+            worktree = Path(str(task["worktree"]))
+            if not repo.is_clean(worktree):
+                raise SoloAIError(
+                    "In-place abandon never resets or cleans the current worktree. Commit exact paths and Finish, or preserve and handle the changes manually."
+                )
+            store.release(task_id, final_status="abandoned")
+            return {
+                "task_id": task_id,
+                "status": "abandoned",
+                "mode": IN_PLACE_MODE,
+                "preserved": True,
+            }
         worktree = ensure_within(
             Path(task["worktree"]), repo.primary_path / config.worktree_directory
         )
@@ -851,6 +1553,10 @@ def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
         )
     store = StateStore(repo)
     with store.operation(task_id, lease, "dev-start") as task:
+        if _is_in_place(task):
+            raise SoloAIError(
+                "In-place tasks intentionally do not claim a managed dev-server slot; run the project's current-worktree command explicitly if needed"
+            )
         if task.get("processes"):
             raise SoloAIError("Task already has a registered development process")
         block = config.port_base + (int(task["slot_id"]) - 1) * 100
@@ -984,16 +1690,16 @@ def warm_slot(repo: GitRepo, *, slot_id: str) -> dict[str, Any]:
                 / "pending"
                 / f"warm-{slot_id}-{uuid.uuid4().hex}.log"
             )
-            code, duration = run_logged(command.argv, cwd=worktree, log_path=pending)
+            result = run_logged(command.argv, cwd=worktree, log_path=pending)
             results.append(
                 {
                     "command": command.redacted(),
-                    "exit_code": code,
-                    "duration_seconds": round(duration, 3),
+                    "exit_code": result.returncode,
+                    "duration_seconds": round(result.duration_seconds, 3),
                     "log": str(pending),
                 }
             )
-            if code:
+            if result.returncode:
                 failed_log = pending
                 break
         changed = repo.changed_paths(worktree)

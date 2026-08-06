@@ -7,9 +7,6 @@ on:
 permissions:
   contents: read
 
-env:
-  DWW_SKIP_CODEX_CLI_INTEGRATION: "1"
-
 jobs:
   test:
     strategy:
@@ -18,10 +15,10 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v9.0.0
       - run: uv sync --dev
       - run: uv run pytest -vv -o faulthandler_timeout=30
-      - run: uv run python -m compileall -q plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts
+      - run: uv run python -m compileall -q plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts plugins/develop-with-worktrees/hooks
       - run: uvx ruff check .
       - run: uvx ruff format --check .

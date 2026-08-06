@@ -2,12 +2,12 @@ import json
 from pathlib import Path
 
 import pytest
-
 from solo_ai.config import (
     CommandSpec,
     discover_validation_commands,
     load_repo_config,
     load_verification_config,
+    managed_block,
     render_repo_config,
     render_verification_config,
 )
@@ -30,13 +30,33 @@ def test_renders_safe_default_reuse_policy() -> None:
     assert "cross_task_reuse = false" in rendered
     assert 'external_state = "unknown"' in rendered
     assert "{port}" in render_repo_config()
+    assert "cleanup = { owned_paths = [] }" in render_repo_config()
+
+
+def test_managed_policy_separates_local_lifecycle_from_explicit_publish() -> None:
+    policy = managed_block()
+
+    assert "The DWW lifecycle is local-only" in policy
+    assert "After a successful Finish, an explicit user request" in policy
+    assert "ordinary non-force push" in policy
+    assert "separate from DWW" in policy
+
+
+def test_rejects_schema_two_verification_policy(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "verification.toml").write_text(
+        "schema_version = 2\nstatic_only = true\n", encoding="utf-8"
+    )
+    with pytest.raises(SoloAIError, match="expected 3"):
+        load_verification_config(GitRepo(git_repo))
 
 
 def test_rejects_cross_task_reuse_with_external_state(git_repo: Path) -> None:
     config = git_repo / ".solo-ai"
     config.mkdir()
     (config / "verification.toml").write_text(
-        """schema_version = 2
+        """schema_version = 3
 static_only = false
 
 [[profiles]]
@@ -50,6 +70,46 @@ commands = [["git", "status"]]
     )
     with pytest.raises(SoloAIError, match="external_state"):
         load_verification_config(GitRepo(git_repo))
+
+
+def test_verification_schema_three_requires_complete_inputs_for_cross_task_reuse(
+    git_repo: Path,
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    path = config / "verification.toml"
+    path.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "shared"
+paths = ["src/**"]
+cross_task_reuse = true
+external_state = "none"
+input_paths = ["src/**", "uv.lock"]
+input_closure = "declared"
+timeout_seconds = 12.5
+resource_class = "heavy"
+level = "ready"
+environment = ["CI"]
+commands = [["git", "status", "--short"]]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(SoloAIError, match="input_closure"):
+        load_verification_config(GitRepo(git_repo))
+
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'input_closure = "declared"', 'input_closure = "complete"'
+        ),
+        encoding="utf-8",
+    )
+    profile = load_verification_config(GitRepo(git_repo)).profiles[0]
+    assert profile.timeout_seconds == 12.5
+    assert profile.resource_class == "heavy"
+    assert profile.input_closure == "complete"
 
 
 def test_rejects_unimplemented_command_readiness(git_repo: Path) -> None:
@@ -82,6 +142,13 @@ def test_rejects_worktree_directory_outside_repository(git_repo: Path) -> None:
         )
         with pytest.raises(SoloAIError, match="worktree_directory"):
             load_repo_config(GitRepo(git_repo))
+
+
+def test_accepts_up_to_thirty_two_configured_slots(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "config.toml").write_text(render_repo_config(slots=32), encoding="utf-8")
+    assert load_repo_config(GitRepo(git_repo)).slots == 32
 
 
 @pytest.mark.parametrize(
@@ -159,7 +226,7 @@ def test_rejects_ambiguous_verification_config_types(
     config = git_repo / ".solo-ai"
     config.mkdir()
     (config / "verification.toml").write_text(
-        "schema_version = 2\n" + body,
+        "schema_version = 3\n" + body,
         encoding="utf-8",
     )
 

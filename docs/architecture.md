@@ -1,57 +1,31 @@
 # Architecture
 
-`develop-with-worktrees` is a Codex marketplace repository containing one plugin, not merely a prompt file:
-
 ```text
-marketplace root
-├── .agents/plugins/marketplace.json
-├── plugins/develop-with-worktrees/
-│   ├── .codex-plugin/plugin.json   plugin metadata
-│   ├── hooks/                      lightweight Codex guardrail
-│   └── skills/develop-with-worktrees/  task-facing policy and runner
-└── tests/                          CLI, lifecycle, hook, and fault tests
+Codex central conversation
+  simple goal ──────────────────────────────→ one normal DWW task
+  complex goal → plain plan → one confirmation
+                    ↓
+Host-neutral orchestration layer
+  batch state → dependency frontier → controller-only worker dispatch
+  pause / cancel / handoff → minimal evidence ledger → compact receipt
+                    ↓
+Lifecycle adapter boundary
+  managed repository → DWW adapter → Start / exact Commit / Ready / Finish
+  mature repository → explicit delegated adapter → repository-owned lifecycle
+                    ↓
+Git common-dir local state
+  solo-ai/                 DWW slots, leases, proofs, lifecycle receipts
+  solo-ai-orchestration/   batch graph, decisions, task/proof references, receipts
 ```
 
-The plugin deliberately splits responsibilities:
+The orchestration layer is deliberately separate from `StateStore`. A batch has a goal, a maximum development concurrency of at most five, a lifecycle adapter, and minimal task summaries. It starts in `awaiting-confirmation`; no worker is schedulable before the central conversation calls `confirm`. A new central conversation can make a confirmed handoff using the exact batch id, while branches and worker files remain untouched.
 
-| Layer | Responsibility | Boundary |
-| --- | --- | --- |
-| Hook | Detect likely supported Codex writes; inject a mode-aware reminder | Guardrail only; no OS/IDE enforcement claim |
-| Skill | Decide read-only/defer/adopt/managed workflow and guide the agent | Must not self-bypass a user decision |
-| CLI | State transition, path staging, proof, process, integration, cleanup | Hard gate for the plugin lifecycle |
+The scheduler is pure: it returns planned tasks whose dependencies are completed, subject to the batch limit and the currently available DWW slots. `write_scope` is advisory and never serializes a task by itself. `exclusive_resources` is the narrow opt-in gate for migrations, lockfiles, shared contracts, or another explicitly high-risk artifact. A blocked task prevents only its descendants; unrelated ready work remains in the frontier.
 
-## Repository policy versus local state
+Only the central Codex conversation is a supported dispatcher. It claims one writer per task, starts the worker’s ordinary lifecycle, and records its lifecycle task id. A worker may edit only its own task and may not create another worker. This is a host-workflow rule, not an operating-system security boundary.
 
-```text
-target repository
-├── .solo-ai/config.toml            tracked schema-2 policy
-├── .solo-ai/verification.toml      tracked schema-2 validation map
-├── AGENTS.md                       exact tracked managed block
-├── .worktrees/solo-ai-slot-01..05  local managed worktrees
-└── <git-common-dir>/solo-ai/        untracked, machine-local state
-    ├── bootstrap.json               dirty-primary bootstrap only
-    ├── preferences.json             local disable choice
-    ├── approvals.json               per-machine policy approval
-    ├── state.json                   slots, masked leases, operations
-    ├── queue/ and locks/            FIFO integration coordination
-    ├── logs/content/                redacted content-addressed logs
-    └── proofs/ profile-proofs/      reusable evidence metadata
-```
+DWW remains the Git authority. The orchestration layer neither copies slots, leases, integration locks, validation scheduling, nor semantic merge logic. Its `dww` adapter is available only when the shared route is `managed`; it references DWW task ids and Ready/Finish proof or receipt ids. Its `delegated` adapter does not guess commands, parse arbitrary instructions, or write DWW state; an existing mature repository must explicitly choose it. Repositories with an external orchestrator still fully defer.
 
-Policy is shared only after an explicit adoption commit. State follows the Git common directory so linked worktrees share it, but it is never copied, committed, or disk-scanned from a plugin registry.
+Each completion requires existing acceptance evidence with a `kind` and `ref`. When every task is complete and evidenced, the batch writes a small receipt. The controller runs only missing targeted combination validation; there is no default full test, reviewer AI, resident service, push, PR, deployment, or release. Repeated unchanged failures stop after two reports; progressive repairs are governed by the batch’s configurable effective-change and elapsed-time budget.
 
-## Core invariants
-
-1. Mode precedence is local disable, existing mature workflow defer, managed adoption, then uninitialized confirmation.
-2. Initializing an existing workflow writes nothing. A dirty primary gets a pending bootstrap; no stash or primary mutation is used.
-3. Every mutation records a live operation before work starts. Recover cannot steal a live lease.
-4. Commit stages an exact task change manifest, never `git add -A`.
-5. Integration is local-only FIFO plus `ff-only`; conflicts preserve the task.
-6. Cross-task proof reuse is disabled unless a profile states closed inputs and no external state.
-7. Cleanup uses exact owned paths and stops on unknown/protected data.
-
-## Versioning and removal
-
-Tracked and local schemas are versioned. A future update must inspect active state first: active tasks freeze new adoption and migration, while the update must retain a compatible Finish/Recover path for those tasks. An empty state may receive only an additive local migration. Security or tracked validation policy changes always require a user-reviewed bootstrap commit and per-machine approval.
-
-Removal is intentionally two-stage: repository `deinit` first, plugin uninstall second. This keeps a user from losing the lifecycle runner while a repository still has owned state.
+The Codex hook remains a strong adapter, not the core authority. It recognizes the `dww orchestrate` command family as a trusted DWW command, while the existing route still gives mature workflows absolute priority. It cannot cover specialized execution paths that do not invoke it and never rolls back user files.

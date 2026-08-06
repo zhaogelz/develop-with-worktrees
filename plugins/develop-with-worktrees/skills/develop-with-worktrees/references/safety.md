@@ -1,23 +1,19 @@
 # Safety reference
 
-## What is enforced where
+The CLI owns lifecycle identity; the Codex adapter supplies a strong but scoped guard. After the plugin hook is trusted, `PreToolUse` returns the supported `permissionDecision: deny` response before protected base-worktree writes made through supported Codex local tool paths. Strictly read-only Bash and the DWW lifecycle command are whitelisted; unknown Bash, `apply_patch`, Edit, and Write are fail-closed on a protected base worktree.
 
-The lifecycle CLI is the hard gate for work started through this plugin. The bundled Codex hook is intentionally lightweight and stdlib-only. It can inject a pre-write policy reminder for supported Codex local tools, but the current Codex `PreToolUse` interface does not provide a portable hard-deny result. Therefore it is a strong guardrail, not OS, IDE, or manual-edit enforcement. Hook failures emit a conservative model-visible warning; an agent must not disable the hook or local preference to bypass policy.
+Codex persists trust against the exact hook definition. `hooks/hooks.json` is therefore a stable compatibility contract: ordinary plugin, skill, and guard-script updates keep it unchanged and require no repeated user action. Only an actual first install or intentional definition change may trigger review. When Codex reports pending review, the AI asks once after explaining the changed guard behavior and, after approval, uses host UI control when available to complete `/hooks`. The plugin never edits Codex trust storage, bypasses hook trust, or claims a skipped hook is active.
 
-## Candidate content gate
+A mature repository workflow has absolute routing priority. `SessionStart` injects one short deferral context; later Pre/Post Tool hooks step aside. The route reads but never deletes or rewrites existing DWW preferences and session authorizations.
 
-The built-in gate reports only a path, line, and rule name. It blocks newly added `.env*`, private-key/certificate files, credential files, recognizable private-key headers, common provider tokens, and assignments to secret-like names unless an exact repository allowlist applies. It does not print a secret value.
+An explicit current-task choice is intentionally outside that protected mode. Its local authorization is bound to the exact worktree and a hash of the current Codex session, so both PreToolUse and PostToolUse step aside for that session. A child session must present a one-time parent delegation code, which is stored only as a hash. The adapter never widens this choice to every session in the repository or to a guessed time period. The long-term current-directory choice is also local-only and is blocked while active managed tasks, queue tickets, or lifecycle locks exist.
 
-A repository may declare a dedicated scanner before the built-in gate. This supplements rather than replaces the built-in gate. Never add a scanner command without repository approval.
+This is not operating-system enforcement. A specialised path may not invoke the hook. When a later hook call or `doctor` observes a dirty unowned base, it stores a local alert and tells the agent to preserve it; immediate observation of an opt-out path is not promised. It never resets, cleans, rolls back, moves, or silently adopts those files. Hook failures also fail closed for a supported PreToolUse call.
 
-## Logs, proofs, and privacy
+An active in-place task is allowed only when its current worktree, branch, expected HEAD, and hashed Codex session identifier still match local state. A mismatch quarantines it before a new write. The task cannot be recovered around that mismatch. After a Codex task ends, an explicit exact-confirmation resume may transfer an unchanged active, ready, or quarantined task only after identity, live-operation, and live-validation checks; a mismatch still needs manual restoration first.
 
-Command execution uses explicit argv and `shell=False`. Logs redact common credential patterns before persistence and are content-addressed under local Git common metadata. Proofs store command digests and redacted displays, never raw environment values. Declared environment values are SHA-256 hashes or `absent`. A missing or changed log invalidates its proof.
+Commands use explicit argv and `shell=False`. Logs redact common credentials; proofs persist command digests, hashes, and redacted displays but not environment values, leases, raw session identifiers, or raw command lines. Validation subprocesses have identity snapshots, heartbeats, hard timeouts, and persistent receipts. Recovery never kills or adopts an unverified process.
 
-Exact candidate reuse binds candidate commit/tree and default head. Profile reuse across different task branches is disabled unless the profile explicitly says `cross_task_reuse = true` and `external_state = "none"`; its full declared tracked/dependency/environment closure, policy, tools, platform, and logs must still match. Time is audit data and cannot make a proof valid by itself.
+Finish never cleans caches or dependencies. Manual `prune-slot` is bounded to declared top-level ownership paths and requires a reviewed plan id plus digest. If any declared target contains `.env*`, a symlink or junction, or changes before execution, the whole prune stops without deleting anything.
 
-## Process and cleanup ownership
-
-Development processes are spawned without a shell in an isolated process group/session. The root process identity contains PID, creation time, executable, cwd, and a command-line digest rather than a raw command line. Stop validates the root before terminating its descendant tree. Port retries are confined to the owning slot's 100-port range.
-
-Ignored `.env*` files are protected and block release or deinit. Unknown ignored files and process mismatches also block cleanup. Pruning is never automatic. `prune-proofs`, `prune-logs`, `prune-slot`, abandon, and deinit all need explicit confirmation and exact managed-path checks.
+Remote publishing is never implicit. A user-requested post-Finish push must use the clean base worktree, verify the branch and remote, succeed in a dry-run, and avoid force, deletion, tags, PR creation, or deployment unless each additional action is separately authorized. Remote divergence stops the publish rather than triggering an automatic pull, rebase, merge, or history rewrite.

@@ -1,4 +1,4 @@
-schema_version = 2
+schema_version = 3
 static_only = false
 
 [[profiles]]
@@ -8,6 +8,10 @@ cross_task_reuse = false
 external_state = "unknown"
 input_paths = ["**"]
 environment = []
+input_closure = "declared"
+timeout_seconds = 2700
+resource_class = "normal"
+level = "ready"
 commands = [
   ["uv", "run", "pytest"],
 ]

@@ -1,3 +1,3 @@
 """Deterministic local workflow engine for develop-with-worktrees."""
 
-__version__ = "0.1.0"
+VERSION = __version__ = "0.3.0-beta.3"

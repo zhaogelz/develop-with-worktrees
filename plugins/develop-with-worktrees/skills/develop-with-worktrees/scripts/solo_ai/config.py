@@ -9,11 +9,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .repo import GitRepo
+from .routing import WORKFLOW_MARKERS
 from .util import SoloAIError, redact_text, sha256_file, sha256_text, stable_json
 
-
 CONFIG_SCHEMA = 2
-VERIFICATION_SCHEMA = 2
+VERIFICATION_SCHEMA = 3
+DEFAULT_CLEANUP_OWNED_PATHS: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class RepoConfig:
     warm_commands: tuple[CommandSpec, ...]
     dev_start: CommandSpec | None
     readiness: ReadinessSpec | None
+    cleanup_owned_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,10 @@ class VerificationProfile:
     external_state: str
     input_paths: tuple[str, ...]
     environment: tuple[str, ...]
+    input_closure: str
+    timeout_seconds: float
+    resource_class: str
+    level: str
 
 
 @dataclass(frozen=True)
@@ -82,6 +88,10 @@ class VerificationConfig:
                     "external_state": profile.external_state,
                     "input_paths": list(profile.input_paths),
                     "environment": list(profile.environment),
+                    "input_closure": profile.input_closure,
+                    "timeout_seconds": profile.timeout_seconds,
+                    "resource_class": profile.resource_class,
+                    "level": profile.level,
                 }
                 for profile in self.profiles
             ],
@@ -182,6 +192,29 @@ def _sensitive_allowlist(raw: Any) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _cleanup_paths(
+    raw: Any, *, field: str, default: tuple[str, ...], allow_patterns: bool
+) -> tuple[str, ...]:
+    values = default if raw is None else _strings(raw, field=field, allow_empty=True)
+    normalized: list[str] = []
+    for value in values:
+        path = value.replace("\\", "/")
+        candidate = PurePosixPath(path)
+        if (
+            path.startswith("/")
+            or (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/")
+            or candidate == PurePosixPath(".")
+            or ".." in candidate.parts
+            or len(candidate.parts) != 1
+            or (not allow_patterns and any(character in path for character in "*?["))
+        ):
+            raise SoloAIError(
+                f"{field} must contain only top-level repository-relative {'patterns' if allow_patterns else 'paths'}"
+            )
+        normalized.append(path)
+    return tuple(normalized)
+
+
 def _commands(raw: Any, *, field: str) -> tuple[CommandSpec, ...]:
     if raw is None:
         return ()
@@ -238,14 +271,14 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     if not isinstance(lifecycle, dict):
         raise SoloAIError("lifecycle must be a TOML table")
     slots = _integer(data.get("slots", 3), field="slots")
-    if not 1 <= slots <= 5:
-        raise SoloAIError("slots must be between 1 and 5")
+    if not 1 <= slots <= 32:
+        raise SoloAIError("slots must be between 1 and 32")
     mode = _string(data.get("mode", "managed"), field="mode")
     if mode != "managed":
         raise SoloAIError('Only mode = "managed" is valid in an adopted repository')
     port_base = _integer(data.get("port_base", 20000), field="port_base")
-    if not 1024 <= port_base <= 65036:
-        raise SoloAIError("port_base must leave room for all 100-port slot blocks")
+    if not 1024 <= port_base <= 62436:
+        raise SoloAIError("port_base must leave room for all 32 100-port slot blocks")
     remote_policy = _string(
         data.get("remote_policy", "local-only"), field="remote_policy"
     )
@@ -253,6 +286,9 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         raise SoloAIError('Version 1 supports only remote_policy = "local-only"')
     readiness: ReadinessSpec | None = None
     dev_start: CommandSpec | None = None
+    cleanup = data.get("cleanup", {})
+    if not isinstance(cleanup, dict):
+        raise SoloAIError("cleanup must be a TOML table")
     readiness_raw = lifecycle.get("readiness")
     if "dev_start" in lifecycle:
         dev_start = _command(lifecycle["dev_start"], field="lifecycle.dev_start")
@@ -298,6 +334,12 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         warm_commands=_commands(data.get("warm"), field="warm"),
         dev_start=dev_start,
         readiness=readiness,
+        cleanup_owned_paths=_cleanup_paths(
+            cleanup.get("owned_paths"),
+            field="cleanup.owned_paths",
+            default=DEFAULT_CLEANUP_OWNED_PATHS,
+            allow_patterns=False,
+        ),
     )
 
 
@@ -305,12 +347,11 @@ def load_verification_config(
     repo: GitRepo, *, cwd: Path | None = None
 ) -> VerificationConfig:
     data = _read_toml((cwd or repo.policy_path()) / ".solo-ai" / "verification.toml")
-    if (
-        _integer(data.get("schema_version", 0), field="schema_version")
-        != VERIFICATION_SCHEMA
-    ):
+    schema_version = _integer(data.get("schema_version", 0), field="schema_version")
+    if schema_version != VERIFICATION_SCHEMA:
         raise SoloAIError(
-            f"Unsupported .solo-ai/verification.toml schema; expected {VERIFICATION_SCHEMA}"
+            "Unsupported .solo-ai/verification.toml schema; expected "
+            f"{VERIFICATION_SCHEMA}"
         )
     raw_profiles = data.get("profiles", [])
     if not isinstance(raw_profiles, list):
@@ -343,6 +384,45 @@ def load_verification_config(
             raise SoloAIError(
                 f'Profile {profile_id!r} enables cross_task_reuse but external_state is not "none"'
             )
+        input_closure = _string(
+            raw.get("input_closure", "declared"),
+            field=f"profiles[{index}].input_closure",
+            non_empty=True,
+        )
+        if input_closure not in {"declared", "complete"}:
+            raise SoloAIError(
+                f"Profile {profile_id!r} input_closure must be declared or complete"
+            )
+        if reuse and input_closure != "complete":
+            raise SoloAIError(
+                f"Profile {profile_id!r} enables cross_task_reuse but input_closure is not complete"
+            )
+        timeout_seconds = _number(
+            raw.get("timeout_seconds", 2700),
+            field=f"profiles[{index}].timeout_seconds",
+        )
+        if timeout_seconds <= 0:
+            raise SoloAIError(
+                f"Profile {profile_id!r} timeout_seconds must be positive"
+            )
+        resource_class = _string(
+            raw.get("resource_class", "normal"),
+            field=f"profiles[{index}].resource_class",
+            non_empty=True,
+        )
+        if resource_class not in {"normal", "heavy"}:
+            raise SoloAIError(
+                f"Profile {profile_id!r} resource_class must be normal or heavy"
+            )
+        level = _string(
+            raw.get("level", "ready"),
+            field=f"profiles[{index}].level",
+            non_empty=True,
+        )
+        if level not in {"development", "ready", "full"}:
+            raise SoloAIError(
+                f"Profile {profile_id!r} level must be development, ready, or full"
+            )
         profiles.append(
             VerificationProfile(
                 profile_id=profile_id,
@@ -360,6 +440,10 @@ def load_verification_config(
                     field=f"profiles[{index}].environment",
                     allow_empty=True,
                 ),
+                input_closure=input_closure,
+                timeout_seconds=timeout_seconds,
+                resource_class=resource_class,
+                level=level,
             )
         )
     static_only = _boolean(data.get("static_only", False), field="static_only")
@@ -367,7 +451,11 @@ def load_verification_config(
         raise SoloAIError(
             "No validation commands configured; explicitly enable static_only or add a profile"
         )
-    return VerificationConfig(VERIFICATION_SCHEMA, static_only, tuple(profiles))
+    if profiles and static_only:
+        raise SoloAIError(
+            "static_only cannot be combined with verification profiles; map every changed path explicitly"
+        )
+    return VerificationConfig(schema_version, static_only, tuple(profiles))
 
 
 def _package_json_commands(root: Path) -> list[CommandSpec]:
@@ -448,23 +536,6 @@ def discover_validation_commands(root: Path) -> list[CommandSpec]:
     return unique
 
 
-WORKFLOW_MARKERS = {
-    ".config/wt.toml": "Worktrunk",
-    ".conductor": "Conductor",
-    ".parallel-code": "Parallel Code",
-    "scripts/worktree-flow.ps1": "repository worktree-flow",
-    ".sdd": "agent orchestrator workspace",
-}
-
-
-def detect_existing_workflows(root: Path) -> list[str]:
-    return [
-        name
-        for relative, name in WORKFLOW_MARKERS.items()
-        if (root / relative).exists()
-    ]
-
-
 def workflow_marker_fingerprint(root: Path) -> str:
     records: list[dict[str, str]] = []
     for relative in WORKFLOW_MARKERS:
@@ -500,6 +571,10 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # Optional serial preparation commands for an idle slot. No environment is copied.
 # warm = [["uv", "sync"]]
 
+# Only exact top-level paths explicitly declared here may be removed by prune-slot.
+# An empty list means no dependencies or caches are ever removed automatically.
+cleanup = {{ owned_paths = [] }}
+
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{{port}}"]
 # [lifecycle.readiness]
@@ -527,6 +602,10 @@ def render_verification_config(
                 'external_state = "unknown"',
                 'input_paths = ["**"]',
                 "environment = []",
+                'input_closure = "declared"',
+                "timeout_seconds = 2700",
+                'resource_class = "normal"',
+                'level = "ready"',
                 "commands = [",
             )
         )
@@ -543,7 +622,7 @@ def managed_block() -> str:
     return f"""{MANAGED_START}
 ## Isolated coding tasks
 
-For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in the returned worktree, stage an exact reviewed path list with `commit`, then run `ready` and `finish`. Read-only analysis does not claim a slot. Do not bypass a failed gate. This repository's policy is local-only: do not fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history through this lifecycle.
+For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in the returned worktree, stage an exact reviewed path list with `commit`, then run `ready` and `finish`. Read-only analysis does not claim a slot. Do not bypass a failed gate. The DWW lifecycle is local-only and must not fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After a successful Finish, an explicit user request may be fulfilled with an ordinary non-force push of the current branch from the clean base worktree; that publishing step is separate from DWW.
 {MANAGED_END}
 """
 

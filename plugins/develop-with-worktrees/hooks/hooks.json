@@ -1,5 +1,5 @@
 {
-  "description": "Codex guardrails for develop-with-worktrees. They inject policy context; the lifecycle CLI remains the hard gate.",
+  "description": "Codex guardrails for develop-with-worktrees. On supported local tool paths, PreToolUse denies protected base-worktree writes before they run; the lifecycle CLI supplies task authorization.",
   "hooks": {
     "SessionStart": [
       {
