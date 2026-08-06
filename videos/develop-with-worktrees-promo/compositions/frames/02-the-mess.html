@@ -1,0 +1,349 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Noto Serif SC";
+      src: url("assets/fonts/NotoSerifSC-400.ttf") format("truetype");
+      font-weight: 400;
+      font-style: normal;
+    }
+
+    #root {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      container-type: size;
+      color: #eaf2ff;
+      background: #071321;
+      font-family: "Noto Serif SC", serif;
+    }
+
+    #root .clip { position: absolute; box-sizing: border-box; }
+    #root .mono { font-family: ui-monospace, Consolas, monospace; }
+
+    #root [data-ground] {
+      inset: 0;
+      background:
+        radial-gradient(circle at 48% 37%, rgba(77, 124, 255, 0.18), transparent 29cqw),
+        linear-gradient(rgba(137, 177, 230, 0.08) 0.08cqw, transparent 0.08cqw),
+        linear-gradient(90deg, rgba(137, 177, 230, 0.08) 0.08cqw, transparent 0.08cqw),
+        #071321;
+      background-size: auto, 4cqw 4cqw, 4cqw 4cqw, auto;
+    }
+
+    #root [data-scan] {
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 0.22cqh;
+      opacity: 0.24;
+      background: linear-gradient(90deg, transparent, #71d7ff, transparent);
+      z-index: 1;
+    }
+
+    #root [data-chrome] {
+      left: 5.2cqw;
+      right: 5.2cqw;
+      top: 7.4cqh;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #9bb6d8;
+      font-size: 1.04cqw;
+      letter-spacing: 0.13em;
+      z-index: 7;
+    }
+
+    #root [data-chrome] span:last-child { color: #71d7ff; }
+
+    #root [data-headline] {
+      top: 12.6cqh;
+      left: 5.2cqw;
+      width: 78cqw;
+      font-size: 7.2cqw;
+      line-height: 0.98;
+      letter-spacing: -0.075em;
+      z-index: 9;
+    }
+
+    #root [data-headline] small {
+      display: block;
+      margin-top: 1.7cqh;
+      color: #9bb6d8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.15cqw;
+      letter-spacing: 0.1em;
+    }
+
+    #root [data-panel] {
+      border: 0.14cqw solid rgba(137, 177, 230, 0.58);
+      background: linear-gradient(150deg, rgba(17, 43, 73, 0.98), rgba(12, 32, 56, 0.98));
+      box-shadow: inset 0 0 0 0.08cqw rgba(234, 242, 255, 0.035);
+      overflow: hidden;
+    }
+
+    #root [data-panel]::before {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 0.44cqh;
+      background: rgba(113, 215, 255, 0.15);
+      content: "";
+    }
+
+    #root [data-main-panel] {
+      top: 29cqh;
+      left: 24cqw;
+      width: 52cqw;
+      height: 33.4cqh;
+      padding: 2.2cqw;
+      z-index: 6;
+    }
+
+    #root [data-panel-top] {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 1.55cqh;
+      border-bottom: 0.1cqw solid rgba(137, 177, 230, 0.24);
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1cqw;
+      letter-spacing: 0.07em;
+    }
+
+    #root [data-chip] {
+      display: inline-block;
+      padding: 0.45cqh 0.8cqw;
+      border: 0.1cqw solid currentColor;
+      color: #71d7ff;
+      font-size: 0.88cqw;
+      line-height: 1;
+      letter-spacing: 0.08em;
+    }
+
+    #root [data-chip="risk"] { color: #ff8b7a; }
+    #root [data-chip="cool"] { color: #71d7ff; }
+
+    #root [data-path] {
+      margin: 2.05cqh 0 1.2cqh;
+      color: #eaf2ff;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.48cqw;
+      letter-spacing: -0.025em;
+    }
+
+    #root [data-command] {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.68cqh 0;
+      border-top: 0.08cqw solid rgba(137, 177, 230, 0.16);
+      color: #9bb6d8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.08cqw;
+      letter-spacing: 0.02em;
+    }
+
+    #root [data-command] b { color: #eaf2ff; font-weight: 400; }
+    #root [data-command] em { color: #ff8b7a; font-style: normal; }
+
+    #root [data-support] {
+      width: 18cqw;
+      min-height: 14.4cqh;
+      padding: 1.55cqw 1.65cqw;
+      z-index: 5;
+    }
+
+    #root [data-support="branch"] { left: 5.2cqw; top: 33.7cqh; }
+    #root [data-support="deps"] { left: 76.8cqw; top: 35.5cqh; }
+    #root [data-support="port"] { left: 51.6cqw; top: 65.8cqh; width: 31.4cqw; min-height: 12.4cqh; }
+
+    #root [data-card-label] {
+      color: #9bb6d8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.9cqw;
+      letter-spacing: 0.12em;
+    }
+
+    #root [data-card-name] {
+      display: block;
+      margin: 1.45cqh 0 0.55cqh;
+      color: #eaf2ff;
+      font-size: 3.05cqw;
+      line-height: 0.95;
+      letter-spacing: -0.055em;
+    }
+
+    #root [data-support="branch"] [data-card-name],
+    #root [data-support="deps"] [data-card-name] { font-size: 2.52cqw; }
+
+    #root [data-card-detail] {
+      display: block;
+      color: #9bb6d8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.98cqw;
+      line-height: 1.55;
+    }
+
+    #root [data-support="branch"] [data-card-detail],
+    #root [data-support="deps"] [data-card-detail] { font-size: 0.82cqw; }
+
+    #root [data-card-status] {
+      position: absolute;
+      right: 1.55cqw;
+      bottom: 1.45cqh;
+    }
+
+    #root [data-route] {
+      height: 0.15cqw;
+      transform-origin: left center;
+      background: linear-gradient(90deg, #ff8b7a, rgba(255, 139, 122, 0.3));
+      z-index: 4;
+    }
+
+    #root [data-route]::after {
+      position: absolute;
+      top: -0.34cqw;
+      right: -0.28cqw;
+      width: 0.52cqw;
+      height: 0.52cqw;
+      border: 0.12cqw solid #ff8b7a;
+      background: #071321;
+      content: "";
+    }
+
+    #root [data-route="branch"] { left: 22.8cqw; top: 45.2cqh; width: 16cqw; transform: rotate(7deg); }
+    #root [data-route="deps"] { left: 76.8cqw; top: 46.4cqh; width: 18cqw; transform: rotate(168deg); }
+    #root [data-route="port"] { left: 59cqw; top: 66.8cqh; width: 16.3cqw; transform: rotate(-119deg); }
+
+    #root [data-risk-tag] {
+      padding: 0.56cqh 0.84cqw;
+      border: 0.1cqw solid rgba(255, 139, 122, 0.78);
+      background: #0c2038;
+      color: #ff8b7a;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.82cqw;
+      letter-spacing: 0.09em;
+      z-index: 8;
+    }
+
+    #root [data-risk-tag="scope"] { top: 25cqh; left: 12cqw; }
+    #root [data-risk-tag="drift"] { top: 26.5cqh; right: 9.2cqw; }
+    #root [data-risk-tag="owner"] { top: 70.7cqh; left: 15cqw; }
+
+    #root [data-footer] {
+      left: 5.2cqw;
+      right: 5.2cqw;
+      bottom: 7.2cqh;
+      display: flex;
+      justify-content: space-between;
+      padding-top: 1.25cqh;
+      border-top: 0.1cqw solid rgba(137, 177, 230, 0.3);
+      color: #9bb6d8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.96cqw;
+      letter-spacing: 0.11em;
+      z-index: 8;
+    }
+
+    #root [data-final] {
+      top: 81.2cqh;
+      left: 12cqw;
+      width: 76cqw;
+      color: #eaf2ff;
+      font-size: 5.5cqw;
+      line-height: 0.95;
+      letter-spacing: -0.075em;
+      text-align: center;
+      z-index: 10;
+    }
+
+    #root [data-final] strong { color: #ff8b7a; font-weight: 400; }
+  </style>
+
+  <div data-hf-id="hf-1zsl" id="root" data-composition-id="02-the-mess" data-duration="6.4" data-width="1080" data-height="1920">
+    <div data-hf-id="hf-khk8" id="f02-ground" class="clip" data-ground="" data-start="0" data-duration="6.4" data-track-index="0"></div>
+    <div data-hf-id="hf-m4st" id="f02-scan" class="clip" data-scan="" data-start="0" data-duration="6.4" data-track-index="1"></div>
+
+    <div data-hf-id="hf-nrh9" id="f02-chrome" class="clip mono" data-chrome="" data-start="0" data-duration="6.4" data-track-index="2">
+      <span data-hf-id="hf-czbg">02 / 同一个项目</span><span data-hf-id="hf-vssc">风险正在出现</span>
+    </div>
+    <div data-hf-id="hf-s2pk" id="f02-headline" class="clip" data-headline="" data-start="0" data-duration="6.4" data-track-index="3">
+      一个项目，<br data-hf-id="hf-x5px">三个 AI 同时改。
+      <small data-hf-id="hf-yu4x">它们不知道彼此正在改什么</small>
+    </div>
+
+    <div data-hf-id="hf-f7k4" id="f02-branch-card" class="clip" data-panel="" data-support="branch" data-start="0" data-duration="6.4" data-track-index="4">
+      <span data-hf-id="hf-jqg5" class="mono" data-card-label="">AI A / 01</span>
+      <span data-hf-id="hf-sy9o" data-card-name="">正在改登录</span>
+      <span data-hf-id="hf-zlkr" data-card-detail="">也碰到：登录页面<br data-hf-id="hf-rsrt">不知道 AI B 也在改</span>
+      <span data-hf-id="hf-en77" class="mono" data-chip="risk" data-card-status="">改到同一处</span>
+    </div>
+    <div data-hf-id="hf-9tiz" id="f02-deps-card" class="clip" data-panel="" data-support="deps" data-start="0" data-duration="6.4" data-track-index="5">
+      <span data-hf-id="hf-hwej" class="mono" data-card-label="">AI B / 02</span>
+      <span data-hf-id="hf-d43o" data-card-name="">正在改接口</span>
+      <span data-hf-id="hf-6q6e" data-card-detail="">接口也动了登录页面<br data-hf-id="hf-szow">不知道 AI A 先改了</span>
+      <span data-hf-id="hf-b66z" class="mono" data-chip="risk" data-card-status="">互相覆盖</span>
+    </div>
+    <div data-hf-id="hf-cnbc" id="f02-port-card" class="clip" data-panel="" data-support="port" data-start="0" data-duration="6.4" data-track-index="6">
+      <span data-hf-id="hf-3uat" class="mono" data-card-label="">AI C / 03</span>
+      <span data-hf-id="hf-n8lw" data-card-name="">正在跑测试</span>
+      <span data-hf-id="hf-f5fa" data-card-detail="">测试又改了配置<br data-hf-id="hf-sldv">没人知道谁动过</span>
+      <span data-hf-id="hf-9frm" class="mono" data-chip="risk" data-card-status="">最后才发现</span>
+    </div>
+
+    <div data-hf-id="hf-oiqy" id="f02-branch-route" class="clip" data-route="branch" data-start="0" data-duration="6.4" data-track-index="7"></div>
+    <div data-hf-id="hf-e43t" id="f02-deps-route" class="clip" data-route="deps" data-start="0" data-duration="6.4" data-track-index="8"></div>
+    <div data-hf-id="hf-x1jg" id="f02-port-route" class="clip" data-route="port" data-start="0" data-duration="6.4" data-track-index="9"></div>
+
+    <div data-hf-id="hf-u8qr" id="f02-main-panel" class="clip" data-panel="" data-main-panel="" data-start="0" data-duration="6.4" data-track-index="10">
+      <div data-hf-id="hf-mc9d" data-panel-top=""><span data-hf-id="hf-gedl">同一个项目</span><span data-hf-id="hf-d6ki" class="mono" data-chip="risk">三个任务同时改</span></div>
+      <div data-hf-id="hf-ie87" class="mono" data-path="">现在：同一份代码</div>
+      <div data-hf-id="hf-o4fg" data-command=""><span data-hf-id="hf-8v57">AI A</span><b data-hf-id="hf-wjfg">正在改登录页面</b></div>
+      <div data-hf-id="hf-6l1g" data-command=""><span data-hf-id="hf-bi04">AI B</span><em data-hf-id="hf-n4x4">也在改登录页面</em></div>
+      <div data-hf-id="hf-5e4d" data-command=""><span data-hf-id="hf-rkie">AI C</span><em data-hf-id="hf-naku">配置被再次修改</em></div>
+      <div data-hf-id="hf-5sfe" data-command=""><span data-hf-id="hf-i2ix">现在</span><em data-hf-id="hf-pwsv">等最后再发现</em></div>
+    </div>
+
+    <div data-hf-id="hf-bftj" id="f02-risk-scope" class="clip" data-risk-tag="scope" data-start="0" data-duration="6.4" data-track-index="11">同一文件</div>
+    <div data-hf-id="hf-gtof" id="f02-risk-drift" class="clip" data-risk-tag="drift" data-start="0" data-duration="6.4" data-track-index="12">互相不知道</div>
+    <div data-hf-id="hf-vme3" id="f02-risk-owner" class="clip" data-risk-tag="owner" data-start="0" data-duration="6.4" data-track-index="13">最后才发现</div>
+
+    <div data-hf-id="hf-xuw4" id="f02-final" class="clip" data-final="" data-start="4.65" data-duration="1.75" data-track-index="14">
+      等要交付，<strong data-hf-id="hf-uoaa">才发现东西乱了。</strong>
+    </div>
+    <div data-hf-id="hf-uwvn" id="f02-footer" class="clip mono" data-footer="" data-start="0" data-duration="6.4" data-track-index="15">
+      <span data-hf-id="hf-joba">原因 / 没分开</span><span data-hf-id="hf-lng3">结果 / 最后才发现</span>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <script>
+    (() => {
+      const get = (id) => document.getElementById(id);
+      const branch = get("f02-branch-card");
+      const deps = get("f02-deps-card");
+      const port = get("f02-port-card");
+      const routes = [get("f02-branch-route"), get("f02-deps-route"), get("f02-port-route")];
+      const tags = [get("f02-risk-scope"), get("f02-risk-drift"), get("f02-risk-owner")];
+      const tl = gsap.timeline({ paused: true });
+
+      tl.fromTo(get("f02-chrome"), { opacity: 0, y: -16 }, { opacity: 1, y: 0, duration: 0.28, ease: "power1.out" }, 0.08)
+        .fromTo(get("f02-headline"), { opacity: 0, y: 28 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, 0.22)
+        .fromTo(get("f02-main-panel"), { opacity: 0, scale: 0.92, y: 42 }, { opacity: 1, scale: 1, y: 0, duration: 0.58, ease: "expo.out" }, 0.62)
+        .fromTo(branch, { opacity: 0, x: -82, y: -24, scale: 0.86 }, { opacity: 1, x: 0, y: 0, scale: 1, duration: 0.48, ease: "power3.out" }, 1.2)
+        .fromTo(deps, { opacity: 0, x: 92, y: -42, scale: 0.84 }, { opacity: 1, x: 0, y: 0, scale: 1, duration: 0.5, ease: "power2.out" }, 1.8)
+        .fromTo(port, { opacity: 0, x: 56, y: 76, scale: 0.84 }, { opacity: 1, x: 0, y: 0, scale: 1, duration: 0.5, ease: "power4.out" }, 2.4)
+        .fromTo(routes, { opacity: 0, scaleX: 0 }, { opacity: 1, scaleX: 1, duration: 0.52, stagger: 0.13, ease: "power1.inOut" }, 2.72)
+        .fromTo(tags, { opacity: 0, scale: 0.76 }, { opacity: 1, scale: 1, duration: 0.34, stagger: 0.14, ease: "power2.out" }, 3.24)
+        .to(routes, { opacity: 0.72, duration: 0.42, ease: "power1.out" }, 3.55)
+        .to(get("f02-scan"), { y: 1680, duration: 1.7, ease: "none" }, 2.9)
+        .to([branch, deps, port], { borderColor: "rgba(255, 139, 122, 0.78)", duration: 0.34, stagger: 0.07, ease: "power1.inOut" }, 4.25)
+        .fromTo(get("f02-final"), { opacity: 0, y: 20, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.5, ease: "power3.out" }, 4.65)
+        .fromTo(get("f02-footer"), { opacity: 0 }, { opacity: 1, duration: 0.34, ease: "power1.out" }, 5.18);
+
+      window.__timelines = window.__timelines || {};
+      window.__timelines["02-the-mess"] = tl;
+    })();
+  </script>
+</template>

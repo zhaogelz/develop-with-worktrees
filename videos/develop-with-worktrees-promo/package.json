@@ -1,0 +1,11 @@
+{
+  "name": "develop-with-worktrees-promo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx --yes hyperframes@0.7.94 preview",
+    "check": "npx --yes hyperframes@0.7.94 check",
+    "render": "npx --yes hyperframes@0.7.94 render",
+    "publish": "npx --yes hyperframes@0.7.94 publish"
+  }
+}

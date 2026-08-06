@@ -1,0 +1,112 @@
+<template>
+  <style>
+    @font-face { font-family: "NotoSerifSC"; src: url("assets/fonts/NotoSerifSC-400.ttf") format("truetype"); font-style: normal; font-weight: 400; font-display: block; }
+    #root { position: relative; width: 1080px; height: 1920px; overflow: hidden; container-type: size; color: #EAF2FF; font-family: "NotoSerifSC", serif; background: #071321; }
+    #root *, #root *::before, #root *::after { box-sizing: border-box; }
+    #f05g-ground { position: absolute; inset: 0; background: radial-gradient(circle at 50% 48%, rgba(255,139,122,.13), rgba(255,139,122,0) 28%), radial-gradient(circle at 12% 18%, rgba(77,124,255,.2), rgba(77,124,255,0) 24%), linear-gradient(rgba(137,177,230,.075) .1cqw, rgba(137,177,230,0) .1cqw), linear-gradient(90deg, rgba(137,177,230,.075) .1cqw, rgba(137,177,230,0) .1cqw), #071321; background-size: auto, auto, 4cqw 4cqw, 4cqw 4cqw, auto; }
+    #f05g-vignette { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(7,19,33,.02), rgba(7,19,33,.5)); }
+    .f05g-hud { position: absolute; left: 5.2cqw; right: 5.2cqw; display: flex; align-items: center; justify-content: space-between; color: #9BB6D8; font: 1.35cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .12em; }
+    #f05g-top { top: 4.5cqh; padding-bottom: 2.05cqh; border-bottom: .1cqw solid rgba(137,177,230,.28); }
+    #f05g-top span:last-child { color: #FF8B7A; }
+    #f05g-title { position: absolute; left: 5.2cqw; top: 9.1cqh; width: 82cqw; font-size: 7.2cqw; font-weight: 400; letter-spacing: -.075em; line-height: .92; }
+    #f05g-title span { display: block; }
+    #f05g-title em { display: block; color: #FF8B7A; font-style: normal; }
+    #f05g-subtitle { position: absolute; left: 5.45cqw; top: 20.2cqh; width: 78cqw; color: #9BB6D8; font-size: 2.18cqw; letter-spacing: .02em; line-height: 1.42; }
+    .f05g-side { position: absolute; top: 29.2cqh; width: 41.6cqw; min-height: 17cqh; overflow: hidden; border: .12cqw solid rgba(137,177,230,.38); background: linear-gradient(145deg, rgba(17,43,73,.97), rgba(12,32,56,.94)); box-shadow: 0 1.8cqh 4.5cqh rgba(0,0,0,.2); }
+    #f05g-main-card { left: 5.2cqw; }
+    #f05g-ai-card { right: 5.2cqw; }
+    .f05g-card-head { height: 5.1cqh; padding: 1.55cqh 1.65cqw; display: flex; align-items: center; justify-content: space-between; border-bottom: .1cqw solid rgba(137,177,230,.22); color: #9BB6D8; font: 1.08cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+    .f05g-card-head b { color: #EAF2FF; font-weight: 400; }
+    .f05g-card-head span { padding: .55cqh .75cqw; border: .1cqw solid rgba(113,215,255,.38); color: #71D7FF; }
+    .f05g-card-body { padding: 2.15cqh 1.75cqw 1.8cqh; }
+    .f05g-card-kicker { color: #9BB6D8; font: 1.05cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .1em; }
+    .f05g-card-file { margin-top: 1.2cqh; color: #EAF2FF; font-size: 2.75cqw; letter-spacing: -.045em; }
+    .f05g-card-note { margin-top: 1.25cqh; color: #9BB6D8; font: 1.08cqw/1.35 ui-monospace, Consolas, monospace; }
+    #f05g-routes { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .f05g-route { fill: none; stroke: rgba(113,215,255,.65); stroke-width: 2.4; stroke-dasharray: 14 13; stroke-dashoffset: 190; }
+    #f05g-route-right { stroke: rgba(255,139,122,.75); }
+    #f05g-target { position: absolute; left: 50%; top: 49.8cqh; width: 35cqw; min-height: 5.8cqh; margin-left: -17.5cqw; display: flex; align-items: center; justify-content: center; gap: 1cqw; border: .12cqw solid rgba(255,139,122,.52); background: rgba(12,32,56,.95); color: #EAF2FF; font-size: 2.05cqw; letter-spacing: -.02em; box-shadow: 0 1.2cqh 3cqh rgba(0,0,0,.18); }
+    #f05g-target::before { width: 1cqw; height: 1cqw; border-radius: 50%; background: #FF8B7A; box-shadow: 0 0 0 .45cqw rgba(255,139,122,.1); content: ""; }
+    #f05g-scan-state { position: absolute; left: 5.2cqw; right: 5.2cqw; top: 56.5cqh; min-height: 9.5cqh; overflow: hidden; border: .12cqw solid rgba(255,139,122,.65); background: rgba(12,32,56,.96); box-shadow: 0 1.8cqh 4.5cqh rgba(0,0,0,.2); }
+    #f05g-scan-line { position: absolute; left: 0; right: 0; top: -2cqh; height: 3.2cqh; background: linear-gradient(180deg, rgba(255,139,122,0), rgba(255,139,122,.18), rgba(255,139,122,0)); }
+    #f05g-guard-bar { position: absolute; left: 0; top: 0; bottom: 0; width: .55cqw; background: #FF8B7A; transform-origin: center top; }
+    #f05g-guard-content { position: relative; min-height: 9.5cqh; padding: 2.15cqh 2.35cqw 1.75cqh 3cqw; display: grid; grid-template-columns: 1fr auto; gap: 1.5cqw; align-items: center; }
+    #f05g-guard-title { color: #EAF2FF; font-size: 3.15cqw; letter-spacing: -.045em; }
+    #f05g-guard-title span { display: block; margin-bottom: .65cqh; color: #FF8B7A; font: 1.08cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .12em; }
+    #f05g-paused { min-width: 15cqw; padding: 1.2cqh 1.5cqw; border: .12cqw solid rgba(255,139,122,.72); color: #FF8B7A; text-align: center; font: 1.35cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .12em; }
+    #f05g-paused b { display: block; margin-top: .8cqh; color: #EAF2FF; font-size: 1.85cqw; font-weight: 400; letter-spacing: -.02em; }
+    #f05g-receipt { position: absolute; left: 5.2cqw; right: 5.2cqw; top: 68.1cqh; min-height: 10.2cqh; display: grid; grid-template-columns: repeat(3, 1fr); overflow: hidden; border: .1cqw solid rgba(137,177,230,.3); background: rgba(12,32,56,.86); }
+    .f05g-step { position: relative; min-height: 10.2cqh; padding: 1.75cqh 1.6cqw 1.45cqh 4.1cqw; border-right: .1cqw solid rgba(137,177,230,.22); }
+    .f05g-step:last-child { border-right: none; }
+    .f05g-step-index { position: absolute; left: 1.35cqw; top: 1.65cqh; width: 1.9cqw; height: 1.9cqw; display: grid; place-items: center; border-radius: 50%; background: #86E6B1; color: #071321; font: 1.15cqw/1 ui-monospace, Consolas, monospace; }
+    .f05g-step-label { color: #EAF2FF; font-size: 2.05cqw; letter-spacing: -.035em; }
+    .f05g-step-meta { margin-top: 1.25cqh; color: #9BB6D8; font: 1cqw/1.35 ui-monospace, Consolas, monospace; }
+    #f05g-result { position: absolute; left: 18cqw; right: 18cqw; top: 80.1cqh; min-height: 7cqh; padding: 1.65cqh 2.1cqw; display: flex; align-items: center; justify-content: center; gap: 1.25cqw; border: .12cqw solid rgba(134,230,177,.62); background: rgba(12,32,56,.96); color: #EAF2FF; font-size: 3.05cqw; letter-spacing: -.045em; text-align: center; box-shadow: 0 0 0 .55cqw rgba(134,230,177,.07); }
+    #f05g-result strong { color: #86E6B1; font-weight: 400; }
+    #f05g-result::before { width: 1.25cqw; height: 1.25cqw; border-radius: 50%; background: #86E6B1; box-shadow: 0 0 0 .5cqw rgba(134,230,177,.1); content: ""; }
+    #f05g-bottom { bottom: 4.4cqh; padding-top: 2.05cqh; border-top: .1cqw solid rgba(137,177,230,.28); }
+    #f05g-bottom span:first-child { color: #86E6B1; }
+  </style>
+
+  <div data-hf-id="hf-f05g-root" id="root" data-composition-id="05-conflict-guard" data-duration="7.5" data-width="1080" data-height="1920">
+    <div data-hf-id="hf-f05g-ground" id="f05g-ground" class="clip" data-start="0" data-duration="7.5" data-track-index="0"></div>
+    <div data-hf-id="hf-f05g-vignette" id="f05g-vignette" class="clip" data-start="0" data-duration="7.5" data-track-index="1"></div>
+    <div data-hf-id="hf-f05g-top" id="f05g-top" class="f05g-hud clip" data-layout-allow-overlap="" data-start="0" data-duration="7.5" data-track-index="2"><span data-hf-id="hf-f05g-top-a">安全证据 / 冲突处理</span><span data-hf-id="hf-f05g-top-b">● 先停下</span></div>
+    <div data-hf-id="hf-f05g-title" id="f05g-title" class="clip" data-layout-allow-overlap="" data-start="0" data-duration="7.5" data-track-index="3"><span data-hf-id="hf-f05g-title-a">真有冲突，</span><em data-hf-id="hf-f05g-title-b">就先停下</em></div>
+    <div data-hf-id="hf-f05g-subtitle" id="f05g-subtitle" class="clip" data-start="0" data-duration="7.5" data-track-index="4">告诉你哪里冲突，不会偷偷覆盖原项目。</div>
+
+    <section data-hf-id="hf-f05g-main-card" id="f05g-main-card" class="f05g-side clip" data-start="0" data-duration="7.5" data-track-index="5">
+      <div data-hf-id="hf-f05g-main-head" class="f05g-card-head"><b data-hf-id="hf-f05g-main-name">主项目</b><span data-hf-id="hf-f05g-main-status">原来的修改</span></div>
+      <div data-hf-id="hf-f05g-main-body" class="f05g-card-body"><div data-hf-id="hf-f05g-main-kicker" class="f05g-card-kicker">刚刚有人改了</div><div data-hf-id="hf-f05g-main-file" class="f05g-card-file">登录页面</div><div data-hf-id="hf-f05g-main-note" class="f05g-card-note">这是主项目里已经存在的内容</div></div>
+    </section>
+
+    <section data-hf-id="hf-f05g-ai-card" id="f05g-ai-card" class="f05g-side clip" data-start="0" data-duration="7.5" data-track-index="6">
+      <div data-hf-id="hf-f05g-ai-head" class="f05g-card-head"><b data-hf-id="hf-f05g-ai-name">AI B 的修改</b><span data-hf-id="hf-f05g-ai-status">准备合回</span></div>
+      <div data-hf-id="hf-f05g-ai-body" class="f05g-card-body"><div data-hf-id="hf-f05g-ai-kicker" class="f05g-card-kicker">它也改了</div><div data-hf-id="hf-f05g-ai-file" class="f05g-card-file">登录页面</div><div data-hf-id="hf-f05g-ai-note" class="f05g-card-note">两边碰到了同一个地方</div></div>
+    </section>
+
+    <svg data-hf-id="hf-f05g-routes" id="f05g-routes" class="clip" data-start="0" data-duration="7.5" data-track-index="7" viewBox="0 0 1080 1920" aria-hidden="true"><path data-hf-id="hf-f05g-route-left" id="f05g-route-left" class="f05g-route" d="M276 888 V988 H540" /><path data-hf-id="hf-f05g-route-right" id="f05g-route-right" class="f05g-route" d="M804 888 V988 H540" /></svg>
+    <div data-hf-id="hf-f05g-target" id="f05g-target" class="clip" data-start="0" data-duration="7.5" data-track-index="8">同一个地方：登录页面</div>
+
+    <section data-hf-id="hf-f05g-scan-state" id="f05g-scan-state" class="clip" data-start="0" data-duration="7.5" data-track-index="9">
+      <div data-hf-id="hf-f05g-scan-line" id="f05g-scan-line"></div>
+      <div data-hf-id="hf-f05g-guard-bar" id="f05g-guard-bar"></div>
+      <div data-hf-id="hf-f05g-guard-content" id="f05g-guard-content"><div data-hf-id="hf-f05g-guard-title" id="f05g-guard-title"><span data-hf-id="hf-f05g-guard-kicker">发现两边都改了登录页面</span>不会自动覆盖</div><div data-hf-id="hf-f05g-paused" id="f05g-paused">发现冲突<b data-hf-id="hf-f05g-paused-b">已暂停</b></div></div>
+    </section>
+
+    <div data-hf-id="hf-f05g-receipt" id="f05g-receipt" class="clip" data-start="0" data-duration="7.5" data-track-index="10">
+      <div data-hf-id="hf-f05g-step-one" id="f05g-step-one" class="f05g-step"><div data-hf-id="hf-f05g-step-one-index" class="f05g-step-index">✓</div><div data-hf-id="hf-f05g-step-one-label" class="f05g-step-label">先停下</div><div data-hf-id="hf-f05g-step-one-meta" class="f05g-step-meta">不继续自动合回</div></div>
+      <div data-hf-id="hf-f05g-step-two" id="f05g-step-two" class="f05g-step"><div data-hf-id="hf-f05g-step-two-index" class="f05g-step-index">✓</div><div data-hf-id="hf-f05g-step-two-label" class="f05g-step-label">告诉你冲突在哪</div><div data-hf-id="hf-f05g-step-two-meta" class="f05g-step-meta">登录页面被两边修改</div></div>
+      <div data-hf-id="hf-f05g-step-three" id="f05g-step-three" class="f05g-step"><div data-hf-id="hf-f05g-step-three-index" class="f05g-step-index">✓</div><div data-hf-id="hf-f05g-step-three-label" class="f05g-step-label">修好再继续</div><div data-hf-id="hf-f05g-step-three-meta" class="f05g-step-meta">不会猜着替你处理</div></div>
+    </div>
+
+    <div data-hf-id="hf-f05g-result" id="f05g-result" class="clip" data-start="0" data-duration="7.5" data-track-index="11">原项目<strong data-hf-id="hf-f05g-result-strong">保持原样</strong></div>
+    <div data-hf-id="hf-f05g-bottom" id="f05g-bottom" class="f05g-hud clip" data-start="0" data-duration="7.5" data-track-index="12"><span data-hf-id="hf-f05g-bottom-a">冲突先停，不偷偷覆盖</span><span data-hf-id="hf-f05g-bottom-b">05 / 06</span></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <script>
+    const tl = window.gsap.timeline({ paused: true });
+    tl.fromTo("#f05g-top", { opacity: 0, y: "-2cqh" }, { opacity: 1, y: 0, duration: .3, ease: "power1.out" }, .08)
+      .fromTo("#f05g-title", { opacity: 0, y: "3cqh", clipPath: "inset(0 100% 0 0)" }, { opacity: 1, y: 0, clipPath: "inset(0 0% 0 0)", duration: .62, ease: "power3.out" }, .24)
+      .fromTo("#f05g-subtitle", { opacity: 0, x: "-2cqw" }, { opacity: 1, x: 0, duration: .4, ease: "power2.out" }, .72)
+      .fromTo("#f05g-main-card", { opacity: 0, x: "-6cqw", y: "2cqh" }, { opacity: 1, x: 0, y: 0, duration: .52, ease: "power3.out" }, 1.15)
+      .fromTo("#f05g-ai-card", { opacity: 0, x: "6cqw", y: "2cqh" }, { opacity: 1, x: 0, y: 0, duration: .54, ease: "expo.out" }, 1.78)
+      .fromTo(".f05g-route", { opacity: 0, strokeDashoffset: 190 }, { opacity: 1, strokeDashoffset: 0, duration: .62, stagger: .16, ease: "power1.inOut" }, 2.36)
+      .fromTo("#f05g-target", { opacity: 0, scale: .88, y: "1.2cqh" }, { opacity: 1, scale: 1, y: 0, duration: .46, ease: "power4.out" }, 2.78)
+      .fromTo("#f05g-scan-state", { opacity: 0, y: "2.2cqh" }, { opacity: 1, y: 0, duration: .5, ease: "power3.out" }, 3.18)
+      .fromTo("#f05g-scan-line", { opacity: 0, y: 0 }, { opacity: .95, y: "8.5cqh", duration: .82, ease: "none" }, 3.18)
+      .to(["#f05g-main-card", "#f05g-ai-card"], { borderColor: "rgba(255,139,122,.78)", duration: .32, stagger: .08, ease: "power1.inOut" }, 3.48)
+      .fromTo("#f05g-guard-bar", { scaleY: 0 }, { scaleY: 1, duration: .36, ease: "power3.out" }, 3.65)
+      .fromTo("#f05g-paused", { opacity: 0, x: "2cqw" }, { opacity: 1, x: 0, duration: .38, ease: "power2.out" }, 4.02)
+      .to("#f05g-scan-line", { opacity: 0, duration: .18, ease: "power1.out" }, 4.08)
+      .fromTo("#f05g-receipt", { opacity: 0, y: "2cqh" }, { opacity: 1, y: 0, duration: .46, ease: "power3.out" }, 4.62)
+      .fromTo("#f05g-step-one", { opacity: 0, y: "1.5cqh" }, { opacity: 1, y: 0, duration: .36, ease: "power2.out" }, 4.92)
+      .fromTo("#f05g-step-two", { opacity: 0, y: "1.5cqh" }, { opacity: 1, y: 0, duration: .38, ease: "power3.out" }, 5.38)
+      .fromTo("#f05g-step-three", { opacity: 0, y: "1.5cqh" }, { opacity: 1, y: 0, duration: .4, ease: "power4.out" }, 5.84)
+      .fromTo("#f05g-result", { opacity: 0, y: "1.8cqh", scale: .96 }, { opacity: 1, y: 0, scale: 1, duration: .48, ease: "expo.out" }, 6.22)
+      .fromTo("#f05g-bottom", { opacity: 0 }, { opacity: 1, duration: .3, ease: "power1.out" }, 6.46);
+    window.__timelines = window.__timelines || {};
+    window.__timelines["05-conflict-guard"] = tl;
+  </script>
+</template>

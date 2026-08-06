@@ -1,0 +1,86 @@
+<template>
+  <style>
+    @font-face { font-family: "NotoSerifSC"; src: url("assets/fonts/NotoSerifSC-400.ttf") format("truetype"); font-style: normal; font-weight: 400; font-display: block; }
+    #root { position: relative; width: 1080px; height: 1920px; overflow: hidden; container-type: size; color: #EAF2FF; font-family: "NotoSerifSC", serif; background: #071321; }
+    #root *, #root *::before, #root *::after { box-sizing: border-box; }
+    #f05-ground { position: absolute; inset: 0; background: radial-gradient(circle at 55% 45%, rgba(77,124,255,.26), transparent 34%), radial-gradient(circle at 92% 8%, rgba(113,215,255,.14), transparent 24%), linear-gradient(rgba(137,177,230,.075) .1cqw, transparent .1cqw), linear-gradient(90deg, rgba(137,177,230,.075) .1cqw, transparent .1cqw), #071321; background-size: auto, auto, 4cqw 4cqw, 4cqw 4cqw, auto; }
+    #f05-mist { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(7,19,33,.08), rgba(7,19,33,.54)); }
+    .f05-hud { position: absolute; left: 5.2cqw; right: 5.2cqw; display: flex; justify-content: space-between; align-items: center; color: #9BB6D8; font: 1.4cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .12em; }
+    #f05-top { top: 4.5cqh; padding-bottom: 2.05cqh; border-bottom: .1cqw solid rgba(137,177,230,.28); }
+    #f05-top b { color: #86E6B1; font-weight: 400; }
+    #f05-headline { position: absolute; left: 5.2cqw; top: 9.2cqh; font-size: 7.45cqw; font-weight: 400; letter-spacing: -.075em; line-height: .91; }
+    #f05-headline span { display: block; }
+    #f05-headline em { display: block; color: #71D7FF; font-style: normal; }
+    #f05-smallcopy { position: absolute; left: 5.45cqw; top: 20.4cqh; color: #9BB6D8; font-size: 2.18cqw; letter-spacing: .03em; }
+    .f05-support { position: absolute; overflow: hidden; border: .1cqw solid rgba(137,177,230,.25); background: rgba(12,32,56,.76); box-shadow: 0 1.6cqh 4cqh rgba(0,0,0,.16); }
+    .f05-support::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: .35cqw; background: #4D7CFF; }
+    #f05-slots { left: 5.2cqw; top: 31cqh; width: 21.4cqw; }
+    .f05-slot { position: relative; min-height: 11.3cqh; padding: 1.55cqh 1.45cqw 1.3cqh 2.4cqw; border-bottom: .1cqw solid rgba(137,177,230,.18); }
+    .f05-slot:last-child { border-bottom: none; }
+    .f05-slot-id { color: #71D7FF; font: 1.05cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .1em; }
+    .f05-slot-name { margin-top: .72cqh; color: #EAF2FF; font-size: 2.15cqw; letter-spacing: -.04em; line-height: 1; }
+    .f05-slot-state { margin-top: 1cqh; color: #86E6B1; font: 1cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+    #f05-proof { right: 5.2cqw; top: 31cqh; width: 21.4cqw; padding: 1.55cqh 1.45cqw 1.45cqh 2.4cqw; }
+    #f05-proof-label { color: #71D7FF; font: 1.05cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .1em; }
+    .f05-check { display: flex; gap: .8cqw; align-items: center; margin-top: 1.55cqh; color: #9BB6D8; font: 1.02cqw/1.2 ui-monospace, Consolas, monospace; }
+    .f05-check i { display: block; width: .85cqw; height: .85cqw; border-radius: 50%; background: #86E6B1; box-shadow: 0 0 0 .38cqw rgba(134,230,177,.1); }
+    #f05-product { position: absolute; left: 29.8cqw; top: 28.8cqh; width: 40.4cqw; min-height: 46.8cqh; overflow: hidden; border: .1cqw solid rgba(113,215,255,.45); background: linear-gradient(150deg, rgba(17,43,73,.96), rgba(12,32,56,.94)); box-shadow: 0 2.2cqh 6cqh rgba(0,0,0,.28); }
+    #f05-product::after { content: ""; position: absolute; left: 0; right: 0; top: 0; height: .34cqh; background: linear-gradient(90deg, transparent, #71D7FF, transparent); opacity: .72; }
+    #f05-product-head { height: 6.6cqh; padding: 2cqh 2.1cqw; display: flex; justify-content: space-between; align-items: center; border-bottom: .1cqw solid rgba(137,177,230,.24); color: #9BB6D8; font: 1.03cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .1em; }
+    #f05-product-head span:last-child { color: #86E6B1; }
+    #f05-product-name { margin: 3.45cqh 2.1cqw 0; color: #EAF2FF; font-size: 4.15cqw; letter-spacing: -.072em; line-height: .93; word-break: break-word; }
+    #f05-product-name em { color: #71D7FF; font-style: normal; }
+    #f05-product-desc { margin: 2.1cqh 2.15cqw 0; color: #9BB6D8; font-size: 1.85cqw; line-height: 1.45; }
+    #f05-command { margin: 2.8cqh 2.1cqw 0; padding: 1.45cqh 1.3cqw; border: .1cqw solid rgba(137,177,230,.24); background: rgba(7,19,33,.52); color: #71D7FF; font: 1.1cqw/1.55 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+    #f05-command b { color: #EAF2FF; font-weight: 400; }
+    #f05-statuses { display: flex; flex-wrap: wrap; gap: .7cqw; margin: 2.15cqh 2.1cqw 0; }
+    .f05-chip { padding: .65cqh .8cqw; border: .1cqw solid rgba(137,177,230,.28); color: #9BB6D8; font: .92cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+    .f05-chip--ok { border-color: rgba(134,230,177,.52); color: #86E6B1; }
+    #f05-cta { position: absolute; left: 50%; top: 70.7cqh; width: 33cqw; height: 8.8cqh; margin-left: -16.5cqw; display: grid; place-items: center; border: .12cqw solid #71D7FF; background: #4D7CFF; color: #F7FBFF; font-size: 2.3cqw; letter-spacing: -.035em; box-shadow: 0 1.1cqh 2.8cqh rgba(0,0,0,.2); }
+    #f05-cta-sub { position: absolute; left: 50%; top: 81.4cqh; width: 46cqw; margin-left: -23cqw; color: #9BB6D8; text-align: center; font: 1.18cqw/1.45 ui-monospace, Consolas, monospace; letter-spacing: .04em; }
+    #f05-ring { position: absolute; left: 50%; top: 70.7cqh; width: 33cqw; height: 8.8cqh; margin-left: -16.5cqw; border: .12cqw solid rgba(113,215,255,.65); pointer-events: none; }
+    #f05-cursor { position: absolute; left: 0; top: 0; width: 4.3cqw; height: 6.2cqh; z-index: 5; filter: drop-shadow(0 .5cqh .45cqh rgba(0,0,0,.35)); }
+    #f05-cursor::before { content: ""; position: absolute; inset: 0; background: #EAF2FF; clip-path: polygon(6% 0, 95% 49%, 61% 57%, 86% 100%, 66% 100%, 41% 65%, 6% 94%); }
+    #f05-cursor::after { content: ""; position: absolute; inset: .33cqw; background: #071321; clip-path: polygon(6% 0, 95% 49%, 61% 57%, 86% 100%, 66% 100%, 41% 65%, 6% 94%); }
+    #f05-bottom { bottom: 4.4cqh; padding-top: 2.05cqh; border-top: .1cqw solid rgba(137,177,230,.28); }
+    #f05-bottom span:first-child { color: #71D7FF; }
+  </style>
+
+  <div data-hf-id="hf-ks29" id="root" data-composition-id="05-public-beta" data-duration="5" data-width="1080" data-height="1920">
+    <div data-hf-id="hf-wp1l" id="f05-ground" class="clip" data-start="0" data-duration="5" data-track-index="0"></div>
+    <div data-hf-id="hf-2pg6" id="f05-mist" class="clip" data-start="0" data-duration="5" data-track-index="1"></div>
+    <div data-hf-id="hf-0cc8" id="f05-top" class="f05-hud clip" data-layout-allow-overlap="" data-start="0" data-duration="5" data-track-index="2"><span data-hf-id="hf-f07e">它解决的就是</span><b data-hf-id="hf-9i8r">● 公开 Beta</b></div>
+    <div data-hf-id="hf-xo91" id="f05-headline" class="clip" data-layout-allow-overlap="" data-start="0" data-duration="5" data-track-index="3"><span data-hf-id="hf-wplh">多个 AI，</span><em data-hf-id="hf-eu19">也不会改乱</em></div>
+    <div data-hf-id="hf-nrdp" id="f05-smallcopy" class="clip" data-start="0" data-duration="5" data-track-index="4">让它们同时写代码，也不会互相覆盖。</div>
+    <div data-hf-id="hf-6n3t" id="f05-slots" class="f05-support clip" data-start="0" data-duration="5" data-track-index="5"><div data-hf-id="hf-1fao" class="f05-slot"><div data-hf-id="hf-kijq" class="f05-slot-id">AI 任务 / 01</div><div data-hf-id="hf-ta36" class="f05-slot-name">改登录</div><div data-hf-id="hf-1l6f" class="f05-slot-state">各自独立</div></div><div data-hf-id="hf-lqiw" class="f05-slot"><div data-hf-id="hf-kwur" class="f05-slot-id">AI 任务 / 02</div><div data-hf-id="hf-vuud" class="f05-slot-name">改接口</div><div data-hf-id="hf-3cho" class="f05-slot-state">各自独立</div></div><div data-hf-id="hf-kjlt" class="f05-slot"><div data-hf-id="hf-lb5s" class="f05-slot-id">AI 任务 / 03</div><div data-hf-id="hf-yjh8" class="f05-slot-name">跑测试</div><div data-hf-id="hf-tlkv" class="f05-slot-state">各自独立</div></div></div>
+    <div data-hf-id="hf-ubhx" id="f05-proof" class="f05-support clip" data-start="0" data-duration="5" data-track-index="6"><div data-hf-id="hf-ntq2" id="f05-proof-label">最后检查</div><div data-hf-id="hf-goh8" class="f05-check"><i data-hf-id="hf-wt6k"></i><span data-hf-id="hf-jksi">每个 AI 各改各的</span></div><div data-hf-id="hf-7c04" class="f05-check"><i data-hf-id="hf-zeb8"></i><span data-hf-id="hf-9dn8">只带这次修改</span></div><div data-hf-id="hf-6531" class="f05-check"><i data-hf-id="hf-y7e5"></i><span data-hf-id="hf-d1fa">检查没问题</span></div><div data-hf-id="hf-6je2" class="f05-check"><i data-hf-id="hf-ylp6"></i><span data-hf-id="hf-u0e5">再合回项目</span></div></div>
+    <div data-hf-id="hf-o4rk" id="f05-product" class="clip" data-start="0" data-duration="5" data-track-index="7"><div data-hf-id="hf-sbcx" id="f05-product-head"><span data-hf-id="hf-nzhe">它是做什么的</span><span data-hf-id="hf-wko8">可以用了</span></div><div data-hf-id="hf-74d0" id="f05-product-name">develop-<em data-hf-id="hf-d82e">with-</em>worktrees</div><div data-hf-id="hf-awmv" id="f05-product-desc">让多个 AI 同时写代码，也不会互相改乱。</div><div data-hf-id="hf-xoe6" id="f05-command"><b data-hf-id="hf-0ogj">✓</b> 每个任务各自独立<br data-hf-id="hf-x5px">完成后再安全合回去</div><div data-hf-id="hf-kqpn" id="f05-statuses"><span data-hf-id="hf-zjwt" class="f05-chip f05-chip--ok">任务各自独立</span><span data-hf-id="hf-0s1c" class="f05-chip">检查后再合</span></div></div>
+    <div data-hf-id="hf-c5r8" id="f05-cta" class="clip" data-start="0" data-duration="5" data-track-index="8">查看公开 Beta</div>
+    <div data-hf-id="hf-wfbn" id="f05-ring" class="clip" data-start="0" data-duration="5" data-track-index="9"></div>
+    <div data-hf-id="hf-rw9o" id="f05-cta-sub" class="clip" data-start="0" data-duration="5" data-track-index="10">一个人，也能放心让多个 AI 同时干活。</div>
+    <div data-hf-id="hf-nd1v" id="f05-cursor" class="clip" data-start="0" data-duration="5" data-track-index="11" aria-hidden="true"></div>
+    <div data-hf-id="hf-72lj" id="f05-bottom" class="f05-hud clip" data-start="0" data-duration="5" data-track-index="12"><span data-hf-id="hf-eqna">多个 AI 不互相改乱</span><span data-hf-id="hf-laxe">06 / 06</span></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <script>
+    const tl = window.gsap.timeline({ paused: true });
+    tl.fromTo("#f05-top", { opacity: 0, y: "-2cqh" }, { opacity: 1, y: 0, duration: .3, ease: "power1.out" }, .08)
+      .fromTo("#f05-headline", { opacity: 0, y: "3cqh" }, { opacity: 1, y: 0, duration: .5, ease: "power3.out" }, .24)
+      .fromTo("#f05-smallcopy", { opacity: 0, y: "2cqh" }, { opacity: 1, y: 0, duration: .34, ease: "power2.out" }, .7)
+      .fromTo("#f05-slots", { opacity: 0, x: "-4cqw" }, { opacity: 1, x: 0, duration: .48, ease: "power4.out" }, 1.12)
+      .fromTo("#f05-proof", { opacity: 0, x: "4cqw" }, { opacity: 1, x: 0, duration: .48, ease: "expo.out" }, 1.6)
+      .fromTo("#f05-product", { opacity: 0, y: "3cqh", scale: .96 }, { opacity: 1, y: 0, scale: 1, duration: .58, ease: "power3.out" }, 2.02)
+      .fromTo("#f05-cta", { opacity: 0, y: "2cqh", scale: .86 }, { opacity: 1, y: 0, scale: 1, duration: .44, ease: "expo.out" }, 2.72)
+      .fromTo("#f05-cta-sub", { opacity: 0, y: "1cqh" }, { opacity: 1, y: 0, duration: .34, ease: "power2.out" }, 3.04)
+      .set("#f05-cursor", { opacity: 1, x: "85cqw", y: "88cqh", rotation: -16 }, 3.34)
+      .to("#f05-cursor", { x: "58cqw", y: "70cqh", rotation: -5, duration: .52, ease: "power3.out" }, 3.34)
+      .to("#f05-cursor", { x: "51cqw", y: "72cqh", rotation: 0, duration: .22, ease: "power1.in" }, 3.88)
+      .to("#f05-cta", { scale: .94, duration: .12, ease: "power1.in" }, 4.1)
+      .fromTo("#f05-ring", { opacity: .8, scale: 1 }, { opacity: 0, scale: 1.55, duration: .52, ease: "power2.out" }, 4.11)
+      .to("#f05-cta", { scale: 1, duration: .26, ease: "power3.out" }, 4.24)
+      .fromTo("#f05-bottom", { opacity: 0 }, { opacity: 1, duration: .28, ease: "power1.out" }, 4.52);
+    window.__timelines = window.__timelines || {};
+    window.__timelines["05-public-beta"] = tl;
+  </script>
+</template>

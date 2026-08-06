@@ -1,0 +1,357 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "Noto Serif SC";
+      src: url("assets/fonts/NotoSerifSC-400.ttf") format("truetype");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    #root {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      container-type: size;
+      color: #EAF2FF;
+      background: #071321;
+      font-family: "Noto Serif SC", serif;
+    }
+
+    #f03-ground.clip {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 52% 39%, rgba(77, 124, 255, 0.17), transparent 26%),
+        radial-gradient(circle at 84% 12%, rgba(113, 215, 255, 0.08), transparent 24%),
+        linear-gradient(rgba(137, 177, 230, 0.08) 0.09cqw, transparent 0.09cqw),
+        linear-gradient(90deg, rgba(137, 177, 230, 0.08) 0.09cqw, transparent 0.09cqw),
+        #071321;
+      background-size: auto, auto, 2.5cqw 2.5cqw, 2.5cqw 2.5cqw, auto;
+    }
+
+    #f03-ground::before,
+    #f03-ground::after {
+      position: absolute;
+      content: "";
+      pointer-events: none;
+    }
+
+    #f03-ground::before {
+      inset: 3.1cqw;
+      border: 0.09cqw solid rgba(137, 177, 230, 0.20);
+    }
+
+    #f03-ground::after {
+      top: -16cqh;
+      left: 0;
+      width: 100%;
+      height: 13cqh;
+      background: linear-gradient(180deg, transparent, rgba(113, 215, 255, 0.11), transparent);
+      opacity: 0.55;
+    }
+
+    .f03-chrome {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      left: 5.2cqw;
+      right: 5.2cqw;
+      color: #9BB6D8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.45cqw;
+      letter-spacing: 0.08em;
+      z-index: 5;
+    }
+
+    #f03-top-chrome { top: 7.6cqh; }
+    #f03-bottom-chrome { bottom: 8.2cqh; }
+
+    .f03-chrome-rule {
+      position: absolute;
+      left: 5.2cqw;
+      right: 5.2cqw;
+      height: 0.1cqw;
+      background: rgba(137, 177, 230, 0.28);
+      z-index: 4;
+    }
+
+    #f03-top-rule { top: 10.3cqh; }
+    #f03-bottom-rule { bottom: 10.8cqh; }
+
+    #f03-statement {
+      position: absolute;
+      top: 14.1cqh;
+      left: 8.2cqw;
+      right: 8.2cqw;
+      color: #EAF2FF;
+      font-size: 6.5cqw;
+      line-height: 1.05;
+      letter-spacing: -0.04em;
+      z-index: 5;
+    }
+
+    #f03-statement em {
+      color: #71D7FF;
+      font-style: normal;
+    }
+
+    #f03-substatement {
+      position: absolute;
+      top: 20.4cqh;
+      left: 8.4cqw;
+      color: #9BB6D8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.65cqw;
+      letter-spacing: 0.09em;
+      z-index: 5;
+    }
+
+    .f03-route {
+      position: absolute;
+      height: 0.14cqw;
+      transform-origin: 0 50%;
+      background: repeating-linear-gradient(90deg, #4D7CFF 0 1.25cqw, rgba(77, 124, 255, 0.15) 1.25cqw 2.25cqw);
+      opacity: 0.75;
+      z-index: 1;
+    }
+
+    #f03-route-a { left: 27.3cqw; top: 39.0cqh; width: 23.8cqw; transform: rotate(25deg); }
+    #f03-route-b { left: 50.0cqw; top: 39.7cqh; width: 23.5cqw; transform: rotate(-25deg); }
+    #f03-route-c { left: 27.3cqw; top: 55.2cqh; width: 23.8cqw; transform: rotate(-25deg); }
+    #f03-route-d { left: 50.0cqw; top: 55.2cqh; width: 23.5cqw; transform: rotate(25deg); }
+
+    .f03-card {
+      position: absolute;
+      width: 37.2cqw;
+      height: 16.3cqh;
+      padding: 1.55cqw 1.6cqw;
+      box-sizing: border-box;
+      border: 0.14cqw solid rgba(137, 177, 230, 0.50);
+      background: linear-gradient(135deg, rgba(17, 43, 73, 0.95), rgba(12, 32, 56, 0.94));
+      box-shadow: inset 0 0 0 0.08cqw rgba(113, 215, 255, 0.05);
+      z-index: 3;
+    }
+
+    #f03-card-a { left: 6.4cqw; top: 26.1cqh; }
+    #f03-card-b { right: 6.4cqw; top: 26.1cqh; }
+    #f03-card-c { left: 6.4cqw; top: 56.4cqh; }
+    #f03-card-d { right: 6.4cqw; top: 56.4cqh; }
+
+    .f03-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #EAF2FF;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.52cqw;
+      letter-spacing: 0.07em;
+      line-height: 1;
+    }
+
+    .f03-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55cqw;
+      padding: 0.48cqw 0.7cqw;
+      border: 0.09cqw solid rgba(134, 230, 177, 0.55);
+      color: #86E6B1;
+      font-size: 1.05cqw;
+      letter-spacing: 0.08em;
+      line-height: 1;
+    }
+
+    .f03-status::before {
+      width: 0.55cqw;
+      height: 0.55cqw;
+      border-radius: 50%;
+      background: #86E6B1;
+      content: "";
+    }
+
+    .f03-path {
+      margin-top: 1.35cqh;
+      overflow: hidden;
+      color: #71D7FF;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.34cqw;
+      line-height: 1.2;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .f03-tree {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55cqh 0.9cqw;
+      margin-top: 1.65cqh;
+      color: #9BB6D8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.18cqw;
+      line-height: 1;
+    }
+
+    .f03-tree span::before {
+      margin-right: 0.46cqw;
+      color: #4D7CFF;
+      content: "└";
+    }
+
+    #f03-hub {
+      position: absolute;
+      top: 41.8cqh;
+      left: 50%;
+      width: 44.5cqw;
+      height: 14.2cqh;
+      padding: 1.8cqw 2cqw;
+      box-sizing: border-box;
+      border: 0.18cqw solid #4D7CFF;
+      transform: translateX(-50%);
+      background:
+        linear-gradient(90deg, rgba(113, 215, 255, 0.08) 0.09cqw, transparent 0.09cqw),
+        linear-gradient(rgba(113, 215, 255, 0.08) 0.09cqw, transparent 0.09cqw),
+        #112B49;
+      background-size: 2cqw 2cqw;
+      box-shadow: 0 0 0 0.7cqw rgba(77, 124, 255, 0.10);
+      z-index: 4;
+    }
+
+    #f03-hub-kicker {
+      color: #71D7FF;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.23cqw;
+      letter-spacing: 0.12em;
+    }
+
+    #f03-hub-name {
+      margin-top: 0.9cqh;
+      color: #EAF2FF;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 2.35cqw;
+      letter-spacing: -0.04em;
+      white-space: nowrap;
+    }
+
+    #f03-hub-footer {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 1.35cqh;
+      color: #9BB6D8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.16cqw;
+      letter-spacing: 0.06em;
+    }
+
+    #f03-boundary {
+      position: absolute;
+      top: 75.7cqh;
+      left: 50%;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.7cqw;
+      padding: 0.8cqw 1.1cqw;
+      border: 0.1cqw solid rgba(134, 230, 177, 0.55);
+      transform: translateX(-50%);
+      color: #86E6B1;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.3cqw;
+      letter-spacing: 0.11em;
+      white-space: nowrap;
+      z-index: 5;
+    }
+
+    #f03-boundary::before {
+      width: 0.7cqw;
+      height: 0.7cqw;
+      border-radius: 50%;
+      background: #86E6B1;
+      content: "";
+    }
+  </style>
+
+  <div data-hf-id="hf-7ao7" id="root" data-composition-id="03-own-workspace" data-duration="6.5" data-width="1080" data-height="1920">
+    <div data-hf-id="hf-lbjt" id="f03-ground" class="clip" data-layout-allow-overflow="" data-start="0" data-duration="6.5" data-track-index="0" aria-hidden="true"></div>
+
+    <div data-hf-id="hf-czqs" id="f03-top-chrome" class="f03-chrome"><span data-hf-id="hf-7dpl">03 / 分开做</span><span data-hf-id="hf-810q">每个 AI 一份副本</span></div>
+    <div data-hf-id="hf-q754" id="f03-top-rule" class="f03-chrome-rule" aria-hidden="true"></div>
+
+    <div data-hf-id="hf-st1w" id="f03-statement">每个 AI，<em data-hf-id="hf-429z">各改各的</em></div>
+    <div data-hf-id="hf-xlye" id="f03-substatement">各自用一份副本，不互相碰文件</div>
+
+    <div data-hf-id="hf-815j" id="f03-route-a" class="f03-route" aria-hidden="true"></div>
+    <div data-hf-id="hf-zd9o" id="f03-route-b" class="f03-route" aria-hidden="true"></div>
+    <div data-hf-id="hf-04xh" id="f03-route-c" class="f03-route" aria-hidden="true"></div>
+    <div data-hf-id="hf-iwn6" id="f03-route-d" class="f03-route" aria-hidden="true"></div>
+
+    <section data-hf-id="hf-62oa" id="f03-card-a" class="f03-card" aria-label="AI A 的登录任务副本">
+      <div data-hf-id="hf-xlse" class="f03-card-header"><span data-hf-id="hf-51ou">AI A / 改登录</span><span data-hf-id="hf-sss6" class="f03-status">只改自己的</span></div>
+      <div data-hf-id="hf-7z0l" class="f03-path">独立副本 / 登录</div>
+      <div data-hf-id="hf-r8h2" class="f03-tree"><span data-hf-id="hf-iuye">它能改：</span><span data-hf-id="hf-ybd2">登录功能</span><span data-hf-id="hf-vq1v">不会碰：</span><span data-hf-id="hf-bir8">别人的任务</span></div>
+    </section>
+    <section data-hf-id="hf-c1z6" id="f03-card-b" class="f03-card" aria-label="AI B 的接口任务副本">
+      <div data-hf-id="hf-mvte" class="f03-card-header"><span data-hf-id="hf-tg26">AI B / 改接口</span><span data-hf-id="hf-e0be" class="f03-status">只改自己的</span></div>
+      <div data-hf-id="hf-86ih" class="f03-path">独立副本 / 接口</div>
+      <div data-hf-id="hf-hh62" class="f03-tree"><span data-hf-id="hf-m3dp">它能改：</span><span data-hf-id="hf-aw5m">接口功能</span><span data-hf-id="hf-sujk">不会碰：</span><span data-hf-id="hf-oajy">登录任务</span></div>
+    </section>
+    <section data-hf-id="hf-3a1d" id="f03-card-c" class="f03-card" aria-label="AI C 的测试任务副本">
+      <div data-hf-id="hf-na4f" class="f03-card-header"><span data-hf-id="hf-g8mw">AI C / 跑测试</span><span data-hf-id="hf-eemf" class="f03-status">只改自己的</span></div>
+      <div data-hf-id="hf-7fhr" class="f03-path">独立副本 / 测试</div>
+      <div data-hf-id="hf-hvh3" class="f03-tree"><span data-hf-id="hf-y9wj">它能改：</span><span data-hf-id="hf-0h22">测试内容</span><span data-hf-id="hf-edpg">不会碰：</span><span data-hf-id="hf-f12l">接口任务</span></div>
+    </section>
+    <section data-hf-id="hf-j2ni" id="f03-card-d" class="f03-card" aria-label="AI D 的文档任务副本">
+      <div data-hf-id="hf-nofg" class="f03-card-header"><span data-hf-id="hf-3zwc">AI D / 写文档</span><span data-hf-id="hf-esxg" class="f03-status">只改自己的</span></div>
+      <div data-hf-id="hf-9h17" class="f03-path">独立副本 / 文档</div>
+      <div data-hf-id="hf-i9s4" class="f03-tree"><span data-hf-id="hf-jwhf">它能改：</span><span data-hf-id="hf-5s4d">项目文档</span><span data-hf-id="hf-bxo1">不会碰：</span><span data-hf-id="hf-9ci1">测试任务</span></div>
+    </section>
+
+    <section data-hf-id="hf-t61j" id="f03-hub" aria-label="develop-with-worktrees 解决多个 AI 互相改乱的问题">
+      <div data-hf-id="hf-fo63" id="f03-hub-kicker">让多个 AI 不再互相改乱</div>
+      <div data-hf-id="hf-bun3" id="f03-hub-name">develop-with-worktrees</div>
+      <div data-hf-id="hf-j35o" id="f03-hub-footer"><span data-hf-id="hf-v411">每个任务一份副本</span><span data-hf-id="hf-wko8">可以并行</span></div>
+    </section>
+
+    <div data-hf-id="hf-o81a" id="f03-boundary">✓ 不会互相改乱</div>
+    <div data-hf-id="hf-ewo0" id="f03-bottom-rule" class="f03-chrome-rule" aria-hidden="true"></div>
+    <div data-hf-id="hf-abbw" id="f03-bottom-chrome" class="f03-chrome"><span data-hf-id="hf-arjr">AI 各自干活</span><span data-hf-id="hf-hfoy">不用抢文件</span></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <script>
+    (() => {
+      const timeline = gsap.timeline({ paused: true, defaults: { ease: "power2.out" } });
+      const ground = document.querySelector("#f03-ground");
+      const statement = document.querySelector("#f03-statement");
+      const substatement = document.querySelector("#f03-substatement");
+      const chrome = document.querySelectorAll(".f03-chrome, .f03-chrome-rule");
+      const routes = document.querySelectorAll(".f03-route");
+      const cardA = document.querySelector("#f03-card-a");
+      const cardB = document.querySelector("#f03-card-b");
+      const cardC = document.querySelector("#f03-card-c");
+      const cardD = document.querySelector("#f03-card-d");
+      const hub = document.querySelector("#f03-hub");
+      const boundary = document.querySelector("#f03-boundary");
+
+      timeline
+        .fromTo(ground, { autoAlpha: 0, scale: 1.05 }, { autoAlpha: 1, scale: 1, duration: 0.55, ease: "power1.out" }, 0.08)
+        .fromTo(chrome, { autoAlpha: 0, y: -12 }, { autoAlpha: 1, y: 0, duration: 0.35, stagger: 0.05, ease: "power2.out" }, 0.18)
+        .fromTo(statement, { autoAlpha: 0, y: 28, clipPath: "inset(0 100% 0 0)" }, { autoAlpha: 1, y: 0, clipPath: "inset(0 0% 0 0)", duration: 0.58, ease: "power3.out" }, 0.32)
+        .fromTo(substatement, { autoAlpha: 0, x: -20 }, { autoAlpha: 1, x: 0, duration: 0.4, ease: "power2.out" }, 0.74)
+        .fromTo(hub, { autoAlpha: 0, scale: 0.88, y: 20 }, { autoAlpha: 1, scale: 1, y: 0, duration: 0.52, ease: "expo.out" }, 1.02)
+        .fromTo(routes, { autoAlpha: 0, scaleX: 0 }, { autoAlpha: 1, scaleX: 1, duration: 0.36, stagger: 0.1, ease: "power1.inOut" }, 1.46)
+        .fromTo(cardA, { autoAlpha: 0, x: -54, y: -28, scale: 0.94 }, { autoAlpha: 1, x: 0, y: 0, scale: 1, duration: 0.42, ease: "power3.out" }, 1.72)
+        .fromTo(cardB, { autoAlpha: 0, x: 54, y: -28, scale: 0.94 }, { autoAlpha: 1, x: 0, y: 0, scale: 1, duration: 0.42, ease: "power2.out" }, 2.3)
+        .fromTo(cardC, { autoAlpha: 0, x: -54, y: 28, scale: 0.94 }, { autoAlpha: 1, x: 0, y: 0, scale: 1, duration: 0.42, ease: "power4.out" }, 2.88)
+        .fromTo(cardD, { autoAlpha: 0, x: 54, y: 28, scale: 0.94 }, { autoAlpha: 1, x: 0, y: 0, scale: 1, duration: 0.42, ease: "expo.out" }, 3.46)
+        .to(routes, { backgroundPosition: "5cqw 0", duration: 1.05, ease: "none" }, 3.9)
+        .to([cardA, cardB, cardC, cardD], { borderColor: "rgba(134, 230, 177, 0.7)", duration: 0.26, stagger: 0.12, ease: "power1.out" }, 4.36)
+        .fromTo(boundary, { autoAlpha: 0, y: 12 }, { autoAlpha: 1, y: 0, duration: 0.4, ease: "power3.out" }, 4.92)
+        .to(hub, { boxShadow: "0 0 0 1.05cqw rgba(77, 124, 255, 0.08)", duration: 0.45, ease: "power1.out" }, 5.2);
+
+      window.__timelines = window.__timelines || {};
+      window.__timelines["03-own-workspace"] = timeline;
+    })();
+  </script>
+</template>

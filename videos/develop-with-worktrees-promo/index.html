@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1080, height=1920">
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js" integrity="sha384-sG0Hv1tP1lZCk9KQmrIbY/XNwi+OY84GQqhMscbnsoBFqAz8KNCil1kvfL3Hbbk2" crossorigin="anonymous"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: #000;
+      }
+      #root {
+        position: relative;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: #071321;
+      }
+      .scene {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div data-hf-id="hf-5ve3" id="root" data-composition-id="main" data-start="0" data-duration="36" data-width="1080" data-height="1920">
+      <div data-hf-id="hf-mcxd" id="el-01-not-by-luck" class="scene" data-composition-id="01-not-by-luck" data-composition-src="compositions/frames/01-not-by-luck.html" data-start="0" data-duration="5.4" data-track-index="0"></div>
+
+      <div data-hf-id="hf-e5he" id="el-02-the-mess" class="scene" data-composition-id="02-the-mess" data-composition-src="compositions/frames/02-the-mess.html" data-start="5" data-duration="6.4" data-track-index="1"></div>
+
+      <div data-hf-id="hf-j1ss" id="el-03-own-workspace" class="scene" data-composition-id="03-own-workspace" data-composition-src="compositions/frames/03-own-workspace.html" data-start="11" data-duration="6.5" data-track-index="0"></div>
+
+      <div data-hf-id="hf-xftz" id="el-04-the-loop" class="scene" data-composition-id="04-the-loop" data-composition-src="compositions/frames/04-the-loop.html" data-start="17" data-duration="7.5" data-track-index="1"></div>
+
+      <div data-hf-id="hf-7fdb" id="el-05-conflict-guard" class="scene" data-composition-id="05-conflict-guard" data-composition-src="compositions/frames/05-conflict-guard.html" data-start="24" data-duration="7.5" data-track-index="0"></div>
+
+      <div data-hf-id="hf-twv9" id="el-05-public-beta" class="scene" data-composition-id="05-public-beta" data-composition-src="compositions/frames/05-public-beta.html" data-start="31" data-duration="5" data-track-index="1"></div>
+
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = gsap.timeline({ paused: true });
+      // ── frame transitions (injected by transitions.mjs) ──
+      (function () { var tl = window.__timelines["main"];
+        tl.to("#el-01-not-by-luck", { scale: 2.5, opacity: 0, filter: "blur(8px)", duration: 0.4, ease: "power3.in" }, 5);
+        tl.fromTo("#el-02-the-mess", { scale: 0.5, opacity: 0, filter: "blur(8px)" }, { scale: 1, opacity: 1, filter: "blur(0px)", duration: 0.4, ease: "power3.out" }, 5);
+        tl.to("#el-02-the-mess", { scaleX: 0, transformOrigin: "left center", duration: 0.4, ease: "power3.inOut" }, 11);
+        tl.fromTo("#el-03-own-workspace", { scaleX: 0, transformOrigin: "right center", opacity: 1 }, { scaleX: 1, transformOrigin: "right center", duration: 0.4, ease: "power3.inOut" }, 11);
+        tl.to("#el-03-own-workspace", { x: -1080, duration: 0.5, ease: "power3.inOut" }, 17);
+        tl.fromTo("#el-04-the-loop", { x: 1080, opacity: 1 }, { x: 0, duration: 0.5, ease: "power3.inOut" }, 17);
+        tl.to("#el-04-the-loop", { opacity: 0, duration: 0.5, ease: "power2.inOut" }, 24);
+        tl.fromTo("#el-05-conflict-guard", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power2.inOut" }, 24);
+        tl.to("#el-05-conflict-guard", { opacity: 0, duration: 0.5, ease: "power2.inOut" }, 31);
+        tl.fromTo("#el-05-public-beta", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power2.inOut" }, 31);
+        tl.to({}, { duration: 36 }, 0); // full-span anchor — main.duration() == composition total (Studio master duration)
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "preferences": {
+    "destination": {
+      "value": "xiaohongshu-bilibili-short",
+      "confirmed_in": [
+        "develop-with-worktrees-promo"
+      ],
+      "updated_at": "2026-07-21T06:42:54.108Z"
+    },
+    "aspect": {
+      "value": "1080x1920",
+      "confirmed_in": [
+        "develop-with-worktrees-promo"
+      ],
+      "updated_at": "2026-07-21T06:42:54.225Z"
+    },
+    "language": {
+      "value": "zh-CN",
+      "confirmed_in": [
+        "develop-with-worktrees-promo"
+      ],
+      "updated_at": "2026-07-21T06:42:54.317Z"
+    },
+    "flow": {
+      "value": "automation",
+      "confirmed_in": [
+        "develop-with-worktrees-promo"
+      ],
+      "updated_at": "2026-07-21T06:42:54.406Z"
+    },
+    "storyboard": {
+      "value": "no",
+      "confirmed_in": [
+        "develop-with-worktrees-promo"
+      ],
+      "updated_at": "2026-07-21T06:42:54.495Z"
+    },
+    "style_preset.product-launch-video": {
+      "value": "cobalt-grid",
+      "confirmed_in": [
+        "develop-with-worktrees-promo"
+      ],
+      "updated_at": "2026-07-21T06:42:54.580Z"
+    }
+  },
+  "sightings": {}
+}

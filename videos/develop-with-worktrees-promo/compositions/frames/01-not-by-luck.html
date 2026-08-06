@@ -1,0 +1,439 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "NotoSerifSC";
+      src: url("assets/fonts/NotoSerifSC-400.ttf") format("truetype");
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+    }
+
+    #root {
+      width: 1080px;
+      height: 1920px;
+      position: relative;
+      overflow: hidden;
+      container-type: size;
+      color: #EAF2FF;
+      background: #071321;
+      font-family: "NotoSerifSC", serif;
+    }
+
+    #f01-ground {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 73% 27%, rgba(77, 124, 255, 0.19), transparent 29%),
+        radial-gradient(circle at 13% 79%, rgba(113, 215, 255, 0.08), transparent 27%),
+        #071321;
+    }
+
+    #f01-ground::before,
+    #f01-ground::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    #f01-ground::before {
+      opacity: 0.62;
+      background-image:
+        linear-gradient(rgba(137, 177, 230, 0.13) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(137, 177, 230, 0.13) 1px, transparent 1px);
+      background-size: 54px 54px;
+      mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0.24));
+    }
+
+    #f01-ground::after {
+      inset: 5.2cqw;
+      border: 1px solid rgba(137, 177, 230, 0.22);
+    }
+
+    .f01-mono {
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 2.05cqw;
+      letter-spacing: 0.085em;
+      line-height: 1.2;
+    }
+
+    #f01-chrome {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    #f01-kicker {
+      position: absolute;
+      top: 8.1cqh;
+      left: 5.2cqw;
+      color: #9BB6D8;
+    }
+
+    #f01-index {
+      position: absolute;
+      top: 8.1cqh;
+      right: 5.2cqw;
+      color: #71D7FF;
+      text-align: right;
+    }
+
+    #f01-top-line,
+    #f01-bottom-line {
+      position: absolute;
+      left: 5.2cqw;
+      right: 5.2cqw;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(113, 215, 255, 0.84), rgba(137, 177, 230, 0.12));
+      transform-origin: left center;
+    }
+
+    #f01-top-line { top: 11.2cqh; }
+    #f01-bottom-line { bottom: 7.3cqh; }
+
+    #f01-route {
+      position: absolute;
+      top: 24.4cqh;
+      left: 8.6cqw;
+      width: 82.8cqw;
+      height: 49.5cqh;
+      z-index: 1;
+      opacity: 0.78;
+    }
+
+    #f01-route path {
+      fill: none;
+      stroke: rgba(113, 215, 255, 0.36);
+      stroke-width: 3;
+      stroke-dasharray: 8 11;
+    }
+
+    #f01-route circle {
+      fill: #071321;
+      stroke: #71D7FF;
+      stroke-width: 3;
+    }
+
+    #f01-headline {
+      position: absolute;
+      top: 14.2cqh;
+      left: 8.8cqw;
+      z-index: 8;
+      width: 82cqw;
+      pointer-events: none;
+    }
+
+    #f01-headline-small {
+      display: block;
+      margin-bottom: 0.85cqh;
+      color: #9BB6D8;
+    }
+
+    #f01-headline-main,
+    #f01-headline-risk {
+      display: block;
+      font-size: 9.7cqw;
+      letter-spacing: -0.055em;
+      line-height: 0.95;
+    }
+
+    #f01-headline-main { color: #EAF2FF; }
+    #f01-headline-risk { color: #71D7FF; }
+
+    .f01-panel {
+      position: absolute;
+      box-sizing: border-box;
+      border: 2px solid rgba(137, 177, 230, 0.44);
+      background: linear-gradient(135deg, rgba(17, 43, 73, 0.98), rgba(12, 32, 56, 0.98));
+      box-shadow: 0 18px 54px rgba(0, 0, 0, 0.24);
+    }
+
+    #f01-terminal {
+      top: 29.2cqh;
+      left: 9.1cqw;
+      z-index: 3;
+      width: 81.8cqw;
+      height: 38.5cqh;
+      overflow: hidden;
+      border-color: rgba(113, 215, 255, 0.58);
+    }
+
+    #f01-terminal::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, rgba(77, 124, 255, 0.09), transparent 38%);
+      pointer-events: none;
+    }
+
+    .f01-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-sizing: border-box;
+      min-height: 5.5cqh;
+      padding: 0 3.1cqw;
+      border-bottom: 1px solid rgba(137, 177, 230, 0.28);
+      color: #EAF2FF;
+    }
+
+    .f01-label {
+      color: #9BB6D8;
+    }
+
+    .f01-chip {
+      display: inline-flex;
+      align-items: center;
+      box-sizing: border-box;
+      min-height: 3.7cqh;
+      padding: 0 1.4cqw;
+      border: 1px solid currentColor;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.72cqw;
+      letter-spacing: 0.06em;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .f01-chip-running {
+      color: #71D7FF;
+      background: rgba(113, 215, 255, 0.08);
+    }
+
+    .f01-chip-risk {
+      color: #FF8B7A;
+      background: rgba(255, 139, 122, 0.08);
+    }
+
+    .f01-chip-neutral {
+      color: #9BB6D8;
+      background: rgba(155, 182, 216, 0.07);
+    }
+
+    #f01-terminal-title {
+      font-size: 3.15cqw;
+      letter-spacing: 0.035em;
+    }
+
+    #f01-terminal-content {
+      position: relative;
+      z-index: 1;
+      padding: 1.45cqh 3.3cqw;
+      color: #EAF2FF;
+    }
+
+    .f01-field {
+      display: grid;
+      grid-template-columns: 21cqw 1fr;
+      gap: 1.3cqw;
+      margin-bottom: 0.72cqh;
+      color: #9BB6D8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.92cqw;
+      letter-spacing: 0.025em;
+      line-height: 1.2;
+    }
+
+    .f01-field b {
+      color: #EAF2FF;
+      font-weight: 400;
+    }
+
+    #f01-command {
+      margin-top: 1.15cqh;
+      padding-top: 1.05cqh;
+      border-top: 1px solid rgba(137, 177, 230, 0.25);
+      color: #86E6B1;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.86cqw;
+      letter-spacing: 0.02em;
+    }
+
+    #f01-scan {
+      position: absolute;
+      top: 22%;
+      right: 0;
+      left: 0;
+      z-index: 3;
+      height: 3px;
+      opacity: 0;
+      background: linear-gradient(90deg, transparent, #71D7FF 16%, #71D7FF 84%, transparent);
+      box-shadow: 0 0 18px rgba(113, 215, 255, 0.75);
+    }
+
+    #f01-api-card {
+      top: 49.8cqh;
+      left: 3.8cqw;
+      z-index: 6;
+      width: 43.4cqw;
+      min-height: 14.2cqh;
+      padding: 1.55cqh 2.4cqw 1.7cqh;
+      border-color: rgba(255, 139, 122, 0.66);
+    }
+
+    #f01-test-card {
+      top: 64.7cqh;
+      right: 3.7cqw;
+      z-index: 7;
+      width: 43.8cqw;
+      min-height: 14.1cqh;
+      padding: 1.55cqh 2.4cqw 1.7cqh;
+      border-color: rgba(255, 139, 122, 0.66);
+    }
+
+    .f01-card-title {
+      margin-bottom: 1.1cqh;
+      color: #EAF2FF;
+      font-size: 2.8cqw;
+      letter-spacing: 0.025em;
+    }
+
+    .f01-card-meta {
+      margin-bottom: 0.52cqh;
+      color: #9BB6D8;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 1.68cqw;
+      letter-spacing: 0.015em;
+      line-height: 1.25;
+    }
+
+    .f01-card-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 1.05cqh;
+    }
+
+    #f01-queue {
+      position: absolute;
+      right: 9.1cqw;
+      bottom: 12.8cqh;
+      z-index: 4;
+      width: 46.2cqw;
+      box-sizing: border-box;
+      padding: 1.55cqh 2.3cqw;
+      border-top: 1px solid rgba(137, 177, 230, 0.42);
+      border-bottom: 1px solid rgba(137, 177, 230, 0.42);
+      color: #9BB6D8;
+      background: rgba(7, 19, 33, 0.56);
+    }
+
+    #f01-queue strong {
+      margin-left: 1.3cqw;
+      color: #EAF2FF;
+      font-weight: 400;
+    }
+
+    #f01-conclusion {
+      position: absolute;
+      bottom: 10.5cqh;
+      left: 8.8cqw;
+      z-index: 8;
+      color: #EAF2FF;
+      font-size: 4.15cqw;
+      letter-spacing: -0.03em;
+      line-height: 1.08;
+    }
+
+    #f01-conclusion em {
+      color: #86E6B1;
+      font-style: normal;
+    }
+  </style>
+
+  <div data-hf-id="hf-mglt" id="root" data-composition-id="01-not-by-luck" data-duration="5.4" data-width="1080" data-height="1920" data-layout-allow-overflow="">
+    <div data-hf-id="hf-f01a" id="f01-ground" class="clip" data-start="0" data-duration="5.4" data-track-index="0"></div>
+
+    <div data-hf-id="hf-f01b" id="f01-chrome" class="clip" data-start="0" data-duration="5.4" data-track-index="1">
+      <div data-hf-id="hf-52da" id="f01-kicker" class="f01-mono">多个 AI / 同时写代码</div>
+      <div data-hf-id="hf-nvtu" id="f01-index" class="f01-mono">01 / 06 · 一眼看懂</div>
+      <div data-hf-id="hf-4e2x" id="f01-top-line"></div>
+      <div data-hf-id="hf-70uf" id="f01-bottom-line"></div>
+    </div>
+
+    <svg data-hf-id="hf-f01c" id="f01-route" class="clip" data-start="0" data-duration="5.4" data-track-index="2" viewBox="0 0 894 950" aria-hidden="true">
+      <path data-hf-id="hf-k6zs" id="f01-route-path-a" d="M72 472 H204 V208 H572" />
+      <path data-hf-id="hf-um54" id="f01-route-path-b" d="M822 694 H676 V518 H524" />
+      <circle data-hf-id="hf-r11s" cx="204" cy="208" r="8" />
+      <circle data-hf-id="hf-6jht" cx="676" cy="518" r="8" />
+    </svg>
+
+    <div data-hf-id="hf-f01d" id="f01-headline" class="clip" data-start="0" data-duration="5.4" data-track-index="3" data-layout-allow-overlap="">
+      <span data-hf-id="hf-3xev" id="f01-headline-small" class="f01-mono">让多个 AI 同时写代码</span>
+      <span data-hf-id="hf-099p" id="f01-headline-main">也不会把</span>
+      <span data-hf-id="hf-vvmo" id="f01-headline-risk">项目改乱</span>
+    </div>
+
+    <section data-hf-id="hf-f01e" id="f01-terminal" class="f01-panel clip" data-start="0" data-duration="5.4" data-track-index="4">
+      <div data-hf-id="hf-l16t" class="f01-panel-head">
+        <span data-hf-id="hf-gp2l" id="f01-terminal-title" data-layout-allow-overlap="">AI A / 正在改登录</span>
+        <span data-hf-id="hf-1jwm" id="f01-running-chip" class="f01-chip f01-chip-running">正在进行</span>
+      </div>
+      <div data-hf-id="hf-0reh" id="f01-terminal-content">
+        <div data-hf-id="hf-zru4" class="f01-field"><span data-hf-id="hf-dyy0">正在改：</span><b data-hf-id="hf-o4qa">登录功能</b></div>
+        <div data-hf-id="hf-obic" class="f01-field"><span data-hf-id="hf-wy21">是否独立：</span><b data-hf-id="hf-2wrg">还不确定</b></div>
+        <div data-hf-id="hf-n4l9" class="f01-field"><span data-hf-id="hf-p8gf">碰到文件：</span><b data-hf-id="hf-2are">登录页面</b></div>
+        <div data-hf-id="hf-npa8" id="f01-command">AI A 正在修改：登录页面</div>
+      </div>
+      <div data-hf-id="hf-x9ea" id="f01-scan"></div>
+    </section>
+
+    <section data-hf-id="hf-f01f" id="f01-api-card" class="f01-panel clip" data-start="0" data-duration="5.4" data-track-index="5" data-layout-allow-occlusion="">
+      <div data-hf-id="hf-f4tb" class="f01-card-title">AI B / 也在改登录</div>
+      <div data-hf-id="hf-lxah" class="f01-card-meta">正在改：接口</div>
+      <div data-hf-id="hf-6oz3" class="f01-card-meta">也碰到：登录页面</div>
+      <div data-hf-id="hf-3ilr" class="f01-card-foot"><span data-hf-id="hf-s787" class="f01-chip f01-chip-risk">风险 · 改到同一处</span></div>
+    </section>
+
+    <section data-hf-id="hf-f01g" id="f01-test-card" class="f01-panel clip" data-start="0" data-duration="5.4" data-track-index="6">
+      <div data-hf-id="hf-lh0j" class="f01-card-title">AI C / 正在跑测试</div>
+      <div data-hf-id="hf-g8u5" class="f01-card-meta">同时改：项目配置</div>
+      <div data-hf-id="hf-qujv" class="f01-card-meta">没人知道谁先动过</div>
+      <div data-hf-id="hf-yplb" class="f01-card-foot"><span data-hf-id="hf-u2mf" class="f01-chip f01-chip-risk">风险 · 最后才发现</span></div>
+    </section>
+
+    <div data-hf-id="hf-f01h" id="f01-queue" class="clip f01-mono" data-start="0" data-duration="5.4" data-track-index="7">
+      三个 AI 任务 <strong data-hf-id="hf-h2b0">登录 · 接口 · 测试</strong>
+    </div>
+
+    <div data-hf-id="hf-f01i" id="f01-conclusion" class="clip" data-start="0" data-duration="5.4" data-track-index="8">
+      办法：<em data-hf-id="hf-kw7x">每个 AI 先各改各的副本。</em>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <script>
+    const compositionId = "01-not-by-luck";
+    const frameId = "f01";
+    const timeline = gsap.timeline({ paused: true });
+    const byId = (suffix) => document.getElementById(`${frameId}-${suffix}`);
+
+    timeline
+      .fromTo(byId("top-line"), { scaleX: 0, autoAlpha: 0 }, { scaleX: 1, autoAlpha: 1, duration: 0.32, ease: "power2.out" }, 0.06)
+      .fromTo(byId("bottom-line"), { scaleX: 0, autoAlpha: 0 }, { scaleX: 1, autoAlpha: 1, duration: 0.32, ease: "power2.out" }, 0.14)
+      .fromTo([byId("kicker"), byId("index")], { y: -14, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.3, stagger: 0.08, ease: "power2.out" }, 0.14)
+      .fromTo(byId("route"), { autoAlpha: 0, scale: 0.96, transformOrigin: "50% 50%" }, { autoAlpha: 0.78, scale: 1, duration: 0.4, ease: "power2.out" }, 0.18)
+      .fromTo(byId("terminal"), { y: 58, autoAlpha: 0, scale: 0.965 }, { y: 0, autoAlpha: 1, scale: 1, duration: 0.54, ease: "power3.out" }, 0.34)
+      .fromTo(byId("headline-small"), { x: -18, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: 0.28, ease: "power2.out" }, 0.48)
+      .fromTo(byId("headline-main"), { y: 22, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.42, ease: "power3.out" }, 0.58)
+      .fromTo(byId("headline-risk"), { y: 28, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.44, ease: "power3.out" }, 0.76)
+      .fromTo(byId("api-card"), { x: -76, y: 22, autoAlpha: 0, rotation: -1.5 }, { x: 0, y: 0, autoAlpha: 1, rotation: 0, duration: 0.48, ease: "power3.out" }, 1.02)
+      .fromTo(byId("test-card"), { x: 80, y: 28, autoAlpha: 0, rotation: 1.2 }, { x: 0, y: 0, autoAlpha: 1, rotation: 0, duration: 0.5, ease: "power3.out" }, 1.2)
+      .fromTo(byId("queue"), { x: 24, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: 0.32, ease: "power2.out" }, 1.48)
+      .fromTo(byId("scan"), { y: 0, autoAlpha: 0 }, { y: "22.3cqh", autoAlpha: 0.86, duration: 0.92, ease: "none" }, 1.66)
+      .to(byId("scan"), { autoAlpha: 0, duration: 0.2, ease: "none" }, 2.58)
+      .to(byId("route-path-a"), { strokeDashoffset: -76, duration: 1.25, ease: "none" }, 1.72)
+      .to(byId("route-path-b"), { strokeDashoffset: 76, duration: 1.25, ease: "none" }, 1.72)
+      .fromTo(byId("conclusion"), { y: 18, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.48, ease: "power3.out" }, 2.95)
+      .to([byId("api-card"), byId("test-card")], { borderColor: "rgba(255, 139, 122, 1)", duration: 0.18, yoyo: true, repeat: 1, ease: "power1.inOut" }, 3.48)
+      .to(byId("headline-risk"), { color: "#86E6B1", duration: 0.36, ease: "power1.out" }, 4.02);
+
+    window.__timelines = window.__timelines || {};
+    window.__timelines[compositionId] = timeline;
+  </script>
+</template>

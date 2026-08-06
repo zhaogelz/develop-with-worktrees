@@ -1,0 +1,92 @@
+<template>
+  <style>
+    @font-face { font-family: "NotoSerifSC"; src: url("assets/fonts/NotoSerifSC-400.ttf") format("truetype"); font-style: normal; font-weight: 400; font-display: block; }
+    #root { position: relative; width: 1080px; height: 1920px; overflow: hidden; container-type: size; color: #EAF2FF; font-family: "NotoSerifSC", serif; background: #071321; }
+    #root *, #root *::before, #root *::after { box-sizing: border-box; }
+    #f04-ground { position: absolute; inset: 0; background: radial-gradient(circle at 78% 22%, rgba(77,124,255,.22), transparent 28%), radial-gradient(circle at 15% 78%, rgba(113,215,255,.09), transparent 26%), linear-gradient(rgba(137,177,230,.075) .1cqw, transparent .1cqw), linear-gradient(90deg, rgba(137,177,230,.075) .1cqw, transparent .1cqw), #071321; background-size: auto, auto, 4cqw 4cqw, 4cqw 4cqw, auto; }
+    #f04-vignette { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(7,19,33,.05), rgba(7,19,33,.48)); }
+    .f04-hud { position: absolute; display: flex; align-items: center; justify-content: space-between; color: #9BB6D8; font: 1.45cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .12em; }
+    #f04-topline { left: 5.2cqw; right: 5.2cqw; top: 4.5cqh; padding-bottom: 2.1cqh; border-bottom: .1cqw solid rgba(137,177,230,.28); }
+    #f04-topline span:last-child { color: #86E6B1; }
+    #f04-title { position: absolute; left: 5.2cqw; top: 9.1cqh; font-size: 7.35cqw; font-weight: 400; letter-spacing: -.07em; line-height: .92; }
+    #f04-title span { display: block; }
+    #f04-title em { display: block; color: #71D7FF; font-style: normal; }
+    #f04-subtitle { position: absolute; left: 5.45cqw; top: 20.5cqh; width: 60cqw; color: #9BB6D8; font-size: 2.35cqw; line-height: 1.45; letter-spacing: .02em; }
+    #f04-routes { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .f04-route { fill: none; stroke: rgba(113,215,255,.55); stroke-width: 2; stroke-dasharray: 14 15; stroke-dashoffset: 240; }
+    .f04-route--done { stroke: rgba(134,230,177,.72); }
+    #f04-step-rail { position: absolute; left: 5.2cqw; top: 29cqh; width: 21.5cqw; display: grid; gap: 1.2cqh; }
+    .f04-step { position: relative; min-height: 11.2cqh; padding: 1.55cqh 1.45cqw 1.35cqh 2.6cqw; overflow: hidden; border: .1cqw solid rgba(137,177,230,.28); background: rgba(12,32,56,.82); box-shadow: 0 1.2cqh 3cqh rgba(0,0,0,.15); }
+    .f04-step::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: .38cqw; background: #4D7CFF; }
+    .f04-step[data-state="verified"]::before { background: #86E6B1; }
+    .f04-step-index { color: #71D7FF; font: 1.15cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .12em; }
+    .f04-step-name { margin-top: .7cqh; color: #EAF2FF; font-size: 2.25cqw; letter-spacing: -.04em; line-height: 1; }
+    .f04-step-meta { margin-top: 1.2cqh; color: #9BB6D8; font: 1.02cqw/1.35 ui-monospace, Consolas, monospace; }
+    .f04-dot { position: absolute; right: 1.4cqw; top: 1.5cqh; width: .85cqw; height: .85cqw; border-radius: 50%; background: #86E6B1; box-shadow: 0 0 0 .45cqw rgba(134,230,177,.09); }
+    #f04-main { position: absolute; left: 30.5cqw; top: 29cqh; width: 64.3cqw; height: 44.1cqh; overflow: hidden; border: .1cqw solid rgba(137,177,230,.34); background: linear-gradient(145deg, rgba(17,43,73,.96), rgba(12,32,56,.94)); box-shadow: 0 2cqh 5cqh rgba(0,0,0,.22); }
+    #f04-main::before { content: ""; position: absolute; inset: 0; background: linear-gradient(110deg, transparent 0%, rgba(113,215,255,.06) 48%, transparent 52%); transform: translateX(-110%); }
+    #f04-main-head { position: relative; height: 6.6cqh; padding: 2cqh 2.3cqw; display: flex; align-items: center; justify-content: space-between; border-bottom: .1cqw solid rgba(137,177,230,.24); color: #9BB6D8; font: 1.15cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .1em; }
+    #f04-main-head b { color: #EAF2FF; font-weight: 400; }
+    #f04-main-head span { color: #86E6B1; }
+    #f04-terminal { position: relative; padding: 2.3cqh 2.35cqw 0; }
+    .f04-log { display: grid; grid-template-columns: 3.4cqw 1fr auto; gap: 1.4cqw; align-items: baseline; padding: 1.25cqh 0; border-bottom: .1cqw solid rgba(137,177,230,.14); color: #9BB6D8; font: 1.48cqw/1.25 ui-monospace, Consolas, monospace; }
+    .f04-log span:first-child { color: #71D7FF; }
+    .f04-log b { color: #EAF2FF; font-weight: 400; }
+    .f04-log em { color: #86E6B1; font-style: normal; font-size: 1.04cqw; letter-spacing: .08em; }
+    #f04-scan { position: absolute; left: 0; right: 0; top: 0; height: 4.2cqh; background: linear-gradient(180deg, rgba(113,215,255,0), rgba(113,215,255,.12), rgba(113,215,255,0)); mix-blend-mode: screen; pointer-events: none; }
+    #f04-main-foot { position: absolute; left: 2.35cqw; right: 2.35cqw; bottom: 2.1cqh; display: flex; justify-content: space-between; color: #9BB6D8; font: 1.1cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+    #f04-main-foot span:last-child { color: #71D7FF; }
+    #f04-proof { position: absolute; left: 30.5cqw; top: 76.8cqh; width: 64.3cqw; min-height: 12cqh; padding: 2cqh 2.45cqw; border: .1cqw solid rgba(134,230,177,.48); background: rgba(12,32,56,.88); }
+    #f04-proof-mark { color: #86E6B1; font: 1.1cqw/1 ui-monospace, Consolas, monospace; letter-spacing: .13em; }
+    #f04-proof-title { margin-top: .8cqh; color: #EAF2FF; font-size: 3.55cqw; letter-spacing: -.06em; line-height: 1; }
+    #f04-proof-meta { margin-top: 1.4cqh; color: #9BB6D8; font: 1.12cqw/1 ui-monospace, Consolas, monospace; }
+    #f04-proof-meta b { color: #86E6B1; font-weight: 400; }
+    #f04-bottomline { left: 5.2cqw; right: 5.2cqw; bottom: 4.4cqh; padding-top: 2cqh; border-top: .1cqw solid rgba(137,177,230,.28); }
+  </style>
+
+  <div data-hf-id="hf-k100" id="root" data-composition-id="04-the-loop" data-duration="7.5" data-width="1080" data-height="1920">
+    <div data-hf-id="hf-bvfe" id="f04-ground" class="clip" data-start="0" data-duration="7.5" data-track-index="0"></div>
+    <div data-hf-id="hf-t9o0" id="f04-vignette" class="clip" data-start="0" data-duration="7.5" data-track-index="1"></div>
+    <div data-hf-id="hf-i030" id="f04-topline" class="f04-hud clip" data-layout-allow-overlap="" data-start="0" data-duration="7.5" data-track-index="2"><span data-hf-id="hf-s52y">多个 AI 一起干活 / 4 步</span><span data-hf-id="hf-zknw">● 可以放心合回去</span></div>
+    <div data-hf-id="hf-317w" id="f04-title" class="clip" data-layout-allow-overlap="" data-start="0" data-duration="7.5" data-track-index="3"><span data-hf-id="hf-vgfq">完成后，</span><em data-hf-id="hf-vhhn">检查再合回去</em></div>
+    <div data-hf-id="hf-1mus" id="f04-subtitle" class="clip" data-start="0" data-duration="7.5" data-track-index="4">让多个 AI 分开干活，确认没问题，再把改动放回主项目。</div>
+    <svg data-hf-id="hf-yh7q" id="f04-routes" class="clip" data-start="0" data-duration="7.5" data-track-index="5" viewBox="0 0 1080 1920" aria-hidden="true"><path data-hf-id="hf-tj38" class="f04-route" d="M286 678 H330 V710 H388" /><path data-hf-id="hf-47ld" class="f04-route" d="M286 918 H330 V918 H388" /><path data-hf-id="hf-ikee" class="f04-route" d="M286 1160 H330 V1064 H388" /><path data-hf-id="hf-jvyo" class="f04-route f04-route--done" d="M708 1397 V1474 H514 V1518" /></svg>
+    <div data-hf-id="hf-vonk" id="f04-step-rail" class="clip" data-start="0" data-duration="7.5" data-track-index="6">
+      <div data-hf-id="hf-nvqe" class="f04-step" id="f04-step-one" data-state="verified"><span data-hf-id="hf-o793" class="f04-dot"></span><div data-hf-id="hf-ns4c" class="f04-step-index">01 / 第一步</div><div data-hf-id="hf-2r1m" class="f04-step-name">先分开干活</div><div data-hf-id="hf-8asn" class="f04-step-meta">每个 AI<br data-hf-id="hf-x5px">各用一份副本</div></div>
+      <div data-hf-id="hf-qqnc" class="f04-step" id="f04-step-two" data-state="verified"><span data-hf-id="hf-ctdj" class="f04-dot"></span><div data-hf-id="hf-yyq2" class="f04-step-index">02 / 第二步</div><div data-hf-id="hf-um5j" class="f04-step-name">只交这次改的</div><div data-hf-id="hf-w68e" class="f04-step-meta">不把别的改动<br data-hf-id="hf-rsrt">一起带进去</div></div>
+      <div data-hf-id="hf-x8wu" class="f04-step" id="f04-step-three" data-state="verified"><span data-hf-id="hf-cf2i" class="f04-dot"></span><div data-hf-id="hf-t46h" class="f04-step-index">03 / 第三步</div><div data-hf-id="hf-ql3c" class="f04-step-name">检查有没有问题</div><div data-hf-id="hf-jdb3" class="f04-step-meta">改了什么<br data-hf-id="hf-szow">先看清楚</div></div>
+      <div data-hf-id="hf-80ye" class="f04-step" id="f04-step-four" data-state="verified"><span data-hf-id="hf-c0rh" class="f04-dot"></span><div data-hf-id="hf-itgi" class="f04-step-index">04 / 第四步</div><div data-hf-id="hf-34gf" class="f04-step-name">确认后再合回去</div><div data-hf-id="hf-u2ul" class="f04-step-meta">没问题<br data-hf-id="hf-sldv">再进主项目</div></div>
+    </div>
+    <div data-hf-id="hf-r1dv" id="f04-main" class="clip" data-start="0" data-duration="7.5" data-track-index="7">
+      <div data-hf-id="hf-gbg0" id="f04-main-head"><b data-hf-id="hf-57cw">这次改动检查</b><span data-hf-id="hf-2wbd">可以合回</span></div>
+      <div data-hf-id="hf-qjcy" id="f04-terminal">
+        <div data-hf-id="hf-0nfj" class="f04-log" id="f04-log-one"><span data-hf-id="hf-p81i">01</span><b data-hf-id="hf-aifb">AI A 的改动独立</b><em data-hf-id="hf-jnui">通过</em></div>
+        <div data-hf-id="hf-3gfx" class="f04-log" id="f04-log-two"><span data-hf-id="hf-pmcj">02</span><b data-hf-id="hf-3io4">只包含这次修改</b><em data-hf-id="hf-uf4u">通过</em></div>
+        <div data-hf-id="hf-savj" class="f04-log" id="f04-log-three"><span data-hf-id="hf-q0nk">03</span><b data-hf-id="hf-yndh">检查没有问题</b><em data-hf-id="hf-utfv">通过</em></div>
+        <div data-hf-id="hf-3uh5" class="f04-log" id="f04-log-four"><span data-hf-id="hf-n8id">04</span><b data-hf-id="hf-75no">可以合回主项目</b><em data-hf-id="hf-v7qw">通过</em></div>
+        <div data-hf-id="hf-novl" id="f04-scan"></div>
+      </div>
+      <div data-hf-id="hf-lepm" id="f04-main-foot"><span data-hf-id="hf-ilug">多个 AI 也能放心协作</span><span data-hf-id="hf-2fe4">可以合回</span></div>
+    </div>
+    <div data-hf-id="hf-4iw3" id="f04-proof" class="clip" data-start="0" data-duration="7.5" data-track-index="8"><div data-hf-id="hf-5t3r" id="f04-proof-mark">✓ 确认后再合回去</div><div data-hf-id="hf-hhb5" id="f04-proof-title">不用一乱再重来</div><div data-hf-id="hf-dejw" id="f04-proof-meta">每个任务先分开，<b data-hf-id="hf-438u">确认后再回到主项目。</b></div></div>
+    <div data-hf-id="hf-qbfr" id="f04-bottomline" class="f04-hud clip" data-start="0" data-duration="7.5" data-track-index="9"><span data-hf-id="hf-3ord">分开干活 → 检查 → 合回主项目</span><span data-hf-id="hf-ydgf">04 / 06</span></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <script>
+    const tl = window.gsap.timeline({ paused: true });
+    tl.fromTo("#f04-topline", { opacity: 0, y: "-2cqh" }, { opacity: 1, y: 0, duration: .32, ease: "power2.out" }, .05)
+      .fromTo("#f04-title", { opacity: 0, y: "3cqh" }, { opacity: 1, y: 0, duration: .55, ease: "power3.out" }, .2)
+      .fromTo("#f04-subtitle", { opacity: 0, y: "2cqh" }, { opacity: 1, y: 0, duration: .4, ease: "power2.out" }, .48)
+      .fromTo(".f04-step", { opacity: 0, x: "-5cqw" }, { opacity: 1, x: 0, duration: .38, stagger: .18, ease: "power3.out" }, .72)
+      .fromTo("#f04-main", { opacity: 0, x: "5cqw", y: "1cqh" }, { opacity: 1, x: 0, y: 0, duration: .62, ease: "power3.out" }, 1.1)
+      .to(".f04-route", { strokeDashoffset: 0, duration: .8, stagger: .16, ease: "power1.out" }, 1.42)
+      .fromTo(".f04-log", { opacity: 0, x: "2cqw" }, { opacity: 1, x: 0, duration: .3, stagger: .28, ease: "power2.out" }, 1.62)
+      .fromTo("#f04-scan", { opacity: 0, y: "-2cqh" }, { opacity: .9, y: "11.5cqh", duration: 2.4, ease: "none" }, 2.4)
+      .fromTo("#f04-proof", { opacity: 0, y: "3cqh", scale: .96 }, { opacity: 1, y: 0, scale: 1, duration: .55, ease: "power3.out" }, 4.95)
+      .fromTo("#f04-bottomline", { opacity: 0 }, { opacity: 1, duration: .3, ease: "power1.out" }, 5.45)
+      .to("#f04-proof", { boxShadow: "0 0 0 0.5cqw rgba(134,230,177,.08)", duration: .5, yoyo: true, repeat: 1, ease: "sine.inOut" }, 5.78);
+    window.__timelines = window.__timelines || {};
+    window.__timelines["04-the-loop"] = tl;
+  </script>
+</template>
