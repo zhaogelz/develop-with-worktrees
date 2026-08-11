@@ -95,7 +95,7 @@ For an adopted repository, proactively run `start --name <purpose>` when a modif
 3. Use `plan` or `verify --level development` as useful feedback. Slow estimates are advice only.
 4. Run `ready`, then `finish` with the same task and lease.
 
-Ready/Finish synchronize only the recorded base branch. A deleted, rewound, or rewritten base requires explicit `retarget`; Finish only fast-forwards the recorded clean base worktree. It never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
+Ready/Finish synchronize only the recorded base branch. Ready checks the expected base after validation admission and again after validation; when another Finish advances that base, the same Ready call resynchronizes and reuses exact unchanged profile proofs, up to five retries. A deleted, rewound, or rewritten base requires explicit `retarget`; Finish only fast-forwards the recorded clean base worktree. It never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 
 ## Explicit post-Finish publishing
 

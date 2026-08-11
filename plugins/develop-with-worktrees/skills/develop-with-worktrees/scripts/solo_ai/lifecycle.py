@@ -30,7 +30,7 @@ from .config import (
     render_repo_config,
     render_verification_config,
 )
-from .proof import approval_plan, validate
+from .proof import ValidationBaseChanged, approval_plan, validate
 from .repo import GitRepo
 from .routing import decide_route, detect_existing_workflows
 from .safety import require_safe
@@ -53,6 +53,7 @@ from .util import (
 
 BOOTSTRAP_SCHEMA = 1
 TASK_GRANT_SCHEMA = 1
+MAX_READY_CONVERGENCE_RETRIES = 5
 LOCKFILE_NAMES = (
     "uv.lock",
     "package-lock.json",
@@ -941,39 +942,67 @@ def ready(
             _assert_in_place_binding(repo, store, task, session_id=session_id)
         if not repo.is_clean(worktree):
             raise SoloAIError("Commit all task changes before Ready")
-        if not _is_in_place(task):
-            task = _sync_base(repo, task)
-        if not repo.is_clean(worktree):
-            raise SoloAIError("Base-branch synchronization left the task dirty")
-        # 同步可能带入新的受管策略；必须按同步后的策略重新确认和验证。
-        config = load_repo_config(repo, cwd=worktree)
-        store.require_slot_layout(config)
-        verification = load_verification_config(repo, cwd=worktree)
-        require_approval(repo, verification, cwd=worktree)
-        base_ref = _verification_base(task)
-        _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
-        require_safe(
-            repo, cwd=worktree, base=base_ref, allowlist=config.sensitive_allowlist
-        )
-        proof = validate(
-            repo,
-            cwd=worktree,
-            base=base_ref,
-            verification=verification,
-            task_id=task_id,
-            force_task_scope=_is_in_place(task),
-        )
-        updates: dict[str, Any] = {
-            "status": "ready",
-            "candidate_head": repo.head(worktree),
-            "ready_proof": proof["fingerprint"],
-        }
-        if not _is_in_place(task):
-            updates["base_head"] = task["base_head"]
-        return store.update_task(
-            task_id,
-            **updates,
-        )
+        convergence_retries = 0
+        while True:
+            if not _is_in_place(task):
+                task = _sync_base(repo, task)
+            if not repo.is_clean(worktree):
+                raise SoloAIError("Base-branch synchronization left the task dirty")
+            # 每次同步都可能带入新的受管策略；必须按本轮候选重新确认和验证。
+            config = load_repo_config(repo, cwd=worktree)
+            store.require_slot_layout(config)
+            verification = load_verification_config(repo, cwd=worktree)
+            require_approval(repo, verification, cwd=worktree)
+            base_ref = _verification_base(task)
+            _run_declared_secret_scanner(
+                repo, cwd=worktree, scanner=config.secret_scanner
+            )
+            require_safe(
+                repo, cwd=worktree, base=base_ref, allowlist=config.sensitive_allowlist
+            )
+            expected_base_head = None if _is_in_place(task) else str(task["base_head"])
+            try:
+                proof = validate(
+                    repo,
+                    cwd=worktree,
+                    base=base_ref,
+                    verification=verification,
+                    task_id=task_id,
+                    force_task_scope=_is_in_place(task),
+                    expected_base_head=expected_base_head,
+                )
+            except ValidationBaseChanged as exc:
+                convergence_retries += 1
+                if convergence_retries > MAX_READY_CONVERGENCE_RETRIES:
+                    raise SoloAIError(
+                        "Ready could not converge because the base kept advancing; "
+                        "the task is preserved and can be retried after integration activity settles"
+                    ) from exc
+                continue
+
+            if not _is_in_place(task):
+                current_base_head = repo.git(
+                    ["rev-parse", "--verify", f"refs/heads/{task['base_ref']}"],
+                    cwd=worktree,
+                ).stdout.strip()
+                if current_base_head != task["base_head"]:
+                    convergence_retries += 1
+                    if convergence_retries > MAX_READY_CONVERGENCE_RETRIES:
+                        raise SoloAIError(
+                            "Ready could not converge because the base kept advancing; "
+                            "the task is preserved and can be retried after integration activity settles"
+                        )
+                    continue
+
+            updates: dict[str, Any] = {
+                "status": "ready",
+                "candidate_head": repo.head(worktree),
+                "ready_proof": proof["fingerprint"],
+            }
+            if not _is_in_place(task):
+                updates["base_head"] = task["base_head"]
+            updated = store.update_task(task_id, **updates)
+            return {**updated, "convergence_retries": convergence_retries}
 
 
 def _queue_ticket(repo: GitRepo, task_id: str) -> Path:

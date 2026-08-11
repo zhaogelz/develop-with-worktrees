@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0-beta.4 — 2026-08-11
+
+- Makes one Ready call converge when another task advances the recorded base during validation, instead of recording a stale Ready proof that Finish must validate again.
+- Rechecks the expected base after machine validation admission and before every profile command; a post-validation check closes changes that occur during the final command. A failed command is discarded only when its base changed during execution, while a failure on the current base remains a hard failure.
+- Reuses exact unchanged profile proofs across convergence attempts and bounds automatic retries at five while preserving the candidate on continued movement.
+
 ## 0.3.0-beta.3 — 2026-07-30
 
 - Treats `hooks/hooks.json` as a stable trust-compatibility contract so ordinary plugin, skill, and guard-script updates require no repeated user action.

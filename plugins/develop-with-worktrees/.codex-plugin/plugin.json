@@ -1,7 +1,7 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.3.0-beta.3",
+  "version": "0.3.0-beta.4",
   "description": "A local-first Codex workflow with a one-confirmation multi-AI command center, safe isolated integration, and mature-workflow deferral.",
   "skills": "skills",
   "author": {

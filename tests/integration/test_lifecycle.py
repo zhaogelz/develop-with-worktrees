@@ -6,11 +6,13 @@ import socket
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from conftest import git
 from solo_ai import lifecycle
+from solo_ai import proof as proof_module
 from solo_ai.cli import _prune
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
@@ -103,6 +105,28 @@ commands = [{json.dumps(list(command.argv))}]
     approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
     ready(repo, task_id=task["id"], lease=task["lease"])
     finish(repo, task_id=task["id"], lease=task["lease"])
+
+
+def install_counting_verification_policy(repo: GitRepo, command: list[str]) -> None:
+    verification = repo.root / ".solo-ai" / "verification.toml"
+    verification.write_text(
+        f"""schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "default"
+paths = ["candidate.txt"]
+cross_task_reuse = false
+external_state = "none"
+input_paths = ["candidate.txt"]
+environment = []
+commands = [{json.dumps(command)}]
+""",
+        encoding="utf-8",
+    )
+    git(repo.root, "add", ".solo-ai/verification.toml")
+    git(repo.root, "commit", "-m", "test: install counting verification")
+    approve(repo, load_verification_config(repo))
 
 
 def proof_commands(repo: GitRepo, fingerprint: str) -> list[list[str] | None]:
@@ -787,6 +811,172 @@ def test_ready_uses_policy_after_default_branch_synchronization(git_repo: Path) 
 
     prepared = ready(repo, task_id=task["id"], lease=task["lease"])
     assert proof_commands(repo, prepared["ready_proof"]) == [list(STRICT_VERIFY.argv)]
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_ready_resynchronizes_before_validation_after_queue_wait(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    counter = repo.local_dir / "ready-queue-counter.txt"
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            f"p=Path({str(counter)!r}); "
+            "p.write_text(str(int(p.read_text()) + 1) if p.exists() else '1')"
+        ),
+    ]
+    install_counting_verification_policy(repo, command)
+    task = start(repo, name="base advances while queued")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+
+    original_claim = proof_module.claim_validation_slot
+    advanced = False
+
+    @contextmanager
+    def advance_base_before_claim_yields(resource_class: str):
+        nonlocal advanced
+        with original_claim(resource_class) as claim:
+            if not advanced:
+                advanced = True
+                (repo.root / "parallel.txt").write_text("parallel\n", encoding="utf-8")
+                git(repo.root, "add", "parallel.txt")
+                git(repo.root, "commit", "-m", "test: parallel base advance")
+            yield claim
+
+    monkeypatch.setattr(
+        proof_module, "claim_validation_slot", advance_base_before_claim_yields
+    )
+
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert prepared["base_head"] == repo.head(repo.root)
+    assert prepared["convergence_retries"] == 1
+    assert counter.read_text(encoding="utf-8") == "1"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_ready_resynchronizes_after_validation_and_reuses_profile_proof(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    counter = repo.local_dir / "ready-after-counter.txt"
+    marker = repo.root / "parallel.txt"
+    script = (
+        "from pathlib import Path; import subprocess; "
+        f"counter=Path({str(counter)!r}); marker=Path({str(marker)!r}); "
+        "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1'); "
+        f"root={str(repo.root)!r}; "
+        "marker.exists() or (marker.write_text('parallel\\n', encoding='utf-8'), "
+        "subprocess.run(['git', '-C', root, 'add', 'parallel.txt'], check=True), "
+        "subprocess.run(['git', '-C', root, 'commit', '-m', 'test: parallel base advance'], check=True))"
+    )
+    install_counting_verification_policy(repo, [sys.executable, "-c", script])
+    task = start(repo, name="base advances after validation")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert prepared["base_head"] == repo.head(repo.root)
+    assert prepared["convergence_retries"] == 1
+    assert counter.read_text(encoding="utf-8") == "1"
+    proof = read_json(repo.local_dir / "proofs" / f"{prepared['ready_proof']}.json", {})
+    assert proof["profile_proofs"][0]["reused"] is True
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert result["proof_reused"] is True
+    assert counter.read_text(encoding="utf-8") == "1"
+
+
+def test_ready_discards_a_stale_validation_failure_after_base_advance(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    counter = repo.local_dir / "ready-stale-failure-counter.txt"
+    marker = repo.root / "parallel.txt"
+    script = (
+        "from pathlib import Path; import subprocess; "
+        f"counter=Path({str(counter)!r}); marker=Path({str(marker)!r}); "
+        "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1'); "
+        f"root={str(repo.root)!r}; "
+        "already=marker.exists(); "
+        "already or (marker.write_text('parallel\\n', encoding='utf-8'), "
+        "subprocess.run(['git', '-C', root, 'add', 'parallel.txt'], check=True), "
+        "subprocess.run(['git', '-C', root, 'commit', '-m', 'test: parallel base advance'], check=True)); "
+        "raise SystemExit(0 if already else 1)"
+    )
+    install_counting_verification_policy(repo, [sys.executable, "-c", script])
+    task = start(repo, name="stale failure after base advance")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert prepared["base_head"] == repo.head(repo.root)
+    assert prepared["convergence_retries"] == 1
+    assert counter.read_text(encoding="utf-8") == "2"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_ready_keeps_a_real_validation_failure_as_a_hard_failure(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    install_counting_verification_policy(
+        repo, [sys.executable, "-c", "raise SystemExit(1)"]
+    )
+    task = start(repo, name="real validation failure")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+
+    with pytest.raises(SoloAIError, match="Validation failed"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert StateStore(repo).task(task["id"])["status"] == "active"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_ready_stops_after_bounded_base_convergence_retries(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    counter = repo.local_dir / "ready-bounded-counter.txt"
+    install_counting_verification_policy(
+        repo,
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                f"p=Path({str(counter)!r}); "
+                "p.write_text(str(int(p.read_text()) + 1) if p.exists() else '1')"
+            ),
+        ],
+    )
+    task = start(repo, name="base never settles")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+
+    original_claim = proof_module.claim_validation_slot
+    advance_count = 0
+
+    @contextmanager
+    def always_advance_base(resource_class: str):
+        nonlocal advance_count
+        with original_claim(resource_class) as claim:
+            advance_count += 1
+            relative = f"parallel-{advance_count}.txt"
+            (repo.root / relative).write_text("parallel\n", encoding="utf-8")
+            git(repo.root, "add", relative)
+            git(repo.root, "commit", "-m", f"test: base advance {advance_count}")
+            yield claim
+
+    monkeypatch.setattr(proof_module, "claim_validation_slot", always_advance_base)
+
+    with pytest.raises(SoloAIError, match="base kept advancing"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert advance_count == lifecycle.MAX_READY_CONVERGENCE_RETRIES + 1
+    assert not counter.exists()
+    assert StateStore(repo).task(task["id"])["status"] == "active"
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 

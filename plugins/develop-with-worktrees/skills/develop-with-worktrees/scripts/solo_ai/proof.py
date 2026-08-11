@@ -48,6 +48,27 @@ _EXECUTION_BASELINE = (
 )
 
 
+class ValidationBaseChanged(SoloAIError):
+    """验证取得机器准入后发现基线已经推进。"""
+
+    def __init__(self, *, expected: str, current: str) -> None:
+        self.expected = expected
+        self.current = current
+        super().__init__(
+            f"Validation base advanced from {expected} to {current} while waiting"
+        )
+
+
+def _require_expected_base_head(
+    repo: GitRepo, *, cwd: Path, base: str, expected_base_head: str | None
+) -> None:
+    if expected_base_head is None:
+        return
+    current = repo.git(["rev-parse", "--verify", base], cwd=cwd).stdout.strip()
+    if current != expected_base_head:
+        raise ValidationBaseChanged(expected=expected_base_head, current=current)
+
+
 def changed_files(repo: GitRepo, *, cwd: Path, base: str) -> list[str]:
     output = repo.git(
         ["diff", "--name-only", "--no-renames", f"{base}...HEAD"], cwd=cwd
@@ -310,6 +331,8 @@ def _run_profile(
     inputs: dict[str, Any],
     fingerprint: str,
     task_id: str | None,
+    base: str,
+    expected_base_head: str | None,
 ) -> dict[str, Any]:
     proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
     from .util import read_json
@@ -324,6 +347,12 @@ def _run_profile(
     runs: list[dict[str, Any]] = []
     with claim_validation_slot(profile.resource_class) as queue_claim:
         for index, command in enumerate(profile.commands, 1):
+            _require_expected_base_head(
+                repo,
+                cwd=cwd,
+                base=base,
+                expected_base_head=expected_base_head,
+            )
             pending = temp_dir / f"{index:02d}.log"
             receipt_path = (
                 repo.local_dir / "validation-runs" / run_id / f"{index:02d}.json"
@@ -357,6 +386,13 @@ def _run_profile(
                 }
             )
             if result.returncode != 0:
+                # 旧基线上的失败不是当前候选的有效结论；交给 Ready 同步后重试。
+                _require_expected_base_head(
+                    repo,
+                    cwd=cwd,
+                    base=base,
+                    expected_base_head=expected_base_head,
+                )
                 proof = {
                     "schema_version": PROOF_SCHEMA,
                     "fingerprint": fingerprint,
@@ -403,6 +439,7 @@ def validate(
     task_id: str | None = None,
     level: str = "ready",
     force_task_scope: bool = False,
+    expected_base_head: str | None = None,
 ) -> dict[str, Any]:
     from .util import read_json
 
@@ -443,6 +480,8 @@ def validate(
             inputs=profile_inputs,
             fingerprint=profile_fingerprint,
             task_id=task_id,
+            base=base,
+            expected_base_head=expected_base_head,
         )
         profile_proofs.append(
             {

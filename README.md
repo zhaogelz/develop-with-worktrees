@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.3` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.3.0-beta.4` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
 
 ## One conversation for complex work
 
@@ -49,6 +49,7 @@ route → start → edit only in returned directory → commit exact paths
 ```
 
 - Each normal task receives its own reusable managed directory and lease. Finish fast-forwards only the recorded clean base worktree, locally.
+- Ready rechecks its base after machine validation admission. If another task advances the base, the same Ready call resynchronizes and reuses exact content proofs, with five bounded retries instead of handing Finish a stale proof.
 - Validation uses schema 3 profiles and a machine-global weighted FIFO queue. Slow estimates advise splitting mappings or removing repeated preparation; they never weaken coverage.
 - Finish preserves caches and dependencies. Destructive cleanup remains an explicit reviewed `prune-slot` action.
 
