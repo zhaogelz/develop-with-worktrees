@@ -116,6 +116,6 @@ Do not fetch, pull, force-push, delete a remote ref, push tags, create a PR, or 
 - `verification.toml` supports schema 3 only. Commands are registered argv arrays, never shell strings.
 - Development, Ready, and Full evidence are separate. All changed candidate paths need Ready coverage unless internal static-only policy is active.
 - Validation uses a machine-global weighted FIFO queue. `settings --validation-capacity auto|1..4` is local-only.
-- Finish never removes dependencies or caches. `prune-slot` requires a reviewed exact plan and digest; `.env*`, symlinks, junctions, or changes stop the whole deletion.
+- Finish never removes dependencies or caches. Interrupted Finish/Abandon operations resume only from persisted exact-candidate transactions and Git facts. `prune-slot` requires a reviewed generation-bound one-shot plan and digest; `.env*`, databases, upload/storage content, symlinks, junctions, or changes stop deletion.
 
 Read [configuration.md](references/configuration.md), [lifecycle.md](references/lifecycle.md), and [safety.md](references/safety.md) before changing policy or handling an exception.

@@ -521,3 +521,159 @@ def format_bytes(value: int) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TiB"
+
+
+def path_identity(path: Path) -> dict[str, Any]:
+    """冻结目录项对象身份；同路径替换后 inode/file-index 必须变化。"""
+    details = path.stat(follow_symlinks=False)
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        create_file = ctypes.windll.kernel32.CreateFileW
+        create_file.restype = wintypes.HANDLE
+        invalid = wintypes.HANDLE(-1).value
+        handle = create_file(
+            str(path),
+            0x0080,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x00200000 | (0x02000000 if path.is_dir() else 0),
+            None,
+        )
+        if handle == invalid:
+            raise SoloAIError(f"Cannot read managed path identity: {path}")
+        try:
+            return _windows_handle_identity(handle, mode=int(details.st_mode))
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    return {
+        "device": int(details.st_dev),
+        "inode": int(details.st_ino),
+        "mode": int(details.st_mode),
+    }
+
+
+def _windows_handle_identity(handle: int, *, mode: int) -> dict[str, Any]:
+    import ctypes
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    information = ByHandleFileInformation()
+    if not ctypes.windll.kernel32.GetFileInformationByHandle(
+        handle, ctypes.byref(information)
+    ):
+        raise SoloAIError("Cannot read Windows file identity")
+    return {
+        "device": int(information.dwVolumeSerialNumber),
+        "inode": (int(information.nFileIndexHigh) << 32)
+        | int(information.nFileIndexLow),
+        "mode": mode,
+    }
+
+
+def snapshot_plain_path(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise SoloAIError(f"Refusing to snapshot a link: {path}")
+    identity = path_identity(path)
+    if path.is_file():
+        return {
+            **identity,
+            "size": int(path.stat(follow_symlinks=False).st_size),
+            "kind": "file",
+            "sha256": sha256_file(path),
+        }
+    if path.is_dir():
+        return {**identity, "kind": "directory"}
+    raise SoloAIError(f"Unsupported cleanup path type: {path}")
+
+
+def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None:
+    """在 Windows 用已打开对象句柄条件删除，避免路径校验后的替换竞态。"""
+    if os.name != "nt":
+        if snapshot_plain_path(path) != expected:
+            raise SoloAIError(f"Cleanup content changed before deletion: {path}")
+        if path.is_dir():
+            path.rmdir()
+        else:
+            path.unlink()
+        return
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.windll.kernel32.CreateFileW
+    create_file.restype = wintypes.HANDLE
+    invalid = wintypes.HANDLE(-1).value
+    generic_read = 0x80000000
+    delete_access = 0x00010000
+    share_read = 0x00000001
+    share_delete = 0x00000004
+    open_existing = 3
+    backup_semantics = 0x02000000
+    open_reparse = 0x00200000
+    flags = open_reparse | (backup_semantics if expected.get("kind") == "directory" else 0)
+    handle = create_file(
+        str(path),
+        generic_read | delete_access,
+        share_read | share_delete,
+        None,
+        open_existing,
+        flags,
+        None,
+    )
+    if handle == invalid:
+        raise SoloAIError(f"Cleanup path is busy or changed: {path}")
+    fd: int | None = None
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+        handle = None
+        observed_stat = os.fstat(fd)
+        observed = {
+            **_windows_handle_identity(
+                msvcrt.get_osfhandle(fd), mode=int(observed_stat.st_mode)
+            ),
+            "kind": expected.get("kind"),
+        }
+        if expected.get("kind") == "file":
+            observed["size"] = int(observed_stat.st_size)
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                digest = hashlib.sha256()
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+                observed["sha256"] = digest.hexdigest()
+        if observed != expected:
+            raise SoloAIError(f"Cleanup content changed before deletion: {path}")
+
+        class FileDispositionInfo(ctypes.Structure):
+            _fields_ = [("DeleteFile", wintypes.BOOL)]
+
+        disposition = FileDispositionInfo(True)
+        raw_handle = msvcrt.get_osfhandle(fd)
+        if not ctypes.windll.kernel32.SetFileInformationByHandle(
+            raw_handle,
+            4,
+            ctypes.byref(disposition),
+            ctypes.sizeof(disposition),
+        ):
+            raise SoloAIError(f"Cleanup path could not be conditionally deleted: {path}")
+    finally:
+        if fd is not None:
+            os.close(fd)
+        elif handle not in {None, invalid}:
+            ctypes.windll.kernel32.CloseHandle(handle)

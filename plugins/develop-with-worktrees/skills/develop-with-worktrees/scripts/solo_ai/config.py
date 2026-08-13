@@ -197,6 +197,7 @@ def _cleanup_paths(
 ) -> tuple[str, ...]:
     values = default if raw is None else _strings(raw, field=field, allow_empty=True)
     normalized: list[str] = []
+    seen: set[str] = set()
     for value in values:
         path = value.replace("\\", "/")
         candidate = PurePosixPath(path)
@@ -211,6 +212,10 @@ def _cleanup_paths(
             raise SoloAIError(
                 f"{field} must contain only top-level repository-relative {'patterns' if allow_patterns else 'paths'}"
             )
+        identity = path.casefold()
+        if identity in seen:
+            raise SoloAIError(f"{field} contains duplicate paths for this filesystem")
+        seen.add(identity)
         normalized.append(path)
     return tuple(normalized)
 

@@ -59,6 +59,15 @@ class ValidationBaseChanged(SoloAIError):
         )
 
 
+class ValidationCandidateChanged(SoloAIError):
+    """验证期间候选 HEAD 发生变化。"""
+
+    def __init__(self, *, expected: str, current: str) -> None:
+        self.expected = expected
+        self.current = current
+        super().__init__(f"Validation candidate changed from {expected} to {current}")
+
+
 def _require_expected_base_head(
     repo: GitRepo, *, cwd: Path, base: str, expected_base_head: str | None
 ) -> None:
@@ -67,6 +76,18 @@ def _require_expected_base_head(
     current = repo.git(["rev-parse", "--verify", base], cwd=cwd).stdout.strip()
     if current != expected_base_head:
         raise ValidationBaseChanged(expected=expected_base_head, current=current)
+
+
+def _require_expected_candidate_head(
+    repo: GitRepo, *, cwd: Path, expected_candidate_head: str | None
+) -> None:
+    if expected_candidate_head is None:
+        return
+    current = repo.head(cwd)
+    if current != expected_candidate_head:
+        raise ValidationCandidateChanged(
+            expected=expected_candidate_head, current=current
+        )
 
 
 def changed_files(repo: GitRepo, *, cwd: Path, base: str) -> list[str]:
@@ -266,7 +287,11 @@ def proof_inputs(
     task_id: str | None = None,
     levels: tuple[str, ...] = ("ready",),
     force_task_scope: bool = False,
+    expected_candidate_head: str | None = None,
 ) -> tuple[dict[str, Any], list[tuple[VerificationProfile, dict[str, Any], str]]]:
+    _require_expected_candidate_head(
+        repo, cwd=cwd, expected_candidate_head=expected_candidate_head
+    )
     files = changed_files(repo, cwd=cwd, base=base)
     profiles = select_profiles(verification, files, levels=levels)
     missing = unmapped_files(verification, files, levels=levels)
@@ -312,6 +337,23 @@ def _logs_exist(proof: dict[str, Any]) -> bool:
     )
 
 
+def require_exact_passed_proof(
+    proof: dict[str, Any], *, fingerprint: str, candidate_head: str, base_head: str
+) -> None:
+    """恢复旧任务前严格核验门禁证明与不可变候选的绑定。"""
+    inputs = proof.get("inputs") or {}
+    if proof.get("schema_version") != PROOF_SCHEMA:
+        raise SoloAIError("Unsupported validation proof schema")
+    if proof.get("fingerprint") != fingerprint or proof.get("result") != "passed":
+        raise SoloAIError("Validation proof identity or result is invalid")
+    if inputs.get("candidate_head") != candidate_head:
+        raise SoloAIError("Validation proof belongs to another candidate")
+    if inputs.get("base_head") != base_head:
+        raise SoloAIError("Validation proof belongs to another base snapshot")
+    if not _logs_exist(proof):
+        raise SoloAIError("Validation proof logs are missing or changed")
+
+
 def _content_address_log(repo: GitRepo, temporary: Path) -> tuple[Path, str]:
     digest = sha256_file(temporary)
     target = repo.local_dir / "logs" / "content" / f"{digest}.log"
@@ -333,12 +375,16 @@ def _run_profile(
     task_id: str | None,
     base: str,
     expected_base_head: str | None,
+    expected_candidate_head: str | None,
 ) -> dict[str, Any]:
     proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
     from .util import read_json
 
     existing = read_json(proof_path, {})
     if existing.get("result") == "passed" and _logs_exist(existing):
+        _require_expected_candidate_head(
+            repo, cwd=cwd, expected_candidate_head=expected_candidate_head
+        )
         existing["reused_at"] = utc_timestamp()
         atomic_write_json(proof_path, existing)
         return {**existing, "reused": True}
@@ -347,6 +393,9 @@ def _run_profile(
     runs: list[dict[str, Any]] = []
     with claim_validation_slot(profile.resource_class) as queue_claim:
         for index, command in enumerate(profile.commands, 1):
+            _require_expected_candidate_head(
+                repo, cwd=cwd, expected_candidate_head=expected_candidate_head
+            )
             _require_expected_base_head(
                 repo,
                 cwd=cwd,
@@ -370,6 +419,9 @@ def _run_profile(
                     "profile_fingerprint": fingerprint,
                     "queue_ticket": queue_claim["id"],
                 },
+            )
+            _require_expected_candidate_head(
+                repo, cwd=cwd, expected_candidate_head=expected_candidate_head
             )
             log_path, log_digest = _content_address_log(repo, pending)
             runs.append(
@@ -440,6 +492,7 @@ def validate(
     level: str = "ready",
     force_task_scope: bool = False,
     expected_base_head: str | None = None,
+    expected_candidate_head: str | None = None,
 ) -> dict[str, Any]:
     from .util import read_json
 
@@ -452,6 +505,7 @@ def validate(
         task_id=task_id,
         levels=levels,
         force_task_scope=force_task_scope,
+        expected_candidate_head=expected_candidate_head,
     )
     if inputs["unmapped_files"] and not verification.static_only:
         raise SoloAIError(
@@ -466,6 +520,9 @@ def validate(
     proof_path = repo.local_dir / "proofs" / f"{fingerprint}.json"
     existing = read_json(proof_path, {})
     if existing.get("result") == "passed" and _logs_exist(existing):
+        _require_expected_candidate_head(
+            repo, cwd=cwd, expected_candidate_head=expected_candidate_head
+        )
         existing["reused_at"] = utc_timestamp()
         atomic_write_json(proof_path, existing)
         return {**existing, "reused": True}
@@ -482,6 +539,7 @@ def validate(
             task_id=task_id,
             base=base,
             expected_base_head=expected_base_head,
+            expected_candidate_head=expected_candidate_head,
         )
         profile_proofs.append(
             {
@@ -515,6 +573,9 @@ def validate(
                 "reused": False,
             }
         )
+    _require_expected_candidate_head(
+        repo, cwd=cwd, expected_candidate_head=expected_candidate_head
+    )
     proof = {
         "schema_version": PROOF_SCHEMA,
         "fingerprint": fingerprint,

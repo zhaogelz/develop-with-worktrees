@@ -69,7 +69,10 @@ def scan(
         status, _, path = row.partition("\t")
         if status == "A" and not _allowed(path, allowlist):
             leaf = Path(path).name
-            if any(fnmatch.fnmatchcase(leaf, pattern) for pattern in _SENSITIVE_NAMES):
+            if any(
+                fnmatch.fnmatchcase(leaf.casefold(), pattern.casefold())
+                for pattern in _SENSITIVE_NAMES
+            ):
                 findings.append(Finding(path, None, "sensitive-file"))
 
     current_path = "unknown"

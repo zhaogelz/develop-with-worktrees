@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.4` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.3.0-beta.5` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
 
 ## One conversation for complex work
 
@@ -48,10 +48,11 @@ route → start → edit only in returned directory → commit exact paths
        → plan / verify → ready → finish
 ```
 
-- Each normal task receives its own reusable managed directory and lease. Finish fast-forwards only the recorded clean base worktree, locally.
+- Each normal task receives its own reusable managed directory and lease. Finish persists an exact-candidate integration transaction before fast-forwarding the recorded clean base worktree. Recover uses Git ancestry to finish an interrupted promotion without merging a newer candidate.
+- Abandon preserves and stops on tracked working-tree changes, protected content, same-path object replacement, or another active task reference; it never force-resets or blanket-cleans the slot.
 - Ready rechecks its base after machine validation admission. If another task advances the base, the same Ready call resynchronizes and reuses exact content proofs, with five bounded retries instead of handing Finish a stale proof.
 - Validation uses schema 3 profiles and a machine-global weighted FIFO queue. Slow estimates advise splitting mappings or removing repeated preparation; they never weaken coverage.
-- Finish preserves caches and dependencies. Destructive cleanup remains an explicit reviewed `prune-slot` action.
+- Finish preserves caches and dependencies. Destructive cleanup remains an explicit reviewed, generation-bound, one-shot `prune-slot` action; an interrupted move or delete resumes only from that exact manifest.
 
 `start --in-place` remains an advanced compatibility path for a user who explicitly wants DWW's exact Commit/Ready/Finish safeguards in the current clean worktree; it is not choice 2.
 

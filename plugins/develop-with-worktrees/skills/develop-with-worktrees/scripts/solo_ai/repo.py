@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import subprocess
 
 from .util import CommandResult, SoloAIError, run
 
@@ -179,14 +180,65 @@ class GitRepo:
     def is_ancestor(
         self, ancestor: str, descendant: str, cwd: Path | None = None
     ) -> bool:
-        return (
-            self.git(
-                ["merge-base", "--is-ancestor", ancestor, descendant],
-                cwd=cwd,
-                check=False,
-            ).returncode
-            == 0
+        result = self.git(
+            ["merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=cwd,
+            check=False,
         )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        raise SoloAIError(
+            "Git could not determine commit ancestry; preserve the task for manual inspection"
+        )
+
+    def ref_head(self, ref: str, cwd: Path | None = None) -> str | None:
+        result = self.git(
+            ["show-ref", "--verify", "--quiet", ref], cwd=cwd, check=False
+        )
+        if result.returncode == 0:
+            return self.git(["rev-parse", "--verify", ref], cwd=cwd).stdout.strip()
+        if result.returncode == 1:
+            return None
+        raise SoloAIError(f"Git could not read ref safely: {ref}")
+
+    def delete_ref(self, ref: str, *, expected: str, cwd: Path | None = None) -> None:
+        """仅当引用仍指向预期提交时原子删除，避免并发推进的新提交丢失。"""
+        result = self.git(
+            ["update-ref", "-d", ref, expected], cwd=cwd, check=False
+        )
+        if result.returncode != 0:
+            raise SoloAIError(
+                f"Git ref changed before deletion and was preserved: {ref}"
+            )
+
+    def delete_ref_with_verifications(
+        self,
+        ref: str,
+        *,
+        expected: str,
+        verifications: dict[str, str],
+        cwd: Path | None = None,
+    ) -> None:
+        """在一个 Git ref 事务中验证所有活跃分支并删除目标引用。"""
+        actual = cwd or self.root
+        lines: list[str] = []
+        for verify_ref, verify_head in sorted(verifications.items()):
+            lines.append(f"verify {verify_ref} {verify_head}")
+        lines.extend((f"delete {ref} {expected}", ""))
+        completed = subprocess.run(
+            ["git", "-C", str(actual), "update-ref", "--stdin"],
+            cwd=actual,
+            input="\n".join(lines).encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise SoloAIError(
+                "An active task ref changed during abandonment; all refs were preserved: "
+                + completed.stderr.decode("utf-8", errors="replace").strip()
+            )
 
     def tracked(self, relative: str, cwd: Path | None = None) -> bool:
         return (

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
+import shutil
 import sys
 import threading
 import time
@@ -12,8 +14,13 @@ from pathlib import Path
 import pytest
 from conftest import git
 from solo_ai import lifecycle
+from solo_ai import abandonment as abandonment_module
+from solo_ai import integration as integration_module
 from solo_ai import proof as proof_module
+from solo_ai import state as state_module
 from solo_ai.cli import _prune
+from solo_ai import cli as cli_module
+from solo_ai import cleanup as cleanup_module
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
     abandon,
@@ -28,6 +35,7 @@ from solo_ai.lifecycle import (
     initialize,
     local_enabled,
     ready,
+    recover,
     resume_in_place,
     retarget,
     set_local_enabled,
@@ -146,6 +154,27 @@ def test_full_managed_lifecycle_and_exact_ready_proof_reuse(git_repo: Path) -> N
     assert result["proof_reused"] is True
     assert (git_repo / "hello.txt").read_text(encoding="utf-8") == "hello\n"
     assert StateStore(repo).task(task["id"])["status"] == "finished"
+
+
+def test_ready_rejects_candidate_committed_after_sensitive_gate(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="candidate gate race")
+    worktree = Path(task["worktree"])
+    commit_one(repo, task, "candidate.txt", "first\n", "test: first candidate")
+    original_require_safe = lifecycle.require_safe
+
+    def gate_then_commit(*args: object, **kwargs: object) -> None:
+        original_require_safe(*args, **kwargs)
+        (worktree / "late.txt").write_text("late\n", encoding="utf-8")
+        git(worktree, "add", "late.txt")
+        git(worktree, "commit", "-m", "test: late candidate")
+
+    monkeypatch.setattr(lifecycle, "require_safe", gate_then_commit)
+    with pytest.raises(SoloAIError, match="Candidate changed"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+    assert StateStore(repo).task(task["id"])["status"] == "active"
 
 
 def test_in_place_lifecycle_preserves_current_branch_and_uses_immutable_start_head(
@@ -339,14 +368,86 @@ def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
     state_path = repo.local_dir / "state.json"
     old_state = read_json(state_path, {})
     old_state["schema_version"] = 2
+    old_state.pop("pending_operation_outcomes", None)
     for item in old_state["tasks"].values():
         item.pop("mode", None)
+        item.pop("integration", None)
+        item.pop("abandonment", None)
+    for item in old_state["slots"].values():
+        item.pop("generation", None)
     atomic_write_json(state_path, old_state)
 
     assert StateStore(repo).task(task["id"])["mode"] == "isolated"
     ready(repo, task_id=task["id"], lease=task["lease"])
     finish(repo, task_id=task["id"], lease=task["lease"])
-    assert read_json(state_path, {})["schema_version"] == 3
+    assert read_json(state_path, {})["schema_version"] == 4
+
+
+def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="schema three promoted task")
+    commit_one(repo, task, "legacy.txt", "legacy\n", "test: legacy candidate")
+    candidate = ready(repo, task_id=task["id"], lease=task["lease"])[
+        "candidate_head"
+    ]
+    git(git_repo, "merge", "--ff-only", candidate)
+    state_path = repo.local_dir / "state.json"
+    legacy = read_json(state_path, {})
+    legacy["schema_version"] = 3
+    legacy.pop("pending_operation_outcomes", None)
+    for item in legacy["tasks"].values():
+        item.pop("integration", None)
+        item.pop("abandonment", None)
+    for item in legacy["slots"].values():
+        item.pop("generation", None)
+    atomic_write_json(state_path, legacy)
+
+    result = recover(repo, task_id=task["id"])
+    finished = StateStore(repo).task(task["id"])
+    assert result["integrated_head"] == candidate
+    assert repo.head(git_repo) == candidate
+    assert finished["status"] == "finished"
+    assert finished["integration"]["transaction_id"].startswith("legacy-")
+    assert read_json(state_path, {})["schema_version"] == 4
+    upgraded = read_json(state_path, {})
+    assert upgraded["pending_operation_outcomes"] == {}
+    assert isinstance(upgraded["slots"][task["slot_id"]]["generation"], int)
+
+
+def test_schema_one_receipt_is_strictly_migrated_for_finished_task(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="legacy receipt")
+    commit_one(repo, task, "legacy-receipt.txt", "legacy\n", "test: old receipt")
+    ready_result = ready(repo, task_id=task["id"], lease=task["lease"])
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    finished = StateStore(repo).task(task["id"])
+    StateStore(repo).update_task(task["id"], integration=None)
+    atomic_write_json(
+        repo.local_dir / "integration-receipts" / f"{task['id']}.json",
+        {
+            "schema_version": 1,
+            "stage": "released",
+            "task_id": task["id"],
+            "branch": task["branch"],
+            "base_ref": task["base_ref"],
+            "candidate_head": ready_result["candidate_head"],
+            "integrated_head": ready_result["candidate_head"],
+            "proof": finished["ready_proof"],
+            "updated_at": "2026-01-01T00:00:00Z",
+        },
+    )
+
+    result = recover(repo, task_id=task["id"])
+    receipt = read_json(
+        repo.local_dir / "integration-receipts" / f"{task['id']}.json", {}
+    )
+    assert result["status"] == "completed"
+    assert receipt["schema_version"] == 2
+    assert receipt["transaction_id"].startswith("legacy-")
 
 
 def test_finish_resumes_after_branch_cleanup_crash(
@@ -356,25 +457,1178 @@ def test_finish_resumes_after_branch_cleanup_crash(
     task = start(repo, name="resume finish")
     commit_one(repo, task, "resume.txt", "resume\n", "test: resume finish")
     ready(repo, task_id=task["id"], lease=task["lease"])
-    original_release = StateStore.release
+    original_complete = StateStore.complete_integration
 
-    def fail_release(self: StateStore, task_id: str, *, final_status: str) -> None:
+    def fail_complete(
+        self: StateStore, task_id: str, *, transaction_id: str
+    ) -> dict[str, object]:
         raise RuntimeError("simulated crash before release")
 
-    monkeypatch.setattr(StateStore, "release", fail_release)
+    monkeypatch.setattr(StateStore, "complete_integration", fail_complete)
     with pytest.raises(RuntimeError, match="simulated crash"):
         finish(repo, task_id=task["id"], lease=task["lease"])
 
-    receipt = read_json(
-        repo.local_dir / "integration-receipts" / f"{task['id']}.json", {}
-    )
-    assert receipt["stage"] == "branch-deleted"
-    assert StateStore(repo).task(task["id"])["status"] == "ready"
+    failed = StateStore(repo).task(task["id"])
+    assert failed["integration"]["phase"] == "promoted"
+    assert failed["status"] == "finishing"
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is None
 
-    monkeypatch.setattr(StateStore, "release", original_release)
+    monkeypatch.setattr(StateStore, "complete_integration", original_complete)
     result = finish(repo, task_id=task["id"], lease=task["lease"])
     assert result["task_id"] == task["id"]
     assert StateStore(repo).task(task["id"])["status"] == "finished"
+
+
+def test_recover_uses_git_fact_after_merge_before_promoted_state(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="merge crash fact")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: exact candidate")
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+    candidate = prepared["candidate_head"]
+    original_mark = StateStore.mark_integration_promoted
+
+    def fail_mark(
+        self: StateStore,
+        task_id: str,
+        *,
+        transaction_id: str,
+        observed_base_head: str,
+    ) -> dict[str, object]:
+        raise RuntimeError("simulated crash after merge")
+
+    monkeypatch.setattr(StateStore, "mark_integration_promoted", fail_mark)
+    with pytest.raises(RuntimeError, match="simulated crash after merge"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    assert repo.is_ancestor(candidate, "main")
+    failed = StateStore(repo).task(task["id"])
+    assert failed["integration"]["phase"] == "prepared"
+
+    monkeypatch.setattr(StateStore, "mark_integration_promoted", original_mark)
+    (git_repo / "advance.txt").write_text("advance\n", encoding="utf-8")
+    git(git_repo, "add", "advance.txt")
+    git(git_repo, "commit", "-m", "test: advance main after crash")
+    advanced_main = repo.head(git_repo)
+
+    result = recover(repo, task_id=task["id"])
+    assert result["integrated_head"] == candidate
+    assert repo.head(git_repo) == advanced_main
+    assert StateStore(repo).task(task["id"])["status"] == "finished"
+    assert repo.branch(Path(task["worktree"])) is None
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+
+
+def test_recover_rejects_unknown_transaction_phase_before_git_write(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="unknown integration phase")
+    commit_one(repo, task, "unknown-phase.txt", "candidate\n", "test: unknown phase")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original_resume = lifecycle.resume_integration
+    monkeypatch.setattr(
+        lifecycle,
+        "resume_integration",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after prepare")),
+    )
+    with pytest.raises(RuntimeError, match="stop after prepare"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    monkeypatch.setattr(lifecycle, "resume_integration", original_resume)
+    state = StateStore(repo).read()
+    state["tasks"][task["id"]]["integration"]["phase"] = "unknown"
+    atomic_write_json(repo.local_dir / "state.json", state)
+    main_before = repo.head(git_repo)
+
+    with pytest.raises(SoloAIError, match="Unsupported integration transaction phase"):
+        recover(repo, task_id=task["id"])
+    assert repo.head(git_repo) == main_before
+    assert StateStore(repo).task(task["id"])["integration"]["phase"] == "unknown"
+
+
+def test_stale_prepared_recovery_preserves_changed_task_branch_identity(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="stale changed worktree")
+    commit_one(repo, task, "stale.txt", "candidate\n", "test: stale candidate")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original_resume = lifecycle.resume_integration
+    monkeypatch.setattr(
+        lifecycle,
+        "resume_integration",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after prepare")),
+    )
+    with pytest.raises(RuntimeError, match="stop after prepare"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    monkeypatch.setattr(lifecycle, "resume_integration", original_resume)
+    (git_repo / "advance-stale.txt").write_text("advance\n", encoding="utf-8")
+    git(git_repo, "add", "advance-stale.txt")
+    git(git_repo, "commit", "-m", "test: advance base outside candidate")
+    worktree = Path(task["worktree"])
+    candidate = repo.head(worktree)
+    git(worktree, "switch", "-c", "other-stale", candidate)
+
+    with pytest.raises(SoloAIError, match="candidate identity changed"):
+        recover(repo, task_id=task["id"])
+    preserved = StateStore(repo).task(task["id"])
+    assert preserved["integration"]["phase"] == "prepared"
+    assert repo.branch(worktree) == "other-stale"
+
+
+def test_integration_recovery_rejects_same_path_worktree_replacement(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="replace finishing worktree")
+    commit_one(repo, task, "replace.txt", "candidate\n", "test: replace worktree")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original_resume = lifecycle.resume_integration
+    monkeypatch.setattr(
+        lifecycle,
+        "resume_integration",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after prepare")),
+    )
+    with pytest.raises(RuntimeError, match="stop after prepare"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    monkeypatch.setattr(lifecycle, "resume_integration", original_resume)
+    worktree = Path(task["worktree"])
+    parked = worktree.with_name(worktree.name + "-integration-original")
+    worktree.rename(parked)
+    shutil.copytree(parked, worktree)
+
+    with pytest.raises(SoloAIError, match="directory object was replaced"):
+        recover(repo, task_id=task["id"])
+    assert (parked / "replace.txt").read_text(encoding="utf-8") == "candidate\n"
+    assert StateStore(repo).task(task["id"])["integration"]["phase"] == "prepared"
+
+
+def test_recover_repairs_missing_completion_receipt_after_atomic_release(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="receipt crash")
+    commit_one(repo, task, "receipt.txt", "receipt\n", "test: receipt candidate")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original_write = integration_module.write_completed_receipt
+
+    def fail_write(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("simulated receipt failure")
+
+    monkeypatch.setattr(integration_module, "write_completed_receipt", fail_write)
+    with pytest.raises(RuntimeError, match="simulated receipt failure"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    completed = StateStore(repo).task(task["id"])
+    assert completed["status"] == "finished"
+    assert completed["integration"]["phase"] == "completed"
+
+    monkeypatch.setattr(integration_module, "write_completed_receipt", original_write)
+    result = recover(repo, task_id=task["id"])
+    assert result["status"] == "completed"
+    receipt = read_json(
+        repo.local_dir / "integration-receipts" / f"{task['id']}.json", {}
+    )
+    assert receipt["status"] == "completed"
+    assert receipt["integrated_head"] == completed["candidate_head"]
+
+
+def test_recover_rejects_corrupted_completed_transaction_before_rebuilding_receipt(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="corrupt completed transaction")
+    commit_one(repo, task, "completed.txt", "candidate\n", "test: completed candidate")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    receipt_path = repo.local_dir / "integration-receipts" / f"{task['id']}.json"
+    receipt_path.unlink()
+    state = StateStore(repo).read()
+    original_candidate = state["tasks"][task["id"]]["candidate_head"]
+    state["tasks"][task["id"]]["integration"]["candidate_head"] = state["tasks"][
+        task["id"]
+    ]["base_head"]
+    atomic_write_json(repo.local_dir / "state.json", state)
+
+    with pytest.raises(SoloAIError, match="identity changed: candidate_head"):
+        recover(repo, task_id=task["id"])
+    assert not receipt_path.exists()
+    assert StateStore(repo).task(task["id"])["candidate_head"] == original_candidate
+
+
+@pytest.mark.parametrize(
+    "stage",
+    (
+        "after-prepare",
+        "after-merge",
+        "after-promoted",
+        "after-detach",
+        "after-ref-delete",
+        "after-complete-before-release",
+        "after-complete-state",
+    ),
+)
+def test_public_recover_converges_after_real_finish_process_exit(
+    git_repo: Path, stage: str
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name=f"hard exit {stage}")
+    commit_one(repo, task, "hard-exit.txt", stage + "\n", "test: hard exit candidate")
+    candidate = ready(repo, task_id=task["id"], lease=task["lease"])[
+        "candidate_head"
+    ]
+    source_root = str(Path(lifecycle.__file__).parent.parent)
+    child = r'''
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from solo_ai import integration as integration_module
+from solo_ai import lifecycle as lifecycle_module
+from solo_ai.lifecycle import finish
+from solo_ai.repo import GitRepo
+from solo_ai.state import StateStore
+
+repo = GitRepo(Path(sys.argv[2]))
+task_id, lease, stage = sys.argv[3:6]
+if stage == "after-prepare":
+    lifecycle_module.resume_integration = lambda *args, **kwargs: os._exit(86)
+elif stage == "after-merge":
+    StateStore.mark_integration_promoted = lambda *args, **kwargs: os._exit(86)
+elif stage == "after-promoted":
+    integration_module._cleanup = lambda *args, **kwargs: os._exit(86)
+elif stage == "after-detach":
+    GitRepo.delete_ref = lambda *args, **kwargs: os._exit(86)
+elif stage == "after-ref-delete":
+    StateStore.complete_integration = lambda *args, **kwargs: os._exit(86)
+elif stage == "after-complete-before-release":
+    original_complete = StateStore.complete_integration
+    def complete_then_exit(self, task_id, *, transaction_id):
+        original_complete(self, task_id, transaction_id=transaction_id)
+        os._exit(86)
+    StateStore.complete_integration = complete_then_exit
+elif stage == "after-complete-state":
+    original = integration_module.atomic_write_json
+    def crash_receipt(path, value):
+        if "integration-receipts" in str(path):
+            os._exit(86)
+        return original(path, value)
+    integration_module.atomic_write_json = crash_receipt
+finish(repo, task_id=task_id, lease=lease)
+'''
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child,
+            source_root,
+            str(git_repo),
+            task["id"],
+            task["lease"],
+            stage,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=90,
+    )
+    assert crashed.returncode == 86, crashed.stderr
+    crash_main = repo.head(git_repo)
+    if stage == "after-prepare":
+        assert not repo.is_ancestor(candidate, "main")
+    else:
+        assert repo.is_ancestor(candidate, "main")
+    operation_path = next(
+        path
+        for path in (repo.local_dir / "operations").glob("*.json")
+        if (operation := read_json(path, {})).get("task_id") == task["id"]
+        and operation.get("kind") == "finish"
+    )
+    assert read_json(operation_path, {})["status"] == "running"
+
+    if stage == "after-merge":
+        runner = (
+            Path(__file__).parents[2]
+            / "plugins"
+            / "develop-with-worktrees"
+            / "skills"
+            / "develop-with-worktrees"
+            / "scripts"
+            / "dww.py"
+        )
+        recovered = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--script",
+                str(runner),
+                "--repo",
+                str(git_repo),
+                "--json",
+                "recover",
+                "--task",
+                task["id"],
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=90,
+        )
+        assert recovered.returncode == 0, recovered.stderr
+        first = json.loads(recovered.stdout)["result"]
+    else:
+        first = recover(repo, task_id=task["id"])
+    first_receipt = read_json(
+        repo.local_dir / "integration-receipts" / f"{task['id']}.json", {}
+    )
+    first_operation_status = read_json(operation_path, {})["status"]
+    second = recover(repo, task_id=task["id"])
+    second_receipt = read_json(
+        repo.local_dir / "integration-receipts" / f"{task['id']}.json", {}
+    )
+    state = StateStore(repo).read()
+    finished = state["tasks"][task["id"]]
+    assert first["status"] == second["status"] == "completed"
+    assert first_receipt["transaction_id"] == second_receipt["transaction_id"]
+    assert first_receipt["integrated_head"] == candidate
+    if stage == "after-prepare":
+        assert repo.head(git_repo) == candidate
+    else:
+        assert repo.head(git_repo) == crash_main
+    assert finished["status"] == "finished"
+    assert finished["integration"]["phase"] == "completed"
+    assert state["slots"][task["slot_id"]]["status"] == "idle"
+    assert repo.branch(Path(task["worktree"])) is None
+    assert repo.head(Path(task["worktree"])) == candidate
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+    assert first_operation_status == "interrupted"
+    assert read_json(operation_path, {})["status"] == first_operation_status
+
+
+def test_running_operation_receipt_failure_rolls_back_live_marker(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="running receipt failure")
+    original = state_module.atomic_write_json
+
+    def fail_running(path: Path, value: dict[str, object]) -> None:
+        if "operations" in str(path) and value.get("status") == "running":
+            raise OSError("simulated running receipt failure")
+        original(path, value)
+
+    monkeypatch.setattr(state_module, "atomic_write_json", fail_running)
+    with pytest.raises(OSError, match="running receipt failure"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+    assert StateStore(repo).task(task["id"])["active_operation"] is None
+
+
+def test_final_operation_receipt_failure_does_not_turn_success_into_failure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="final receipt failure")
+    commit_one(repo, task, "final-log.txt", "ok\n", "test: final operation log")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original = state_module.atomic_write_json
+
+    def fail_final(path: Path, value: dict[str, object]) -> None:
+        if "operations" in str(path) and value.get("status") in {
+            "succeeded",
+            "failed",
+        }:
+            raise OSError("simulated final receipt failure")
+        original(path, value)
+
+    monkeypatch.setattr(state_module, "atomic_write_json", fail_final)
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert result["status"] == "completed"
+    assert StateStore(repo).task(task["id"])["status"] == "finished"
+    pending = StateStore(repo).read()["pending_operation_outcomes"]
+    assert len(pending) == 1
+    operation_id = next(iter(pending))
+    monkeypatch.setattr(state_module, "atomic_write_json", original)
+    recover(repo, task_id=task["id"])
+    operation = read_json(repo.local_dir / "operations" / f"{operation_id}.json", {})
+    assert operation["status"] == "succeeded"
+    assert not StateStore(repo).read()["pending_operation_outcomes"]
+
+
+def test_failed_operation_receipt_failure_preserves_original_error_and_recovers_audit(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="failed operation receipt")
+    worktree = Path(task["worktree"])
+    (worktree / ".ENV.local").write_text("secret\n", encoding="utf-8")
+    original = state_module.atomic_write_json
+
+    def fail_final(path: Path, value: dict[str, object]) -> None:
+        if "operations" in str(path) and value.get("status") == "failed":
+            raise OSError("simulated failed receipt write")
+        original(path, value)
+
+    monkeypatch.setattr(state_module, "atomic_write_json", fail_final)
+    with pytest.raises(SoloAIError, match="blocks abandon"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    state = StateStore(repo).read()
+    assert state["tasks"][task["id"]]["active_operation"] is None
+    operation_id = next(iter(state["pending_operation_outcomes"]))
+    monkeypatch.setattr(state_module, "atomic_write_json", original)
+    StateStore(repo).reconcile_operation_receipts()
+    operation = read_json(repo.local_dir / "operations" / f"{operation_id}.json", {})
+    assert operation["status"] == "failed"
+
+
+def test_completed_task_ignores_redundant_operation_state_write_failure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="redundant final state write")
+    commit_one(repo, task, "redundant.txt", "ok\n", "test: redundant state write")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original = StateStore.mutate
+
+    def fail_operation_end(self: StateStore, callback: object) -> object:
+        if getattr(callback, "__name__", "") == "end":
+            raise OSError("simulated redundant operation state failure")
+        return original(self, callback)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(StateStore, "mutate", fail_operation_end)
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert result["status"] == "completed"
+    assert StateStore(repo).task(task["id"])["status"] == "finished"
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_operation_records_process_interrupt_as_interrupted(
+    git_repo: Path, interrupt: type[BaseException]
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="operation interrupt")
+    with pytest.raises(interrupt):
+        with StateStore(repo).operation(task["id"], task["lease"], "ready"):
+            raise interrupt()
+    operations = [
+        read_json(path, {}) for path in (repo.local_dir / "operations").glob("*.json")
+    ]
+    receipt = next(item for item in operations if item.get("kind") == "ready")
+    assert receipt["status"] == "interrupted"
+    assert StateStore(repo).task(task["id"])["active_operation"] is None
+
+
+def test_recover_repairs_dead_running_operation_after_hard_exit(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="dead operation receipt")
+    commit_one(repo, task, "dead-operation.txt", "ok\n", "test: dead operation")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    source_root = str(Path(lifecycle.__file__).parent.parent)
+    child = r'''
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from solo_ai import state as state_module
+from solo_ai.lifecycle import finish
+from solo_ai.repo import GitRepo
+
+repo = GitRepo(Path(sys.argv[2]))
+original = state_module.atomic_write_json
+def exit_on_terminal(path, value):
+    if "operations" in str(path) and value.get("status") != "running":
+        os._exit(86)
+    return original(path, value)
+state_module.atomic_write_json = exit_on_terminal
+finish(repo, task_id=sys.argv[3], lease=sys.argv[4])
+'''
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child,
+            source_root,
+            str(git_repo),
+            task["id"],
+            task["lease"],
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=90,
+    )
+    assert crashed.returncode == 86, crashed.stderr
+    operation_path = next(
+        path
+        for path in (repo.local_dir / "operations").glob("*.json")
+        if read_json(path, {}).get("kind") == "finish"
+    )
+    assert read_json(operation_path, {})["status"] == "running"
+
+    recover(repo, task_id=task["id"])
+    assert read_json(operation_path, {})["status"] == "succeeded"
+    assert not StateStore(repo).read()["pending_operation_outcomes"]
+
+
+def test_recover_repairs_in_place_receipt_after_release(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="in-place receipt crash", in_place=True, session_id="session-a")
+    (git_repo / "in-place-receipt.txt").write_text("done\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        session_id="session-a",
+        message="test: in-place receipt",
+        paths=["in-place-receipt.txt"],
+    )
+    ready(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        session_id="session-a",
+    )
+    original = lifecycle._write_in_place_receipt
+    calls = 0
+
+    def fail_released(repo_arg: GitRepo, receipt: dict[str, object]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated released receipt failure")
+        original(repo_arg, receipt)
+
+    monkeypatch.setattr(lifecycle, "_write_in_place_receipt", fail_released)
+    with pytest.raises(OSError, match="released receipt failure"):
+        finish(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            session_id="session-a",
+        )
+    assert StateStore(repo).task(task["id"])["status"] == "finished"
+
+    monkeypatch.setattr(lifecycle, "_write_in_place_receipt", original)
+    result = recover(repo, task_id=task["id"])
+    receipt = read_json(
+        repo.local_dir / "in-place-receipts" / f"{task['id']}.json", {}
+    )
+    assert result["status"] == "completed"
+    assert receipt["stage"] == "released"
+
+
+def test_in_place_finish_rejects_forged_local_completion_receipt(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="forged in-place receipt", in_place=True, session_id="session-a")
+    (git_repo / "forged.txt").write_text("done\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        session_id="session-a",
+        message="test: forged receipt",
+        paths=["forged.txt"],
+    )
+    ready(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        session_id="session-a",
+    )
+    atomic_write_json(
+        repo.local_dir / "in-place-receipts" / f"{task['id']}.json",
+        {
+            "schema_version": 1,
+            "task_id": task["id"],
+            "mode": "in-place",
+            "branch": task["branch"],
+            "head": task["expected_head"],
+            "start_head": task["start_head"],
+            "stage": "bogus",
+            "proof": "fake",
+            "proof_kind": "commands",
+        },
+    )
+    with pytest.raises(SoloAIError, match="Unsupported in-place completion receipt"):
+        finish(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            session_id="session-a",
+        )
+    assert StateStore(repo).task(task["id"])["status"] == "ready"
+
+
+def test_finish_preserves_dirty_worktree_created_after_promotion(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="dirty cleanup")
+    worktree = Path(task["worktree"])
+    commit_one(repo, task, "dirty.txt", "clean\n", "test: cleanup candidate")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original_mark = StateStore.mark_integration_promoted
+
+    def dirty_after_mark(
+        self: StateStore,
+        task_id: str,
+        *,
+        transaction_id: str,
+        observed_base_head: str,
+    ) -> dict[str, object]:
+        result = original_mark(
+            self,
+            task_id,
+            transaction_id=transaction_id,
+            observed_base_head=observed_base_head,
+        )
+        (worktree / "dirty.txt").write_text("changed\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(StateStore, "mark_integration_promoted", dirty_after_mark)
+    with pytest.raises(SoloAIError, match="worktree changed"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    assert (worktree / "dirty.txt").read_text(encoding="utf-8") == "changed\n"
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is not None
+    assert StateStore(repo).task(task["id"])["status"] == "finishing"
+
+
+def test_finish_atomically_preserves_branch_advanced_before_delete(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="branch advance cleanup")
+    commit_one(repo, task, "branch.txt", "branch\n", "test: branch candidate")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original_delete = GitRepo.delete_ref
+    advanced: dict[str, str] = {}
+
+    def advance_then_delete(
+        self: GitRepo, ref: str, *, expected: str, cwd: Path | None = None
+    ) -> None:
+        new_head = self.git(
+            ["commit-tree", f"{expected}^{{tree}}", "-p", expected, "-m", "late"],
+            cwd=cwd,
+        ).stdout.strip()
+        self.git(["update-ref", ref, new_head, expected], cwd=cwd)
+        advanced["head"] = new_head
+        original_delete(self, ref, expected=expected, cwd=cwd)
+
+    monkeypatch.setattr(GitRepo, "delete_ref", advance_then_delete)
+    with pytest.raises(SoloAIError, match="changed before deletion"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == advanced["head"]
+    assert StateStore(repo).task(task["id"])["status"] == "finishing"
+
+
+@pytest.mark.parametrize("name", [".env.local", ".ENV.production", "critical.DB"])
+def test_abandon_preserves_sensitive_untracked_content(
+    git_repo: Path, name: str
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="protected abandon")
+    worktree = Path(task["worktree"])
+    (worktree / name).write_text("secret\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="blocks abandon"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+    assert (worktree / name).read_text(encoding="utf-8") == "secret\n"
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is not None
+    assert StateStore(repo).task(task["id"])["status"] == "active"
+
+
+def test_abandon_rejects_other_branch_even_at_same_head(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="wrong branch abandon")
+    worktree = Path(task["worktree"])
+    original_head = repo.head(worktree)
+    git(worktree, "switch", "-c", "other-branch", original_head)
+
+    with pytest.raises(SoloAIError, match="identity changed"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+    assert repo.branch(worktree) == "other-branch"
+    assert repo.head(worktree) == original_head
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == original_head
+    assert StateStore(repo).task(task["id"])["status"] == "active"
+
+
+def test_recover_completes_abandonment_after_branch_delete(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="abandon crash")
+    commit_one(repo, task, "discard.txt", "discard\n", "test: discard candidate")
+    original_complete = StateStore.complete_abandonment
+
+    def fail_complete(
+        self: StateStore, task_id: str, *, transaction_id: str
+    ) -> dict[str, object]:
+        raise RuntimeError("simulated abandonment release failure")
+
+    monkeypatch.setattr(StateStore, "complete_abandonment", fail_complete)
+    with pytest.raises(RuntimeError, match="release failure"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    failed = StateStore(repo).task(task["id"])
+    assert failed["status"] == "abandoning"
+    assert repo.branch(Path(task["worktree"])) is None
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+
+    monkeypatch.setattr(StateStore, "complete_abandonment", original_complete)
+    result = recover(repo, task_id=task["id"])
+    assert result["status"] == "abandoned"
+    assert StateStore(repo).task(task["id"])["status"] == "abandoned"
+
+
+@pytest.mark.parametrize("stage", ["before-delete", "after-delete", "after-complete"])
+def test_public_recover_completes_abandonment_after_real_process_exit(
+    git_repo: Path, stage: str
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="abandon hard exit")
+    commit_one(repo, task, "discard-hard.txt", "discard\n", "test: hard abandon")
+    source_root = str(Path(lifecycle.__file__).parent.parent)
+    child = r'''
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from solo_ai import abandonment as abandonment_module
+from solo_ai.lifecycle import abandon
+from solo_ai.repo import GitRepo
+from solo_ai.state import StateStore
+
+repo = GitRepo(Path(sys.argv[2]))
+task_id, lease, stage = sys.argv[3:6]
+if stage in {"before-delete", "after-delete"}:
+    original = GitRepo.delete_ref_with_verifications
+    def delete_then_exit(self, ref, *, expected, verifications, cwd=None):
+        if stage == "before-delete":
+            os._exit(86)
+        original(self, ref, expected=expected, verifications=verifications, cwd=cwd)
+        os._exit(86)
+    GitRepo.delete_ref_with_verifications = delete_then_exit
+else:
+    original_complete = StateStore.complete_abandonment
+    def complete_then_exit(self, task_id, *, transaction_id):
+        original_complete(self, task_id, transaction_id=transaction_id)
+        os._exit(86)
+    StateStore.complete_abandonment = complete_then_exit
+abandon(repo, task_id=task_id, lease=lease, confirm=task_id)
+'''
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child,
+            source_root,
+            str(git_repo),
+            task["id"],
+            task["lease"],
+            stage,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=90,
+    )
+    assert crashed.returncode == 86, crashed.stderr
+    if stage == "before-delete":
+        assert repo.ref_head(f"refs/heads/{task['branch']}") is not None
+    else:
+        assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+
+    operation_path = next(
+        path
+        for path in (repo.local_dir / "operations").glob("*.json")
+        if (receipt := read_json(path, {})).get("task_id") == task["id"]
+        and receipt.get("kind") == "abandon"
+    )
+    assert read_json(operation_path, {})["status"] == "running"
+
+    result = recover(repo, task_id=task["id"])
+    receipt = read_json(
+        repo.local_dir / "abandonment-receipts" / f"{task['id']}.json", {}
+    )
+    first_operation_status = read_json(operation_path, {})["status"]
+    repeated = recover(repo, task_id=task["id"])
+    repeated_receipt = read_json(
+        repo.local_dir / "abandonment-receipts" / f"{task['id']}.json", {}
+    )
+    state = StateStore(repo).read()
+    assert result["status"] == "abandoned"
+    assert repeated["status"] == "abandoned"
+    assert receipt["transaction_id"] == repeated_receipt["transaction_id"]
+    assert state["tasks"][task["id"]]["status"] == "abandoned"
+    assert state["slots"][task["slot_id"]]["status"] == "idle"
+    assert repo.branch(Path(task["worktree"])) is None
+    assert repo.head(Path(task["worktree"])) == task["base_head"]
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+    assert first_operation_status == "interrupted"
+    assert read_json(operation_path, {})["status"] == first_operation_status
+
+
+def test_abandon_preserves_tracked_change_created_after_transaction_prepare(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="late tracked abandon")
+    worktree = Path(task["worktree"])
+    original_prepare = StateStore.prepare_abandonment
+
+    def prepare_then_edit(
+        self: StateStore,
+        task_id: str,
+        *,
+        operation_id: str,
+        abandonment: dict[str, object],
+    ) -> dict[str, object]:
+        result = original_prepare(
+            self,
+            task_id,
+            operation_id=operation_id,
+            abandonment=abandonment,
+        )
+        (worktree / "README.md").write_text("late edit\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(StateStore, "prepare_abandonment", prepare_then_edit)
+    with pytest.raises(SoloAIError, match="Tracked worktree content changed"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert (worktree / "README.md").read_text(encoding="utf-8") == "late edit\n"
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is not None
+    assert StateStore(repo).task(task["id"])["status"] == "abandoning"
+
+
+def test_abandon_cas_preserves_branch_advanced_during_cleanup(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="abandon branch race")
+    commit_one(repo, task, "race.txt", "candidate\n", "test: abandon race")
+    original = abandonment_module.remove_abandoned_untracked
+    advanced: dict[str, str] = {}
+
+    def advance_after_inventory(
+        repo_arg: GitRepo,
+        *,
+        cwd: Path,
+        expected_ordinary: dict[str, dict[str, object]],
+        policy: object = None,
+    ) -> None:
+        original(repo_arg, cwd=cwd, expected_ordinary=expected_ordinary)
+        expected = repo_arg.ref_head(f"refs/heads/{task['branch']}")
+        assert expected
+        new_head = repo_arg.git(
+            ["commit-tree", f"{expected}^{{tree}}", "-p", expected, "-m", "late abandon"],
+            cwd=cwd,
+        ).stdout.strip()
+        repo_arg.git(
+            ["update-ref", f"refs/heads/{task['branch']}", new_head, expected], cwd=cwd
+        )
+        advanced["head"] = new_head
+
+    monkeypatch.setattr(abandonment_module, "remove_abandoned_untracked", advance_after_inventory)
+    with pytest.raises(SoloAIError, match="advanced during abandonment"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == advanced["head"]
+    assert StateStore(repo).task(task["id"])["status"] == "abandoning"
+
+
+@pytest.mark.parametrize("relative", ["README.md", "scratch.txt", ".ENV.local", "late.DB"])
+def test_recover_abandonment_refuses_late_worktree_content(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name=f"late abandon content {relative}")
+    original_complete = StateStore.complete_abandonment
+    monkeypatch.setattr(
+        StateStore,
+        "complete_abandonment",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop before release")),
+    )
+    with pytest.raises(RuntimeError, match="stop before release"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    monkeypatch.setattr(StateStore, "complete_abandonment", original_complete)
+    target = Path(task["worktree"]) / relative
+    target.write_text("late\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="changed before release|files were preserved"):
+        recover(repo, task_id=task["id"])
+    assert target.read_text(encoding="utf-8") == "late\n"
+    assert StateStore(repo).task(task["id"])["status"] == "abandoning"
+
+
+def test_abandon_refuses_candidate_referenced_by_another_active_task(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task_a = start(repo, name="shared candidate a")
+    commit_one(repo, task_a, "shared.txt", "shared\n", "test: shared candidate")
+    candidate = repo.head(Path(task_a["worktree"]))
+    task_b = start(repo, name="shared candidate b")
+    git(Path(task_b["worktree"]), "merge", "--ff-only", candidate)
+
+    with pytest.raises(SoloAIError, match="referenced by active task"):
+        abandon(
+            repo,
+            task_id=task_a["id"],
+            lease=task_a["lease"],
+            confirm=task_a["id"],
+        )
+    assert repo.ref_head(f"refs/heads/{task_a['branch']}") == candidate
+    assert StateStore(repo).task(task_a["id"])["status"] == "active"
+
+
+def test_abandon_blocks_preexisting_tracked_changes_without_preparing_transaction(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="dirty tracked abandon")
+    worktree = Path(task["worktree"])
+    (worktree / "README.md").write_text("first dirty value\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="Tracked worktree changes block abandon"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert (worktree / "README.md").read_text(encoding="utf-8") == "first dirty value\n"
+    assert StateStore(repo).task(task["id"])["status"] == "active"
+
+
+def test_abandon_preserves_ordinary_file_replaced_at_conditional_delete(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="ordinary replacement abandon")
+    worktree = Path(task["worktree"])
+    scratch = worktree / "scratch.txt"
+    scratch.write_text("reviewed\n", encoding="utf-8")
+    original = cleanup_module.delete_plain_path_if_unchanged
+
+    def replace_then_delete(path: Path, expected: dict[str, object]) -> None:
+        if path == scratch:
+            path.write_text("late replacement\n", encoding="utf-8")
+        original(path, expected)
+
+    monkeypatch.setattr(
+        cleanup_module, "delete_plain_path_if_unchanged", replace_then_delete
+    )
+    with pytest.raises(SoloAIError, match="changed before deletion"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert scratch.read_text(encoding="utf-8") == "late replacement\n"
+    assert StateStore(repo).task(task["id"])["status"] == "abandoning"
+
+
+def test_abandon_atomically_verifies_other_active_refs_before_delete(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task_a = start(repo, name="atomic reference a")
+    commit_one(repo, task_a, "a.txt", "a\n", "test: candidate a")
+    candidate = repo.head(Path(task_a["worktree"]))
+    task_b = start(repo, name="atomic reference b")
+    original = GitRepo.delete_ref_with_verifications
+
+    def advance_b_then_delete(
+        self: GitRepo,
+        ref: str,
+        *,
+        expected: str,
+        verifications: dict[str, str],
+        cwd: Path | None = None,
+    ) -> None:
+        b_ref = f"refs/heads/{task_b['branch']}"
+        old_b = self.ref_head(b_ref)
+        assert old_b
+        new_b = self.git(
+            ["commit-tree", f"{candidate}^{{tree}}", "-p", candidate, "-m", "include a"],
+            cwd=cwd,
+        ).stdout.strip()
+        self.git(["update-ref", b_ref, new_b, old_b], cwd=cwd)
+        original(
+            self,
+            ref,
+            expected=expected,
+            verifications=verifications,
+            cwd=cwd,
+        )
+
+    monkeypatch.setattr(GitRepo, "delete_ref_with_verifications", advance_b_then_delete)
+    with pytest.raises(SoloAIError, match="active task ref changed"):
+        abandon(
+            repo,
+            task_id=task_a["id"],
+            lease=task_a["lease"],
+            confirm=task_a["id"],
+        )
+    assert repo.ref_head(f"refs/heads/{task_a['branch']}") == candidate
+    assert StateStore(repo).task(task_a["id"])["status"] == "abandoning"
+
+
+def test_abandon_quarantines_released_slot_when_content_arrives_at_complete(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="late release content")
+    worktree = Path(task["worktree"])
+    original = StateStore.complete_abandonment
+
+    def complete_after_write(
+        self: StateStore, task_id: str, *, transaction_id: str
+    ) -> dict[str, object]:
+        completed = original(self, task_id, transaction_id=transaction_id)
+        slot = self.read()["slots"][task["slot_id"]]
+        assert slot["status"] == "release-checking"
+        assert slot["task_id"] == task_id
+        (worktree / ".ENV.local").write_text("late\n", encoding="utf-8")
+        return completed
+
+    monkeypatch.setattr(StateStore, "complete_abandonment", complete_after_write)
+    with pytest.raises(SoloAIError, match="changed before release|files were preserved"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    state = StateStore(repo).read()
+    assert state["tasks"][task["id"]]["status"] == "abandoned"
+    assert state["slots"][task["slot_id"]]["status"] == "quarantined"
+    assert (worktree / ".ENV.local").read_text(encoding="utf-8") == "late\n"
+
+
+def test_abandon_quarantines_content_created_at_release_publish(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="late abandon publish")
+    worktree = Path(task["worktree"])
+    original = StateStore.publish_abandonment_release
+
+    def publish_after_write(
+        self: StateStore, task_id: str, *, transaction_id: str
+    ) -> dict[str, object]:
+        (worktree / ".ENV.local").write_text("late\n", encoding="utf-8")
+        return original(self, task_id, transaction_id=transaction_id)
+
+    monkeypatch.setattr(StateStore, "publish_abandonment_release", publish_after_write)
+    with pytest.raises(SoloAIError, match="changed.*abandonment release|changed before release"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    state = StateStore(repo).read()
+    assert state["slots"][task["slot_id"]]["status"] == "quarantined"
+    assert (worktree / ".ENV.local").read_text(encoding="utf-8") == "late\n"
+
+
+def test_finish_quarantines_content_created_at_release_publish(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="late finish publish")
+    worktree = Path(task["worktree"])
+    commit_one(repo, task, "finish.txt", "done\n", "test: finish late publish")
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    original = StateStore.publish_integration_release
+
+    def publish_after_write(
+        self: StateStore, task_id: str, *, transaction_id: str
+    ) -> dict[str, object]:
+        (worktree / ".ENV.local").write_text("late\n", encoding="utf-8")
+        return original(self, task_id, transaction_id=transaction_id)
+
+    monkeypatch.setattr(StateStore, "publish_integration_release", publish_after_write)
+    with pytest.raises(SoloAIError, match="changed.*integration release|changed before slot release"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    state = StateStore(repo).read()
+    assert state["slots"][task["slot_id"]]["status"] == "quarantined"
+    assert (worktree / ".ENV.local").read_text(encoding="utf-8") == "late\n"
+
+
+def test_start_rejects_ignored_protected_content_added_to_idle_slot(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="release slot identity")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    info_exclude = repo.common_dir / "info" / "exclude"
+    with info_exclude.open("a", encoding="utf-8") as handle:
+        handle.write("\n.ENV.local\n")
+    protected = worktree / ".ENV.local"
+    protected.write_text("late-secret\n", encoding="utf-8")
+    StateStore(repo).mutate(
+        lambda state: [
+            slot.update({"status": "quarantined"})
+            for slot_id, slot in state["slots"].items()
+            if slot_id != task["slot_id"]
+        ]
+    )
+
+    with pytest.raises(SoloAIError, match="protected or unknown ignored content"):
+        start(repo, name="must not inherit secret")
+    state = StateStore(repo).read()
+    assert state["slots"][task["slot_id"]]["status"] == "quarantined"
+    assert protected.read_text(encoding="utf-8") == "late-secret\n"
+
+
+def test_start_rejects_same_path_idle_worktree_replacement(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="release directory identity")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    parked = worktree.with_name(worktree.name + "-released-original")
+    worktree.rename(parked)
+    shutil.copytree(parked, worktree)
+    StateStore(repo).mutate(
+        lambda state: [
+            slot.update({"status": "quarantined"})
+            for slot_id, slot in state["slots"].items()
+            if slot_id != task["slot_id"]
+        ]
+    )
+
+    with pytest.raises(SoloAIError, match="directory object was replaced"):
+        start(repo, name="must not reuse replaced directory")
+    state = StateStore(repo).read()
+    assert state["slots"][task["slot_id"]]["status"] == "quarantined"
+    assert (parked / "README.md").exists()
+    assert (worktree / "README.md").exists()
+
+
+def test_abandon_rejects_same_path_worktree_directory_replacement(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="replaced worktree object")
+    worktree = Path(task["worktree"])
+    parked = worktree.with_name(worktree.name + "-original")
+    original = StateStore.prepare_abandonment
+
+    def prepare_then_replace(
+        self: StateStore,
+        task_id: str,
+        *,
+        operation_id: str,
+        abandonment: dict[str, object],
+    ) -> dict[str, object]:
+        result = original(
+            self,
+            task_id,
+            operation_id=operation_id,
+            abandonment=abandonment,
+        )
+        worktree.rename(parked)
+        shutil.copytree(parked, worktree)
+        return result
+
+    monkeypatch.setattr(StateStore, "prepare_abandonment", prepare_then_replace)
+    with pytest.raises(SoloAIError, match="directory object was replaced"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert (parked / "README.md").exists()
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is not None
+    assert StateStore(repo).task(task["id"])["status"] == "abandoning"
 
 
 def test_finish_retains_standard_tool_caches_created_by_validation(
@@ -1262,7 +2516,7 @@ def test_prune_slot_stops_when_a_declared_target_contains_protected_content(
     (worktree / ".venv").mkdir()
     (worktree / ".venv" / ".env.local").write_text("marker=kept\n", encoding="utf-8")
 
-    with pytest.raises(SoloAIError, match="protected .env"):
+    with pytest.raises(SoloAIError, match="retained or protected"):
         _prune(repo, kind="slot", slot="01")
 
     assert (worktree / ".venv" / ".env.local").read_text(
@@ -1286,10 +2540,360 @@ def test_prune_slot_stops_when_a_declared_target_contains_a_link(
     except OSError as exc:
         pytest.skip(f"Current Windows policy cannot create a symlink: {exc}")
 
-    with pytest.raises(SoloAIError, match="link or junction"):
+    with pytest.raises(SoloAIError, match="staging identity|link or junction"):
         _prune(repo, kind="slot", slot="01")
 
     assert link.is_symlink()
+
+
+def test_prune_slot_preserves_uppercase_env_content(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name="prepare uppercase env cache")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    (worktree / ".venv").mkdir()
+    protected = worktree / ".venv" / ".ENV.local"
+    protected.write_text("secret\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="retained or protected"):
+        _prune(repo, kind="slot", slot="01")
+    assert protected.read_text(encoding="utf-8") == "secret\n"
+
+
+def test_prune_slot_plan_is_one_shot(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name="prepare one shot cache")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    (worktree / ".venv").mkdir()
+    (worktree / ".venv" / "marker").write_text("same", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01")
+    _prune(
+        repo,
+        kind="slot",
+        slot="01",
+        plan_id=plan["plan_id"],
+        confirm=plan["digest"],
+    )
+    (worktree / ".venv").mkdir()
+    marker = worktree / ".venv" / "marker"
+    marker.write_text("same", encoding="utf-8")
+
+    with pytest.raises(
+        SoloAIError, match="already executed|source reappeared after completion"
+    ):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            plan_id=plan["plan_id"],
+            confirm=plan["digest"],
+        )
+    assert marker.read_text(encoding="utf-8") == "same"
+
+
+@pytest.mark.parametrize(
+    "stage", ["rename", "unlink", "marker-delete", "completed-write"]
+)
+def test_prune_slot_recovers_after_real_process_exit(
+    git_repo: Path, stage: str
+) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name=f"prune crash {stage}")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    (worktree / ".venv").mkdir()
+    (worktree / ".venv" / "a").write_text("a", encoding="utf-8")
+    (worktree / ".venv" / "b").write_text("b", encoding="utf-8")
+    sibling = worktree / "unmanaged-sibling.txt"
+    sibling.write_text("preserve\n", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01")
+    source_root = str(Path(lifecycle.__file__).parent.parent)
+    child = r'''
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from solo_ai import cli as cli_module
+from solo_ai.cli import _prune
+from solo_ai.repo import GitRepo
+
+repo = GitRepo(Path(sys.argv[2]))
+stage = sys.argv[5]
+if stage == "rename":
+    original = Path.rename
+    def crash_after_rename(self, target):
+        result = original(self, target)
+        if ".dww-prune-" in str(target):
+            os._exit(86)
+        return result
+    Path.rename = crash_after_rename
+elif stage in {"unlink", "marker-delete"}:
+    original = cli_module.delete_plain_path_if_unchanged
+    def crash_after_unlink(path, expected):
+        result = original(path, expected)
+        if stage == "unlink" and path.name != ".dww-staging-owner":
+            os._exit(86)
+        if stage == "marker-delete" and path.name == ".dww-staging-owner":
+            os._exit(86)
+        return result
+    cli_module.delete_plain_path_if_unchanged = crash_after_unlink
+else:
+    original = cli_module.atomic_write_json
+    def crash_completed(path, value):
+        if value.get("status") == "completed":
+            os._exit(86)
+        return original(path, value)
+    cli_module.atomic_write_json = crash_completed
+_prune(repo, kind="slot", slot="01", plan_id=sys.argv[3], confirm=sys.argv[4])
+'''
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child,
+            source_root,
+            str(git_repo),
+            plan["plan_id"],
+            plan["digest"],
+            stage,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=90,
+    )
+    assert crashed.returncode == 86, crashed.stderr
+
+    result = _prune(
+        repo,
+        kind="slot",
+        slot="01",
+        plan_id=plan["plan_id"],
+        confirm=plan["digest"],
+    )
+    stored = read_json(
+        repo.local_dir / "cleanup-plans" / f"{plan['plan_id']}.json", {}
+    )
+    assert result["status"] == "pruned"
+    assert stored["status"] == "completed"
+    assert not (worktree / ".venv").exists()
+    assert not (worktree / f".dww-prune-{plan['plan_id']}").exists()
+    assert sibling.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_prune_slot_rejects_replaced_staging_directory_before_move(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name="replaced prune staging")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    source = worktree / ".venv"
+    source.mkdir()
+    (source / "marker").write_text("keep\n", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01")
+    plan_path = repo.local_dir / "cleanup-plans" / f"{plan['plan_id']}.json"
+    stored = read_json(plan_path, {})
+    staging = worktree / f".dww-prune-{plan['plan_id']}"
+    stored.update(
+        {
+            "status": "executing",
+            "staging": str(staging),
+            "staging_resolved": str(staging.absolute()),
+        }
+    )
+    atomic_write_json(plan_path, stored)
+    external = tmp_path / "external-staging"
+    external.mkdir()
+    try:
+        os.symlink(external, staging, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Current Windows policy cannot create a directory symlink: {exc}")
+
+    with pytest.raises(SoloAIError, match="staging identity|link or junction"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            plan_id=plan["plan_id"],
+            confirm=plan["digest"],
+        )
+    assert (source / "marker").read_text(encoding="utf-8") == "keep\n"
+    assert not any(external.iterdir())
+
+
+def test_prune_preserves_file_replaced_at_conditional_delete(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name="prune file replacement")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    (worktree / ".venv").mkdir()
+    (worktree / ".venv" / "marker").write_text("reviewed\n", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01")
+    original = cli_module.delete_plain_path_if_unchanged
+    replaced: dict[str, Path] = {}
+
+    def replace_then_delete(path: Path, expected: dict[str, object]) -> None:
+        if path.name == "marker":
+            path.write_text("late replacement\n", encoding="utf-8")
+            replaced["path"] = path
+        original(path, expected)
+
+    monkeypatch.setattr(cli_module, "delete_plain_path_if_unchanged", replace_then_delete)
+    with pytest.raises(SoloAIError, match="changed before deletion"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            plan_id=plan["plan_id"],
+            confirm=plan["digest"],
+        )
+    assert replaced["path"].read_text(encoding="utf-8") == "late replacement\n"
+
+
+def test_prune_quarantines_plan_when_source_reappears_at_completion(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name="prune late source")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    source = worktree / ".venv"
+    source.mkdir()
+    (source / "marker").write_text("reviewed\n", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01")
+    original = cli_module.atomic_write_json
+
+    def recreate_before_completed(path: Path, value: dict[str, object]) -> None:
+        if path.name == f"{plan['plan_id']}.json" and value.get("status") == "completed":
+            source.mkdir(exist_ok=True)
+            (source / "late").write_text("late\n", encoding="utf-8")
+        original(path, value)
+
+    monkeypatch.setattr(cli_module, "atomic_write_json", recreate_before_completed)
+    with pytest.raises(SoloAIError, match="plan was quarantined"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            plan_id=plan["plan_id"],
+            confirm=plan["digest"],
+        )
+    stored = read_json(
+        repo.local_dir / "cleanup-plans" / f"{plan['plan_id']}.json", {}
+    )
+    assert stored["status"] == "quarantined"
+    assert (source / "late").read_text(encoding="utf-8") == "late\n"
+    assert StateStore(repo).read()["slots"][task["slot_id"]]["status"] == "quarantined"
+
+
+def test_prune_marker_is_created_exclusively_without_overwriting_late_content(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name="prune marker race")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    source = worktree / ".venv"
+    source.mkdir()
+    (source / "marker").write_text("reviewed\n", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01")
+    owner = worktree / f".dww-prune-{plan['plan_id']}" / ".dww-staging-owner"
+    original = Path.open
+    injected = False
+
+    def create_late_then_open(self: Path, *args: object, **kwargs: object):
+        nonlocal injected
+        if self == owner and args and args[0] == "x" and not injected:
+            injected = True
+            self.write_text("late-user-data\n", encoding="utf-8")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", create_late_then_open)
+    with pytest.raises(SoloAIError, match="ownership marker appeared concurrently"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            plan_id=plan["plan_id"],
+            confirm=plan["digest"],
+        )
+    assert owner.read_text(encoding="utf-8") == "late-user-data\n"
+    assert (source / "marker").read_text(encoding="utf-8") == "reviewed\n"
+
+
+def test_prune_rejects_same_path_staging_directory_replacement(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    declare_cleanup(repo, ".venv")
+    task = start(repo, name="replace staging object")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    source = worktree / ".venv"
+    source.mkdir()
+    (source / "marker").write_text("reviewed\n", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01")
+    staging = worktree / f".dww-prune-{plan['plan_id']}"
+    parked = worktree / f".dww-prune-{plan['plan_id']}-original"
+    original = Path.rename
+    replaced = False
+
+    def rename_after_replacement(self: Path, target: Path) -> Path:
+        nonlocal replaced
+        if not replaced and self == source:
+            replaced = True
+            staging.rename(parked)
+            shutil.copytree(parked, staging)
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename_after_replacement)
+    with pytest.raises(SoloAIError, match="directory object was replaced"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            plan_id=plan["plan_id"],
+            confirm=plan["digest"],
+        )
+    assert (staging / ".venv" / "marker").read_text(encoding="utf-8") == "reviewed\n"
+    assert parked.exists()
+
+
+def test_prune_missing_slot_plan_is_consumed_once(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="missing idle slot")
+    worktree = Path(task["worktree"])
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    repo.git(["worktree", "remove", "--force", str(worktree)], cwd=git_repo)
+    plan = _prune(repo, kind="slot", slot="01")
+    result = _prune(
+        repo,
+        kind="slot",
+        slot="01",
+        plan_id=plan["plan_id"],
+        confirm=plan["digest"],
+    )
+    assert result["worktree_retained"] is False
+    with pytest.raises(SoloAIError, match="already executed"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            plan_id=plan["plan_id"],
+            confirm=plan["digest"],
+        )
 
 
 def test_slot_configuration_can_expand_to_six_without_reinitializing(
@@ -1547,7 +3151,34 @@ def test_dev_supervisor_owns_and_stops_tcp_process_tree(git_repo: Path) -> None:
     assert not StateStore(repo).task(task["id"])["processes"]
     with socket.socket() as connection:
         assert connection.connect_ex(("127.0.0.1", started["port"])) != 0
-    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+@pytest.mark.parametrize("status", ["finishing", "abandoning"])
+def test_dev_start_refuses_task_finalization_states(
+    git_repo: Path, status: str
+) -> None:
+    repo = initialized(git_repo)
+    config = git_repo / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + f'''\ndev_start = [{json.dumps(sys.executable)}, "-c", "import time; time.sleep(5)"]
+
+[lifecycle.readiness]
+kind = "tcp"
+target = "127.0.0.1:{{port}}"
+timeout_seconds = 1
+''',
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: add blocked development command")
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name=f"blocked dev start {status}")
+    StateStore(repo).update_task(task["id"], status=status)
+
+    with pytest.raises(SoloAIError, match="cannot start during"):
+        dev_start(repo, task_id=task["id"], lease=task["lease"])
+    assert StateStore(repo).task(task["id"])["active_operation"] is None
 
 
 def test_dev_start_fails_fast_when_first_free_port_never_becomes_ready(

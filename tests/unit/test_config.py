@@ -33,6 +33,20 @@ def test_renders_safe_default_reuse_policy() -> None:
     assert "cleanup = { owned_paths = [] }" in render_repo_config()
 
 
+def test_rejects_casefold_duplicate_cleanup_paths(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "config.toml").write_text(
+        render_repo_config().replace(
+            "cleanup = { owned_paths = [] }",
+            'cleanup = { owned_paths = [".venv", ".VENV"] }',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SoloAIError, match="duplicate paths"):
+        load_repo_config(GitRepo(git_repo))
+
+
 def test_managed_policy_separates_local_lifecycle_from_explicit_publish() -> None:
     policy = managed_block()
 

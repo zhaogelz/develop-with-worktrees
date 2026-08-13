@@ -14,6 +14,7 @@ from .config import (
     load_repo_config,
     load_verification_config,
 )
+from .cleanup import classify_cleanup_path, require_managed_directory_identity
 from .lifecycle import (
     abandon,
     approve,
@@ -28,6 +29,7 @@ from .lifecycle import (
     local_enabled,
     maintenance_lock,
     ready,
+    recover,
     repository_route,
     resume_in_place,
     retarget,
@@ -41,18 +43,21 @@ from .orchestration.models import MAX_DEVELOPMENT_PARALLELISM
 from .proof import approval_plan, proof_inputs, validate
 from .repo import GitRepo
 from .routing import detect_existing_workflows
-from .state import FINAL_TASK_STATES, StateStore
+from .state import FINAL_TASK_STATES, STATE_SCHEMA, StateStore
 from .util import (
     SoloAIError,
     atomic_write_json,
     directory_size,
+    delete_plain_path_if_unchanged,
     ensure_within,
     format_bytes,
     is_link_or_junction,
     new_id,
     read_json,
+    path_identity,
     sha256_file,
     sha256_text,
+    snapshot_plain_path,
     stable_json,
     utc_timestamp,
 )
@@ -342,7 +347,7 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("--detailed", action="store_true")
 
     recover = sub.add_parser(
-        "recover", help="rotate a stale task lease without discarding work"
+        "recover", help="recover an interrupted task from persisted identity and Git facts"
     )
     recover.add_argument("--task", required=True)
 
@@ -469,6 +474,7 @@ def _orchestration_status(
 
 def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
     store = StateStore(repo)
+    store.reconcile_operation_receipts()
     state = store.read()
     route = repository_route(repo)
     result: dict[str, Any] = {
@@ -504,7 +510,7 @@ def _version() -> dict[str, Any]:
         "version": VERSION,
         "plugin_version": manifest.get("version"),
         "verification_schema": 3,
-        "state_schema": 3,
+        "state_schema": STATE_SCHEMA,
         "codex_guard": "PreToolUse deny on supported local tool paths after user trusts this plugin hook",
         "script": str(Path(sys.argv[0]).resolve()),
         "validation_queue": queue_status(),
@@ -575,13 +581,13 @@ def _cleanup_target(path: Path, root: Path) -> dict[str, Any]:
             raise SoloAIError(
                 f"Cleanup target contains a link or junction: {candidate}"
             )
-        if candidate.name.startswith(".env"):
-            raise SoloAIError(
-                f"Cleanup target contains protected .env content: {candidate}"
-            )
         relative = str(candidate.relative_to(root)).replace("\\", "/")
+        if classify_cleanup_path(relative) != "ordinary":
+            raise SoloAIError(
+                f"Cleanup target contains retained or protected content: {candidate}"
+            )
         if directory:
-            entries.append({"path": relative, "kind": "directory"})
+            entries.append({"path": relative, **snapshot_plain_path(candidate)})
             return
         size = candidate.stat().st_size
         total_bytes += size
@@ -589,14 +595,16 @@ def _cleanup_target(path: Path, root: Path) -> dict[str, Any]:
             {
                 "path": relative,
                 "kind": "file",
-                "bytes": size,
+                "size": size,
                 "sha256": sha256_file(candidate),
+                **path_identity(candidate),
             }
         )
 
     if path.is_file():
         add(path, directory=False)
     else:
+        add(path, directory=True)
         for current, directories, files in os.walk(path, followlinks=False):
             current_path = Path(current)
             for name in sorted(directories):
@@ -609,6 +617,7 @@ def _cleanup_target(path: Path, root: Path) -> dict[str, Any]:
         "bytes": total_bytes,
         "delete_reason": "declared cleanup.owned_paths entry",
         "contents_digest": sha256_text(stable_json(entries)),
+        "entries": entries,
     }
 
 
@@ -644,8 +653,10 @@ def _slot_prune_payload(repo: GitRepo, *, slot: str) -> dict[str, Any]:
         "slot": slot,
         "worktree": str(root),
         "worktree_retained": True,
+        "worktree_identity": path_identity(root),
         "targets": targets,
         "owned_paths": list(config.cleanup_owned_paths),
+        "slot_generation": int(details.get("generation", 0)),
     }
 
 
@@ -673,19 +684,71 @@ def _plan_slot_prune(repo: GitRepo, *, slot: str) -> dict[str, Any]:
 def _execute_slot_prune(
     repo: GitRepo, *, slot: str, plan_id: str, confirm: str
 ) -> dict[str, Any]:
-    plan = read_json(repo.local_dir / "cleanup-plans" / f"{plan_id}.json", {})
+    plan_path = repo.local_dir / "cleanup-plans" / f"{plan_id}.json"
+    plan = read_json(plan_path, {})
     if not plan or plan.get("schema_version") != 1:
         raise SoloAIError("Unknown cleanup plan; generate a new plan before pruning")
     if plan.get("payload", {}).get("slot") != slot:
         raise SoloAIError("Cleanup plan belongs to a different slot")
     if confirm != plan.get("digest"):
         raise SoloAIError("Cleanup confirmation must exactly match the planned digest")
-    current = _slot_prune_payload(repo, slot=slot)
-    if sha256_text(stable_json(current)) != plan["digest"]:
-        raise SoloAIError(
-            "Cleanup plan changed after review; nothing was deleted. Generate and review a new plan."
-        )
-    if not current["worktree_retained"]:
+    status = str(plan.get("status", "planned"))
+    if status == "completed":
+        completed_payload = plan.get("payload") or {}
+        if completed_payload.get("worktree_retained"):
+            completed_root = Path(str(completed_payload["worktree"]))
+            require_managed_directory_identity(
+                completed_root,
+                managed_root=completed_root,
+                expected_identity=dict(completed_payload["worktree_identity"]),
+                expected_root_identity=dict(completed_payload["worktree_identity"]),
+            )
+            late = [
+                str(completed_root / str(target["path"]))
+                for target in completed_payload.get("targets", [])
+                if (completed_root / str(target["path"])).exists()
+                or (completed_root / str(target["path"])).is_symlink()
+            ]
+            if late:
+                plan.update(
+                    {
+                        "status": "quarantined",
+                        "quarantine_reason": "Cleanup source reappeared after completion",
+                    }
+                )
+                atomic_write_json(plan_path, plan)
+                StateStore(repo).quarantine_idle_slot_generation(
+                    slot,
+                    generation=int(completed_payload["slot_generation"]),
+                    reason="Cleanup source reappeared after completed plan",
+                )
+                raise SoloAIError(
+                    "Cleanup source reappeared after completion; the plan was quarantined"
+                )
+        raise SoloAIError("Cleanup plan was already executed and completed; it cannot be replayed")
+    if status not in {"planned", "creating", "executing", "deleting"}:
+        raise SoloAIError("Cleanup plan has an unsupported recovery state")
+    payload = dict(plan["payload"])
+    if status == "planned":
+        current = _slot_prune_payload(repo, slot=slot)
+        if sha256_text(stable_json(current)) != plan["digest"]:
+            raise SoloAIError(
+                "Cleanup plan changed after review; nothing was deleted. Generate and review a new plan."
+            )
+    else:
+        current = payload
+        state = StateStore(repo).read()
+        details = state["slots"].get(slot) or {}
+        if (
+            details.get("status") not in {"idle", "inactive"}
+            or details.get("task_id")
+            or int(details.get("generation", 0))
+            != int(payload.get("slot_generation", 0))
+        ):
+            raise SoloAIError("Cleanup slot generation or ownership changed during recovery")
+    if not payload["worktree_retained"]:
+        plan.update({"status": "completed", "completed_at": utc_timestamp()})
+        atomic_write_json(plan_path, plan)
         return {
             "status": "pruned",
             "slot": slot,
@@ -693,27 +756,216 @@ def _execute_slot_prune(
             "removed": [],
             "worktree_retained": False,
         }
-    root = Path(str(current["worktree"]))
-    removed: list[str] = []
-    for target in current["targets"]:
-        path = root / str(target["path"])
-        # 计划已重新摘要；再次拒绝链接或 junction，防止检查和删除之间路径替换。
-        if is_link_or_junction(path):
-            raise SoloAIError(f"Cleanup target became a link or junction: {path}")
-        path = ensure_within(path, root)
-        if path.is_dir():
-            shutil.rmtree(path)
-        elif path.is_file():
-            path.unlink()
+    root = Path(str(payload["worktree"]))
+    require_managed_directory_identity(
+        root,
+        managed_root=root,
+        expected_identity=dict(payload["worktree_identity"]),
+        expected_root_identity=dict(payload["worktree_identity"]),
+    )
+    staging = root / f".dww-prune-{plan_id}"
+    expected_staging = str(staging.absolute())
+    marker = staging / ".dww-staging-owner"
+
+    def require_staging() -> None:
+        if not plan.get("staging_identity"):
+            raise SoloAIError("Cleanup staging identity is missing; files were preserved")
+        require_managed_directory_identity(
+            staging,
+            managed_root=root,
+            expected_resolved=expected_staging,
+            expected_root_resolved=str(root.resolve()),
+            expected_identity=dict(plan["staging_identity"]),
+            expected_root_identity=dict(payload["worktree_identity"]),
+        )
+
+    if status == "planned":
+        if staging.exists() or staging.is_symlink():
+            raise SoloAIError("Cleanup staging path already exists; nothing was deleted")
+        plan.update(
+            {
+                "status": "creating",
+                "staging": str(staging),
+                "staging_resolved": expected_staging,
+                "staging_nonce": new_id("staging"),
+                "started_at": utc_timestamp(),
+            }
+        )
+        # 在创建暂存区和首次移动前先持久化事务；崩溃后只能继续这张计划。
+        atomic_write_json(plan_path, plan)
+        status = "creating"
+    elif plan.get("staging_resolved") != expected_staging:
+        raise SoloAIError("Cleanup staging identity changed")
+
+    if status == "creating":
+        if not staging.exists():
+            require_managed_directory_identity(
+                root,
+                managed_root=root,
+                expected_identity=dict(payload["worktree_identity"]),
+                expected_root_identity=dict(payload["worktree_identity"]),
+            )
+            staging.mkdir()
+        require_managed_directory_identity(staging, managed_root=root)
+        unexpected = [item for item in staging.iterdir() if item != marker]
+        if unexpected:
+            raise SoloAIError("Cleanup staging was populated before ownership was recorded")
+        if marker.exists():
+            if marker.read_text(encoding="utf-8") != str(plan["staging_nonce"]):
+                raise SoloAIError("Cleanup staging ownership marker changed")
         else:
-            raise SoloAIError(f"Cleanup target changed type: {path}")
-        removed.append(str(path))
+            try:
+                with marker.open("x", encoding="utf-8", newline="\n") as handle:
+                    handle.write(str(plan["staging_nonce"]))
+            except FileExistsError as exc:
+                raise SoloAIError(
+                    "Cleanup staging ownership marker appeared concurrently"
+                ) from exc
+        plan["staging_identity"] = path_identity(staging)
+        plan["marker_identity"] = snapshot_plain_path(marker)
+        plan["status"] = "executing"
+        atomic_write_json(plan_path, plan)
+        status = "executing"
+
+    if status == "executing":
+        require_staging()
+        if snapshot_plain_path(marker) != plan.get("marker_identity") or marker.read_text(
+            encoding="utf-8"
+        ) != str(plan["staging_nonce"]):
+            raise SoloAIError("Cleanup staging ownership marker changed")
+        for target in payload["targets"]:
+            require_staging()
+            source = ensure_within(root / str(target["path"]), root)
+            destination = staging / str(target["path"])
+            source_exists = source.exists() or source.is_symlink()
+            destination_exists = destination.exists() or destination.is_symlink()
+            if source_exists and destination_exists:
+                raise SoloAIError("Cleanup source was recreated during staging; files were preserved")
+            if source_exists:
+                if is_link_or_junction(source):
+                    raise SoloAIError(f"Cleanup target became a link or junction: {source}")
+                if stable_json(_cleanup_target(source, root)) != stable_json(target):
+                    raise SoloAIError("Cleanup target changed before staging")
+                require_staging()
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                require_staging()
+                source.rename(destination)
+            elif not destination_exists:
+                raise SoloAIError("Cleanup target disappeared outside the recorded transaction")
+            require_staging()
+            if stable_json(_cleanup_target(destination, staging)) != stable_json(target):
+                raise SoloAIError("Cleanup target changed while being staged")
+        plan["status"] = "deleting"
+        plan["deleting_at"] = utc_timestamp()
+        atomic_write_json(plan_path, plan)
+        status = "deleting"
+
+    removed = [str(root / str(target["path"])) for target in payload["targets"]]
+    if status == "deleting":
+        if any(
+            (root / str(target["path"])).exists()
+            or (root / str(target["path"])).is_symlink()
+            for target in payload["targets"]
+        ):
+            raise SoloAIError("Cleanup source reappeared after staging; files were preserved")
+        if not staging.exists():
+            pass
+        else:
+            require_staging()
+            expected_entries = {
+                entry["path"]: entry
+                for target in payload["targets"]
+                for entry in target.get("entries", [])
+            }
+            descendants: list[Path] = []
+            for current_directory, directories, files in os.walk(
+                staging, followlinks=False
+            ):
+                require_staging()
+                current_path = Path(current_directory)
+                for name in [*directories, *files]:
+                    candidate = current_path / name
+                    if candidate == marker:
+                        continue
+                    if is_link_or_junction(candidate):
+                        raise SoloAIError(
+                            f"Cleanup staging contains a link or junction: {candidate}"
+                        )
+                    relative = candidate.relative_to(staging).as_posix()
+                    expected = expected_entries.get(relative)
+                    if not expected or classify_cleanup_path(relative) != "ordinary":
+                        raise SoloAIError(
+                            f"Cleanup staging contains unreviewed content: {candidate}"
+                        )
+                    observed = snapshot_plain_path(candidate)
+                    comparable = {key: value for key, value in expected.items() if key != "path"}
+                    if observed != comparable:
+                        raise SoloAIError("Cleanup staging content changed after review")
+                    descendants.append(candidate)
+            for candidate in sorted(
+                descendants, key=lambda item: len(item.parts), reverse=True
+            ):
+                require_staging()
+                relative = candidate.relative_to(staging).as_posix()
+                expected = expected_entries[relative]
+                delete_plain_path_if_unchanged(
+                    candidate,
+                    {key: value for key, value in expected.items() if key != "path"},
+                )
+            require_staging()
+            if marker.exists():
+                delete_plain_path_if_unchanged(
+                    marker, dict(plan["marker_identity"])
+                )
+            # marker 已缺失表示上次进程已完成该条件删除子阶段。
+            require_managed_directory_identity(
+                staging,
+                managed_root=root,
+                expected_resolved=expected_staging,
+                expected_root_resolved=str(root.resolve()),
+                expected_identity=dict(plan["staging_identity"]),
+                expected_root_identity=dict(payload["worktree_identity"]),
+            )
+            delete_plain_path_if_unchanged(
+                staging, {**dict(plan["staging_identity"]), "kind": "directory"}
+            )
+        if any(
+            (root / str(target["path"])).exists()
+            or (root / str(target["path"])).is_symlink()
+            for target in payload["targets"]
+        ):
+            raise SoloAIError("Cleanup source reappeared before plan completion")
+    plan["status"] = "completed"
+    plan["completed_at"] = utc_timestamp()
+    atomic_write_json(plan_path, plan)
+    late_sources = [
+        str(root / str(target["path"]))
+        for target in payload["targets"]
+        if (root / str(target["path"])).exists()
+        or (root / str(target["path"])).is_symlink()
+    ]
+    if late_sources:
+        plan.update(
+            {
+                "status": "quarantined",
+                "quarantine_reason": "Cleanup source reappeared at completion",
+            }
+        )
+        atomic_write_json(plan_path, plan)
+        StateStore(repo).quarantine_idle_slot_generation(
+            slot,
+            generation=int(payload["slot_generation"]),
+            reason="Cleanup source reappeared at plan completion",
+        )
+        raise SoloAIError(
+            "Cleanup source reappeared at completion; the plan was quarantined"
+        )
     return {
         "status": "pruned",
         "slot": slot,
         "plan_id": plan_id,
         "removed": removed,
-        "worktree_retained": current["worktree_retained"],
+        "worktree_retained": payload["worktree_retained"],
     }
 
 
@@ -1016,7 +1268,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "status":
         return _status(repo, detailed=args.detailed)
     if args.command == "recover":
-        return StateStore(repo).recover(args.task)
+        return recover(repo, task_id=args.task)
     if args.command == "resume-in-place":
         return resume_in_place(
             repo,
@@ -1098,6 +1350,17 @@ def _human(command: str, result: dict[str, Any]) -> str:
         )
         return f"{verb} {result['task_id']} at {result['integrated_head']} ({label})."
     if command in {"recover", "resume-in-place"}:
+        if result.get("status") == "completed":
+            return (
+                f"Task: {result['id']}\nStatus: completed\n"
+                f"Transaction: {result['transaction_id']}\n"
+                f"Candidate: {result['candidate_head']}"
+            )
+        if result.get("status") == "abandoned":
+            return (
+                f"Task: {result.get('id') or result.get('task_id')}\n"
+                f"Status: abandoned\nTransaction: {result['transaction_id']}"
+            )
         return "\n".join((f"Task: {result['id']}", f"Lease: {result['lease']}"))
     return json.dumps(
         _redact_leases(result), ensure_ascii=False, indent=2, sort_keys=True

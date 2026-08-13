@@ -139,7 +139,7 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert f'"version": "{expected_version}"' in version.stdout
     assert f'"plugin_version": "{expected_version}"' in version.stdout
     assert '"verification_schema": 3' in version.stdout
-    assert '"state_schema": 3' in version.stdout
+    assert '"state_schema": 4' in version.stdout
     started = run_runner("start", "--name", "installed artifact smoke")
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())

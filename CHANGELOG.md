@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0-beta.5 — 2026-08-13
+
+- Finish 在改变基线分支前持久化精确候选事务；Recover 依据 Git 祖先事实幂等完成提升、detached、原子删引用和槽位释放。
+- Abandon 与 Finish 共用集成串行边界，并使用可恢复事务、工作树身份核验和预期 SHA 原子删引用。
+- 统一清理分类，大小写无关保护 `.env*`、数据库与上传/存储目录，拒绝未知 ignored 内容和链接/junction。
+- PruneSlot 计划绑定槽位世代、一次性执行，在首次移动前持久化事务，并可从真实进程退出后的暂存或逐项删除阶段继续。
+- Ready/Finish 的证明绑定精确候选 SHA，在敏感扫描、验证和进程停止前后拒绝候选漂移。
+- Recover 发布同任务互斥操作，严格迁移旧回执，并可补齐已释放直改任务的最终回执；辅助操作日志失败不再制造假失败或遗留活动标记。
+- Abandon 与 PruneSlot 绑定 Windows 文件对象身份并使用条件删除；tracked 改动、同路径替换、跨任务 ref 竞态和释放瞬间的晚到内容均保留现场或隔离槽位。
+
 ## 0.3.0-beta.4 — 2026-08-11
 
 - Makes one Ready call converge when another task advances the recorded base during validation, instead of recording a stale Ready proof that Finish must validate again.
