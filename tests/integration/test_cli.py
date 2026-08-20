@@ -46,7 +46,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.3.0-beta.5"
+    assert payload["version"] == "0.3.0-beta.6"
     assert payload["version"] == payload["plugin_version"] == manifest["version"]
     assert payload["version"] == pyproject["project"]["version"]
     assert payload["version"] == __version__
@@ -67,7 +67,7 @@ def test_hook_definition_remains_the_stable_trust_contract() -> None:
 
     assert (
         hashlib.sha256(hook_definition.read_bytes()).hexdigest()
-        == "3749d6d42cfabe6a958832cb1c47e6a41e6a7d3eb1460de930ff9595ddd82d44"
+        == "f05bfe3e90b2fbf93a7ae7003caaf840e38166a86df8bbbaf0b7d9b427d7e606"
     )
 
 

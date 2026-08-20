@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "uv run --script \"$PLUGIN_ROOT/hooks/worktree_guard.py\"",
-            "commandWindows": "uv run --script \"%PLUGIN_ROOT%\\hooks\\worktree_guard.py\"",
+            "commandWindows": "uv run --script \"$env:PLUGIN_ROOT/hooks/worktree_guard.py\"",
             "timeout": 15,
             "statusMessage": "Checking worktree policy"
           }
@@ -22,7 +22,7 @@
           {
             "type": "command",
             "command": "uv run --script \"$PLUGIN_ROOT/hooks/worktree_guard.py\"",
-            "commandWindows": "uv run --script \"%PLUGIN_ROOT%\\hooks\\worktree_guard.py\"",
+            "commandWindows": "uv run --script \"$env:PLUGIN_ROOT/hooks/worktree_guard.py\"",
             "timeout": 15,
             "statusMessage": "Checking worktree policy"
           }
@@ -36,7 +36,7 @@
           {
             "type": "command",
             "command": "uv run --script \"$PLUGIN_ROOT/hooks/worktree_guard.py\"",
-            "commandWindows": "uv run --script \"%PLUGIN_ROOT%\\hooks\\worktree_guard.py\"",
+            "commandWindows": "uv run --script \"$env:PLUGIN_ROOT/hooks/worktree_guard.py\"",
             "timeout": 15,
             "statusMessage": "Reviewing worktree policy"
           }

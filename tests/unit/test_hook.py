@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,7 @@ HOOK_PATH = (
     / "hooks"
     / "worktree_guard.py"
 )
+HOOK_DEFINITION_PATH = HOOK_PATH.parent / "hooks.json"
 RUNNER_PATH = (
     Path(__file__).parents[2]
     / "plugins"
@@ -69,6 +71,40 @@ def test_doctor_describes_stable_hook_trust_without_repeated_user_work(
     assert "need no repeated review" in report["hook_trust"]
     assert "ask once" in report["hook_trust"]
     assert "Run /hooks" not in report["hook_trust"]
+
+
+def test_windows_hook_command_uses_the_host_powershell_environment(
+    git_repo: Path,
+) -> None:
+    config = json.loads(HOOK_DEFINITION_PATH.read_text(encoding="utf-8"))
+    command = config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
+    assert "%PLUGIN_ROOT%" not in command
+    assert "$env:PLUGIN_ROOT" in command
+    if os.name != "nt":
+        return
+
+    marker = git_repo / "scripts" / "worktree-flow.ps1"
+    marker.parent.mkdir()
+    marker.write_text("# existing\n", encoding="utf-8")
+    payload = {
+        "cwd": str(git_repo),
+        "hook_event_name": "SessionStart",
+        "session_id": "windows-hook-test",
+    }
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", command],
+        input=json.dumps(payload, ensure_ascii=False),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=15,
+        env={**os.environ, "PLUGIN_ROOT": str(HOOK_PATH.parent.parent)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert "silently defers" in response["hookSpecificOutput"]["additionalContext"]
 
 
 def test_hook_defers_to_existing_workflow_without_writing(git_repo: Path) -> None:

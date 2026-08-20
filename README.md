@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.5` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.3.0-beta.6` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
 
 ## One conversation for complex work
 

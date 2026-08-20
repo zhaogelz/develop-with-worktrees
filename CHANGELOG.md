@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0-beta.6 — 2026-08-20
+
+- 修复 Windows Hook 在 PowerShell 宿主中仍使用 cmd `%PLUGIN_ROOT%`，导致 SessionStart、PreToolUse 和 PostToolUse 无法定位守卫脚本的问题。
+- 用真实 PowerShell 启动方式回归 Hook 定义；该修复有意改变一次信任定义，升级后只需重新审查一次。
+
 ## 0.3.0-beta.5 — 2026-08-13
 
 - Finish 在改变基线分支前持久化精确候选事务；Recover 依据 Git 祖先事实幂等完成提升、detached、原子删引用和槽位释放。
