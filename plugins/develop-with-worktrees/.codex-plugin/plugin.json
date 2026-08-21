@@ -1,9 +1,9 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.3.0-beta.6",
+  "version": "0.3.0-beta.7",
   "description": "A local-first Codex workflow with a one-confirmation multi-AI command center, safe isolated integration, and mature-workflow deferral.",
-  "skills": "skills",
+  "skills": "./skills/",
   "author": {
     "name": "develop-with-worktrees contributors"
   },
@@ -20,7 +20,10 @@
       "Local validation and integration gates",
       "Safe local lifecycle cleanup"
     ],
-    "defaultPrompt": "Route this modifying Git task first. Silently defer to an existing mature workflow; use one plain-language confirmed plan for a complex goal, otherwise follow the managed or local-choice route."
+    "defaultPrompt": [
+      "Use the repository's required workflow for this Git change.",
+      "Handle this change in an isolated worktree and finish the managed lifecycle."
+    ]
   },
   "license": "MIT",
   "keywords": [

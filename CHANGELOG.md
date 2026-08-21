@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0-beta.7 — 2026-08-21
+
+- 修复插件清单使用旧式技能路径和超长单条默认提示，改为 Codex 当前要求的 `./skills/` 与最多三条短提示。
+- 增加插件清单契约回归测试，发布前检查组件路径存在、默认提示类型、数量与长度；不改变 Hook 定义和既有信任摘要。
+
 ## 0.3.0-beta.6 — 2026-08-20
 
 - 修复 Windows Hook 在 PowerShell 宿主中仍使用 cmd `%PLUGIN_ROOT%`，导致 SessionStart、PreToolUse 和 PostToolUse 无法定位守卫脚本的问题。

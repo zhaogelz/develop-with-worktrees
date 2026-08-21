@@ -46,7 +46,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.3.0-beta.6"
+    assert payload["version"] == "0.3.0-beta.7"
     assert payload["version"] == payload["plugin_version"] == manifest["version"]
     assert payload["version"] == pyproject["project"]["version"]
     assert payload["version"] == __version__
@@ -57,6 +57,24 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     assert payload["state_schema"] == 4
     assert "PreToolUse deny" in payload["codex_guard"]
     assert Path(payload["script"]).name == "dww.py"
+
+
+def test_plugin_manifest_matches_current_codex_component_contract() -> None:
+    repository_root = Path(__file__).parents[2]
+    plugin_root = repository_root / "plugins" / "develop-with-worktrees"
+    manifest = json.loads(
+        (plugin_root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+
+    skills_path = manifest["skills"]
+    assert isinstance(skills_path, str)
+    assert skills_path.startswith("./")
+    assert (plugin_root / skills_path[2:]).is_dir()
+
+    prompts = manifest["interface"]["defaultPrompt"]
+    assert isinstance(prompts, list)
+    assert 1 <= len(prompts) <= 3
+    assert all(isinstance(prompt, str) and len(prompt) <= 128 for prompt in prompts)
 
 
 def test_hook_definition_remains_the_stable_trust_contract() -> None:
