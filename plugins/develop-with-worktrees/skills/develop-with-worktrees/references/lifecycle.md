@@ -22,6 +22,12 @@ The host hook exposes no reliable parent-agent or task identifier. A writing chi
 
 Finish is the terminal DWW operation and remains local-only. An explicit user-requested remote sync occurs only after Finish as a separate ordinary Git operation from the clean base worktree. It starts with a push dry-run and permits only a non-force push of the current branch; DWW state, leases, and lifecycle locks are not extended to cover publishing.
 
+## Optional delegated explicit-seal batches
+
+The managed DWW lifecycle always keeps `finish` as the exact-candidate local promotion described above. It does not implement a hidden batch queue, timer, or background merger.
+
+A repository that routes as a mature workflow may explicitly delegate a different integration contract to its own controller. Only if that contract names immutable candidates, an explicit seal operation, final validation evidence, and protected base promotion may the controller treat worker completion as candidate publication. The controller must capture one generation per seal; later candidate revisions belong to the next explicit seal. A failed generation leaves the base unchanged, and recovery resumes only that recorded generation. The DWW orchestration adapter records the external receipt but neither invents nor invokes the repository's seal command.
+
 ## In-place task (explicit only)
 
 `start --in-place --session` is a separate task type, not a flag that disables the workflow. It runs only in the current clean attached worktree, requires a Codex session identifier, creates no slot or branch, and records:

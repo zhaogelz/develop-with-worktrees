@@ -8,7 +8,7 @@ Simple work stays simple: one AI uses the normal isolated lifecycle. For a compl
 
 The command center keeps only a compact local task graph, dependencies, task status, lifecycle/proof references, and key decisions in Git common-dir state. It does not keep chat transcripts, raw reasoning, leases, or secrets. Pausing, cancelling, or moving to a new central conversation preserves branches and files; cancellation never deletes work.
 
-Same-file predictions are allowed to run optimistically. Only explicit high-risk resources such as migrations, lockfiles, and shared contracts are serialized. Clean Git merges that pass Ready/Finish integrate locally; text or semantic conflicts are sent to a fresh repair task instead of guessed. There is no default reviewer AI, resident daemon, push, PR, deploy, or full-repository final test.
+Same-file predictions are allowed to run optimistically. Only explicit high-risk resources such as migrations, lockfiles, and shared contracts are serialized. In an ordinary DWW-managed repository, clean Git merges that pass Ready/Finish integrate locally; text or semantic conflicts are sent to a fresh repair task instead of guessed. A mature delegated repository may instead explicitly own a candidate pool and one batch-seal action: workers publish independently, the central controller seals one immutable generation when it decides the intended candidates are ready, and a later B1 waits for the next seal. DWW never infers, schedules, or implements that repository-specific mode. There is no default reviewer AI, resident daemon, push, PR, deploy, or full-repository final test.
 
 ## Mature repository workflows win
 

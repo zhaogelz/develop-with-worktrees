@@ -116,6 +116,8 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "one-confirmation" in text
     assert "post-Finish publishing" in text
     assert "stable compatibility contract" in text
+    assert "explicit batch-seal" in text
+    assert "候选池 + 显式封板" in text
     assert "After every install or hook change" not in text
     assert "每次安装或钩子升级后" not in text
 

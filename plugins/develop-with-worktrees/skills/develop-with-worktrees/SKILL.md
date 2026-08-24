@@ -48,12 +48,24 @@ After confirmation, create one opaque controller identifier locally, pass it to 
 
 - Only the controller may call `orchestrate claim`, start workers, add an internal task, or hand off the controller. A worker receives one task and has no authority to spawn another worker.
 - Give each worker exactly one writer task. Same-file predictions do not serialize work. Only an explicit high-risk `exclusive_resources` value (for example a migration, lockfile, or shared contract) serializes tasks.
-- Let each worker use its own ordinary DWW lifecycle. Git-clean merges with Ready/Finish evidence integrate locally; never guess text or semantic conflicts. Assign a new repair task from the latest base to the original owner when possible, otherwise make a dedicated integration repair task.
+- For a `managed` repository, let each worker use its own ordinary DWW lifecycle: Ready/Finish integrates its exact candidate locally. For a `delegated` mature workflow, follow only its declared lifecycle. If that workflow explicitly declares a candidate pool and an explicit batch-seal action, a worker's “finish” may mean “publish a verified candidate” rather than “move the base branch”; the controller alone performs the declared seal. Never infer such a mode from task wording or simulate it with DWW commands.
 - A blocked task stops only its dependents. Continue unrelated frontier tasks. Record a repair attempt only when the diagnosis changed; two unchanged failures, business ambiguity, safety, data, permission, or scope changes require the central conversation to ask the user.
 - Record existing proof/receipt references with `orchestrate complete`. At batch end, run only a targeted combination check that lacks evidence; do not add a default full repository test or review AI.
 - `orchestrate pause`, `resume`, `cancel`, and `take-over` preserve code and local state. Cancellation never deletes a branch or file. A future central conversation can inspect status, take over with the exact batch id, and continue; no resident daemon is implied.
 
 `dww` is the adapter for a `managed` repository. A mature repository may participate only through an explicit `delegated` adapter chosen by its own workflow; never parse arbitrary instructions or invent an external command. If it already has an external orchestrator, fully defer.
+
+### Optional delegated candidate batches
+
+This is a repository-owned protocol, not a second DWW lifecycle. Use it only when a mature delegated workflow explicitly supplies all of: immutable candidate identities, an explicit seal command, one final verification boundary, and a compare-and-swap or equivalent protected base promotion.
+
+- Workers independently develop and verify their exact candidate, then publish it. They do not wait for other workers and do not run final integration validation.
+- The central controller decides when the intended candidates are all published and invokes one explicit seal. Do not use a timer, a queue length, or “the channel happens to be idle” as a seal trigger.
+- A seal captures one immutable generation. A later revision such as B1 never alters the captured B; it waits for a later explicit seal. One seal must not silently consume a later generation after completing the first.
+- On final-validation failure, preserve the base branch. Diagnose first; the responsible task publishes a new candidate. Unchanged, compatible candidates may be retained only if the delegated workflow records their exact identities and says they are reusable. Never automatically rerun the same failed generation.
+- On interruption, resume only the captured generation from its recorded Git facts and final-verification evidence. If the base changed, require a refresh instead of treating the old proof as current.
+
+The controller records only the delegated evidence and result through orchestration; DWW does not create a pool database, choose candidates, or execute the seal itself.
 
 ## First modifying intent in an unchosen repository
 
