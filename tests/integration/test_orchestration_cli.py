@@ -5,6 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from conftest import git
+
 
 def _runner() -> Path:
     return (
@@ -44,9 +46,61 @@ def _call(repo: Path, *arguments: str) -> dict[str, object]:
     return payload["result"]
 
 
+def _approve_test_adapter(repo: Path) -> None:
+    scripts = repo / "scripts"
+    policy = repo / ".solo-ai"
+    scripts.mkdir()
+    policy.mkdir()
+    (scripts / "worktree-flow.ps1").write_text("# lifecycle\n", encoding="utf-8")
+    (scripts / "dww_adapter.py").write_text(
+        """import json
+import sys
+
+request = json.load(sys.stdin)
+json.dump(
+    {
+        "schema_version": 1,
+        "adapter_id": request["adapter_id"],
+        "fingerprint": request["fingerprint"],
+        "operation": request["operation"],
+        "ok": True,
+        "result": {"available_slots": 5},
+    },
+    sys.stdout,
+)
+""",
+        encoding="utf-8",
+    )
+    (policy / "delegated.toml").write_text(
+        """schema_version = 1
+id = "orchestration-test"
+runtime = "python"
+entrypoint = "scripts/dww_adapter.py"
+workflow_markers = ["scripts/worktree-flow.ps1"]
+tracked_inputs = ["scripts/dww_adapter.py", "scripts/worktree-flow.ps1"]
+capabilities = ["status"]
+max_parallel = 5
+""",
+        encoding="utf-8",
+    )
+    git(repo, "add", ".solo-ai/delegated.toml", "scripts")
+    git(repo, "commit", "-m", "declare delegated adapter")
+    inspection = _call(repo, "delegated", "inspect")
+    fingerprint = str(inspection["adapter"]["fingerprint"])
+    _call(
+        repo,
+        "delegated",
+        "approve",
+        "--fingerprint",
+        fingerprint,
+        "--accept",
+    )
+
+
 def test_orchestration_cli_requires_confirmation_then_returns_frontier(
     git_repo: Path,
 ) -> None:
+    _approve_test_adapter(git_repo)
     planned = _call(
         git_repo,
         "orchestrate",
