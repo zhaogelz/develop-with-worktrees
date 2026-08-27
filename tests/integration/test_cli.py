@@ -96,8 +96,6 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
         repository_root / "README.zh-CN.md",
         repository_root / "CHANGELOG.md",
         repository_root / "总体规划.md",
-        repository_root / "需求.md",
-        repository_root / "方案.md",
         repository_root
         / "plugins"
         / "develop-with-worktrees"
@@ -118,6 +116,10 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "stable compatibility contract" in text
     assert "explicit batch-seal" in text
     assert "候选池 + 显式封板" in text
+    assert "task anchor" in text
+    assert "任务锚点" in text
+    assert not (repository_root / "需求.md").exists()
+    assert not (repository_root / "方案.md").exists()
     assert "After every install or hook change" not in text
     assert "每次安装或钩子升级后" not in text
 

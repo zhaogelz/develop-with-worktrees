@@ -32,6 +32,7 @@ uv run --script <DWW> --repo <repository-or-worktree> --json route
 Do not use the full `doctor` report for routing.
 
 - `defer`: the repository's mature workflow has absolute priority over choices 2/3 and DWW policy. Do not ask the DWW repository-choice question, initialize DWW, or change DWW state. Follow the repository's own instructions.
+- `delegated`: the repository's exact tracked adapter contract is locally approved. Follow [delegated-adapters.md](references/delegated-adapters.md) and the repository's instructions; do not initialize or run the managed DWW lifecycle. Contract or input drift returns the route to `defer` until the new fingerprint is reviewed and approved.
 - `disabled` or `current-task`: do not ask again or run the DWW lifecycle; use normal current-directory development.
 - `managed`: proactively start the normal isolated task.
 - `ask`: and only `ask`, show the single question below.
@@ -107,6 +108,8 @@ For an adopted repository, proactively run `start --name <purpose>` when a modif
 3. Use `plan` or `verify --level development` as useful feedback. Slow estimates are advice only.
 4. Run `ready`, then `finish` with the same task and lease.
 
+For a confirmed plan or another multi-step task, create an uncommitted task anchor immediately after entering the writable worktree. Re-read it before modifying files after context compression, model change, or a later continuation. At acceptance, update durable documentation only for facts that must survive future tasks, then remove the anchor. A clearly bounded single small edit may omit it. Follow [task-governance.md](references/task-governance.md) for fields, precedence, fallback storage, and the durable-document boundary.
+
 Ready/Finish synchronize only the recorded base branch. Ready checks the expected base after validation admission and again after validation; when another Finish advances that base, the same Ready call resynchronizes and reuses exact unchanged profile proofs, up to five retries. A deleted, rewound, or rewritten base requires explicit `retarget`; Finish only fast-forwards the recorded clean base worktree. It never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 
 ## Explicit post-Finish publishing
@@ -130,4 +133,4 @@ Do not fetch, pull, force-push, delete a remote ref, push tags, create a PR, or 
 - Validation uses a machine-global weighted FIFO queue. `settings --validation-capacity auto|1..4` is local-only.
 - Finish never removes dependencies or caches. Interrupted Finish/Abandon operations resume only from persisted exact-candidate transactions and Git facts. `prune-slot` requires a reviewed generation-bound one-shot plan and digest; `.env*`, databases, upload/storage content, symlinks, junctions, or changes stop deletion.
 
-Read [configuration.md](references/configuration.md), [lifecycle.md](references/lifecycle.md), and [safety.md](references/safety.md) before changing policy or handling an exception.
+Read [configuration.md](references/configuration.md), [lifecycle.md](references/lifecycle.md), [task-governance.md](references/task-governance.md), and [safety.md](references/safety.md) before changing policy or handling an exception.

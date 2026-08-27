@@ -12,7 +12,7 @@ Same-file predictions are allowed to run optimistically. Only explicit high-risk
 
 ## Mature repository workflows win
 
-Before any repository choice, a compact read-only route checks for a mature worktree or orchestration workflow. When one exists, DWW silently defers: it asks no three-choice question, writes no DWW state, and follows the repository's own instructions. This has absolute priority over previously stored one-task or long-term direct-directory choices; those local records remain untouched and can become active again only after the mature workflow marker is removed.
+Before any repository choice, a compact read-only route checks for a mature worktree or orchestration workflow. An ordinary mature workflow makes DWW silently defer: it asks no three-choice question, writes no DWW state, and follows the repository's own instructions. A mature repository may instead commit a versioned adapter declaration; only after the exact declaration and tracked-input fingerprint is locally approved does the route become `delegated`. DWW then constructs a fixed runtime argv and exchanges one JSON request/response, while the repository remains authoritative for lifecycle state. Any drift returns to `defer`.
 
 The trusted `SessionStart` hook normally injects this route once. If hook context is unavailable, the skill runs one lightweight `dww route --json` fallback; it does not load the full `doctor` report.
 
@@ -54,6 +54,8 @@ route → start → edit only in returned directory → commit exact paths
 - Validation uses schema 3 profiles and a machine-global weighted FIFO queue. Slow estimates advise splitting mappings or removing repeated preparation; they never weaken coverage.
 - Finish preserves caches and dependencies. Destructive cleanup remains an explicit reviewed, generation-bound, one-shot `prune-slot` action; an interrupted move or delete resumes only from that exact manifest.
 
+For a confirmed plan or another multi-step task, the AI creates one ignored, uncommitted task anchor after entering the writable worktree. It records only the active objective, baseline, boundaries, acceptance checks, and progress; it is re-read after context compression or continuation and removed after acceptance. Permanent documentation changes only when a fact must survive future tasks, such as a product rule, public contract, data model, permission, architecture, or stable UI boundary. Ordinary fixes, implementation details, tests, and validation evidence do not create permanent task ledgers.
+
 `start --in-place` remains an advanced compatibility path for a user who explicitly wants DWW's exact Commit/Ready/Finish safeguards in the current clean worktree; it is not choice 2.
 
 In Codex, the trusted `PreToolUse` hook hard-denies protected-worktree writes on supported local tool paths. It is a strong guardrail, not operating-system enforcement: specialised paths can opt out. When a later hooked call or `doctor` observes escaped dirty state, it preserves and records an alert; it never promises immediate observation. Codex persists trust against the exact hook definition, so ordinary plugin updates keep the stable definition and require no repeated user action. Only a first install or an intentional definition change needs review. When Codex actually reports pending review, the AI explains the change and asks once; after approval it uses available host UI control to complete `/hooks` instead of asking the user to click through it. A surface without host UI control must report that limitation and must not claim the hard guard is active.
@@ -67,4 +69,4 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 
 The plugin and DWW lifecycle never update themselves, fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After Finish, a user may explicitly request a separate ordinary push from the clean base worktree; it is dry-run first, current-branch only, and never forced.
 
-See [Chinese documentation](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), and [architecture](docs/architecture.md).
+See [Chinese documentation](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), [task governance](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md), and [architecture](docs/architecture.md).
