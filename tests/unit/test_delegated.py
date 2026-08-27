@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import git
+from conftest import declare_delegated_adapter
 from solo_ai.delegated import (
     DelegatedContractError,
     approve_delegated,
@@ -15,47 +15,12 @@ from solo_ai.repo import GitRepo
 
 
 def declare_adapter(root: Path, *, max_parallel: int = 4) -> None:
-    scripts = root / "scripts"
-    policy = root / ".solo-ai"
-    scripts.mkdir()
-    policy.mkdir()
-    (scripts / "worktree-flow.ps1").write_text(
-        "# mature lifecycle\n", encoding="utf-8"
+    declare_delegated_adapter(
+        root,
+        max_parallel=max_parallel,
+        capabilities=("start", "status"),
+        approve=False,
     )
-    (scripts / "dww_adapter.py").write_text(
-        """import json
-import sys
-
-request = json.load(sys.stdin)
-json.dump(
-    {
-        "schema_version": 1,
-        "adapter_id": request["adapter_id"],
-        "fingerprint": request["fingerprint"],
-        "operation": request["operation"],
-        "ok": True,
-        "result": {"available_slots": 2, "received": request["request"]},
-    },
-    sys.stdout,
-)
-""",
-        encoding="utf-8",
-    )
-    (policy / "delegated.toml").write_text(
-        f"""schema_version = 1
-id = "example-worktree-flow"
-runtime = "python"
-entrypoint = "scripts/dww_adapter.py"
-workflow_markers = ["scripts/worktree-flow.ps1"]
-tracked_inputs = ["scripts/dww_adapter.py", "scripts/worktree-flow.ps1"]
-capabilities = ["start", "status"]
-max_parallel = {max_parallel}
-""",
-        encoding="utf-8",
-    )
-    git(root, "add", ".solo-ai/delegated.toml", "scripts/dww_adapter.py")
-    git(root, "add", "scripts/worktree-flow.ps1")
-    git(root, "commit", "-m", "declare delegated adapter")
 
 
 def test_exact_local_approval_enables_delegated_route_and_limits_slots(

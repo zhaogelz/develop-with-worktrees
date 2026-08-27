@@ -6,10 +6,9 @@ import os
 import subprocess
 from pathlib import Path
 
-from conftest import git
+from conftest import declare_delegated_adapter, git
 from solo_ai.cli import _doctor
 from solo_ai.config import CommandSpec
-from solo_ai.delegated import approve_delegated, inspect_delegated
 from solo_ai.lifecycle import choose, initialize, resume_in_place, start
 from solo_ai.repo import GitRepo
 from solo_ai.state import StateStore
@@ -129,33 +128,7 @@ def test_hook_defers_to_existing_workflow_without_writing(git_repo: Path) -> Non
 def test_hook_steps_aside_only_for_an_approved_delegated_adapter(
     git_repo: Path,
 ) -> None:
-    scripts = git_repo / "scripts"
-    policy = git_repo / ".solo-ai"
-    scripts.mkdir()
-    policy.mkdir()
-    (scripts / "worktree-flow.ps1").write_text("# lifecycle\n", encoding="utf-8")
-    (scripts / "dww_adapter.py").write_text("print('{}')\n", encoding="utf-8")
-    (policy / "delegated.toml").write_text(
-        """schema_version = 1
-id = "example-worktree-flow"
-runtime = "python"
-entrypoint = "scripts/dww_adapter.py"
-workflow_markers = ["scripts/worktree-flow.ps1"]
-tracked_inputs = ["scripts/dww_adapter.py", "scripts/worktree-flow.ps1"]
-capabilities = ["status"]
-max_parallel = 2
-""",
-        encoding="utf-8",
-    )
-    git(git_repo, "add", ".solo-ai/delegated.toml", "scripts")
-    git(git_repo, "commit", "-m", "declare delegated adapter")
-    repo = GitRepo(git_repo)
-    inspection = inspect_delegated(repo.root, repo.common_dir)
-    approve_delegated(
-        repo.root,
-        repo.common_dir,
-        fingerprint=inspection["adapter"]["fingerprint"],
-    )
+    declare_delegated_adapter(git_repo, max_parallel=2)
 
     result = HOOK.decide(
         {

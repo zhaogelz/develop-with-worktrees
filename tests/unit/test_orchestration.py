@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import declare_delegated_adapter
 from solo_ai.orchestration import BatchStore, create_batch
 from solo_ai.orchestration.scheduler import frontier
 from solo_ai.repo import GitRepo
@@ -31,6 +32,11 @@ def _tasks() -> list[dict[str, object]]:
 
 
 def _create(repo: GitRepo, *, max_parallel: int = 5) -> dict[str, object]:
+    declare_delegated_adapter(
+        repo.root,
+        available_slots=max_parallel,
+        max_parallel=max_parallel,
+    )
     return create_batch(
         repo,
         goal="让用户完成一次查询",
@@ -148,6 +154,7 @@ def test_acceptance_ledger_requires_evidence_and_cancel_preserves_code(
     git_repo,
 ) -> None:
     repo = GitRepo(git_repo)
+    declare_delegated_adapter(repo.root, available_slots=5, max_parallel=5)
     batch = create_batch(
         repo,
         goal="完成一个小改动",
