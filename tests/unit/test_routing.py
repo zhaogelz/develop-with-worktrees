@@ -18,6 +18,38 @@ def test_mature_workflow_has_absolute_routing_precedence() -> None:
     }
 
 
+def test_only_an_approved_declared_adapter_changes_mature_routing() -> None:
+    adapter = {
+        "declared": True,
+        "valid": True,
+        "approved": True,
+        "adapter": {"id": "example", "fingerprint": "abc"},
+    }
+
+    assert decide_route(
+        workflows=["repository worktree-flow"],
+        local_enabled=False,
+        current_task=True,
+        adopted=True,
+        delegated=adapter,
+    ) == {
+        "action": "delegated",
+        "reason": "approved-adapter",
+        "workflows": ["repository worktree-flow"],
+        "adapter": {"id": "example", "fingerprint": "abc"},
+    }
+
+    adapter["approved"] = False
+    adapter["reason"] = "approval-required"
+    assert decide_route(
+        workflows=["repository worktree-flow"],
+        local_enabled=True,
+        current_task=False,
+        adopted=False,
+        delegated=adapter,
+    )["reason"] == "delegated-approval-required"
+
+
 def test_route_orders_local_and_managed_dww_modes_after_defer() -> None:
     assert decide_route(
         workflows=[],

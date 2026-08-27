@@ -1,8 +1,8 @@
 # Lifecycle reference
 
-Mode precedence is detected mature workflow, local long-term current-directory choice, exact current-task authorization, managed policy, then the first-modification choice. A mature workflow always wins, including over choices 2/3, and receives zero writes.
+Mode precedence is detected mature workflow, local long-term current-directory choice, exact current-task authorization, managed policy, then the first-modification choice. A mature workflow always wins, including over choices 2/3. It receives zero writes unless its tracked delegated contract has been explicitly approved in local state.
 
-The trusted `SessionStart` hook normally injects one compact route. When that context is unavailable, the skill runs one read-only `dww route --json`; it never uses the full `doctor` report for first-write routing. The actions are `defer`, `disabled`, `current-task`, `managed`, and `ask`.
+The trusted `SessionStart` hook normally injects one compact route. When that context is unavailable, the skill runs one read-only `dww route --json`; it never uses the full `doctor` report for first-write routing. The actions are `defer`, `delegated`, `disabled`, `current-task`, `managed`, and `ask`. `delegated` means the generic guard steps aside while calls cross the bounded, approved JSON adapter described in [Delegated adapter contract](delegated-adapters.md).
 
 ## First-modification choice
 
@@ -26,7 +26,7 @@ Finish is the terminal DWW operation and remains local-only. An explicit user-re
 
 The managed DWW lifecycle always keeps `finish` as the exact-candidate local promotion described above. It does not implement a hidden batch queue, timer, or background merger.
 
-A repository that routes as a mature workflow may explicitly delegate a different integration contract to its own controller. Only if that contract names immutable candidates, an explicit seal operation, final validation evidence, and protected base promotion may the controller treat worker completion as candidate publication. The controller must capture one generation per seal; later candidate revisions belong to the next explicit seal. A failed generation leaves the base unchanged, and recovery resumes only that recorded generation. The DWW orchestration adapter records the external receipt but neither invents nor invokes the repository's seal command.
+A repository that routes as a mature workflow may explicitly delegate a different integration contract to its own controller. Only if that contract names immutable candidates, an explicit seal operation, final validation evidence, and protected base promotion may the controller treat worker completion as candidate publication. The controller must capture one generation per seal; later candidate revisions belong to the next explicit seal. A failed generation leaves the base unchanged, and recovery resumes only that recorded generation. The DWW orchestration layer never invents a seal command; it may invoke only a capability explicitly declared by the approved repository adapter and records the external receipt.
 
 ## In-place task (explicit only)
 

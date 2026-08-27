@@ -15,6 +15,13 @@ from .config import (
     load_verification_config,
 )
 from .cleanup import classify_cleanup_path, require_managed_directory_identity
+from .delegated import (
+    ALLOWED_CAPABILITIES,
+    DelegatedContractError,
+    approve_delegated,
+    inspect_delegated,
+    invoke_delegated,
+)
 from .lifecycle import (
     abandon,
     approve,
@@ -164,6 +171,30 @@ def _parser() -> argparse.ArgumentParser:
         "--session",
         help="optional Codex session identifier supplied by the trusted hook",
     )
+
+    delegated = sub.add_parser(
+        "delegated",
+        help="inspect, approve, or invoke an explicitly declared repository adapter",
+    )
+    delegated_sub = delegated.add_subparsers(
+        dest="delegated_command", required=True
+    )
+    delegated_sub.add_parser(
+        "inspect", help="read and fingerprint the declared adapter without executing it"
+    )
+    delegated_approve = delegated_sub.add_parser(
+        "approve", help="approve one exact adapter and tracked-input fingerprint locally"
+    )
+    delegated_approve.add_argument("--fingerprint", required=True)
+    delegated_approve.add_argument("--accept", action="store_true", required=True)
+    delegated_invoke = delegated_sub.add_parser(
+        "invoke", help="invoke one capability through the approved JSON adapter protocol"
+    )
+    delegated_invoke.add_argument(
+        "--operation", required=True, choices=sorted(ALLOWED_CAPABILITIES)
+    )
+    delegated_invoke.add_argument("--request", default="{}", metavar="JSON_OBJECT")
+    delegated_invoke.add_argument("--timeout-seconds", type=float, default=900)
 
     orchestration = sub.add_parser(
         "orchestrate",
@@ -1007,6 +1038,25 @@ def _prune(
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     repo = GitRepo(args.repo)
+    if args.command == "delegated":
+        if args.delegated_command == "inspect":
+            return inspect_delegated(repo.root, repo.common_dir)
+        if args.delegated_command == "approve":
+            return approve_delegated(
+                repo.root,
+                repo.common_dir,
+                fingerprint=args.fingerprint,
+            )
+        if args.delegated_command == "invoke":
+            request = _parse_json_objects([args.request], option="--request")[0]
+            return invoke_delegated(
+                repo.root,
+                repo.common_dir,
+                operation=args.operation,
+                request=request,
+                timeout_seconds=args.timeout_seconds,
+            )
+        raise SoloAIError(f"Unknown delegated command: {args.delegated_command}")
     if args.command == "orchestrate":
         store = BatchStore(repo)
         command = args.orchestration_command
@@ -1391,7 +1441,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = _dispatch(args)
-    except SoloAIError as exc:
+    except (SoloAIError, DelegatedContractError) as exc:
         if args.json:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=True))
         else:

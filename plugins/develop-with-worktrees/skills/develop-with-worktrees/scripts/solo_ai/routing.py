@@ -26,8 +26,29 @@ def decide_route(
     local_enabled: bool,
     current_task: bool,
     adopted: bool,
+    delegated: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """按稳定优先级返回极小、只读的仓库路由结果。"""
+    if delegated and delegated.get("declared"):
+        if delegated.get("approved"):
+            return {
+                "action": "delegated",
+                "reason": "approved-adapter",
+                "workflows": workflows,
+                "adapter": delegated["adapter"],
+            }
+        result: dict[str, Any] = {
+            "action": "defer",
+            "reason": f"delegated-{delegated.get('reason', 'invalid-contract')}",
+            "workflows": workflows,
+        }
+        if delegated.get("adapter"):
+            result["adapter"] = delegated["adapter"]
+        if delegated.get("error"):
+            result["error"] = delegated["error"]
+        if delegated.get("approval_error"):
+            result["error"] = delegated["approval_error"]
+        return result
     if workflows:
         return {
             "action": "defer",

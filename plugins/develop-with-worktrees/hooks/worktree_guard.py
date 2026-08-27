@@ -32,6 +32,7 @@ SKILL_SCRIPTS = (
 if str(SKILL_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SKILL_SCRIPTS))
 
+from solo_ai.delegated import inspect_delegated
 from solo_ai.routing import decide_route, detect_existing_workflows
 
 FINAL_TASK_STATES = {"finished", "abandoned"}
@@ -46,6 +47,7 @@ DWW_SUBCOMMANDS = {
     "settings",
     "doctor",
     "route",
+    "delegated",
     "orchestrate",
     "start",
     "commit",
@@ -450,16 +452,28 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         local_enabled=not preference_disabled(root),
         current_task=task_bypass_active(root, payload),
         adopted=adopted,
+        delegated=inspect_delegated(root, common_dir(root) or root / ".git"),
     )
     action = route["action"]
     if action == "defer":
         if event != "SessionStart":
             return None
+        workflow_text = ", ".join(route["workflows"]) or "declared adapter"
         return _context(
             event,
             "This repository has a mature workflow ("
-            + ", ".join(route["workflows"])
-            + "). develop-with-worktrees silently defers: do not ask its repository-choice question or change DWW state; follow the repository's own instructions.",
+            + workflow_text
+            + "). develop-with-worktrees silently defers: do not ask its repository-choice question or change DWW state; follow the repository's own instructions. A delegated adapter is not executable unless its exact current fingerprint is valid and locally approved.",
+        )
+    if action == "delegated":
+        if event != "SessionStart":
+            return None
+        adapter = route["adapter"]
+        return _context(
+            event,
+            "This repository owns its mature lifecycle through the locally approved delegated adapter `"
+            + str(adapter["id"])
+            + "`. Use `dww delegated invoke` and the repository's own instructions; do not initialize or run the managed DWW Start/Ready/Finish lifecycle. The generic guard steps aside because the repository adapter remains authoritative.",
         )
     if action == "disabled":
         return _context(

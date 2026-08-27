@@ -5,6 +5,7 @@ Tracked policy is deliberately small. Local state, approvals, queue settings, lo
 ```text
 .solo-ai/config.toml          lifecycle and cleanup boundary
 .solo-ai/verification.toml    schema 3 validation profiles
+.solo-ai/delegated.toml       optional mature-repository adapter contract
 AGENTS.md managed block        Codex lifecycle reminder
 <git-common-dir>/solo-ai/     repository-local state and receipts
 <machine-user-state>/develop-with-worktrees/  validation queue, settings, metrics
@@ -12,7 +13,7 @@ AGENTS.md managed block        Codex lifecycle reminder
 
 `preferences.json` in the Git common directory is the machine-local long-term choice for this repository. `enabled = false` means normal current-directory development and never changes tracked files. `session-overrides.json` contains only hashed current-task session authorizations and delegated capability hashes; it contains neither raw session identifiers nor delegation codes and never enters version control.
 
-`dww route --json` is a compact read-only adapter query. It returns one action: `defer`, `disabled`, `current-task`, `managed`, or `ask`. A detected mature workflow always returns `defer`; existing preference and session files are left untouched but inactive while that workflow marker remains.
+`dww route --json` is a compact read-only adapter query. It returns one action: `defer`, `delegated`, `disabled`, `current-task`, `managed`, or `ask`. A detected mature workflow normally returns `defer`; existing preference and session files are left untouched but inactive while that workflow marker remains. It returns `delegated` only when `.solo-ai/delegated.toml` is valid and its exact contract-plus-input fingerprint has been approved in local Git-common-dir state. See [Delegated adapter contract](delegated-adapters.md).
 
 ## `config.toml`
 

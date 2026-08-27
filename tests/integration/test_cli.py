@@ -197,6 +197,145 @@ def test_cli_route_is_compact_and_read_only_for_mature_workflow(
     assert not (git_repo / ".solo-ai").exists()
 
 
+def test_cli_approves_and_invokes_only_the_exact_delegated_contract(
+    git_repo: Path,
+) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+    scripts = git_repo / "scripts"
+    policy = git_repo / ".solo-ai"
+    scripts.mkdir()
+    policy.mkdir()
+    (scripts / "worktree-flow.ps1").write_text("# lifecycle\n", encoding="utf-8")
+    (scripts / "dww_adapter.py").write_text(
+        """import json
+import sys
+
+request = json.load(sys.stdin)
+json.dump(
+    {
+        "schema_version": 1,
+        "adapter_id": request["adapter_id"],
+        "fingerprint": request["fingerprint"],
+        "operation": request["operation"],
+        "ok": True,
+        "result": {"available_slots": 2, "echo": request["request"]},
+    },
+    sys.stdout,
+)
+""",
+        encoding="utf-8",
+    )
+    (policy / "delegated.toml").write_text(
+        """schema_version = 1
+id = "example-worktree-flow"
+runtime = "python"
+entrypoint = "scripts/dww_adapter.py"
+workflow_markers = ["scripts/worktree-flow.ps1"]
+tracked_inputs = ["scripts/dww_adapter.py", "scripts/worktree-flow.ps1"]
+capabilities = ["start", "status"]
+max_parallel = 2
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/delegated.toml", "scripts")
+    git(git_repo, "commit", "-m", "declare delegated adapter")
+
+    inspect = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "delegated",
+            "inspect",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert inspect.returncode == 0, inspect.stderr
+    fingerprint = json.loads(inspect.stdout)["result"]["adapter"]["fingerprint"]
+    before_approval = subprocess.run(
+        [sys.executable, str(runner), "--repo", str(git_repo), "--json", "route"],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert json.loads(before_approval.stdout)["result"]["action"] == "defer"
+
+    approval = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "delegated",
+            "approve",
+            "--fingerprint",
+            fingerprint,
+            "--accept",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert approval.returncode == 0, approval.stderr
+    routed = subprocess.run(
+        [sys.executable, str(runner), "--repo", str(git_repo), "--json", "route"],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert json.loads(routed.stdout)["result"]["action"] == "delegated"
+
+    invoked = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "delegated",
+            "invoke",
+            "--operation",
+            "status",
+            "--request",
+            '{"task_id":"task-1"}',
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+        timeout=90,
+    )
+    assert invoked.returncode == 0, invoked.stderr
+    response = json.loads(invoked.stdout)["result"]
+    assert response["ok"] is True
+    assert response["result"] == {
+        "available_slots": 2,
+        "echo": {"task_id": "task-1"},
+    }
+
+
 def test_cli_init_only_shows_plan_until_acceptance(git_repo: Path) -> None:
     runner = (
         Path(__file__).parents[2]

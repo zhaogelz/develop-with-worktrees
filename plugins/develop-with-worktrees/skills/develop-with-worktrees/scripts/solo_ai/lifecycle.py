@@ -31,6 +31,7 @@ from .config import (
     render_verification_config,
 )
 from .cleanup import inspect_untracked, require_managed_directory_identity
+from .delegated import inspect_delegated
 from .abandonment import prepare as prepare_abandonment
 from .abandonment import resume as resume_abandonment
 from .abandonment import write_completed_receipt as write_abandonment_receipt
@@ -217,10 +218,12 @@ def choose(
 ) -> dict[str, Any]:
     """将首次三选一交互收敛为唯一入口，避免把内部初始化细节暴露给用户。"""
     route = repository_route(repo, session_id=session_id)
-    if route["action"] == "defer":
+    if route["action"] in {"defer", "delegated"}:
         return {
             "choice": mode,
-            "decision": "deferred",
+            "decision": "delegated"
+            if route["action"] == "delegated"
+            else "deferred",
             "reason": route["reason"],
             "workflows": route["workflows"],
         }
@@ -267,6 +270,7 @@ def repository_route(repo: GitRepo, *, session_id: str | None = None) -> dict[st
             session_id and task_bypass_active(repo, session_id=session_id)
         ),
         adopted=(repo.policy_path() / ".solo-ai" / "config.toml").exists(),
+        delegated=inspect_delegated(repo.root, repo.common_dir),
     )
 
 

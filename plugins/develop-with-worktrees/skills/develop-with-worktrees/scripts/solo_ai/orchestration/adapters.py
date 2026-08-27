@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..config import load_repo_config
+from ..delegated import DelegatedContractError, invoke_delegated
 from ..lifecycle import repository_route
 from ..repo import GitRepo
 from ..state import StateStore
@@ -42,16 +43,37 @@ class DwwLifecycleAdapter:
 
 @dataclass(frozen=True)
 class DelegatedLifecycleAdapter:
-    """成熟仓库必须显式选用；它绝不尝试猜测或执行外部工作流。"""
+    """成熟仓库只有在精确契约获批后才暴露给通用编排器。"""
 
     name: str = "delegated"
 
     def assert_available(self, repo: GitRepo) -> None:
-        del repo
+        if repository_route(repo)["action"] != "delegated":
+            raise SoloAIError(
+                "The delegated lifecycle adapter requires a valid, locally approved repository contract"
+            )
 
     def available_slots(self, repo: GitRepo, *, batch_limit: int) -> int:
-        del repo
-        return batch_limit
+        route = repository_route(repo)
+        if route["action"] != "delegated":
+            self.assert_available(repo)
+        try:
+            response = invoke_delegated(
+                repo.root,
+                repo.common_dir,
+                operation="status",
+                request={"purpose": "orchestration-capacity"},
+                timeout_seconds=30,
+            )
+        except DelegatedContractError as exc:
+            raise SoloAIError(f"Delegated lifecycle status failed: {exc}") from exc
+        if not response["ok"]:
+            raise SoloAIError("Delegated lifecycle status reported failure")
+        return min(
+            batch_limit,
+            int(route["adapter"]["max_parallel"]),
+            int(response["result"]["available_slots"]),
+        )
 
 
 def adapter_for(name: str) -> LifecycleAdapter:

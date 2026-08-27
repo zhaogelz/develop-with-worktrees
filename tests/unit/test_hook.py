@@ -9,6 +9,7 @@ from pathlib import Path
 from conftest import git
 from solo_ai.cli import _doctor
 from solo_ai.config import CommandSpec
+from solo_ai.delegated import approve_delegated, inspect_delegated
 from solo_ai.lifecycle import choose, initialize, resume_in_place, start
 from solo_ai.repo import GitRepo
 from solo_ai.state import StateStore
@@ -123,6 +124,51 @@ def test_hook_defers_to_existing_workflow_without_writing(git_repo: Path) -> Non
     assert HOOK.decide(_payload(git_repo, tool="apply_patch")) is None
     assert git(git_repo, "status", "--porcelain") == before
     assert not (git_repo / ".solo-ai").exists()
+
+
+def test_hook_steps_aside_only_for_an_approved_delegated_adapter(
+    git_repo: Path,
+) -> None:
+    scripts = git_repo / "scripts"
+    policy = git_repo / ".solo-ai"
+    scripts.mkdir()
+    policy.mkdir()
+    (scripts / "worktree-flow.ps1").write_text("# lifecycle\n", encoding="utf-8")
+    (scripts / "dww_adapter.py").write_text("print('{}')\n", encoding="utf-8")
+    (policy / "delegated.toml").write_text(
+        """schema_version = 1
+id = "example-worktree-flow"
+runtime = "python"
+entrypoint = "scripts/dww_adapter.py"
+workflow_markers = ["scripts/worktree-flow.ps1"]
+tracked_inputs = ["scripts/dww_adapter.py", "scripts/worktree-flow.ps1"]
+capabilities = ["status"]
+max_parallel = 2
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/delegated.toml", "scripts")
+    git(git_repo, "commit", "-m", "declare delegated adapter")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+
+    result = HOOK.decide(
+        {
+            **_payload(git_repo, tool="apply_patch"),
+            "hook_event_name": "SessionStart",
+        }
+    )
+
+    assert result is not None
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "locally approved delegated adapter" in context
+    assert "example-worktree-flow" in context
+    assert HOOK.decide(_payload(git_repo, tool="apply_patch")) is None
 
 
 def test_hook_recognizes_local_orchestration_commands_in_a_managed_repository(
