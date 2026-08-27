@@ -46,6 +46,14 @@ dww --repo <path> --json delegated approve --fingerprint <sha256> --accept
 
 Approval is stored only under the Git common directory. It is not committed. A missing, unreadable, mismatched, or stale approval makes `route` return `defer`; it never falls through to managed initialization or executes an adapter.
 
+Revoke an exact approval without changing tracked files:
+
+```text
+dww --repo <path> --json delegated revoke --adapter-id <id> --fingerprint <sha256> --confirm
+```
+
+The adapter id and fingerprint must match the current local approval. After revocation, routing immediately returns to `defer` and the repository's native mature workflow remains authoritative.
+
 ## Invocation protocol
 
 Invoke only a declared capability:
@@ -82,3 +90,5 @@ The entrypoint must emit exactly one JSON object on stdout:
 The response schema, adapter id, fingerprint, and operation must match. A successful `status` result must include integer `available_slots` between zero and the declared `max_parallel`; the orchestration layer uses this live value rather than assuming all declared capacity is idle. Other result fields are owned by the repository adapter. Failed responses use `ok = false` and a non-empty `error`.
 
 This interface does not make the repository lifecycle generic. The repository still owns its task identities, leases, candidate pool, explicit seal, validation evidence, recovery, and cleanup. DWW owns only routing, approval, the bounded JSON call, and generic orchestration bookkeeping.
+
+For staged adoption, parity testing, rollout, and rollback, follow [Delegated adapter migration](delegated-migration.md).

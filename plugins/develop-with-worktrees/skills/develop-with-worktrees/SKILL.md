@@ -134,3 +134,5 @@ Do not fetch, pull, force-push, delete a remote ref, push tags, create a PR, or 
 - Finish never removes dependencies or caches. Interrupted Finish/Abandon operations resume only from persisted exact-candidate transactions and Git facts. `prune-slot` requires a reviewed generation-bound one-shot plan and digest; `.env*`, databases, upload/storage content, symlinks, junctions, or changes stop deletion.
 
 Read [configuration.md](references/configuration.md), [lifecycle.md](references/lifecycle.md), [task-governance.md](references/task-governance.md), and [safety.md](references/safety.md) before changing policy or handling an exception.
+
+When introducing a delegated adapter to an existing mature repository, also follow [delegated-migration.md](references/delegated-migration.md); never treat declaration alone as activation.

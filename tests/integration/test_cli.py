@@ -102,6 +102,13 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
         / "skills"
         / "develop-with-worktrees"
         / "SKILL.md",
+        repository_root
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "references"
+        / "delegated-migration.md",
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in documents)
     assert "0.1.0-beta.2" not in text
@@ -118,6 +125,8 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "候选池 + 显式封板" in text
     assert "task anchor" in text
     assert "任务锚点" in text
+    assert "Dual-run rules" in text
+    assert "delegated revoke" in text
     assert not (repository_root / "需求.md").exists()
     assert not (repository_root / "方案.md").exists()
     assert "After every install or hook change" not in text
@@ -304,6 +313,39 @@ def test_cli_approves_and_invokes_only_the_exact_delegated_contract(
         "available_slots": 2,
         "received": {"task_id": "task-1"},
     }
+
+    revoked = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "delegated",
+            "revoke",
+            "--adapter-id",
+            "example-worktree-flow",
+            "--fingerprint",
+            fingerprint,
+            "--confirm",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert revoked.returncode == 0, revoked.stderr
+    assert json.loads(revoked.stdout)["result"]["revoked"] is True
+    after_revoke = subprocess.run(
+        [sys.executable, str(runner), "--repo", str(git_repo), "--json", "route"],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert json.loads(after_revoke.stdout)["result"]["action"] == "defer"
 
 
 def test_cli_init_only_shows_plan_until_acceptance(git_repo: Path) -> None:

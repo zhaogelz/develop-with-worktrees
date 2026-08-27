@@ -21,6 +21,7 @@ from .delegated import (
     approve_delegated,
     inspect_delegated,
     invoke_delegated,
+    revoke_delegated,
 )
 from .lifecycle import (
     abandon,
@@ -187,6 +188,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     delegated_approve.add_argument("--fingerprint", required=True)
     delegated_approve.add_argument("--accept", action="store_true", required=True)
+    delegated_revoke = delegated_sub.add_parser(
+        "revoke", help="revoke one exact local adapter approval without changing Git"
+    )
+    delegated_revoke.add_argument("--adapter-id", required=True)
+    delegated_revoke.add_argument("--fingerprint", required=True)
+    delegated_revoke.add_argument("--confirm", action="store_true", required=True)
     delegated_invoke = delegated_sub.add_parser(
         "invoke", help="invoke one capability through the approved JSON adapter protocol"
     )
@@ -1045,6 +1052,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return approve_delegated(
                 repo.root,
                 repo.common_dir,
+                fingerprint=args.fingerprint,
+            )
+        if args.delegated_command == "revoke":
+            return revoke_delegated(
+                repo.common_dir,
+                adapter_id=args.adapter_id,
                 fingerprint=args.fingerprint,
             )
         if args.delegated_command == "invoke":

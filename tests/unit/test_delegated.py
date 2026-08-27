@@ -9,6 +9,7 @@ from solo_ai.delegated import (
     approve_delegated,
     inspect_delegated,
     invoke_delegated,
+    revoke_delegated,
 )
 from solo_ai.lifecycle import repository_route
 from solo_ai.repo import GitRepo
@@ -138,3 +139,29 @@ def test_approval_requires_the_exact_reported_fingerprint(git_repo: Path) -> Non
         approve_delegated(repo.root, repo.common_dir, fingerprint="0" * 64)
 
     assert not (repo.local_dir / "delegated-adapter-approval.json").exists()
+
+
+def test_exact_revoke_returns_route_to_safe_defer(git_repo: Path) -> None:
+    declare_adapter(git_repo)
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    fingerprint = inspection["adapter"]["fingerprint"]
+    approve_delegated(repo.root, repo.common_dir, fingerprint=fingerprint)
+
+    with pytest.raises(DelegatedContractError, match="Adapter id does not match"):
+        revoke_delegated(
+            repo.common_dir,
+            adapter_id="wrong-adapter",
+            fingerprint=fingerprint,
+        )
+    assert repository_route(repo)["action"] == "delegated"
+
+    revoked = revoke_delegated(
+        repo.common_dir,
+        adapter_id="example-worktree-flow",
+        fingerprint=fingerprint,
+    )
+
+    assert revoked["revoked"] is True
+    assert repository_route(repo)["action"] == "defer"
+    assert repository_route(repo)["reason"] == "delegated-approval-required"

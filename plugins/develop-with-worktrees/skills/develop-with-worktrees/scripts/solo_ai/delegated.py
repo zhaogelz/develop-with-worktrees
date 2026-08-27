@@ -370,6 +370,37 @@ def approve_delegated(
     return {"approved": True, "adapter": adapter}
 
 
+def revoke_delegated(
+    common_dir: Path, *, adapter_id: str, fingerprint: str
+) -> dict[str, Any]:
+    approval, approval_error = _approval(common_dir)
+    if approval_error:
+        raise DelegatedContractError(approval_error)
+    if approval is None:
+        return {"revoked": False, "reason": "not-approved"}
+    approved_id = approval.get("adapter_id")
+    approved_fingerprint = approval.get("fingerprint")
+    if approved_id != adapter_id or not isinstance(approved_fingerprint, str):
+        raise DelegatedContractError(
+            "Adapter id does not match the current local delegated approval"
+        )
+    if not secrets.compare_digest(approved_fingerprint, fingerprint):
+        raise DelegatedContractError(
+            "Fingerprint does not match the current local delegated approval"
+        )
+    try:
+        _approval_path(common_dir).unlink()
+    except OSError as exc:
+        raise DelegatedContractError(
+            f"Could not revoke the local delegated approval: {exc}"
+        ) from exc
+    return {
+        "revoked": True,
+        "adapter_id": adapter_id,
+        "fingerprint": fingerprint,
+    }
+
+
 def _adapter_argv(root: Path, contract: DelegatedContract) -> list[str]:
     entrypoint = str(root / contract.entrypoint)
     if contract.runtime == "python":
