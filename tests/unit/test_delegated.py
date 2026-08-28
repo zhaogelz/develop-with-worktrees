@@ -2843,14 +2843,26 @@ def test_posix_channel_factory_return_before_store_closes_both_endpoints(
                 raise KeyboardInterrupt("synthetic channel STORE_ATTR interruption")
         return interrupt_store
 
-    sys.settrace(interrupt_store)
+    test_runner_trace = sys.gettrace()
+
+    def sentinel_trace(_frame: object, _event: str, _arg: object) -> object:
+        return sentinel_trace
+
+    sys.settrace(sentinel_trace)
     try:
-        with pytest.raises(
-            KeyboardInterrupt, match="synthetic channel STORE_ATTR interruption"
-        ):
-            allocate_then_store()
+        previous_trace = sys.gettrace()
+        sys.settrace(interrupt_store)
+        try:
+            with pytest.raises(
+                KeyboardInterrupt, match="synthetic channel STORE_ATTR interruption"
+            ):
+                allocate_then_store()
+        finally:
+            sys.settrace(previous_trace)
+        assert sys.gettrace() is sentinel_trace
     finally:
-        sys.settrace(None)
+        sys.settrace(test_runner_trace)
+    assert sys.gettrace() is test_runner_trace
     gc.collect()
     assert len(created_descriptors) == 2
     assert_posix_descriptors_closed(created_descriptors)
@@ -2879,6 +2891,7 @@ def test_posix_endpoint_close_interruption_retains_owning_cleanup() -> None:
             raise KeyboardInterrupt("synthetic endpoint native close interruption")
         return interrupt_native_close
 
+    previous_trace = sys.gettrace()
     sys.settrace(interrupt_native_close)
     try:
         with pytest.raises(
@@ -2886,7 +2899,8 @@ def test_posix_endpoint_close_interruption_retains_owning_cleanup() -> None:
         ):
             read_end.close()
     finally:
-        sys.settrace(None)
+        sys.settrace(previous_trace)
+    assert sys.gettrace() is previous_trace
     # 中断发生在 native close 前，owner 必须仍保有同一 socket 对象，
     # 从而可安全重试，而不是遗失或按可能复用的裸 FD 再次关闭。
     assert read_end.value is not None
@@ -2947,6 +2961,7 @@ def test_temporary_file_return_before_payload_store_closes_descriptor(
 
     monkeypatch.setattr(delegated, "_create_cloexec_pipe", capture_channel)
     monkeypatch.setattr(delegated.tempfile, "TemporaryFile", capture_temporary_file)
+    previous_trace = sys.gettrace()
     sys.settrace(interrupt_store)
     try:
         with pytest.raises(
@@ -2959,7 +2974,8 @@ def test_temporary_file_return_before_payload_store_closes_descriptor(
                 environment={},
             )
     finally:
-        sys.settrace(None)
+        sys.settrace(previous_trace)
+    assert sys.gettrace() is previous_trace
     delegated._stop_posix_adapter_process_group(process)
     gc.collect()
     assert process.payload_handle is None
