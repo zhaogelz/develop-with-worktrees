@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -1064,7 +1066,7 @@ def test_windows_job_contains_descendant_spawned_after_root_resumes(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process handles are required")
-def test_windows_job_assignment_uses_native_handle_before_pid_can_be_reused(
+def test_windows_job_ownership_query_uses_native_handle_before_pid_can_be_reused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import psutil
@@ -1075,19 +1077,18 @@ def test_windows_job_assignment_uses_native_handle_before_pid_can_be_reused(
         argtypes: object = None
         restype: object = None
 
-        def __call__(self, job: object, process: object) -> int:
+        def __call__(
+            self, process: object, job: object, belongs: object
+        ) -> int:
             assigned.append((job.value, process.value))
+            belongs._obj.value = 1
             return 1
 
     class Kernel32:
-        AssignProcessToJobObject = Call()
+        IsProcessInJob = Call()
 
-    class OriginalHandle:
-        _handle = 0x123456
-
-        @property
-        def pid(self) -> int:
-            raise AssertionError("PID lookup would permit reuse before ownership")
+    process = delegated._WindowsAdapterProcess()
+    process.information.hProcess = 0x123456
 
     monkeypatch.setattr(
         psutil,
@@ -1096,8 +1097,8 @@ def test_windows_job_assignment_uses_native_handle_before_pid_can_be_reused(
     )
     monkeypatch.setattr(delegated, "_windows_kernel32", lambda: Kernel32())
 
-    delegated._assign_windows_adapter_job(
-        delegated._WindowsAdapterJob(0xABCDEF), OriginalHandle()
+    delegated._confirm_windows_adapter_job_ownership(
+        delegated._WindowsAdapterJob(0xABCDEF), process
     )
 
     assert assigned == [(0xABCDEF, 0x123456)]
@@ -1116,7 +1117,7 @@ def test_windows_job_configuration_failure_occurs_before_popen(
     monkeypatch.setattr(
         delegated, "_create_windows_adapter_job", fail_job_configuration
     )
-    monkeypatch.setattr(subprocess, "Popen", fail_if_started)
+    monkeypatch.setattr(delegated, "_call_windows_create_process", fail_if_started)
 
     with pytest.raises(
         delegated.DelegatedContractError, match="Job configuration failure"
@@ -1129,8 +1130,417 @@ def test_windows_job_configuration_failure_occurs_before_popen(
         )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job handles are required")
+def test_windows_job_close_interruption_consumes_handle_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    live_handles = {0xABCDEF: "job"}
+
+    class CloseHandle:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, handle: object) -> int:
+            raw_handle = int(handle.value)
+            calls.append(raw_handle)
+            assert live_handles.pop(raw_handle) == "job"
+            # 模拟内核已经关闭 Job，数值立即被无关对象复用，随后才交付异步异常。
+            live_handles[raw_handle] = "unrelated-reused-handle"
+            raise KeyboardInterrupt("synthetic post-CloseHandle interruption")
+
+    class Kernel32:
+        pass
+
+    Kernel32.CloseHandle = CloseHandle()
+
+    monkeypatch.setattr(delegated, "_windows_kernel32", lambda: Kernel32())
+    job = delegated._WindowsAdapterJob(0xABCDEF)
+
+    with pytest.raises(
+        delegated.DelegatedProcessTerminationError,
+        match="close outcome is indeterminate",
+    ) as first:
+        delegated._close_windows_adapter_job(job)
+
+    assert isinstance(first.value.__cause__, KeyboardInterrupt)
+    assert job.handle is None
+    assert job.close_attempted
+    assert job.close_outcome_uncertain
+    assert delegated._exception_requires_closure_preservation(first.value)
+
+    with pytest.raises(
+        delegated.DelegatedProcessTerminationError,
+        match="close outcome is indeterminate",
+    ):
+        delegated._close_windows_adapter_job(job)
+
+    assert calls == [0xABCDEF]
+    assert live_handles == {0xABCDEF: "unrelated-reused-handle"}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended launch is required")
+def test_windows_create_process_return_interruption_cannot_leak_suspended_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "interrupted-popen-root-ran.txt"
+    original_create = delegated._call_windows_create_process
+    observer_handles: list[int] = []
+
+    def create_then_interrupt(
+        process: object, *args: object, **kwargs: object
+    ) -> None:
+        original_create(process, *args, **kwargs)
+        kernel32 = delegated._windows_kernel32()
+        current_process = kernel32.GetCurrentProcess
+        current_process.argtypes = []
+        current_process.restype = ctypes.c_void_p
+        duplicate = kernel32.DuplicateHandle
+        duplicate.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_uint32,
+        ]
+        duplicate.restype = ctypes.c_int
+        observer = ctypes.c_void_p()
+        owner = current_process()
+        assert duplicate(
+            owner,
+            ctypes.c_void_p(process.process_handle()),
+            owner,
+            ctypes.byref(observer),
+            0,
+            False,
+            0x00000002,
+        )
+        observer_handles.append(int(observer.value))
+        raise KeyboardInterrupt("synthetic interruption after CreateProcess")
+
+    monkeypatch.setattr(
+        delegated, "_call_windows_create_process", create_then_interrupt
+    )
+
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic interruption after CreateProcess"
+        ):
+            delegated._run_adapter_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')",
+                ],
+                root=tmp_path,
+                request_bytes=b"{}",
+                timeout_seconds=30,
+            )
+
+        assert len(observer_handles) == 1
+        kernel32 = delegated._windows_kernel32()
+        wait = kernel32.WaitForSingleObject
+        wait.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        wait.restype = ctypes.c_uint32
+        assert wait(ctypes.c_void_p(observer_handles[0]), 5000) == 0
+        assert not marker.exists()
+    finally:
+        kernel32 = delegated._windows_kernel32()
+        close = kernel32.CloseHandle
+        close.argtypes = [ctypes.c_void_p]
+        close.restype = ctypes.c_int
+        for observer_handle in observer_handles:
+            assert close(ctypes.c_void_p(observer_handle))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows atomic Job launch is required")
+def test_windows_post_create_interruption_cleans_confirmed_unused_closure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    marker = git_repo / "post-create-closure-adapter-ran.txt"
+    adapter_path.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "add post-create closure fixture")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    closure_roots: list[Path] = []
+    original_run = delegated._run_adapter_process
+    original_create = delegated._call_windows_create_process
+
+    def capture_then_run(*args: object, **kwargs: object) -> object:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+        return original_run(*args, **kwargs)
+
+    def create_then_interrupt(
+        process: object, *args: object, **kwargs: object
+    ) -> None:
+        original_create(process, *args, **kwargs)
+        raise KeyboardInterrupt("synthetic post-create closure interruption")
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
+    monkeypatch.setattr(
+        delegated, "_call_windows_create_process", create_then_interrupt
+    )
+
+    with pytest.raises(
+        KeyboardInterrupt, match="synthetic post-create closure interruption"
+    ):
+        invoke_delegated(
+            repo.root,
+            repo.common_dir,
+            operation="status",
+            request={},
+            timeout_seconds=30,
+        )
+
+    assert not marker.exists()
+    assert len(closure_roots) == 1
+    assert not closure_roots[0].exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups are required")
+def test_posix_popen_return_interruption_cannot_leak_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "interrupted-popen-root-ran.txt"
+    original_popen = subprocess.Popen
+    spawned: list[subprocess.Popen[bytes]] = []
+    launch_kwargs: list[dict[str, object]] = []
+
+    def create_then_interrupt(*args: object, **kwargs: object) -> object:
+        launch_kwargs.append(dict(kwargs))
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        raise KeyboardInterrupt("synthetic interruption after fork-exec")
+
+    monkeypatch.setattr(subprocess, "Popen", create_then_interrupt)
+
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic interruption after fork-exec"
+        ):
+            delegated._run_adapter_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; from pathlib import Path; time.sleep(1); "
+                    f"Path({str(marker)!r}).write_text('ran', encoding='utf-8'); "
+                    "time.sleep(30)",
+                ],
+                root=tmp_path,
+                request_bytes=b"{}",
+                timeout_seconds=30,
+            )
+
+        assert len(spawned) == 1
+        assert len(launch_kwargs) == 1
+        assert launch_kwargs[0]["start_new_session"] is True
+        assert launch_kwargs[0]["close_fds"] is True
+        assert len(launch_kwargs[0]["pass_fds"]) == 3
+        assert Path(launch_kwargs[0]["cwd"]) != tmp_path
+        launcher_environment = launch_kwargs[0]["env"]
+        assert isinstance(launcher_environment, dict)
+        assert not any(
+            key.upper().startswith(("PYTHON", "LD_", "DYLD_"))
+            for key in launcher_environment
+        )
+        deadline = time.monotonic() + 2
+        while spawned[0].poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert spawned[0].poll() is not None
+        assert not marker.exists()
+    finally:
+        for process in spawned:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX gate launch is required")
+def test_posix_post_fork_interruption_cleans_confirmed_unused_closure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    marker = git_repo / "post-fork-closure-adapter-ran.txt"
+    adapter_path.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "add post-fork closure fixture")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    closure_roots: list[Path] = []
+    original_run = delegated._run_adapter_process
+    original_popen = subprocess.Popen
+
+    def capture_then_run(*args: object, **kwargs: object) -> object:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+
+        def create_then_interrupt(*popen_args: object, **popen_kwargs: object) -> object:
+            original_popen(*popen_args, **popen_kwargs)
+            raise KeyboardInterrupt("synthetic post-fork closure interruption")
+
+        monkeypatch.setattr(subprocess, "Popen", create_then_interrupt)
+        try:
+            return original_run(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(subprocess, "Popen", original_popen)
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
+
+    with pytest.raises(
+        KeyboardInterrupt, match="synthetic post-fork closure interruption"
+    ):
+        invoke_delegated(
+            repo.root,
+            repo.common_dir,
+            operation="status",
+            request={},
+            timeout_seconds=30,
+        )
+
+    assert not marker.exists()
+    assert len(closure_roots) == 1
+    assert not closure_roots[0].exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher isolation is required")
+def test_posix_launcher_does_not_load_adapter_sitecustomize_before_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site_marker = tmp_path / "sitecustomize-ran.txt"
+    adapter_marker = tmp_path / "adapter-ran.txt"
+    (tmp_path / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(site_marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(tmp_path)
+    original_write = delegated.os.write
+
+    def interrupt_gate(descriptor: int, content: bytes) -> int:
+        if content == b"G":
+            raise KeyboardInterrupt("synthetic interruption before GO")
+        return original_write(descriptor, content)
+
+    monkeypatch.setattr(delegated.os, "write", interrupt_gate)
+
+    with pytest.raises(KeyboardInterrupt, match="synthetic interruption before GO"):
+        delegated._run_adapter_process(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; "
+                f"Path({str(adapter_marker)!r}).write_text('ran', encoding='utf-8')",
+            ],
+            root=tmp_path,
+            request_bytes=b"{}",
+            timeout_seconds=30,
+            environment=environment,
+        )
+
+    assert not site_marker.exists()
+    assert not adapter_marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher gate is required")
+def test_posix_gate_write_interruption_after_go_stops_adapter_before_late_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "post-go-adapter-ran.txt"
+    original_write = delegated.os.write
+
+    def write_then_interrupt(descriptor: int, content: bytes) -> int:
+        written = original_write(descriptor, content)
+        if content == b"G":
+            raise KeyboardInterrupt("synthetic interruption after GO")
+        return written
+
+    monkeypatch.setattr(delegated.os, "write", write_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt, match="synthetic interruption after GO"):
+        delegated._run_adapter_process(
+            [
+                sys.executable,
+                "-c",
+                "import time; from pathlib import Path; time.sleep(1); "
+                f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')",
+            ],
+            root=tmp_path,
+            request_bytes=b"{}",
+            timeout_seconds=30,
+        )
+
+    time.sleep(1.2)
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher status is required")
+def test_posix_launcher_rejects_status_that_does_not_match_direct_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "mismatched-status-adapter-ran.txt"
+    original_read_status = delegated._read_posix_launcher_status
+
+    def mismatched_status(*args: object, **kwargs: object) -> None:
+        original_read_status(*args, **kwargs)
+        identity = args[1]
+        pid, process_group = identity.require()
+        assert pid == process_group
+        identity.value = (pid + 1, process_group + 1)
+
+    monkeypatch.setattr(
+        delegated, "_read_posix_launcher_status", mismatched_status
+    )
+
+    with pytest.raises(
+        delegated.DelegatedContractError,
+        match="status does not match its direct child",
+    ):
+        delegated._run_adapter_process(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; "
+                f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')",
+            ],
+            root=tmp_path,
+            request_bytes=b"{}",
+            timeout_seconds=30,
+        )
+
+    assert not marker.exists()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
-@pytest.mark.parametrize("failure_point", ("assign", "ownership-query"))
+@pytest.mark.parametrize("failure_point", ("create", "ownership-query"))
 def test_windows_job_setup_failure_never_executes_root_and_cleans_closure(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, failure_point: str
 ) -> None:
@@ -1164,8 +1574,8 @@ def test_windows_job_setup_failure_never_executes_root_and_cleans_closure(
         raise OSError(f"synthetic Job {failure_point} failure")
 
     monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
-    if failure_point == "assign":
-        monkeypatch.setattr(delegated, "_assign_windows_adapter_job", fail_setup)
+    if failure_point == "create":
+        monkeypatch.setattr(delegated, "_call_windows_create_process", fail_setup)
     else:
         monkeypatch.setattr(
             delegated, "_confirm_windows_adapter_job_ownership", fail_setup

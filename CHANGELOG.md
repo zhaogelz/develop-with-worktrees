@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0-beta.15 — 2026-08-28
+
+- Windows 委托启动不再经过“`Popen` 返回后再 assign Job”的窗口：调用方用 `STARTUPINFOEX` 同时传入精确标准流 HANDLE 列表与 `PROC_THREAD_ATTRIBUTE_JOB_LIST`，`CreateProcessW(CREATE_SUSPENDED)` 创建成功的第一刻即由预建 `KILL_ON_JOB_CLOSE` Job 原子拥有；预建轻量 process wrapper 直接持有 `PROCESS_INFORMATION` 的 process/thread HANDLE，系统创建成功但 Python 尚未返回时的任意 `BaseException` 也能收束且不会执行入口。
+- POSIX 委托增加隔离的 gate/status launcher：父方用 CLOEXEC 管道钉住未 reap 的直接子和进程组身份，严格核对 `pid == pgid == process.pid` 后才发送唯一 GO；launcher 在 GO 前以 `-I -S`、非仓库 cwd 和剥离 Python/动态加载器变量的环境运行，原适配器 argv、cwd 与环境只在 GO 后从私有 FD 读取并 `execvpe`。`_fork_exec` 成功但 `Popen` 尚未返回、GO 写入边界中断、无效帧或超时都不会提前执行适配器，并按 TERM→KILL、`waitpid` 与组消失确认失败关闭。
+- Job、process/thread、标准流副本和属性列表采用单次消费：原生关闭前先从唯一所有者移除数值，关闭成功后的异步中断不会再次查询或关闭已复用 HANDLE；关闭、查询、终止或身份确认不确定时保留 verified-input closure。补充真实 post-create/pre-return、迟到 marker、`sitecustomize`、GO 前后中断、PID/PGID 不匹配和 HANDLE 复用回归，Hook 定义保持不变。
+
 ## 0.3.0-beta.14 — 2026-08-28
 
 - Windows 委托适配器改为预建 `KILL_ON_JOB_CLOSE` Job Object，并以 `CREATE_SUSPENDED` 启动根进程；调用方先用 Popen 原生 process HANDLE 直接加入 Job，再恢复执行，不再通过可复用 PID 或事后 PPID 树建立所有权，也不使用 `CREATE_BREAKAWAY_FROM_JOB`。

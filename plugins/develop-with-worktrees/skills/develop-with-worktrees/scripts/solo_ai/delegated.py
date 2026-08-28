@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
 import re
 import secrets
+import select
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
@@ -33,6 +36,7 @@ MAX_ADAPTER_REQUEST_BYTES = 1024 * 1024
 MAX_ADAPTER_STDOUT_BYTES = 1024 * 1024
 MAX_ADAPTER_STDERR_BYTES = 64 * 1024
 MAX_ADAPTER_ERROR_CHARS = 1200
+MAX_ADAPTER_LAUNCH_PAYLOAD_BYTES = 2 * 1024 * 1024
 ADAPTER_POLL_SECONDS = 0.05
 ADAPTER_TERMINATION_GRACE_SECONDS = 5.0
 ADAPTER_TERMINATION_POLL_SECONDS = 0.02
@@ -712,6 +716,260 @@ def _adapter_poll_pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
+@dataclass
+class _OwnedPosixFd:
+    """先移交状态、再关闭，避免异步异常后重复消费同一 FD 数值。"""
+
+    value: int | None
+
+    def close(self) -> None:
+        if self.value is None:
+            return
+        descriptor = self.value
+        self.value = None
+        os.close(descriptor)
+
+
+@dataclass
+class _PosixLauncherIdentity:
+    value: tuple[int, int] | None = None
+
+    def require(self) -> tuple[int, int]:
+        if self.value is None:
+            raise ValueError("POSIX delegated launcher identity is unavailable")
+        pid, process_group = self.value
+        if pid <= 0 or pid != process_group:
+            raise ValueError("POSIX delegated launcher identity is invalid")
+        return pid, process_group
+
+
+def _create_cloexec_pipe() -> tuple[_OwnedPosixFd, _OwnedPosixFd]:
+    if hasattr(os, "pipe2"):
+        read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+    else:  # pragma: no cover - 当前支持的 POSIX Python 都提供 pipe2
+        read_fd, write_fd = os.pipe()
+        os.set_inheritable(read_fd, False)
+        os.set_inheritable(write_fd, False)
+    return _OwnedPosixFd(read_fd), _OwnedPosixFd(write_fd)
+
+
+_POSIX_GATE_LAUNCHER = r"""
+import os
+import sys
+
+status_fd = int(sys.argv[1])
+gate_fd = int(sys.argv[2])
+payload_fd = int(sys.argv[3])
+try:
+    pid = os.getpid()
+    pgid = os.getpgrp()
+    frame = ("DWW1 %d %d\n" % (pid, pgid)).encode("ascii")
+    pipe_buf = os.fpathconf(status_fd, "PC_PIPE_BUF")
+    if pid <= 0 or pgid != pid or len(frame) > pipe_buf:
+        os._exit(124)
+    if os.write(status_fd, frame) != len(frame):
+        os._exit(124)
+except BaseException:
+    os._exit(124)
+finally:
+    try:
+        os.close(status_fd)
+    except OSError:
+        pass
+
+try:
+    gate = os.read(gate_fd, 2)
+    tail = os.read(gate_fd, 1)
+except BaseException:
+    os._exit(125)
+finally:
+    try:
+        os.close(gate_fd)
+    except OSError:
+        pass
+if gate != b"G" or tail != b"":
+    os._exit(125)
+
+try:
+    chunks = []
+    size = 0
+    while True:
+        chunk = os.read(payload_fd, 65536)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > 2097152:
+            os._exit(126)
+        chunks.append(chunk)
+    os.close(payload_fd)
+    import json
+
+    payload = json.loads(b"".join(chunks).decode("utf-8"))
+    argv = payload["argv"]
+    environment = payload["environment"]
+    cwd = payload["cwd"]
+    if not isinstance(argv, list) or not argv:
+        os._exit(126)
+    if not all(isinstance(item, str) and item for item in argv):
+        os._exit(126)
+    if not isinstance(environment, dict):
+        os._exit(126)
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in environment.items()):
+        os._exit(126)
+    if not isinstance(cwd, str) or not cwd:
+        os._exit(126)
+    os.chdir(cwd)
+    os.execvpe(argv[0], argv, environment)
+except BaseException:
+    os._exit(126)
+"""
+
+
+def _posix_launcher_environment() -> dict[str, str]:
+    blocked_prefixes = ("PYTHON", "LD_", "DYLD_")
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith(blocked_prefixes)
+    }
+
+
+def _posix_launch_payload(
+    argv: list[str], *, root: Path, environment: dict[str, str] | None
+) -> bytes:
+    effective_environment = dict(os.environ if environment is None else environment)
+    payload = json.dumps(
+        {
+            "argv": argv,
+            "cwd": str(root),
+            "environment": effective_environment,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > MAX_ADAPTER_LAUNCH_PAYLOAD_BYTES:
+        raise DelegatedContractError(
+            "Delegated adapter launch environment exceeds the "
+            f"{MAX_ADAPTER_LAUNCH_PAYLOAD_BYTES}-byte limit"
+        )
+    return payload
+
+
+def _read_posix_launcher_status(
+    status_fd: _OwnedPosixFd,
+    identity: _PosixLauncherIdentity,
+    *,
+    timeout: float,
+) -> None:
+    if status_fd.value is None:
+        raise DelegatedProcessTerminationError(
+            "POSIX delegated launcher status descriptor was already closed"
+        )
+    descriptor = status_fd.value
+    deadline = time.monotonic() + timeout
+    frame = bytearray()
+    os.set_blocking(descriptor, False)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("POSIX delegated launcher status timed out")
+        readable, _, _ = select.select([descriptor], [], [], remaining)
+        if not readable:
+            raise TimeoutError("POSIX delegated launcher status timed out")
+        chunk = os.read(descriptor, 128 - len(frame))
+        if not chunk:
+            break
+        frame.extend(chunk)
+        if len(frame) >= 128:
+            raise ValueError("POSIX delegated launcher status frame is oversized")
+    match = re.fullmatch(rb"DWW1 ([1-9][0-9]*) ([1-9][0-9]*)\n", bytes(frame))
+    if match is None:
+        raise ValueError("POSIX delegated launcher status frame is invalid")
+    pid = int(match.group(1))
+    process_group = int(match.group(2))
+    if pid != process_group:
+        raise ValueError("POSIX delegated launcher is not its process-group leader")
+    # 调用方预建唯一 identity 对象；即使赋值后的返回边界被中断仍可收束该组。
+    identity.value = (pid, process_group)
+
+
+def _posix_direct_child_exited_unreaped(pid: int) -> bool:
+    try:
+        status = os.waitid(
+            os.P_PID,
+            pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+    except ChildProcessError as exc:
+        raise DelegatedProcessTerminationError(
+            "Lost POSIX launcher direct child was reaped outside its owner"
+        ) from exc
+    return status is not None and status.si_pid == pid
+
+
+def _wait_and_reap_lost_posix_launcher(pid: int, *, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            waited_pid, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError as exc:
+            raise DelegatedProcessTerminationError(
+                "Lost POSIX launcher direct child was reaped outside its owner"
+            ) from exc
+        if waited_pid == pid:
+            return
+        if time.monotonic() >= deadline:
+            raise DelegatedProcessTerminationError(
+                "Lost POSIX launcher direct child could not be reaped"
+            )
+        time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
+
+
+def _wait_for_posix_group_absence(process_group: int, *, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while _posix_process_group_exists(process_group):
+        if time.monotonic() >= deadline:
+            raise DelegatedProcessTerminationError(
+                "Lost POSIX launcher process group could not be confirmed stopped"
+            )
+        time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
+
+
+def _stop_unreturned_posix_launcher(pid: int, process_group: int) -> None:
+    if pid <= 0 or pid != process_group:
+        raise DelegatedProcessTerminationError(
+            "Lost POSIX launcher identity could not be validated"
+        )
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        raise DelegatedProcessTerminationError(
+            "Could not request lost POSIX launcher process-group termination"
+        ) from exc
+    graceful_deadline = time.monotonic() + ADAPTER_TERMINATION_GRACE_SECONDS
+    while time.monotonic() < graceful_deadline:
+        if _posix_direct_child_exited_unreaped(pid):
+            break
+        time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        raise DelegatedProcessTerminationError(
+            "Could not force lost POSIX launcher process-group termination"
+        ) from exc
+    _wait_and_reap_lost_posix_launcher(
+        pid, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+    )
+    # 信号发送期间始终保留未 reap 的直接子身份；reap 后只查询、不再按裸 PGID 发信号。
+    _wait_for_posix_group_absence(
+        process_group, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+    )
+
+
 def _posix_process_group_exists(process_group: int) -> bool:
     try:
         os.killpg(process_group, 0)
@@ -779,6 +1037,261 @@ def _stop_posix_adapter_process_group(process: subprocess.Popen[bytes]) -> None:
         )
 
 
+def _close_posix_launch_child_ends(
+    status_write: _OwnedPosixFd,
+    gate_read: _OwnedPosixFd,
+    payload_handle: Any,
+) -> BaseException | None:
+    failures: list[BaseException] = []
+    for close in (status_write.close, gate_read.close, payload_handle.close):
+        try:
+            close()
+        except BaseException as exc:  # noqa: BLE001 - 每个 child-end 都必须尝试关闭
+            failures.append(exc)
+    if not failures:
+        return None
+    if len(failures) == 1:
+        return failures[0]
+    return BaseExceptionGroup("POSIX launcher child-end close failures", failures)
+
+
+def _close_posix_parent_ends(
+    status_read: _OwnedPosixFd, gate_write: _OwnedPosixFd
+) -> BaseException | None:
+    failures: list[BaseException] = []
+    for descriptor in (gate_write, status_read):
+        try:
+            descriptor.close()
+        except BaseException as exc:  # noqa: BLE001 - 防止后一 FD 因前一失败而泄漏
+            failures.append(exc)
+    if not failures:
+        return None
+    if len(failures) == 1:
+        return failures[0]
+    return BaseExceptionGroup("POSIX launcher parent-end close failures", failures)
+
+
+def _prepare_posix_launch_resources(
+    argv: list[str], *, root: Path, environment: dict[str, str] | None
+) -> tuple[_OwnedPosixFd, _OwnedPosixFd, _OwnedPosixFd, _OwnedPosixFd, Any]:
+    payload = _posix_launch_payload(argv, root=root, environment=environment)
+    status_read = _OwnedPosixFd(None)
+    status_write = _OwnedPosixFd(None)
+    gate_read = _OwnedPosixFd(None)
+    gate_write = _OwnedPosixFd(None)
+    payload_handle: Any | None = None
+    try:
+        status_read, status_write = _create_cloexec_pipe()
+        gate_read, gate_write = _create_cloexec_pipe()
+        payload_handle = tempfile.TemporaryFile()
+        payload_handle.write(payload)
+        payload_handle.flush()
+        payload_handle.seek(0)
+        return status_read, status_write, gate_read, gate_write, payload_handle
+    except BaseException as original_error:
+        failures: list[BaseException] = []
+        for descriptor in (status_read, status_write, gate_read, gate_write):
+            try:
+                descriptor.close()
+            except BaseException as exc:  # noqa: BLE001 - 未启动时也不泄漏 FD
+                failures.append(exc)
+        if payload_handle is not None:
+            try:
+                payload_handle.close()
+            except BaseException as exc:  # noqa: BLE001 - 与准备错误保留双证据
+                failures.append(exc)
+        if failures:
+            raise _combined_failures(
+                "POSIX launcher preparation and cleanup both failed",
+                original_error,
+                failures[0]
+                if len(failures) == 1
+                else BaseExceptionGroup(
+                    "POSIX launcher preparation cleanup failures", failures
+                ),
+            ) from None
+        raise
+
+
+def _launch_posix_adapter_process(
+    argv: list[str],
+    *,
+    root: Path,
+    stdin_handle: Any,
+    stdout_handle: Any,
+    stderr_handle: Any,
+    environment: dict[str, str] | None,
+) -> subprocess.Popen[bytes]:
+    (
+        status_read,
+        status_write,
+        gate_read,
+        gate_write,
+        payload_handle,
+    ) = _prepare_posix_launch_resources(
+        argv, root=root, environment=environment
+    )
+    process: subprocess.Popen[bytes] | None = None
+    launcher_identity = _PosixLauncherIdentity()
+    launch_error: BaseException | None = None
+    child_close_error: BaseException | None = None
+    try:
+        try:
+            assert status_write.value is not None
+            assert gate_read.value is not None
+            process = subprocess.Popen(
+                [
+                    str(Path(sys.executable).resolve()),
+                    "-I",
+                    "-S",
+                    "-c",
+                    _POSIX_GATE_LAUNCHER,
+                    str(status_write.value),
+                    str(gate_read.value),
+                    str(payload_handle.fileno()),
+                ],
+                cwd=Path(sys.executable).resolve().parent,
+                stdin=stdin_handle,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                env=_posix_launcher_environment(),
+                start_new_session=True,
+                close_fds=True,
+                pass_fds=(
+                    status_write.value,
+                    gate_read.value,
+                    payload_handle.fileno(),
+                ),
+            )
+        except BaseException as exc:  # noqa: BLE001 - 可能已 fork/exec 但尚未返回对象
+            launch_error = exc
+        finally:
+            child_close_error = _close_posix_launch_child_ends(
+                status_write, gate_read, payload_handle
+            )
+
+        if process is None:
+            failures: list[BaseException] = []
+            try:
+                gate_write.close()
+            except BaseException as exc:  # noqa: BLE001 - EOF 是禁止 launcher exec 的门禁
+                failures.append(exc)
+            identity: tuple[int, int] | None = None
+            try:
+                _read_posix_launcher_status(
+                    status_read,
+                    launcher_identity,
+                    timeout=ADAPTER_TERMINATION_GRACE_SECONDS,
+                )
+                identity = launcher_identity.require()
+            except BaseException as exc:  # noqa: BLE001 - 无身份不得猜 PID/PGID
+                try:
+                    identity = launcher_identity.require()
+                except (TypeError, ValueError):
+                    failures.append(
+                        DelegatedProcessTerminationError(
+                            "Unreturned POSIX launcher identity could not be proven"
+                        )
+                    )
+                    failures[-1].__cause__ = exc
+            try:
+                status_read.close()
+            except BaseException as exc:  # noqa: BLE001 - 单次消费后继续终止
+                failures.append(exc)
+            if identity is not None:
+                try:
+                    _stop_unreturned_posix_launcher(*identity)
+                except BaseException as exc:  # noqa: BLE001 - 未返回根仍须确认整个组
+                    failures.append(exc)
+            if child_close_error is not None:
+                failures.append(child_close_error)
+            assert launch_error is not None
+            if failures:
+                termination_error = DelegatedProcessTerminationError(
+                    "Unreturned POSIX delegated launcher could not be safely closed"
+                )
+                termination_error.__cause__ = (
+                    failures[0]
+                    if len(failures) == 1
+                    else BaseExceptionGroup(
+                        "Unreturned POSIX launcher cleanup failures", failures
+                    )
+                )
+                raise _combined_failures(
+                    "Delegated adapter launch failed after POSIX child creation "
+                    "could no longer be excluded",
+                    launch_error,
+                    termination_error,
+                ) from None
+            if isinstance(launch_error, OSError):
+                raise DelegatedContractError(
+                    f"Could not start the delegated adapter: {launch_error}"
+                ) from launch_error
+            raise launch_error
+
+        try:
+            if child_close_error is not None:
+                raise child_close_error
+            _read_posix_launcher_status(
+                status_read,
+                launcher_identity,
+                timeout=ADAPTER_TERMINATION_GRACE_SECONDS,
+            )
+            launcher_pid, process_group = launcher_identity.require()
+            if launcher_pid != process.pid or process_group != process.pid:
+                raise DelegatedContractError(
+                    "POSIX delegated launcher status does not match its direct child"
+                )
+            status_read.close()
+            # 写入一开始就按“适配器可能执行”处理；任意中断都进入整组收束。
+            if gate_write.value is None:
+                raise DelegatedContractError(
+                    "POSIX delegated launcher gate was already closed"
+                )
+            if os.write(gate_write.value, b"G") != 1:
+                raise DelegatedContractError(
+                    "POSIX delegated launcher gate write was incomplete"
+                )
+            gate_write.close()
+            return process
+        except BaseException as original_error:
+            parent_close_error = _close_posix_parent_ends(
+                status_read, gate_write
+            )
+            try:
+                _stop_posix_adapter_process_group(process)
+            except BaseException as termination_error:  # noqa: BLE001 - 协议失败仍须收束
+                failures = [termination_error]
+                if parent_close_error is not None:
+                    failures.append(parent_close_error)
+                wrapped = DelegatedProcessTerminationError(
+                    "POSIX delegated launcher protocol failed and its process "
+                    "group could not be confirmed stopped"
+                )
+                wrapped.__cause__ = (
+                    failures[0]
+                    if len(failures) == 1
+                    else BaseExceptionGroup(
+                        "POSIX launcher protocol cleanup failures", failures
+                    )
+                )
+                raise _combined_failures(
+                    "POSIX delegated launcher protocol and termination both failed",
+                    original_error,
+                    wrapped,
+                ) from None
+            if parent_close_error is not None:
+                raise _combined_failures(
+                    "POSIX delegated launcher protocol and descriptor cleanup failed",
+                    original_error,
+                    parent_close_error,
+                ) from None
+            raise
+    finally:
+        # 正常路径已消费；异常路径只会尝试尚未消费的 FD。
+        _close_posix_parent_ends(status_read, gate_write)
+
+
 class _WindowsBasicLimitInformation(ctypes.Structure):
     _fields_ = [
         ("PerProcessUserTimeLimit", ctypes.c_int64),
@@ -828,20 +1341,139 @@ class _WindowsBasicAccountingInformation(ctypes.Structure):
     ]
 
 
+class _WindowsStartupInformation(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_uint32),
+        ("lpReserved", ctypes.c_wchar_p),
+        ("lpDesktop", ctypes.c_wchar_p),
+        ("lpTitle", ctypes.c_wchar_p),
+        ("dwX", ctypes.c_uint32),
+        ("dwY", ctypes.c_uint32),
+        ("dwXSize", ctypes.c_uint32),
+        ("dwYSize", ctypes.c_uint32),
+        ("dwXCountChars", ctypes.c_uint32),
+        ("dwYCountChars", ctypes.c_uint32),
+        ("dwFillAttribute", ctypes.c_uint32),
+        ("dwFlags", ctypes.c_uint32),
+        ("wShowWindow", ctypes.c_uint16),
+        ("cbReserved2", ctypes.c_uint16),
+        ("lpReserved2", ctypes.POINTER(ctypes.c_ubyte)),
+        ("hStdInput", ctypes.c_void_p),
+        ("hStdOutput", ctypes.c_void_p),
+        ("hStdError", ctypes.c_void_p),
+    ]
+
+
+class _WindowsStartupInformationEx(ctypes.Structure):
+    _fields_ = [
+        ("StartupInfo", _WindowsStartupInformation),
+        ("lpAttributeList", ctypes.c_void_p),
+    ]
+
+
+class _WindowsProcessInformation(ctypes.Structure):
+    _fields_ = [
+        ("hProcess", ctypes.c_void_p),
+        ("hThread", ctypes.c_void_p),
+        ("dwProcessId", ctypes.c_uint32),
+        ("dwThreadId", ctypes.c_uint32),
+    ]
+
+
 @dataclass
 class _WindowsAdapterJob:
-    """Popen 前建立的 Windows 所有权边界；不依赖可复用的 PID。"""
+    """CreateProcessW 前建立的 Windows 所有权边界；不依赖可复用 PID。"""
 
     handle: int | None
     empty_confirmed: bool = False
+    close_attempted: bool = False
+    close_outcome_uncertain: bool = False
+    closed_confirmed: bool = False
+
+
+class _WindowsAdapterProcess:
+    """PROCESS_INFORMATION 是唯一句柄所有者，API 直接写入预建字段。"""
+
+    def __init__(self) -> None:
+        self.information = _WindowsProcessInformation()
+        self.returncode: int | None = None
+        self.job_ownership_confirmed = False
+
+    @property
+    def pid(self) -> int:
+        return int(self.information.dwProcessId)
+
+    def process_handle(self) -> int:
+        handle = self.information.hProcess
+        if not handle:
+            raise OSError("Windows delegated adapter process handle is unavailable")
+        return int(handle)
+
+    def thread_handle(self) -> int:
+        handle = self.information.hThread
+        if not handle:
+            raise OSError("Windows delegated adapter thread handle is unavailable")
+        return int(handle)
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        exit_code = ctypes.c_uint32()
+        kernel32 = _windows_kernel32()
+        get_exit_code = kernel32.GetExitCodeProcess
+        get_exit_code.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        get_exit_code.restype = ctypes.c_int
+        if not get_exit_code(
+            ctypes.c_void_p(self.process_handle()), ctypes.byref(exit_code)
+        ):
+            raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
+        if exit_code.value == 259:
+            return None
+        self.returncode = int(exit_code.value)
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is not None:
+            return self.returncode
+        milliseconds = 0xFFFFFFFF
+        if timeout is not None:
+            milliseconds = min(0xFFFFFFFE, max(0, int(timeout * 1000 + 0.999)))
+        kernel32 = _windows_kernel32()
+        wait = kernel32.WaitForSingleObject
+        wait.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        wait.restype = ctypes.c_uint32
+        result = int(
+            wait(ctypes.c_void_p(self.process_handle()), milliseconds)
+        )
+        if result == 0x00000102:
+            raise subprocess.TimeoutExpired([], timeout)
+        if result == 0xFFFFFFFF:
+            raise OSError(ctypes.get_last_error(), "WaitForSingleObject failed")
+        if result != 0:
+            raise OSError(f"Unexpected WaitForSingleObject result 0x{result:08x}")
+        returncode = self.poll()
+        if returncode is None:
+            raise OSError("Windows process was signaled but remained active")
+        return returncode
+
+
+@dataclass
+class _WindowsLaunchResources:
+    attribute_buffer: Any | None = None
+    attribute_list_initialized: bool = False
+    standard_handles: Any = None
+    job_handles: Any = None
+
+    def __post_init__(self) -> None:
+        if self.standard_handles is None:
+            self.standard_handles = (ctypes.c_void_p * 3)()
+        if self.job_handles is None:
+            self.job_handles = (ctypes.c_void_p * 1)()
+
 
 
 def _windows_kernel32() -> Any:
     return ctypes.WinDLL("kernel32", use_last_error=True)
-
-
-def _windows_ntdll() -> Any:
-    return ctypes.WinDLL("ntdll", use_last_error=True)
 
 
 def _create_windows_adapter_job() -> _WindowsAdapterJob:
@@ -895,42 +1527,36 @@ def _create_windows_adapter_job() -> _WindowsAdapterJob:
 
 def _close_windows_adapter_job(job: _WindowsAdapterJob) -> None:
     if job.handle is None:
+        if job.close_outcome_uncertain:
+            raise DelegatedProcessTerminationError(
+                "Windows adapter Job handle close outcome is indeterminate"
+            )
         return
     handle = job.handle
+    # 数值句柄在原生调用前即从对象移除；即使 CloseHandle 返回边界被中断也绝不重试。
+    job.handle = None
+    job.close_attempted = True
     kernel32 = _windows_kernel32()
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [ctypes.c_void_p]
     close_handle.restype = ctypes.c_int
-    if not close_handle(ctypes.c_void_p(handle)):
-        raise OSError(ctypes.get_last_error(), "CloseHandle failed for adapter job")
-    job.handle = None
-
-
-def _windows_process_handle(process: subprocess.Popen[bytes]) -> int:
-    handle = getattr(process, "_handle", None)
-    if handle is None:
-        raise OSError("Popen did not expose its native Windows process handle")
-    return int(handle)
-
-
-def _assign_windows_adapter_job(
-    job: _WindowsAdapterJob, process: subprocess.Popen[bytes]
-) -> None:
-    if job.handle is None:
-        raise OSError("Windows adapter Job Object was already closed")
-    kernel32 = _windows_kernel32()
-    assign = kernel32.AssignProcessToJobObject
-    assign.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    assign.restype = ctypes.c_int
-    if not assign(
-        ctypes.c_void_p(job.handle),
-        ctypes.c_void_p(_windows_process_handle(process)),
-    ):
-        raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+    try:
+        closed = close_handle(ctypes.c_void_p(handle))
+    except BaseException as exc:  # noqa: BLE001 - 关闭结果可能已生效，禁止复用数值
+        job.close_outcome_uncertain = True
+        raise DelegatedProcessTerminationError(
+            "Windows adapter Job handle close outcome is indeterminate"
+        ) from exc
+    if not closed:
+        job.close_outcome_uncertain = True
+        raise DelegatedProcessTerminationError(
+            "Windows adapter Job handle could not be confirmed closed"
+        ) from OSError(ctypes.get_last_error(), "CloseHandle failed for adapter job")
+    job.closed_confirmed = True
 
 
 def _confirm_windows_adapter_job_ownership(
-    job: _WindowsAdapterJob, process: subprocess.Popen[bytes]
+    job: _WindowsAdapterJob, process: _WindowsAdapterProcess
 ) -> None:
     if job.handle is None:
         raise OSError("Windows adapter Job Object was already closed")
@@ -944,7 +1570,7 @@ def _confirm_windows_adapter_job_ownership(
     is_process_in_job.restype = ctypes.c_int
     belongs = ctypes.c_int()
     if not is_process_in_job(
-        ctypes.c_void_p(_windows_process_handle(process)),
+        ctypes.c_void_p(process.process_handle()),
         ctypes.c_void_p(job.handle),
         ctypes.byref(belongs),
     ):
@@ -953,21 +1579,341 @@ def _confirm_windows_adapter_job_ownership(
         raise OSError("Suspended delegated adapter root is not owned by its Job Object")
 
 
-def _resume_windows_adapter_process(process: subprocess.Popen[bytes]) -> None:
-    """恢复 CREATE_SUSPENDED 根进程，同时继续以原生 HANDLE 标识所有权。"""
-    ntdll = _windows_ntdll()
-    resume = ntdll.NtResumeProcess
-    resume.argtypes = [ctypes.c_void_p]
-    resume.restype = ctypes.c_long
-    status = int(resume(ctypes.c_void_p(_windows_process_handle(process))))
-    if status != 0:
-        convert_status = ntdll.RtlNtStatusToDosError
-        convert_status.argtypes = [ctypes.c_long]
-        convert_status.restype = ctypes.c_uint32
-        raise OSError(
-            int(convert_status(status)),
-            f"NtResumeProcess failed with NTSTATUS 0x{status & 0xFFFFFFFF:08x}",
+def _consume_windows_process_handle(
+    process: _WindowsAdapterProcess, field: str, *, label: str
+) -> None:
+    raw_handle = getattr(process.information, field)
+    if not raw_handle:
+        return
+    setattr(process.information, field, None)
+    kernel32 = _windows_kernel32()
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    try:
+        closed = close_handle(ctypes.c_void_p(int(raw_handle)))
+    except BaseException as exc:  # noqa: BLE001 - 已从唯一所有者移除，禁止重试
+        raise DelegatedProcessTerminationError(
+            f"Windows adapter {label} handle close outcome is indeterminate"
+        ) from exc
+    if not closed:
+        raise DelegatedProcessTerminationError(
+            f"Windows adapter {label} handle could not be confirmed closed"
+        ) from OSError(ctypes.get_last_error(), f"CloseHandle failed for {label}")
+
+
+def _close_windows_adapter_process_handles(
+    process: _WindowsAdapterProcess,
+) -> None:
+    failures: list[BaseException] = []
+    for field, label in (("hThread", "thread"), ("hProcess", "process")):
+        try:
+            _consume_windows_process_handle(process, field, label=label)
+        except BaseException as exc:  # noqa: BLE001 - 两个句柄都只消费一次
+            failures.append(exc)
+    if failures:
+        error = DelegatedProcessTerminationError(
+            "Windows adapter native handles could not be confirmed closed"
         )
+        error.__cause__ = (
+            failures[0]
+            if len(failures) == 1
+            else BaseExceptionGroup("Windows adapter handle close failures", failures)
+        )
+        raise error
+
+
+def _resume_windows_adapter_process(process: _WindowsAdapterProcess) -> None:
+    """只恢复原子入 Job 的 CREATE_SUSPENDED 主线程。"""
+    kernel32 = _windows_kernel32()
+    resume = kernel32.ResumeThread
+    resume.argtypes = [ctypes.c_void_p]
+    resume.restype = ctypes.c_uint32
+    previous_count = int(resume(ctypes.c_void_p(process.thread_handle())))
+    if previous_count == 0xFFFFFFFF:
+        raise OSError(ctypes.get_last_error(), "ResumeThread failed")
+    if previous_count != 1:
+        raise OSError(
+            "Suspended delegated adapter thread had an unexpected suspend count "
+            f"of {previous_count}"
+        )
+
+
+def _initialize_windows_launch_resources(
+    resources: _WindowsLaunchResources,
+    job: _WindowsAdapterJob,
+    standard_streams: tuple[Any, Any, Any],
+) -> _WindowsStartupInformationEx:
+    if job.handle is None:
+        raise OSError("Windows adapter Job Object was already closed")
+    import msvcrt
+
+    kernel32 = _windows_kernel32()
+    initialize = kernel32.InitializeProcThreadAttributeList
+    initialize.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    initialize.restype = ctypes.c_int
+    attribute_bytes = ctypes.c_size_t()
+    ctypes.set_last_error(0)
+    if initialize(None, 2, 0, ctypes.byref(attribute_bytes)):
+        raise OSError("InitializeProcThreadAttributeList size probe unexpectedly succeeded")
+    if ctypes.get_last_error() != 122 or attribute_bytes.value <= 0:
+        raise OSError(
+            ctypes.get_last_error(),
+            "InitializeProcThreadAttributeList size probe failed",
+        )
+    resources.attribute_buffer = ctypes.create_string_buffer(attribute_bytes.value)
+    if not initialize(
+        resources.attribute_buffer,
+        2,
+        0,
+        ctypes.byref(attribute_bytes),
+    ):
+        raise OSError(
+            ctypes.get_last_error(), "InitializeProcThreadAttributeList failed"
+        )
+    resources.attribute_list_initialized = True
+
+    current_process = kernel32.GetCurrentProcess
+    current_process.argtypes = []
+    current_process.restype = ctypes.c_void_p
+    duplicate_handle = kernel32.DuplicateHandle
+    duplicate_handle.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint32,
+    ]
+    duplicate_handle.restype = ctypes.c_int
+    owner = current_process()
+    for index, stream in enumerate(standard_streams):
+        source = msvcrt.get_osfhandle(stream.fileno())
+        target = ctypes.cast(
+            ctypes.byref(
+                resources.standard_handles,
+                index * ctypes.sizeof(ctypes.c_void_p),
+            ),
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        if not duplicate_handle(
+            owner,
+            ctypes.c_void_p(source),
+            owner,
+            target,
+            0,
+            True,
+            0x00000002,
+        ):
+            raise OSError(ctypes.get_last_error(), "DuplicateHandle failed")
+
+    resources.job_handles[0] = job.handle
+    update = kernel32.UpdateProcThreadAttribute
+    update.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_size_t,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    update.restype = ctypes.c_int
+    attribute_pointer = ctypes.c_void_p(
+        ctypes.addressof(resources.attribute_buffer)
+    )
+    if not update(
+        attribute_pointer,
+        0,
+        0x00020002,
+        resources.standard_handles,
+        ctypes.sizeof(resources.standard_handles),
+        None,
+        None,
+    ):
+        raise OSError(
+            ctypes.get_last_error(), "PROC_THREAD_ATTRIBUTE_HANDLE_LIST failed"
+        )
+    if not update(
+        attribute_pointer,
+        0,
+        0x0002000D,
+        resources.job_handles,
+        ctypes.sizeof(resources.job_handles),
+        None,
+        None,
+    ):
+        raise OSError(
+            ctypes.get_last_error(), "PROC_THREAD_ATTRIBUTE_JOB_LIST failed"
+        )
+
+    startup = _WindowsStartupInformationEx()
+    startup.StartupInfo.cb = ctypes.sizeof(startup)
+    startup.StartupInfo.dwFlags = 0x00000100
+    startup.StartupInfo.hStdInput = resources.standard_handles[0]
+    startup.StartupInfo.hStdOutput = resources.standard_handles[1]
+    startup.StartupInfo.hStdError = resources.standard_handles[2]
+    startup.lpAttributeList = attribute_pointer
+    return startup
+
+
+def _close_windows_launch_resources(resources: _WindowsLaunchResources) -> None:
+    failures: list[BaseException] = []
+    if resources.attribute_list_initialized:
+        resources.attribute_list_initialized = False
+        buffer = resources.attribute_buffer
+        resources.attribute_buffer = None
+        try:
+            kernel32 = _windows_kernel32()
+            delete = kernel32.DeleteProcThreadAttributeList
+            delete.argtypes = [ctypes.c_void_p]
+            delete.restype = None
+            assert buffer is not None
+            delete(ctypes.c_void_p(ctypes.addressof(buffer)))
+        except BaseException as exc:  # noqa: BLE001 - 属性列表同样只消费一次
+            failures.append(exc)
+    for index in range(3):
+        raw_handle = resources.standard_handles[index]
+        if not raw_handle:
+            continue
+        resources.standard_handles[index] = None
+        try:
+            kernel32 = _windows_kernel32()
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            if not close_handle(ctypes.c_void_p(int(raw_handle))):
+                raise OSError(
+                    ctypes.get_last_error(),
+                    "CloseHandle failed for inherited standard handle",
+                )
+        except BaseException as exc:  # noqa: BLE001 - 后续句柄仍须消费
+            failures.append(exc)
+    if failures:
+        error = DelegatedProcessTerminationError(
+            "Windows adapter launch resources could not be confirmed closed"
+        )
+        error.__cause__ = (
+            failures[0]
+            if len(failures) == 1
+            else BaseExceptionGroup("Windows launch resource close failures", failures)
+        )
+        raise error
+
+
+def _windows_environment_block(
+    environment: dict[str, str] | None,
+) -> Any | None:
+    if environment is None:
+        return None
+    entries: list[str] = []
+    for key, value in sorted(environment.items(), key=lambda item: item[0].upper()):
+        invalid_equals = "=" in (key[1:] if key.startswith("=") else key)
+        if not key or invalid_equals or "\0" in key or "\0" in value:
+            raise ValueError("Windows delegated adapter environment is invalid")
+        entries.append(f"{key}={value}")
+    return ctypes.create_unicode_buffer("\0".join(entries) + "\0\0")
+
+
+def _call_windows_create_process(
+    process: _WindowsAdapterProcess,
+    startup: _WindowsStartupInformationEx,
+    command_line: Any,
+    environment_block: Any | None,
+    root: Path,
+    creation_flags: int,
+) -> None:
+    kernel32 = _windows_kernel32()
+    create_process = kernel32.CreateProcessW
+    create_process.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(_WindowsProcessInformation),
+    ]
+    create_process.restype = ctypes.c_int
+    environment_pointer = (
+        None
+        if environment_block is None
+        else ctypes.c_void_p(ctypes.addressof(environment_block))
+    )
+    if not create_process(
+        None,
+        command_line,
+        None,
+        None,
+        True,
+        creation_flags,
+        environment_pointer,
+        str(root),
+        ctypes.byref(startup),
+        ctypes.byref(process.information),
+    ):
+        raise OSError(ctypes.get_last_error(), "CreateProcessW failed")
+
+
+def _launch_windows_adapter_process(
+    process: _WindowsAdapterProcess,
+    job: _WindowsAdapterJob,
+    argv: list[str],
+    *,
+    root: Path,
+    stdin_handle: Any,
+    stdout_handle: Any,
+    stderr_handle: Any,
+    environment: dict[str, str] | None,
+) -> None:
+    resources = _WindowsLaunchResources()
+    launch_error: BaseException | None = None
+    try:
+        startup = _initialize_windows_launch_resources(
+            resources,
+            job,
+            (stdin_handle, stdout_handle, stderr_handle),
+        )
+        command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+        environment_block = _windows_environment_block(environment)
+        creation_flags = 0x00000004 | 0x00000200 | 0x00080000
+        if environment_block is not None:
+            creation_flags |= 0x00000400
+        _call_windows_create_process(
+            process,
+            startup,
+            command_line,
+            environment_block,
+            root,
+            creation_flags,
+        )
+        if process.pid <= 0 or not process.information.hThread:
+            raise OSError("CreateProcessW returned incomplete process information")
+        _confirm_windows_adapter_job_ownership(job, process)
+        process.job_ownership_confirmed = True
+    except BaseException as exc:  # noqa: BLE001 - process fields may already own native handles
+        launch_error = exc
+    try:
+        _close_windows_launch_resources(resources)
+    except BaseException as resource_error:  # noqa: BLE001 - 与创建错误保留双证据
+        if launch_error is None:
+            raise
+        raise _combined_failures(
+            "Windows adapter launch and resource cleanup both failed",
+            launch_error,
+            resource_error,
+        ) from None
+    if launch_error is not None:
+        raise launch_error
 
 
 def _query_windows_adapter_job_active_processes(job: _WindowsAdapterJob) -> int:
@@ -1051,16 +1997,11 @@ def _ensure_windows_adapter_job_empty(job: _WindowsAdapterJob) -> None:
 
 def _stop_windows_adapter_job(job: _WindowsAdapterJob) -> None:
     _ensure_windows_adapter_job_empty(job)
-    try:
-        _close_windows_adapter_job(job)
-    except OSError as exc:
-        raise DelegatedContractError(
-            "Confirmed-empty delegated adapter Job Object handle could not be closed"
-        ) from exc
+    _close_windows_adapter_job(job)
 
 
 def _ensure_adapter_process_boundary_empty(
-    process: subprocess.Popen[bytes],
+    process: subprocess.Popen[bytes] | _WindowsAdapterProcess,
     *,
     windows_job: _WindowsAdapterJob | None = None,
 ) -> None:
@@ -1074,32 +2015,24 @@ def _ensure_adapter_process_boundary_empty(
         _stop_posix_adapter_process_group(process)
 
 
-def _discard_suspended_windows_root(
-    process: subprocess.Popen[bytes], job: _WindowsAdapterJob
+def _ensure_windows_adapter_root_stopped(
+    process: _WindowsAdapterProcess,
 ) -> None:
-    failures: list[BaseException] = []
-    try:
-        process.terminate()
-        process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
-    except BaseException as exc:  # noqa: BLE001 - 根进程尚未执行但仍必须确认终止
-        failures.append(exc)
-    try:
-        _stop_windows_adapter_job(job)
-    except BaseException as exc:  # noqa: BLE001 - 两个所有权边界均须保留证据
-        failures.append(exc)
-    if failures:
-        error = DelegatedProcessTerminationError(
-            "Suspended delegated adapter root could not be confirmed stopped"
-        )
-        if len(failures) == 1:
-            raise error from failures[0]
-        raise error from BaseExceptionGroup(
-            "Suspended adapter cleanup failures", failures
-        )
+    if not process.information.hProcess:
+        # PROCESS_INFORMATION 由内核直接写入预建对象；空值证明未创建根。
+        return
+    if process.poll() is None:
+        kernel32 = _windows_kernel32()
+        terminate = kernel32.TerminateProcess
+        terminate.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        terminate.restype = ctypes.c_int
+        if not terminate(ctypes.c_void_p(process.process_handle()), 1):
+            raise OSError(ctypes.get_last_error(), "TerminateProcess failed")
+    process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
 
 
 def _stop_adapter_process(
-    process: subprocess.Popen[bytes],
+    process: subprocess.Popen[bytes] | _WindowsAdapterProcess,
     *,
     windows_job: _WindowsAdapterJob | None = None,
 ) -> None:
@@ -1109,8 +2042,43 @@ def _stop_adapter_process(
                 raise DelegatedProcessTerminationError(
                     "Delegated adapter has no Windows Job Object ownership boundary"
                 )
-            _stop_windows_adapter_job(windows_job)
-            process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
+            assert isinstance(process, _WindowsAdapterProcess)
+            failures: list[BaseException] = []
+            try:
+                _stop_windows_adapter_job(windows_job)
+            except BaseException as exc:  # noqa: BLE001 - 句柄也必须继续单次消费
+                failures.append(exc)
+            root_stopped = process.job_ownership_confirmed and windows_job.empty_confirmed
+            if not root_stopped:
+                try:
+                    _ensure_windows_adapter_root_stopped(process)
+                    root_stopped = True
+                except BaseException as exc:  # noqa: BLE001 - 精确 HANDLE 是最后安全边界
+                    failures.append(exc)
+            if root_stopped:
+                try:
+                    _close_windows_adapter_process_handles(process)
+                except BaseException as exc:  # noqa: BLE001 - Job 失败不跳过原生句柄
+                    failures.append(exc)
+            else:
+                failures.append(
+                    DelegatedProcessTerminationError(
+                        "Windows adapter root could not be confirmed stopped; "
+                        "its native handles were retained"
+                    )
+                )
+            if failures:
+                error = DelegatedProcessTerminationError(
+                    "Windows delegated adapter ownership could not be fully released"
+                )
+                error.__cause__ = (
+                    failures[0]
+                    if len(failures) == 1
+                    else BaseExceptionGroup(
+                        "Windows adapter ownership release failures", failures
+                    )
+                )
+                raise error
         else:
             _stop_posix_adapter_process_group(process)
     except DelegatedContractError:
@@ -1133,11 +2101,6 @@ def _run_adapter_process(
         raise DelegatedContractError(
             f"Delegated adapter request exceeds the {MAX_ADAPTER_REQUEST_BYTES}-byte limit"
         )
-    creation_flags = 0
-    if os.name == "nt":
-        creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
-            subprocess, "CREATE_SUSPENDED", 0x00000004
-        )
     with (
         tempfile.TemporaryFile() as stdin_handle,
         tempfile.TemporaryFile() as stdout_handle,
@@ -1153,57 +2116,50 @@ def _run_adapter_process(
                 raise DelegatedContractError(
                     f"Could not create the delegated adapter Job Object: {exc}"
                 ) from exc
-        try:
-            process = subprocess.Popen(
-                argv,
-                cwd=root,
-                stdin=stdin_handle,
-                stdout=stdout_handle,
-                stderr=stderr_handle,
-                env=environment,
-                start_new_session=os.name != "nt",
-                creationflags=creation_flags,
-            )
-        except BaseException as launch_error:
-            if windows_job is not None:
+        process: subprocess.Popen[bytes] | _WindowsAdapterProcess
+        if os.name == "nt":
+            assert windows_job is not None
+            process = _WindowsAdapterProcess()
+            try:
+                _launch_windows_adapter_process(
+                    process,
+                    windows_job,
+                    argv,
+                    root=root,
+                    stdin_handle=stdin_handle,
+                    stdout_handle=stdout_handle,
+                    stderr_handle=stderr_handle,
+                    environment=environment,
+                )
+            except BaseException as launch_error:
                 try:
-                    windows_job.empty_confirmed = True
-                    _close_windows_adapter_job(windows_job)
-                except BaseException as close_error:
+                    _stop_adapter_process(process, windows_job=windows_job)
+                except BaseException as termination_error:
                     raise _combined_failures(
-                        "Delegated adapter launch and empty Job cleanup both failed",
+                        "Delegated adapter launch and atomic Job cleanup both failed",
                         launch_error,
-                        close_error,
+                        termination_error,
                     ) from None
-            if isinstance(launch_error, OSError):
-                raise DelegatedContractError(
-                    f"Could not start the delegated adapter: {launch_error}"
-                ) from launch_error
-            raise
+                if isinstance(launch_error, OSError):
+                    raise DelegatedContractError(
+                        f"Could not start the delegated adapter: {launch_error}"
+                    ) from launch_error
+                raise
+        else:
+            process = _launch_posix_adapter_process(
+                argv,
+                root=root,
+                stdin_handle=stdin_handle,
+                stdout_handle=stdout_handle,
+                stderr_handle=stderr_handle,
+                environment=environment,
+            )
         resume_attempted = False
         resume_completed = False
         try:
             if os.name == "nt":
                 assert windows_job is not None
-                try:
-                    _assign_windows_adapter_job(windows_job, process)
-                    _confirm_windows_adapter_job_ownership(windows_job, process)
-                except BaseException as assignment_error:
-                    try:
-                        _discard_suspended_windows_root(process, windows_job)
-                    except BaseException as termination_error:
-                        raise _combined_failures(
-                            "Delegated adapter Job assignment failed and its "
-                            "suspended root could not be confirmed stopped",
-                            assignment_error,
-                            termination_error,
-                        ) from None
-                    if isinstance(assignment_error, OSError):
-                        raise DelegatedContractError(
-                            "Could not assign the suspended delegated adapter "
-                            f"to its Job Object: {assignment_error}"
-                        ) from assignment_error
-                    raise
+                assert isinstance(process, _WindowsAdapterProcess)
                 resume_attempted = True
                 _resume_windows_adapter_process(process)
                 resume_completed = True
@@ -1236,7 +2192,7 @@ def _run_adapter_process(
                 stderr_handle, limit=MAX_ADAPTER_STDERR_BYTES, stream="stderr"
             )
             if windows_job is not None:
-                _close_windows_adapter_job(windows_job)
+                _stop_adapter_process(process, windows_job=windows_job)
             return _AdapterProcessResult(returncode, stdout, stderr)
         except BaseException as original_error:
             try:
