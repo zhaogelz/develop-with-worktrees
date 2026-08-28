@@ -1403,8 +1403,8 @@ def test_posix_popen_return_interruption_cannot_leak_process_group(
     original_popen = subprocess.Popen
     spawned: list[subprocess.Popen[bytes]] = []
     launch_kwargs: list[dict[str, object]] = []
-    held_after_gate_eof: list[int] = []
-    original_stop_unreturned = delegated._stop_unreturned_posix_launcher
+    termination_requests: list[str] = []
+    original_request = delegated._request_posix_supervisor_self_termination
 
     def create_then_interrupt(*args: object, **kwargs: object) -> object:
         launch_kwargs.append(dict(kwargs))
@@ -1412,25 +1412,17 @@ def test_posix_popen_return_interruption_cannot_leak_process_group(
         spawned.append(process)
         raise KeyboardInterrupt("synthetic interruption after fork-exec")
 
-    def inspect_then_stop_unreturned(
-        pid: int,
-        process_group: int,
-        control_write: object | None = None,
-    ) -> None:
-        assert pid == process_group
-        assert not delegated._posix_direct_child_exited_unreaped(pid)
-        time.sleep(0.05)
-        assert not delegated._posix_direct_child_exited_unreaped(pid)
-        held_after_gate_eof.append(pid)
-        original_stop_unreturned(
-            pid,
-            process_group,
-            control_write=control_write,  # type: ignore[arg-type]
-        )
+    def record_termination_request(
+        ownership: delegated._PosixSupervisorOwnership,
+    ) -> BaseException | None:
+        termination_requests.append(ownership.termination_delivery)
+        return original_request(ownership)
 
     monkeypatch.setattr(subprocess, "Popen", create_then_interrupt)
     monkeypatch.setattr(
-        delegated, "_stop_unreturned_posix_launcher", inspect_then_stop_unreturned
+        delegated,
+        "_request_posix_supervisor_self_termination",
+        record_termination_request,
     )
 
     try:
@@ -1464,7 +1456,7 @@ def test_posix_popen_return_interruption_cannot_leak_process_group(
             time.sleep(0.01)
         assert spawned[0].poll() is not None
         assert not marker.exists()
-        assert len(held_after_gate_eof) == 1
+        assert termination_requests
     finally:
         for process in spawned:
             if process.poll() is None:
@@ -1519,7 +1511,7 @@ def test_posix_lost_popen_without_status_uses_only_control_capability(
     assert exception_tree_contains(
         raised.value,
         delegated.DelegatedProcessTerminationError,
-        "identity could not be proven",
+        "stopping the delegated adapter process tree",
     )
     assert len(spawned) == 1
     deadline = time.monotonic() + 3
@@ -1586,6 +1578,88 @@ def test_posix_post_fork_interruption_cleans_confirmed_unused_closure(
     assert not marker.exists()
     assert len(closure_roots) == 1
     assert not closure_roots[0].exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX gate launch is required")
+def test_posix_unproven_identity_preserves_verified_input_closure_after_k(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    marker = git_repo / "unproven-identity-adapter-ran.txt"
+    adapter_path.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "add unproven identity closure fixture")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    closure_roots: list[Path] = []
+    spawned: list[subprocess.Popen[bytes]] = []
+    original_run = delegated._run_adapter_process
+    original_popen = subprocess.Popen
+
+    def capture_then_run(*args: object, **kwargs: object) -> object:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+
+        def create_then_interrupt(
+            *popen_args: object, **popen_kwargs: object
+        ) -> object:
+            process = original_popen(*popen_args, **popen_kwargs)
+            spawned.append(process)
+            raise KeyboardInterrupt("synthetic lost Popen identity")
+
+        monkeypatch.setattr(subprocess, "Popen", create_then_interrupt)
+        monkeypatch.setattr(
+            delegated,
+            "_read_posix_launcher_status",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                KeyboardInterrupt("synthetic unproven status identity")
+            ),
+        )
+        try:
+            return original_run(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(subprocess, "Popen", original_popen)
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
+
+    try:
+        with pytest.raises(BaseException) as raised:
+            invoke_delegated(
+                repo.root,
+                repo.common_dir,
+                operation="status",
+                request={},
+                timeout_seconds=30,
+            )
+
+        assert exception_tree_contains(
+            raised.value,
+            delegated.DelegatedProcessTerminationError,
+            "stopping the delegated adapter process tree",
+        )
+        assert len(spawned) == 1
+        deadline = time.monotonic() + 2
+        while spawned[0].poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert spawned[0].poll() is not None
+        assert not marker.exists()
+        assert len(closure_roots) == 1
+        assert closure_roots[0].exists()
+    finally:
+        for closure_root in closure_roots:
+            if closure_root.exists():
+                shutil.rmtree(closure_root)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher isolation is required")
@@ -1666,6 +1740,9 @@ def test_posix_launcher_rejects_status_that_does_not_match_direct_child(
 ) -> None:
     marker = tmp_path / "mismatched-status-adapter-ran.txt"
     original_read_status = delegated._read_posix_launcher_status
+    original_popen = subprocess.Popen
+    spawned: list[subprocess.Popen[bytes]] = []
+    parent_signals: list[tuple[int, int]] = []
 
     def mismatched_status(*args: object, **kwargs: object) -> None:
         original_read_status(*args, **kwargs)
@@ -1674,14 +1751,25 @@ def test_posix_launcher_rejects_status_that_does_not_match_direct_child(
         assert pid == process_group
         identity.value = (pid + 1, process_group + 1)
 
+    def capture_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    original_killpg = delegated.os.killpg
+
+    def record_parent_signal(process_group: int, requested_signal: int) -> None:
+        if requested_signal:
+            parent_signals.append((process_group, requested_signal))
+        original_killpg(process_group, requested_signal)
+
     monkeypatch.setattr(
         delegated, "_read_posix_launcher_status", mismatched_status
     )
+    monkeypatch.setattr(subprocess, "Popen", capture_popen)
+    monkeypatch.setattr(delegated.os, "killpg", record_parent_signal)
 
-    with pytest.raises(
-        delegated.DelegatedContractError,
-        match="status does not match its direct child",
-    ):
+    with pytest.raises(BaseException) as raised:
         delegated._run_adapter_process(
             [
                 sys.executable,
@@ -1694,6 +1782,19 @@ def test_posix_launcher_rejects_status_that_does_not_match_direct_child(
             timeout_seconds=30,
         )
 
+    assert exception_tree_contains(
+        raised.value,
+        delegated.DelegatedContractError,
+        "status does not match its direct child",
+    )
+    assert exception_tree_contains(
+        raised.value,
+        delegated.DelegatedProcessTerminationError,
+        "stopping the delegated adapter process tree",
+    )
+    assert len(spawned) == 1
+    assert spawned[0].returncode == -signal.SIGKILL
+    assert parent_signals == []
     assert not marker.exists()
 
 
@@ -1758,10 +1859,7 @@ def test_posix_initial_status_write_failure_holds_for_controlled_stop(
     )
     monkeypatch.setattr(subprocess, "Popen", capture_popen)
 
-    with pytest.raises(
-        delegated.DelegatedProcessTerminationError,
-        match="status descriptor was already closed",
-    ):
+    with pytest.raises(BaseException) as raised:
         delegated._run_adapter_process(
             [
                 sys.executable,
@@ -1774,6 +1872,16 @@ def test_posix_initial_status_write_failure_holds_for_controlled_stop(
             timeout_seconds=30,
         )
 
+    assert exception_tree_contains(
+        raised.value,
+        delegated.DelegatedProcessTerminationError,
+        "status descriptor was already closed",
+    )
+    assert exception_tree_contains(
+        raised.value,
+        delegated.DelegatedProcessTerminationError,
+        "stopping the delegated adapter process tree",
+    )
     assert len(spawned) == 1
     assert spawned[0].returncode == -signal.SIGKILL
     assert not marker.exists()
@@ -2057,7 +2165,9 @@ def test_unconfirmed_termination_preserves_verified_input_closure(
         fingerprint=inspection["adapter"]["fingerprint"],
     )
     closure_roots: list[Path] = []
+    interrupted_processes: list[object] = []
     original_run = delegated._run_adapter_process
+    original_stop = delegated._stop_adapter_process
     original_sleep = time.sleep
 
     def capture_then_run(*args: object, **kwargs: object) -> object:
@@ -2073,7 +2183,8 @@ def test_unconfirmed_termination_preserves_verified_input_closure(
         assert pid_path.exists()
         raise KeyboardInterrupt("synthetic monitor interruption")
 
-    def fail_stop(_process: object, **_kwargs: object) -> None:
+    def fail_stop(process: object, **_kwargs: object) -> None:
+        interrupted_processes.append(process)
         raise termination_failure("synthetic termination confirmation failure")
 
     monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
@@ -2114,6 +2225,13 @@ def test_unconfirmed_termination_preserves_verified_input_closure(
             for note in getattr(raised.value, "__notes__", ())
         )
     finally:
+        if os.name != "nt":
+            for process in {id(item): item for item in interrupted_processes}.values():
+                assert isinstance(process, delegated._PosixAdapterProcess)
+                original_stop(process)
+                assert process.ownership.termination_confirmed
+                assert process.supervisor is not None
+                assert process.supervisor.poll() is not None
         if pid_path.exists():
             from solo_ai.util import _stop_process_tree
 
@@ -2143,7 +2261,7 @@ def test_posix_lost_launcher_never_signals_after_direct_child_was_reaped(
 
     with pytest.raises(
         delegated.DelegatedProcessTerminationError,
-        match="reaped outside its owner",
+        match="termination descriptor is unavailable",
     ):
         delegated._stop_unreturned_posix_launcher(4242, 4242)
 
@@ -2425,13 +2543,555 @@ def test_posix_unexpected_supervisor_exit_never_signals_its_old_group(
 
     with pytest.raises(
         delegated.DelegatedProcessTerminationError,
-        match="exited before it could terminate",
+        match="reaped outside its owner",
     ):
         delegated._stop_posix_supervisor(ownership)
 
-    assert not ownership.termination_requested
+    assert ownership.termination_requested
     assert ownership.control_write.value == 98
     assert signals == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_stop_retries_control_write_interrupted_before_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control_read, control_write = os.pipe()
+    attempts: list[bytes] = []
+    original_write = delegated.os.write
+    ownership = delegated._PosixSupervisorOwnership(
+        pid=4848,
+        process_group=4848,
+        control_write=delegated._OwnedPosixFd(control_write),
+    )
+
+    def interrupt_first_write(descriptor: int, payload: bytes) -> int:
+        attempts.append(payload)
+        if len(attempts) == 1:
+            raise KeyboardInterrupt("synthetic interruption before control delivery")
+        return original_write(descriptor, payload)
+
+    def reap_only_after_retry(
+        _ownership: delegated._PosixSupervisorOwnership, *, timeout: float
+    ) -> None:
+        assert timeout > 0
+        assert attempts == [b"K", b"K"]
+
+    monkeypatch.setattr(delegated.os, "write", interrupt_first_write)
+    monkeypatch.setattr(
+        delegated, "_posix_direct_child_exited_unreaped", lambda _pid: False
+    )
+    monkeypatch.setattr(
+        delegated, "_wait_and_reap_posix_supervisor", reap_only_after_retry
+    )
+    monkeypatch.setattr(
+        delegated,
+        "_wait_for_posix_group_absence",
+        lambda _process_group, *, timeout: None,
+    )
+
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic interruption before control delivery"
+        ):
+            delegated._stop_posix_supervisor(ownership)
+    finally:
+        if ownership.control_write.value is not None:
+            ownership.control_write.close()
+        os.close(control_read)
+
+    assert attempts == [b"K", b"K"]
+    assert ownership.termination_confirmed
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_duplicate_control_bytes_each_request_group_termination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "duplicate-control-late-marker.txt"
+    process = delegated._PosixAdapterProcess()
+    delegated._launch_posix_adapter_process(
+        process,
+        [
+            sys.executable,
+            "-c",
+            "import time; from pathlib import Path; time.sleep(1); "
+            f"Path({str(marker)!r}).write_text('late', encoding='utf-8')",
+        ],
+        root=tmp_path,
+        stdin_handle=subprocess.DEVNULL,
+        stdout_handle=subprocess.DEVNULL,
+        stderr_handle=subprocess.DEVNULL,
+        environment=None,
+    )
+    assert process.ownership.control_write.value is not None
+
+    try:
+        os.kill(process.pid, signal.SIGSTOP)
+        os.write(process.ownership.control_write.value, b"KK")
+        os.kill(process.pid, signal.SIGCONT)
+        delegated._wait_and_reap_posix_supervisor(process.ownership, timeout=2)
+        delegated._wait_for_posix_group_absence(process.pid, timeout=2)
+        process.ownership.termination_confirmed = True
+        time.sleep(1.1)
+        assert not marker.exists()
+    finally:
+        if not process.ownership.termination_confirmed:
+            try:
+                os.kill(process.pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.supervisor.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        for descriptor in (process.result_read, process.ownership.control_write):
+            try:
+                descriptor.close()
+            except OSError:
+                pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_launch_return_boundary_interruption_keeps_precreated_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "launch-return-boundary-late-marker.txt"
+    captured: list[delegated._PosixAdapterProcess] = []
+    original_launch = delegated._launch_posix_adapter_process
+
+    def launch_then_interrupt(*args: object, **kwargs: object) -> None:
+        result = original_launch(*args, **kwargs)  # type: ignore[arg-type]
+        process = (
+            args[0]
+            if args and isinstance(args[0], delegated._PosixAdapterProcess)
+            else result
+        )
+        assert isinstance(process, delegated._PosixAdapterProcess)
+        captured.append(process)
+        raise KeyboardInterrupt("synthetic launch return boundary interruption")
+
+    monkeypatch.setattr(
+        delegated, "_launch_posix_adapter_process", launch_then_interrupt
+    )
+
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic launch return boundary interruption"
+        ):
+            delegated._run_adapter_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; from pathlib import Path; time.sleep(0.8); "
+                    f"Path({str(marker)!r}).write_text('late', encoding='utf-8')",
+                ],
+                root=tmp_path,
+                request_bytes=b"{}",
+                timeout_seconds=30,
+            )
+
+        assert len(captured) == 1
+        assert captured[0].ownership.termination_confirmed
+        time.sleep(0.9)
+        assert not marker.exists()
+    finally:
+        for process in captured:
+            if not process.ownership.termination_confirmed:
+                delegated._stop_posix_adapter_process_group(process)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_child_end_close_return_interruption_uses_caller_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "child-end-close-boundary-late-marker.txt"
+    spawned: list[subprocess.Popen[bytes]] = []
+    original_popen = subprocess.Popen
+    original_close_child_ends = delegated._close_posix_launch_child_ends
+
+    def record_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    def close_then_interrupt(*args: object, **kwargs: object) -> None:
+        result = original_close_child_ends(*args, **kwargs)  # type: ignore[arg-type]
+        assert result is None
+        raise KeyboardInterrupt("synthetic child-end close return interruption")
+
+    monkeypatch.setattr(subprocess, "Popen", record_popen)
+    monkeypatch.setattr(
+        delegated, "_close_posix_launch_child_ends", close_then_interrupt
+    )
+
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic child-end close return interruption"
+        ):
+            delegated._run_adapter_process(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; from pathlib import Path; time.sleep(0.8); "
+                    f"Path({str(marker)!r}).write_text('late', encoding='utf-8')",
+                ],
+                root=tmp_path,
+                request_bytes=b"{}",
+                timeout_seconds=30,
+            )
+
+        assert len(spawned) == 1
+        assert spawned[0].returncode is not None
+        time.sleep(0.9)
+        assert not marker.exists()
+    finally:
+        for process in spawned:
+            if process.returncode is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=2)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
+def test_posix_resource_prepare_return_interruption_uses_caller_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[delegated._PosixAdapterProcess] = []
+    original_prepare = delegated._prepare_posix_launch_resources
+
+    def prepare_then_interrupt(*args: object, **kwargs: object) -> None:
+        original_prepare(*args, **kwargs)  # type: ignore[arg-type]
+        process = args[0]
+        assert isinstance(process, delegated._PosixAdapterProcess)
+        captured.append(process)
+        raise KeyboardInterrupt("synthetic resource prepare return interruption")
+
+    monkeypatch.setattr(
+        delegated, "_prepare_posix_launch_resources", prepare_then_interrupt
+    )
+
+    with pytest.raises(
+        KeyboardInterrupt, match="synthetic resource prepare return interruption"
+    ):
+        delegated._run_adapter_process(
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            root=tmp_path,
+            request_bytes=b"{}",
+            timeout_seconds=30,
+        )
+
+    assert len(captured) == 1
+    process = captured[0]
+    assert not process.child_creation_possible
+    assert process.ownership.termination_confirmed
+    assert process.payload_handle is None
+    assert all(
+        descriptor.value is None
+        for descriptor in (
+            process.status_read,
+            process.status_write,
+            process.gate_read,
+            process.gate_write,
+            process.control_read,
+            process.ownership.control_write,
+            process.result_read,
+            process.result_write,
+        )
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_stop_retries_after_control_was_delivered_then_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "delivered-then-interrupted-late-marker.txt"
+    process = delegated._PosixAdapterProcess()
+    delegated._launch_posix_adapter_process(
+        process,
+        [
+            sys.executable,
+            "-c",
+            "import time; from pathlib import Path; time.sleep(1); "
+            f"Path({str(marker)!r}).write_text('late', encoding='utf-8')",
+        ],
+        root=tmp_path,
+        stdin_handle=subprocess.DEVNULL,
+        stdout_handle=subprocess.DEVNULL,
+        stderr_handle=subprocess.DEVNULL,
+        environment=None,
+    )
+    original_write = delegated.os.write
+    original_wait = delegated._wait_and_reap_posix_supervisor
+    attempts: list[bytes] = []
+
+    def deliver_then_interrupt(descriptor: int, payload: bytes) -> int:
+        written = original_write(descriptor, payload)
+        if payload == b"K":
+            attempts.append(payload)
+            if len(attempts) == 1:
+                raise KeyboardInterrupt(
+                    "synthetic interruption after kernel accepted control K"
+                )
+        return written
+
+    def resume_then_wait(
+        ownership: delegated._PosixSupervisorOwnership, *, timeout: float
+    ) -> None:
+        os.kill(ownership.pid, signal.SIGCONT)
+        original_wait(ownership, timeout=timeout)
+
+    monkeypatch.setattr(delegated.os, "write", deliver_then_interrupt)
+    monkeypatch.setattr(
+        delegated, "_wait_and_reap_posix_supervisor", resume_then_wait
+    )
+
+    try:
+        os.kill(process.pid, signal.SIGSTOP)
+        with pytest.raises(BaseException) as raised:
+            delegated._stop_posix_supervisor(process.ownership)
+        assert exception_tree_contains(
+            raised.value,
+            KeyboardInterrupt,
+            "after kernel accepted control K",
+        )
+        assert attempts == [b"K", b"K"]
+        assert process.ownership.termination_confirmed
+        time.sleep(1.1)
+        assert not marker.exists()
+    finally:
+        if not process.ownership.termination_confirmed:
+            try:
+                os.kill(process.pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if process.supervisor is not None:
+                process.supervisor.wait(timeout=2)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_continuous_indeterminate_control_writes_retain_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control_read, control_write = os.pipe()
+    attempts: list[bytes] = []
+    ownership = delegated._PosixSupervisorOwnership(
+        pid=4949,
+        process_group=4949,
+        control_write=delegated._OwnedPosixFd(control_write),
+    )
+
+    def always_interrupt(_descriptor: int, payload: bytes) -> int:
+        attempts.append(payload)
+        raise KeyboardInterrupt("synthetic continuous indeterminate write")
+
+    monkeypatch.setattr(delegated.os, "write", always_interrupt)
+    monkeypatch.setattr(
+        delegated, "_posix_direct_child_exited_unreaped", lambda _pid: False
+    )
+
+    try:
+        with pytest.raises(
+            delegated.DelegatedProcessTerminationError,
+            match="delivery could not be confirmed",
+        ):
+            delegated._stop_posix_supervisor(ownership)
+        assert attempts == [b"K", b"K", b"K"]
+        assert ownership.termination_delivery == "indeterminate"
+        assert ownership.control_write.value == control_write
+        assert not ownership.termination_confirmed
+    finally:
+        ownership.control_write.close()
+        os.close(control_read)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_control_writer_close_interruption_is_single_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control_read, control_write = os.pipe()
+    original_close = delegated.os.close
+    close_calls: list[int] = []
+    ownership = delegated._PosixSupervisorOwnership(
+        pid=5050,
+        process_group=5050,
+        control_write=delegated._OwnedPosixFd(control_write),
+    )
+
+    def close_then_interrupt(descriptor: int) -> None:
+        if descriptor == control_write:
+            close_calls.append(descriptor)
+            original_close(descriptor)
+            raise KeyboardInterrupt("synthetic post-close interruption")
+        original_close(descriptor)
+
+    monkeypatch.setattr(delegated.os, "close", close_then_interrupt)
+    monkeypatch.setattr(
+        delegated, "_wait_and_reap_posix_supervisor", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        delegated,
+        "_wait_for_posix_group_absence",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        KeyboardInterrupt, match="synthetic post-close interruption"
+    ):
+        delegated._stop_posix_supervisor(ownership)
+
+    assert ownership.termination_confirmed
+    assert ownership.control_write.value is None
+    delegated._stop_posix_supervisor(ownership)
+    assert close_calls == [control_write]
+    original_close(control_read)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+@pytest.mark.parametrize("fault_mode", ("interrupt", "delayed-return"))
+def test_posix_supervisor_retries_self_kill_until_signal_takes_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault_mode: str
+) -> None:
+    original_launcher = delegated._POSIX_GATE_LAUNCHER
+    fault = (
+        "            if _dww_kill_attempts == 1:\n"
+        "                raise KeyboardInterrupt('synthetic pre-kill interruption')\n"
+        if fault_mode == "interrupt"
+        else "            if _dww_kill_attempts == 1:\n                continue\n"
+    )
+    needle = (
+        "    while True:\n"
+        "        try:\n"
+        "            os.killpg(os.getpgrp(), signal.SIGKILL)\n"
+    )
+    injected = (
+        "    _dww_kill_attempts = 0\n"
+        "    while True:\n"
+        "        try:\n"
+        "            _dww_kill_attempts += 1\n"
+        f"{fault}"
+        "            os.killpg(os.getpgrp(), signal.SIGKILL)\n"
+    )
+    launcher = original_launcher.replace(needle, injected, 1)
+    assert launcher != original_launcher
+    monkeypatch.setattr(delegated, "_POSIX_GATE_LAUNCHER", launcher)
+
+    result = delegated._run_adapter_process(
+        [sys.executable, "-c", "raise SystemExit(0)"],
+        root=tmp_path,
+        request_bytes=b"{}",
+        timeout_seconds=30,
+    )
+
+    assert result.returncode == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_adapter_child_never_execs_after_control_fd_close_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "adapter-ran-after-control-close-failure.txt"
+    original_launcher = delegated._POSIX_GATE_LAUNCHER
+    launcher = original_launcher.replace(
+        "        if not close_control_fds_for_exec():\n",
+        "        if True:\n",
+        1,
+    )
+    assert launcher != original_launcher
+    monkeypatch.setattr(delegated, "_POSIX_GATE_LAUNCHER", launcher)
+
+    result = delegated._run_adapter_process(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; "
+            f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')",
+        ],
+        root=tmp_path,
+        request_bytes=b"{}",
+        timeout_seconds=30,
+    )
+
+    assert result.returncode == 126
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor is required")
+def test_posix_unidentified_cleanup_reenters_after_request_helper_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "unidentified-request-boundary-late-marker.txt"
+    original_popen = subprocess.Popen
+    original_request = delegated._request_posix_supervisor_self_termination
+    spawned: list[subprocess.Popen[bytes]] = []
+    requests = 0
+
+    def create_then_interrupt(*args: object, **kwargs: object) -> object:
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        raise KeyboardInterrupt("synthetic Popen return interruption")
+
+    def unreadable_status(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt("synthetic status identity interruption")
+
+    def request_then_interrupt(
+        ownership: delegated._PosixSupervisorOwnership,
+    ) -> BaseException | None:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            raise KeyboardInterrupt("synthetic request helper return interruption")
+        return original_request(ownership)
+
+    monkeypatch.setattr(subprocess, "Popen", create_then_interrupt)
+    monkeypatch.setattr(delegated, "_read_posix_launcher_status", unreadable_status)
+    monkeypatch.setattr(
+        delegated,
+        "_request_posix_supervisor_self_termination",
+        request_then_interrupt,
+    )
+
+    with pytest.raises(BaseException) as raised:
+        delegated._run_adapter_process(
+            [
+                sys.executable,
+                "-c",
+                "import time; from pathlib import Path; time.sleep(0.8); "
+                f"Path({str(marker)!r}).write_text('late', encoding='utf-8')",
+            ],
+            root=tmp_path,
+            request_bytes=b"{}",
+            timeout_seconds=30,
+        )
+
+    assert exception_tree_contains(
+        raised.value,
+        KeyboardInterrupt,
+        "synthetic Popen return interruption",
+    )
+    assert exception_tree_contains(
+        raised.value,
+        delegated.DelegatedProcessTerminationError,
+        "stopping the delegated adapter process tree",
+    )
+    assert requests >= 2
+    assert len(spawned) == 1
+    deadline = time.monotonic() + 2
+    while spawned[0].poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert spawned[0].poll() is not None
+    time.sleep(0.9)
+    assert not marker.exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups are required")

@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.16` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.3.0-beta.17` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
 
 ## One conversation for complex work
 
@@ -63,7 +63,7 @@ In Codex, the trusted `PreToolUse` hook hard-denies protected-worktree writes on
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.16
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.17
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

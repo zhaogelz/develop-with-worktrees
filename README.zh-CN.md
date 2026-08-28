@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.16` 是一套默认不让并行 AI 改动互相覆盖的本地 Git 工作流。生命周期内核不绑定 Codex；本插件提供 Codex 的首次选择、多 AI 指挥中心、技能和写入保护适配。
+`0.3.0-beta.17` 是一套默认不让并行 AI 改动互相覆盖的本地 Git 工作流。生命周期内核不绑定 Codex；本插件提供 Codex 的首次选择、多 AI 指挥中心、技能和写入保护适配。
 
 ## 复杂任务只用一个中央对话
 
@@ -61,7 +61,7 @@ Codex 中，`PreToolUse` 受信任后会在支持的本地工具路径上真正�
 ## 安装
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.16
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.17
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
