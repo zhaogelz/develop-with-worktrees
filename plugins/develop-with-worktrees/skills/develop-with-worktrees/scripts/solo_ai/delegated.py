@@ -16,7 +16,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .routing import WORKFLOW_MARKERS
-from .util import _stop_process_tree, redact_text
 
 DELEGATED_SCHEMA = 1
 DELEGATED_CONTRACT = ".solo-ai/delegated.toml"
@@ -455,6 +454,9 @@ def _bounded_file_bytes(handle: Any, *, limit: int, stream: str) -> bytes:
 
 
 def _stop_adapter_process(process: subprocess.Popen[bytes]) -> None:
+    # Hook 只导入本模块执行路由检查，不能因此加载主 CLI 的 psutil 依赖。
+    from .util import _stop_process_tree
+
     if process.poll() is not None:
         return
     _stop_process_tree(process.pid, force=False)
@@ -708,6 +710,9 @@ def invoke_delegated(
         timeout_seconds=timeout_seconds,
     )
     if completed.returncode != 0:
+        # 与进程树工具一样延迟导入，保持只读 Hook 的依赖面不变。
+        from .util import redact_text
+
         detail = ""
         try:
             detail = redact_text(
@@ -774,6 +779,8 @@ def invoke_delegated(
         raise DelegatedContractError(
             "Failed delegated adapter response requires a non-empty error"
         )
+    from .util import redact_text
+
     detail = redact_text(str(response["error"]))
     detail = " ".join(detail.split())[:MAX_ADAPTER_ERROR_CHARS]
     raise DelegatedContractError(
