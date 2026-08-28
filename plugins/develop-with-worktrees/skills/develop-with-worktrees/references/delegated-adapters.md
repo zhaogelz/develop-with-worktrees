@@ -30,6 +30,8 @@ The runtime fixes the argv shape; the repository cannot inject shell arguments:
 
 DWW limits contract and input count/size so the Codex hook can re-fingerprint them on every route without unbounded work. It hashes the raw contract and every declared input. A semantic edit, comment edit, script edit, marker addition, or marker removal therefore invalidates the local approval.
 
+Immediately before invocation, DWW captures the entrypoint bytes used by the final fingerprint check and executes a private verified snapshot rather than reopening the live entrypoint. The snapshot stays in the entrypoint's directory only for the bounded process lifetime, so Python sibling imports, inline script metadata, PowerShell `$PSScriptRoot`, shell directory lookup, and the original repository working directory keep their existing meaning; success and failure both remove it. A concurrent edit to the live entrypoint can invalidate the next route, but cannot run under the already constructed approved envelope.
+
 Schema 1 deliberately exposes only two proven capabilities: read-only `status` and idempotent `start`. Ready, Finish, integration, recovery, abandonment, and cleanup remain native project commands. Adding names to the generic allowlist before their request, result, and interruption semantics are standardized would grant authority without a portable contract.
 
 ## Inspection and local approval

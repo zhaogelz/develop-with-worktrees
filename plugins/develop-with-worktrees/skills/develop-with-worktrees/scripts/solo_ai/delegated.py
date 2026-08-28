@@ -11,9 +11,10 @@ import tempfile
 import time
 import tomllib
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 from .routing import WORKFLOW_MARKERS
 
@@ -90,14 +91,6 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _exact_relative_path(raw: Any, *, field: str) -> str:
     if not isinstance(raw, str) or not raw:
         raise DelegatedContractError(f"{field} must be a non-empty string")
@@ -168,14 +161,28 @@ def _plain_tracked_file(root: Path, relative: str, *, field: str) -> Path:
     return path
 
 
-def _load_contract(root: Path) -> DelegatedContract:
+def _bounded_file_bytes_for_fingerprint(
+    path: Path, *, limit: int, description: str
+) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            content = handle.read(limit + 1)
+    except OSError as exc:
+        raise DelegatedContractError(f"Could not read {description}: {exc}") from exc
+    if len(content) > limit:
+        raise DelegatedContractError(f"{description} exceeds the {limit}-byte limit")
+    return content
+
+
+def _load_contract_material(root: Path) -> tuple[DelegatedContract, bytes]:
     contract_path = root / DELEGATED_CONTRACT
     try:
-        if contract_path.stat().st_size > MAX_CONTRACT_BYTES:
-            raise DelegatedContractError(
-                f"{DELEGATED_CONTRACT} exceeds the {MAX_CONTRACT_BYTES}-byte limit"
-            )
-        raw_bytes = contract_path.read_bytes()
+        _plain_tracked_file(root, DELEGATED_CONTRACT, field="contract")
+        raw_bytes = _bounded_file_bytes_for_fingerprint(
+            contract_path,
+            limit=MAX_CONTRACT_BYTES,
+            description=DELEGATED_CONTRACT,
+        )
         data = tomllib.loads(raw_bytes.decode("utf-8"))
     except DelegatedContractError:
         raise
@@ -247,20 +254,22 @@ def _load_contract(root: Path) -> DelegatedContract:
         )
     input_records: list[dict[str, str]] = []
     total_input_bytes = 0
-    _plain_tracked_file(root, DELEGATED_CONTRACT, field="contract")
+    entrypoint_bytes: bytes | None = None
     for relative in tracked_inputs:
         path = _plain_tracked_file(root, relative, field="tracked_inputs")
-        size = path.stat().st_size
-        if size > MAX_INPUT_BYTES:
-            raise DelegatedContractError(
-                f"tracked input exceeds the {MAX_INPUT_BYTES}-byte limit: {relative}"
-            )
-        total_input_bytes += size
+        content = _bounded_file_bytes_for_fingerprint(
+            path,
+            limit=MAX_INPUT_BYTES,
+            description=f"tracked input {relative}",
+        )
+        total_input_bytes += len(content)
         if total_input_bytes > MAX_TOTAL_INPUT_BYTES:
             raise DelegatedContractError(
                 f"tracked inputs exceed the {MAX_TOTAL_INPUT_BYTES}-byte total limit"
             )
-        input_records.append({"path": relative, "sha256": _sha256_file(path)})
+        input_records.append({"path": relative, "sha256": _sha256_bytes(content)})
+        if relative == entrypoint:
+            entrypoint_bytes = content
     suffixes = {"python": ".py", "powershell": ".ps1", "sh": ".sh"}
     if Path(entrypoint).suffix.casefold() != suffixes[runtime]:
         raise DelegatedContractError(
@@ -278,7 +287,7 @@ def _load_contract(root: Path) -> DelegatedContract:
         "contract_sha256": _sha256_bytes(raw_bytes),
     }
     fingerprint = _sha256_bytes(_stable_json(normalized).encode("utf-8"))
-    return DelegatedContract(
+    contract = DelegatedContract(
         adapter_id=adapter_id,
         runtime=runtime,
         entrypoint=entrypoint,
@@ -288,6 +297,14 @@ def _load_contract(root: Path) -> DelegatedContract:
         max_parallel=max_parallel,
         fingerprint=fingerprint,
     )
+    if entrypoint_bytes is None:
+        raise DelegatedContractError("The delegated entrypoint could not be captured")
+    return contract, entrypoint_bytes
+
+
+def _load_contract(root: Path) -> DelegatedContract:
+    contract, _entrypoint_bytes = _load_contract_material(root)
+    return contract
 
 
 def _approval_path(common_dir: Path) -> Path:
@@ -412,8 +429,13 @@ def revoke_delegated(
     }
 
 
-def _adapter_argv(root: Path, contract: DelegatedContract) -> list[str]:
-    entrypoint = str(root / contract.entrypoint)
+def _adapter_argv(
+    root: Path,
+    contract: DelegatedContract,
+    *,
+    entrypoint_path: Path | None = None,
+) -> list[str]:
+    entrypoint = str(entrypoint_path or (root / contract.entrypoint))
     if contract.runtime == "python":
         executable = shutil.which("uv")
         if not executable:
@@ -434,6 +456,63 @@ def _adapter_argv(root: Path, contract: DelegatedContract) -> list[str]:
     if not executable:
         raise DelegatedContractError("The approved shell adapter requires sh")
     return [executable, entrypoint]
+
+
+@contextmanager
+def _verified_entrypoint_snapshot(
+    root: Path, contract: DelegatedContract, content: bytes
+) -> Iterator[Path]:
+    """在原目录冻结已纳入指纹的入口字节，同时保留脚本目录语义。"""
+    original = root / contract.entrypoint
+    snapshot = original.with_name(
+        f".{original.stem}.dww-verified-{uuid.uuid4().hex}{original.suffix}"
+    )
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        descriptor = os.open(snapshot, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    except OSError as exc:
+        try:
+            snapshot.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise DelegatedContractError(
+            f"Could not create the verified delegated adapter snapshot: {exc}"
+        ) from exc
+    # 延迟加载主 CLI 工具，避免只读路由检查因此扩大依赖面。
+    from .util import SoloAIError, delete_plain_path_if_unchanged, snapshot_plain_path
+
+    try:
+        expected_snapshot = snapshot_plain_path(snapshot)
+    except (OSError, SoloAIError) as exc:
+        try:
+            snapshot.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise DelegatedContractError(
+            f"Could not freeze the delegated adapter snapshot identity: {exc}"
+        ) from exc
+    try:
+        yield snapshot
+    finally:
+        try:
+            if snapshot.exists() or snapshot.is_symlink():
+                delete_plain_path_if_unchanged(snapshot, expected_snapshot)
+        except FileNotFoundError:
+            pass
+        except (OSError, SoloAIError) as exc:
+            raise DelegatedContractError(
+                "Could not safely remove the verified delegated adapter snapshot; "
+                f"the changed path was preserved: {exc}"
+            ) from exc
 
 
 @dataclass(frozen=True)
@@ -687,7 +766,7 @@ def invoke_delegated(
         raise DelegatedContractError(
             f"Adapter {adapter['id']} does not declare capability {operation}"
         )
-    contract = _load_contract(root)
+    contract, entrypoint_bytes = _load_contract_material(root)
     if not secrets.compare_digest(contract.fingerprint, str(adapter["fingerprint"])):
         raise DelegatedContractError(
             "Delegated contract changed after approval inspection; retry from inspect"
@@ -703,12 +782,13 @@ def invoke_delegated(
         request_bytes = _stable_json(envelope).encode("utf-8")
     except (TypeError, ValueError, RecursionError) as exc:
         raise DelegatedContractError("Delegated request is not strict JSON") from exc
-    completed = _run_adapter_process(
-        _adapter_argv(root, contract),
-        root=root,
-        request_bytes=request_bytes,
-        timeout_seconds=timeout_seconds,
-    )
+    with _verified_entrypoint_snapshot(root, contract, entrypoint_bytes) as entrypoint:
+        completed = _run_adapter_process(
+            _adapter_argv(root, contract, entrypoint_path=entrypoint),
+            root=root,
+            request_bytes=request_bytes,
+            timeout_seconds=timeout_seconds,
+        )
     if completed.returncode != 0:
         # 与进程树工具一样延迟导入，保持只读 Hook 的依赖面不变。
         from .util import redact_text
