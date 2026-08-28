@@ -5,17 +5,18 @@ import json
 import os
 import re
 import secrets
-import signal
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
 import tomllib
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any
 
 from .routing import WORKFLOW_MARKERS
 
@@ -676,7 +677,7 @@ def _verified_input_closure(
             raise
         try:
             _cleanup_verified_input_closure(manifest)
-        except BaseException as cleanup_error:
+        except BaseException as cleanup_error:  # noqa: BLE001 - 保留中断与清理双重证据
             raise _combined_failures(
                 "Delegated invocation failed and its verified input closure "
                 "also could not be cleaned safely",
@@ -777,13 +778,45 @@ def _stop_posix_adapter_process_group(process: subprocess.Popen[bytes]) -> None:
         )
 
 
-def _stop_windows_adapter_process_tree(process: subprocess.Popen[bytes]) -> None:
+def _windows_process_tree_snapshot(root: Any) -> list[Any]:
+    """单独的快照 seam 让动态派生竞态可以被确定性回归。"""
+    return root.children(recursive=True)
+
+
+def _windows_process_identity(process: Any) -> tuple[int, float]:
+    return int(process.pid), float(process.create_time())
+
+
+def _capture_windows_root_identity(
+    process: subprocess.Popen[bytes],
+) -> tuple[int, float] | None:
+    import psutil
+
+    try:
+        return _windows_process_identity(psutil.Process(process.pid))
+    except psutil.NoSuchProcess:
+        if process.poll() is not None:
+            return None
+        raise DelegatedProcessTerminationError(
+            "Delegated adapter root identity disappeared before it could be captured"
+        )
+    except (OSError, psutil.Error) as exc:
+        raise DelegatedProcessTerminationError(
+            "Could not capture the delegated adapter root process identity"
+        ) from exc
+
+
+def _stop_windows_adapter_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    root_identity: tuple[int, float] | None,
+) -> None:
     # Hook 只导入本模块执行路由检查，不能因此加载主 CLI 的 psutil 依赖。
     import psutil
 
     try:
         root = psutil.Process(process.pid)
-        owned = [*root.children(recursive=True), root]
+        observed_root_identity = _windows_process_identity(root)
     except psutil.NoSuchProcess:
         if process.poll() is None:
             raise DelegatedProcessTerminationError(
@@ -795,57 +828,178 @@ def _stop_windows_adapter_process_tree(process: subprocess.Popen[bytes]) -> None
         raise DelegatedProcessTerminationError(
             "Could not enumerate the delegated adapter process tree"
         ) from exc
-    unique: dict[tuple[int, float], Any] = {}
-    for item in owned:
-        try:
-            unique[(item.pid, item.create_time())] = item
-        except psutil.NoSuchProcess:
-            continue
-        except (OSError, psutil.Error) as exc:
-            raise DelegatedProcessTerminationError(
-                "Could not identify every delegated adapter process"
-            ) from exc
-    owned = list(unique.values())
-    for item in reversed(owned):
+    if root_identity is not None and observed_root_identity != root_identity:
+        if process.poll() is not None:
+            # 原根已经自然退出；同 PID 的新进程不属于本次调用，绝不能触碰。
+            return
+        raise DelegatedProcessTerminationError(
+            "Delegated adapter root PID was reused before termination; the "
+            "unrelated process was preserved"
+        )
+    root_identity = root_identity or observed_root_identity
+    owned: dict[tuple[int, float], Any] = {root_identity: root}
+    pid_identities: dict[int, float] = {
+        root_identity[0]: root_identity[1]
+    }
+    frozen: set[tuple[int, float]] = set()
+    failures: list[tuple[str, BaseException | None]] = []
+    freeze_deadline = time.monotonic() + ADAPTER_TERMINATION_GRACE_SECONDS
+    stable_scans = 0
+
+    def record_failure(message: str, error: BaseException | None = None) -> None:
+        failures.append((message, error))
+
+    while True:
+        for identity, item in tuple(owned.items()):
+            if identity in frozen:
+                continue
+            try:
+                item.suspend()
+                frozen.add(identity)
+            except psutil.NoSuchProcess as exc:
+                # 已发现进程在冻结前消失时，无法证明它没有在最后一刻派生后代。
+                frozen.add(identity)
+                record_failure(
+                    "an owned process disappeared before its subtree was frozen", exc
+                )
+            except (OSError, psutil.Error) as exc:
+                record_failure("an owned process could not be suspended", exc)
+
+        discovered = False
+        for _parent_identity, item in tuple(owned.items()):
+            try:
+                descendants = _windows_process_tree_snapshot(item)
+            except psutil.NoSuchProcess as exc:
+                record_failure(
+                    "a frozen process disappeared before its descendants were enumerated",
+                    exc,
+                )
+                continue
+            except (OSError, psutil.Error) as exc:
+                record_failure(
+                    "an owned process subtree could not be enumerated", exc
+                )
+                continue
+            for descendant in descendants:
+                try:
+                    identity = _windows_process_identity(descendant)
+                except psutil.NoSuchProcess as exc:
+                    record_failure(
+                        "a discovered descendant disappeared before identity capture",
+                        exc,
+                    )
+                    continue
+                except (OSError, psutil.Error) as exc:
+                    record_failure(
+                        "a discovered descendant identity could not be captured", exc
+                    )
+                    continue
+                previous_create_time = pid_identities.get(identity[0])
+                if (
+                    previous_create_time is not None
+                    and previous_create_time != identity[1]
+                ):
+                    record_failure(
+                        "a discovered PID was reused; the unrelated process was preserved"
+                    )
+                    continue
+                if identity[1] < root_identity[1]:
+                    record_failure(
+                        "a process predating the adapter root was excluded from its owned tree"
+                    )
+                    continue
+                if identity not in owned:
+                    owned[identity] = descendant
+                    pid_identities[identity[0]] = identity[1]
+                    discovered = True
+
+        if not discovered and len(frozen) == len(owned):
+            stable_scans += 1
+            if stable_scans >= 2:
+                break
+        else:
+            stable_scans = 0
+        if failures or time.monotonic() >= freeze_deadline:
+            if time.monotonic() >= freeze_deadline:
+                record_failure(
+                    "the delegated adapter process tree did not freeze before the deadline"
+                )
+            break
+        time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
+
+    owned_processes = list(owned.values())
+    for item in owned_processes:
         try:
             item.terminate()
         except psutil.NoSuchProcess:
             continue
         except (OSError, psutil.Error) as exc:
-            raise DelegatedProcessTerminationError(
-                "Could not request delegated adapter process-tree termination"
-            ) from exc
-    _gone, alive = psutil.wait_procs(
-        owned, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
-    )
+            record_failure("an owned process could not be terminated", exc)
+    try:
+        _gone, alive = psutil.wait_procs(
+            owned_processes, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+        )
+    except (OSError, psutil.Error) as exc:
+        record_failure("the terminated process tree could not be waited", exc)
+        alive = owned_processes
     for item in alive:
         try:
             item.kill()
         except psutil.NoSuchProcess:
             continue
         except (OSError, psutil.Error) as exc:
-            raise DelegatedProcessTerminationError(
-                "Could not force delegated adapter process-tree termination"
-            ) from exc
-    _gone, alive = psutil.wait_procs(
-        alive, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
-    )
-    if alive:
-        raise DelegatedProcessTerminationError(
-            "Delegated adapter process tree could not be confirmed stopped"
+            record_failure("an owned process could not be force-killed", exc)
+    try:
+        _gone, alive = psutil.wait_procs(
+            alive, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
         )
+    except (OSError, psutil.Error) as exc:
+        record_failure("the force-killed process tree could not be waited", exc)
     try:
         process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired as exc:
-        raise DelegatedProcessTerminationError(
-            "Delegated adapter root process could not be confirmed stopped"
-        ) from exc
+        record_failure("the delegated adapter root could not be waited", exc)
+
+    unconfirmed: list[tuple[int, float]] = []
+    for identity, item in owned.items():
+        try:
+            if item.is_running() and _windows_process_identity(item) == identity:
+                unconfirmed.append(identity)
+        except psutil.NoSuchProcess:
+            continue
+        except (OSError, psutil.Error) as exc:
+            unconfirmed.append(identity)
+            record_failure("an owned process exit could not be confirmed", exc)
+    if alive:
+        record_failure("the delegated adapter process tree still has live members")
+    if unconfirmed:
+        record_failure(
+            "the delegated adapter process tree contains unconfirmed identities"
+        )
+    if failures:
+        summary = "; ".join(dict.fromkeys(message for message, _ in failures))
+        error = DelegatedProcessTerminationError(
+            "Delegated adapter process tree could not be safely frozen and "
+            f"confirmed stopped: {summary}"
+        )
+        first_cause = next(
+            (cause for _message, cause in failures if cause is not None), None
+        )
+        if first_cause is not None:
+            raise error from first_cause
+        raise error
 
 
-def _stop_adapter_process(process: subprocess.Popen[bytes]) -> None:
+def _stop_adapter_process(
+    process: subprocess.Popen[bytes],
+    *,
+    windows_root_identity: tuple[int, float] | None = None,
+) -> None:
     try:
         if os.name == "nt":
-            _stop_windows_adapter_process_tree(process)
+            _stop_windows_adapter_process_tree(
+                process, root_identity=windows_root_identity
+            )
         else:
             _stop_posix_adapter_process_group(process)
     except DelegatedProcessTerminationError:
@@ -893,7 +1047,10 @@ def _run_adapter_process(
             raise DelegatedContractError(
                 f"Could not start the delegated adapter: {exc}"
             ) from exc
+        windows_root_identity: tuple[int, float] | None = None
         try:
+            if os.name == "nt":
+                windows_root_identity = _capture_windows_root_identity(process)
             deadline = time.monotonic() + timeout_seconds
             while process.poll() is None:
                 if os.fstat(stdout_handle.fileno()).st_size > MAX_ADAPTER_STDOUT_BYTES:
@@ -922,8 +1079,10 @@ def _run_adapter_process(
             return _AdapterProcessResult(returncode, stdout, stderr)
         except BaseException as original_error:
             try:
-                _stop_adapter_process(process)
-            except BaseException as termination_error:
+                _stop_adapter_process(
+                    process, windows_root_identity=windows_root_identity
+                )
+            except BaseException as termination_error:  # noqa: BLE001 - 终止失败必须保留闭包
                 if not isinstance(
                     termination_error, DelegatedProcessTerminationError
                 ):
