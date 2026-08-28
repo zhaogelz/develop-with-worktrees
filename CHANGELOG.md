@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0-beta.16 — 2026-08-28
+
+- POSIX gate launcher 改为不会自然退出的持久 supervisor：它在初始 status 前忽略 `SIGTERM`，GO 后才 fork/exec adapter，亲自 wait adapter 并通过单 writer、有界单帧 result pipe 返回退出码；adapter 在 exec 前恢复默认 `SIGTERM` 并关闭全部 status/gate/payload/result/control FD。adapter 完成、exec 失败、gate EOF 和协议错误都不会释放 supervisor 的进程组 leader 身份。
+- 父方不再对可复用的裸 PID/PGID 发 destructive signal，也不在结果路径 `poll/reap` supervisor。确认 supervisor 仍是未 reap 直接子后，父方只向私有 control pipe 交付一次终止命令；仍活且实际拥有该组的 supervisor 自行 `SIGKILL` 当前组，父方随后只 wait/reap 和只读确认组消失。外部 SIGCHLD reaper、PID/PGID 复用或控制结果不确定时零裸 PGID 信号并保留 verified-input closure。
+- POSIX 预 GO launcher 环境收窄为固定 locale，不再继承 `PATH`、`LIBPATH`、`SHLIB_PATH`、`LDR_*`、`GCONV_PATH` 或其他平台 loader/runtime 环境；完整 adapter 环境仍只在 GO 后从私有 payload 应用。Windows Job/process/thread/标准流/属性列表关闭路径先绑定原生 API，再单次 detach，并将 detach 后的异步中断明确报告为终止不确定；空 Job 的 `CreateJobObjectW` 返回到 Python 所有者落盘之间仍是无子进程、不可完全消除的极短资源泄漏边界。Hook 定义保持不变。
+
 ## 0.3.0-beta.15 — 2026-08-28
 
 - Windows 委托启动不再经过“`Popen` 返回后再 assign Job”的窗口：调用方用 `STARTUPINFOEX` 同时传入精确标准流 HANDLE 列表与 `PROC_THREAD_ATTRIBUTE_JOB_LIST`，`CreateProcessW(CREATE_SUSPENDED)` 创建成功的第一刻即由预建 `KILL_ON_JOB_CLOSE` Job 原子拥有；预建轻量 process wrapper 直接持有 `PROCESS_INFORMATION` 的 process/thread HANDLE，系统创建成功但 Python 尚未返回时的任意 `BaseException` 也能收束且不会执行入口。

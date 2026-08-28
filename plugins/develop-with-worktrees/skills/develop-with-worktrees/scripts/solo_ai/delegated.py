@@ -9,7 +9,6 @@ import re
 import secrets
 import select
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -37,6 +36,7 @@ MAX_ADAPTER_STDOUT_BYTES = 1024 * 1024
 MAX_ADAPTER_STDERR_BYTES = 64 * 1024
 MAX_ADAPTER_ERROR_CHARS = 1200
 MAX_ADAPTER_LAUNCH_PAYLOAD_BYTES = 2 * 1024 * 1024
+MAX_ADAPTER_RESULT_FRAME_BYTES = 64
 ADAPTER_POLL_SECONDS = 0.05
 ADAPTER_TERMINATION_GRACE_SECONDS = 5.0
 ADAPTER_TERMINATION_POLL_SECONDS = 0.02
@@ -743,6 +743,44 @@ class _PosixLauncherIdentity:
         return pid, process_group
 
 
+@dataclass
+class _PosixSupervisorOwnership:
+    """父方只持有直接子与控制管道，不向可复用的裸 PGID 发 destructive signal。"""
+
+    pid: int
+    process_group: int
+    control_write: _OwnedPosixFd
+    process: subprocess.Popen[bytes] | None = None
+    termination_requested: bool = False
+    termination_confirmed: bool = False
+
+
+@dataclass
+class _PosixAdapterProcess:
+    """持久 supervisor 的父方视图；adapter 结果与 supervisor 生存期相互独立。"""
+
+    supervisor: subprocess.Popen[bytes]
+    ownership: _PosixSupervisorOwnership
+    result_read: _OwnedPosixFd
+    result_buffer: bytearray
+    adapter_returncode: int | None = None
+    result_complete: bool = False
+
+    @property
+    def pid(self) -> int:
+        return self.ownership.pid
+
+    def poll(self) -> int | None:
+        return _poll_posix_adapter_result(self)
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.adapter_returncode is None:
+            raise DelegatedContractError(
+                "POSIX delegated adapter result was not complete before wait"
+            )
+        return self.adapter_returncode
+
+
 def _create_cloexec_pipe() -> tuple[_OwnedPosixFd, _OwnedPosixFd]:
     if hasattr(os, "pipe2"):
         read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
@@ -755,40 +793,102 @@ def _create_cloexec_pipe() -> tuple[_OwnedPosixFd, _OwnedPosixFd]:
 
 _POSIX_GATE_LAUNCHER = r"""
 import os
+import select
+import signal
 import sys
 
 status_fd = int(sys.argv[1])
 gate_fd = int(sys.argv[2])
 payload_fd = int(sys.argv[3])
+control_fd = int(sys.argv[4])
+result_fd = int(sys.argv[5])
+owned_fds = {
+    "status": status_fd,
+    "gate": gate_fd,
+    "payload": payload_fd,
+    "control": control_fd,
+    "result": result_fd,
+}
+
+
+def close_owned(name):
+    descriptor = owned_fds[name]
+    owned_fds[name] = -1
+    if descriptor < 0:
+        return
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
+def hold_for_termination():
+    while True:
+        try:
+            readable, _, _ = select.select([control_fd], [], [], None)
+            if not readable:
+                continue
+            command = os.read(control_fd, 2)
+        except InterruptedError:
+            continue
+        except BaseException:
+            command = b""
+        if command == b"K":
+            # 只有仍活着且实际拥有当前进程组的 supervisor 才能发 destructive signal。
+            try:
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+            except BaseException:
+                pass
+        # EOF、伪造、重复或原生调用异常都不得自然退出并释放 PGID 身份。
+        while True:
+            signal.pause()
+
+
+def fail_and_hold():
+    close_owned("status")
+    close_owned("result")
+    close_owned("gate")
+    close_owned("payload")
+    hold_for_termination()
+
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+signal.signal(signal.SIGCHLD, signal.SIG_DFL)
 try:
     pid = os.getpid()
     pgid = os.getpgrp()
     frame = ("DWW1 %d %d\n" % (pid, pgid)).encode("ascii")
     pipe_buf = os.fpathconf(status_fd, "PC_PIPE_BUF")
     if pid <= 0 or pgid != pid or len(frame) > pipe_buf:
-        os._exit(124)
+        fail_and_hold()
     if os.write(status_fd, frame) != len(frame):
-        os._exit(124)
+        fail_and_hold()
 except BaseException:
-    os._exit(124)
+    fail_and_hold()
 finally:
-    try:
-        os.close(status_fd)
-    except OSError:
-        pass
+    close_owned("status")
 
 try:
-    gate = os.read(gate_fd, 2)
-    tail = os.read(gate_fd, 1)
+    os.set_blocking(gate_fd, False)
+    gate = bytearray()
+    while True:
+        readable, _, _ = select.select([gate_fd, control_fd], [], [], None)
+        if control_fd in readable:
+            hold_for_termination()
+        if gate_fd not in readable:
+            continue
+        chunk = os.read(gate_fd, 2)
+        if not chunk:
+            break
+        gate.extend(chunk)
+        if len(gate) > 1:
+            fail_and_hold()
 except BaseException:
-    os._exit(125)
+    fail_and_hold()
 finally:
-    try:
-        os.close(gate_fd)
-    except OSError:
-        pass
-if gate != b"G" or tail != b"":
-    os._exit(125)
+    close_owned("gate")
+if bytes(gate) != b"G":
+    fail_and_hold()
 
 try:
     chunks = []
@@ -799,9 +899,9 @@ try:
             break
         size += len(chunk)
         if size > 2097152:
-            os._exit(126)
+            fail_and_hold()
         chunks.append(chunk)
-    os.close(payload_fd)
+    close_owned("payload")
     import json
 
     payload = json.loads(b"".join(chunks).decode("utf-8"))
@@ -809,29 +909,80 @@ try:
     environment = payload["environment"]
     cwd = payload["cwd"]
     if not isinstance(argv, list) or not argv:
-        os._exit(126)
+        fail_and_hold()
     if not all(isinstance(item, str) and item for item in argv):
-        os._exit(126)
+        fail_and_hold()
     if not isinstance(environment, dict):
-        os._exit(126)
+        fail_and_hold()
     if not all(isinstance(key, str) and isinstance(value, str) for key, value in environment.items()):
-        os._exit(126)
+        fail_and_hold()
     if not isinstance(cwd, str) or not cwd:
-        os._exit(126)
-    os.chdir(cwd)
-    os.execvpe(argv[0], argv, environment)
+        fail_and_hold()
 except BaseException:
-    os._exit(126)
+    fail_and_hold()
+
+try:
+    adapter_pid = os.fork()
+except BaseException:
+    fail_and_hold()
+
+if adapter_pid == 0:
+    try:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        for signal_name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+            if hasattr(signal, signal_name):
+                signal.signal(getattr(signal, signal_name), signal.SIG_DFL)
+        close_owned("control")
+        close_owned("result")
+        os.chdir(cwd)
+        os.execvpe(argv[0], argv, environment)
+    except BaseException:
+        os._exit(126)
+
+adapter_status = None
+while adapter_status is None:
+    try:
+        waited_pid, status = os.waitpid(adapter_pid, os.WNOHANG)
+        if waited_pid == adapter_pid:
+            adapter_status = status
+            break
+    except ChildProcessError:
+        adapter_status = 125 << 8
+        break
+    except InterruptedError:
+        pass
+    try:
+        readable, _, _ = select.select([control_fd], [], [], 0.05)
+    except InterruptedError:
+        continue
+    except BaseException:
+        readable = []
+    if readable:
+        hold_for_termination()
+
+try:
+    returncode = os.waitstatus_to_exitcode(adapter_status)
+    result = ("DWWR1 %d\n" % returncode).encode("ascii")
+    pipe_buf = os.fpathconf(result_fd, "PC_PIPE_BUF")
+    if len(result) > 64 or len(result) > pipe_buf:
+        fail_and_hold()
+    if os.write(result_fd, result) != len(result):
+        fail_and_hold()
+except BaseException:
+    fail_and_hold()
+finally:
+    close_owned("result")
+
+# adapter 已完成，但 supervisor 必须继续钉住 PGID，直到父方唯一终止命令。
+hold_for_termination()
 """
 
 
 def _posix_launcher_environment() -> dict[str, str]:
-    blocked_prefixes = ("PYTHON", "LD_", "DYLD_")
-    return {
-        key: value
-        for key, value in os.environ.items()
-        if not key.upper().startswith(blocked_prefixes)
-    }
+    # 绝对解释器路径与固定 ASCII 协议无需继承 PATH 或 loader/runtime 配置。
+    # adapter 的完整批准环境只经 payload 在 GO 后应用。
+    return {"LC_ALL": "C", "LANG": "C"}
 
 
 def _posix_launch_payload(
@@ -907,20 +1058,24 @@ def _posix_direct_child_exited_unreaped(pid: int) -> bool:
     return status is not None and status.si_pid == pid
 
 
-def _wait_and_reap_lost_posix_launcher(pid: int, *, timeout: float) -> None:
+def _wait_and_reap_posix_supervisor(
+    ownership: _PosixSupervisorOwnership, *, timeout: float
+) -> None:
     deadline = time.monotonic() + timeout
     while True:
         try:
-            waited_pid, _ = os.waitpid(pid, os.WNOHANG)
+            waited_pid, status = os.waitpid(ownership.pid, os.WNOHANG)
         except ChildProcessError as exc:
             raise DelegatedProcessTerminationError(
-                "Lost POSIX launcher direct child was reaped outside its owner"
+                "POSIX supervisor direct child was reaped outside its owner"
             ) from exc
-        if waited_pid == pid:
+        if waited_pid == ownership.pid:
+            if ownership.process is not None:
+                ownership.process.returncode = os.waitstatus_to_exitcode(status)
             return
         if time.monotonic() >= deadline:
             raise DelegatedProcessTerminationError(
-                "Lost POSIX launcher direct child could not be reaped"
+                "POSIX supervisor direct child could not be reaped"
             )
         time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
 
@@ -935,39 +1090,101 @@ def _wait_for_posix_group_absence(process_group: int, *, timeout: float) -> None
         time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
 
 
-def _stop_unreturned_posix_launcher(pid: int, process_group: int) -> None:
-    if pid <= 0 or pid != process_group:
+def _request_posix_supervisor_self_termination(
+    ownership: _PosixSupervisorOwnership,
+) -> BaseException | None:
+    """只向不可复用的私有 pipe 写命令；destructive signal 由活 supervisor 自发。"""
+
+    if ownership.termination_requested:
+        return None
+    if _posix_direct_child_exited_unreaped(ownership.pid):
         raise DelegatedProcessTerminationError(
-            "Lost POSIX launcher identity could not be validated"
+            "POSIX supervisor exited before it could terminate its owned group"
         )
-    try:
-        os.killpg(process_group, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    except OSError as exc:
+    if ownership.control_write.value is None:
         raise DelegatedProcessTerminationError(
-            "Could not request lost POSIX launcher process-group termination"
-        ) from exc
-    graceful_deadline = time.monotonic() + ADAPTER_TERMINATION_GRACE_SECONDS
-    while time.monotonic() < graceful_deadline:
-        if _posix_direct_child_exited_unreaped(pid):
-            break
-        time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
+            "POSIX supervisor termination descriptor is unavailable"
+        )
+    descriptor = ownership.control_write.value
+    # 写入一开始即按“命令可能已交付”处理，后续绝不复用 FD 或改走裸 PGID。
+    ownership.termination_requested = True
+    failure: BaseException | None = None
     try:
-        os.killpg(process_group, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except OSError as exc:
+        if os.write(descriptor, b"K") != 1:
+            raise OSError("POSIX supervisor termination command was incomplete")
+    except BaseException as exc:  # noqa: BLE001 - 命令可能已进入管道，仍须确认终态
+        failure = exc
+    try:
+        ownership.control_write.close()
+    except BaseException as exc:  # noqa: BLE001 - FD 数值已先消费，绝不重试
+        failure = exc if failure is None else _combined_failures(
+            "POSIX supervisor command and descriptor close both failed",
+            failure,
+            exc,
+        )
+    return failure
+
+
+def _request_unidentified_posix_supervisor_self_termination(
+    control_write: _OwnedPosixFd,
+) -> BaseException | None:
+    """身份帧丢失时仍消费不可复用 capability；只请求自杀，不猜 PID/PGID。"""
+
+    if control_write.value is None:
+        return DelegatedProcessTerminationError(
+            "Unidentified POSIX supervisor termination descriptor is unavailable"
+        )
+    descriptor = control_write.value
+    failure: BaseException | None = None
+    try:
+        if os.write(descriptor, b"K") != 1:
+            raise OSError(
+                "Unidentified POSIX supervisor termination command was incomplete"
+            )
+    except BaseException as exc:  # noqa: BLE001 - EPIPE 也只说明没有当前 reader
+        failure = exc
+    try:
+        control_write.close()
+    except BaseException as exc:  # noqa: BLE001 - FD 已单次消费，不重试数值
+        failure = exc if failure is None else _combined_failures(
+            "Unidentified POSIX supervisor command and close both failed",
+            failure,
+            exc,
+        )
+    return failure
+
+
+def _stop_posix_supervisor(ownership: _PosixSupervisorOwnership) -> None:
+    if ownership.termination_confirmed:
+        return
+    if ownership.pid <= 0 or ownership.pid != ownership.process_group:
         raise DelegatedProcessTerminationError(
-            "Could not force lost POSIX launcher process-group termination"
-        ) from exc
-    _wait_and_reap_lost_posix_launcher(
-        pid, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+            "POSIX supervisor identity could not be validated"
+        )
+    request_error = _request_posix_supervisor_self_termination(ownership)
+    _wait_and_reap_posix_supervisor(
+        ownership, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
     )
-    # 信号发送期间始终保留未 reap 的直接子身份；reap 后只查询、不再按裸 PGID 发信号。
+    # supervisor 身份释放后仅只读确认；即使 PGID 已复用也绝不再发信号。
     _wait_for_posix_group_absence(
-        process_group, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+        ownership.process_group, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
     )
+    ownership.termination_confirmed = True
+    if request_error is not None:
+        raise request_error
+
+
+def _stop_unreturned_posix_launcher(
+    pid: int,
+    process_group: int,
+    control_write: _OwnedPosixFd | None = None,
+) -> None:
+    ownership = _PosixSupervisorOwnership(
+        pid=pid,
+        process_group=process_group,
+        control_write=control_write or _OwnedPosixFd(None),
+    )
+    _stop_posix_supervisor(ownership)
 
 
 def _posix_process_group_exists(process_group: int) -> bool:
@@ -982,68 +1199,98 @@ def _posix_process_group_exists(process_group: int) -> bool:
         ) from exc
 
 
-def _wait_for_posix_process_group_exit(
-    process: subprocess.Popen[bytes], *, timeout: float
-) -> bool:
-    deadline = time.monotonic() + timeout
-    while True:
-        root_finished = process.poll() is not None
-        group_exists = _posix_process_group_exists(process.pid)
-        if root_finished and not group_exists:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
-
-
-def _stop_posix_adapter_process_group(process: subprocess.Popen[bytes]) -> None:
-    if not _posix_process_group_exists(process.pid):
-        if process.poll() is None:
-            raise DelegatedProcessTerminationError(
-                "Delegated adapter root left its owned process group and could "
-                "not be confirmed stopped"
-            )
-        return
+def _stop_posix_adapter_process_group(process: _PosixAdapterProcess) -> None:
+    failures: list[BaseException] = []
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        if process.poll() is None:
-            raise DelegatedProcessTerminationError(
-                "Delegated adapter root could not be confirmed stopped after "
-                "its process group disappeared"
-            )
-        return
-    except OSError as exc:
-        raise DelegatedProcessTerminationError(
-            "Could not request delegated adapter process-group termination"
-        ) from exc
-    if _wait_for_posix_process_group_exit(
-        process, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
-    ):
-        return
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        process.poll()
-    except OSError as exc:
-        raise DelegatedProcessTerminationError(
-            "Could not force delegated adapter process-group termination"
-        ) from exc
-    if not _wait_for_posix_process_group_exit(
-        process, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
-    ):
-        raise DelegatedProcessTerminationError(
-            "Delegated adapter process group could not be confirmed stopped"
+        _stop_posix_supervisor(process.ownership)
+    except BaseException as exc:  # noqa: BLE001 - 已确认停止时仍可安全消费 FD
+        failures.append(exc)
+    if process.ownership.termination_confirmed:
+        for descriptor in (process.result_read, process.ownership.control_write):
+            try:
+                descriptor.close()
+            except BaseException as exc:  # noqa: BLE001 - 每个父方 FD 都要单次消费
+                failures.append(exc)
+    if failures:
+        error = DelegatedProcessTerminationError(
+            "POSIX supervisor ownership could not be fully released"
         )
+        error.__cause__ = (
+            failures[0]
+            if len(failures) == 1
+            else BaseExceptionGroup(
+                "POSIX supervisor descriptor close failures", failures
+            )
+        )
+        raise error
+
+
+def _poll_posix_adapter_result(process: _PosixAdapterProcess) -> int | None:
+    if process.result_complete:
+        return process.adapter_returncode
+    if _posix_direct_child_exited_unreaped(process.pid):
+        raise DelegatedProcessTerminationError(
+            "POSIX supervisor exited before its adapter result was accepted"
+        )
+    if process.result_read.value is None:
+        raise DelegatedContractError(
+            "POSIX delegated adapter result descriptor is unavailable"
+        )
+    descriptor = process.result_read.value
+    os.set_blocking(descriptor, False)
+    reached_eof = False
+    while True:
+        readable, _, _ = select.select([descriptor], [], [], 0)
+        if not readable:
+            break
+        try:
+            chunk = os.read(
+                descriptor,
+                MAX_ADAPTER_RESULT_FRAME_BYTES + 1 - len(process.result_buffer),
+            )
+        except BlockingIOError:
+            break
+        if not chunk:
+            reached_eof = True
+            break
+        process.result_buffer.extend(chunk)
+        if len(process.result_buffer) > MAX_ADAPTER_RESULT_FRAME_BYTES:
+            raise DelegatedContractError(
+                "POSIX delegated adapter result frame is oversized"
+            )
+    if not reached_eof:
+        return None
+    frame = bytes(process.result_buffer)
+    match = re.fullmatch(rb"DWWR1 (-?[0-9]{1,3})\n", frame)
+    if match is None:
+        raise DelegatedContractError(
+            "POSIX delegated adapter result frame is invalid"
+        )
+    returncode = int(match.group(1))
+    if returncode < -255 or returncode > 255:
+        raise DelegatedContractError(
+            "POSIX delegated adapter result returncode is out of range"
+        )
+    process.adapter_returncode = returncode
+    process.result_complete = True
+    return returncode
 
 
 def _close_posix_launch_child_ends(
     status_write: _OwnedPosixFd,
     gate_read: _OwnedPosixFd,
+    control_read: _OwnedPosixFd,
+    result_write: _OwnedPosixFd,
     payload_handle: Any,
 ) -> BaseException | None:
     failures: list[BaseException] = []
-    for close in (status_write.close, gate_read.close, payload_handle.close):
+    for close in (
+        status_write.close,
+        gate_read.close,
+        control_read.close,
+        result_write.close,
+        payload_handle.close,
+    ):
         try:
             close()
         except BaseException as exc:  # noqa: BLE001 - 每个 child-end 都必须尝试关闭
@@ -1055,42 +1302,61 @@ def _close_posix_launch_child_ends(
     return BaseExceptionGroup("POSIX launcher child-end close failures", failures)
 
 
-def _close_posix_parent_ends(
-    status_read: _OwnedPosixFd, gate_write: _OwnedPosixFd
-) -> BaseException | None:
-    failures: list[BaseException] = []
-    for descriptor in (gate_write, status_read):
-        try:
-            descriptor.close()
-        except BaseException as exc:  # noqa: BLE001 - 防止后一 FD 因前一失败而泄漏
-            failures.append(exc)
-    if not failures:
-        return None
-    if len(failures) == 1:
-        return failures[0]
-    return BaseExceptionGroup("POSIX launcher parent-end close failures", failures)
-
-
 def _prepare_posix_launch_resources(
     argv: list[str], *, root: Path, environment: dict[str, str] | None
-) -> tuple[_OwnedPosixFd, _OwnedPosixFd, _OwnedPosixFd, _OwnedPosixFd, Any]:
+) -> tuple[
+    _OwnedPosixFd,
+    _OwnedPosixFd,
+    _OwnedPosixFd,
+    _OwnedPosixFd,
+    _OwnedPosixFd,
+    _OwnedPosixFd,
+    _OwnedPosixFd,
+    _OwnedPosixFd,
+    Any,
+]:
     payload = _posix_launch_payload(argv, root=root, environment=environment)
     status_read = _OwnedPosixFd(None)
     status_write = _OwnedPosixFd(None)
     gate_read = _OwnedPosixFd(None)
     gate_write = _OwnedPosixFd(None)
+    control_read = _OwnedPosixFd(None)
+    control_write = _OwnedPosixFd(None)
+    result_read = _OwnedPosixFd(None)
+    result_write = _OwnedPosixFd(None)
     payload_handle: Any | None = None
     try:
         status_read, status_write = _create_cloexec_pipe()
         gate_read, gate_write = _create_cloexec_pipe()
+        control_read, control_write = _create_cloexec_pipe()
+        result_read, result_write = _create_cloexec_pipe()
         payload_handle = tempfile.TemporaryFile()
         payload_handle.write(payload)
         payload_handle.flush()
         payload_handle.seek(0)
-        return status_read, status_write, gate_read, gate_write, payload_handle
+        return (
+            status_read,
+            status_write,
+            gate_read,
+            gate_write,
+            control_read,
+            control_write,
+            result_read,
+            result_write,
+            payload_handle,
+        )
     except BaseException as original_error:
         failures: list[BaseException] = []
-        for descriptor in (status_read, status_write, gate_read, gate_write):
+        for descriptor in (
+            status_read,
+            status_write,
+            gate_read,
+            gate_write,
+            control_read,
+            control_write,
+            result_read,
+            result_write,
+        ):
             try:
                 descriptor.close()
             except BaseException as exc:  # noqa: BLE001 - 未启动时也不泄漏 FD
@@ -1121,12 +1387,16 @@ def _launch_posix_adapter_process(
     stdout_handle: Any,
     stderr_handle: Any,
     environment: dict[str, str] | None,
-) -> subprocess.Popen[bytes]:
+) -> _PosixAdapterProcess:
     (
         status_read,
         status_write,
         gate_read,
         gate_write,
+        control_read,
+        control_write,
+        result_read,
+        result_write,
         payload_handle,
     ) = _prepare_posix_launch_resources(
         argv, root=root, environment=environment
@@ -1139,6 +1409,8 @@ def _launch_posix_adapter_process(
         try:
             assert status_write.value is not None
             assert gate_read.value is not None
+            assert control_read.value is not None
+            assert result_write.value is not None
             process = subprocess.Popen(
                 [
                     str(Path(sys.executable).resolve()),
@@ -1149,6 +1421,8 @@ def _launch_posix_adapter_process(
                     str(status_write.value),
                     str(gate_read.value),
                     str(payload_handle.fileno()),
+                    str(control_read.value),
+                    str(result_write.value),
                 ],
                 cwd=Path(sys.executable).resolve().parent,
                 stdin=stdin_handle,
@@ -1161,13 +1435,19 @@ def _launch_posix_adapter_process(
                     status_write.value,
                     gate_read.value,
                     payload_handle.fileno(),
+                    control_read.value,
+                    result_write.value,
                 ),
             )
         except BaseException as exc:  # noqa: BLE001 - 可能已 fork/exec 但尚未返回对象
             launch_error = exc
         finally:
             child_close_error = _close_posix_launch_child_ends(
-                status_write, gate_read, payload_handle
+                status_write,
+                gate_read,
+                control_read,
+                result_write,
+                payload_handle,
             )
 
         if process is None:
@@ -1200,9 +1480,23 @@ def _launch_posix_adapter_process(
                 failures.append(exc)
             if identity is not None:
                 try:
-                    _stop_unreturned_posix_launcher(*identity)
+                    _stop_unreturned_posix_launcher(
+                        *identity, control_write=control_write
+                    )
                 except BaseException as exc:  # noqa: BLE001 - 未返回根仍须确认整个组
                     failures.append(exc)
+            else:
+                capability_error = (
+                    _request_unidentified_posix_supervisor_self_termination(
+                        control_write
+                    )
+                )
+                if capability_error is not None:
+                    failures.append(capability_error)
+            try:
+                result_read.close()
+            except BaseException as exc:  # noqa: BLE001 - 未返回路径也须消费结果 FD
+                failures.append(exc)
             if child_close_error is not None:
                 failures.append(child_close_error)
             assert launch_error is not None
@@ -1253,17 +1547,44 @@ def _launch_posix_adapter_process(
                     "POSIX delegated launcher gate write was incomplete"
                 )
             gate_write.close()
-            return process
+            ownership = _PosixSupervisorOwnership(
+                pid=launcher_pid,
+                process_group=process_group,
+                control_write=control_write,
+                process=process,
+            )
+            return _PosixAdapterProcess(
+                supervisor=process,
+                ownership=ownership,
+                result_read=result_read,
+                result_buffer=bytearray(),
+            )
         except BaseException as original_error:
-            parent_close_error = _close_posix_parent_ends(
-                status_read, gate_write
+            failures: list[BaseException] = []
+            for descriptor in (status_read, gate_write):
+                try:
+                    descriptor.close()
+                except BaseException as exc:  # noqa: BLE001 - 继续走 supervisor 收束
+                    failures.append(exc)
+            # Popen 已返回时，其 pid 是仍未 poll/reap 的直接子事实；即使 status
+            # 被伪造也只通过该子专属 control pipe 收束，绝不按该数字发信号。
+            cleanup_identity = (process.pid, process.pid)
+            ownership = _PosixSupervisorOwnership(
+                pid=cleanup_identity[0],
+                process_group=cleanup_identity[1],
+                control_write=control_write,
+                process=process,
+            )
+            posix_process = _PosixAdapterProcess(
+                supervisor=process,
+                ownership=ownership,
+                result_read=result_read,
+                result_buffer=bytearray(),
             )
             try:
-                _stop_posix_adapter_process_group(process)
+                _stop_posix_adapter_process_group(posix_process)
             except BaseException as termination_error:  # noqa: BLE001 - 协议失败仍须收束
-                failures = [termination_error]
-                if parent_close_error is not None:
-                    failures.append(parent_close_error)
+                failures.insert(0, termination_error)
                 wrapped = DelegatedProcessTerminationError(
                     "POSIX delegated launcher protocol failed and its process "
                     "group could not be confirmed stopped"
@@ -1280,7 +1601,14 @@ def _launch_posix_adapter_process(
                     original_error,
                     wrapped,
                 ) from None
-            if parent_close_error is not None:
+            if failures:
+                parent_close_error = (
+                    failures[0]
+                    if len(failures) == 1
+                    else BaseExceptionGroup(
+                        "POSIX launcher descriptor cleanup failures", failures
+                    )
+                )
                 raise _combined_failures(
                     "POSIX delegated launcher protocol and descriptor cleanup failed",
                     original_error,
@@ -1288,8 +1616,12 @@ def _launch_posix_adapter_process(
                 ) from None
             raise
     finally:
-        # 正常路径已消费；异常路径只会尝试尚未消费的 FD。
-        _close_posix_parent_ends(status_read, gate_write)
+        # wrapper 持有 control/result；这里只消费 launch 阶段的 status/gate。
+        for descriptor in (status_read, gate_write):
+            try:
+                descriptor.close()
+            except BaseException:
+                pass
 
 
 class _WindowsBasicLimitInformation(ctypes.Structure):
@@ -1532,27 +1864,32 @@ def _close_windows_adapter_job(job: _WindowsAdapterJob) -> None:
                 "Windows adapter Job handle close outcome is indeterminate"
             )
         return
-    handle = job.handle
-    # 数值句柄在原生调用前即从对象移除；即使 CloseHandle 返回边界被中断也绝不重试。
-    job.handle = None
-    job.close_attempted = True
     kernel32 = _windows_kernel32()
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [ctypes.c_void_p]
     close_handle.restype = ctypes.c_int
+    handle = job.handle
+    # 先绑定 API，再预置不确定状态并从唯一所有者移除；detach 后任意异步异常
+    # 都会保留“不确定”事实，且绝不重试该数值。
     try:
-        closed = close_handle(ctypes.c_void_p(handle))
-    except BaseException as exc:  # noqa: BLE001 - 关闭结果可能已生效，禁止复用数值
+        job.close_attempted = True
         job.close_outcome_uncertain = True
+        job.handle = None
+        closed = close_handle(ctypes.c_void_p(handle))
+        if not closed:
+            raise DelegatedProcessTerminationError(
+                "Windows adapter Job handle could not be confirmed closed"
+            ) from OSError(
+                ctypes.get_last_error(), "CloseHandle failed for adapter job"
+            )
+        job.closed_confirmed = True
+        job.close_outcome_uncertain = False
+    except DelegatedProcessTerminationError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - 关闭结果可能已生效，禁止复用数值
         raise DelegatedProcessTerminationError(
             "Windows adapter Job handle close outcome is indeterminate"
         ) from exc
-    if not closed:
-        job.close_outcome_uncertain = True
-        raise DelegatedProcessTerminationError(
-            "Windows adapter Job handle could not be confirmed closed"
-        ) from OSError(ctypes.get_last_error(), "CloseHandle failed for adapter job")
-    job.closed_confirmed = True
 
 
 def _confirm_windows_adapter_job_ownership(
@@ -1585,21 +1922,25 @@ def _consume_windows_process_handle(
     raw_handle = getattr(process.information, field)
     if not raw_handle:
         return
-    setattr(process.information, field, None)
     kernel32 = _windows_kernel32()
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [ctypes.c_void_p]
     close_handle.restype = ctypes.c_int
     try:
+        setattr(process.information, field, None)
         closed = close_handle(ctypes.c_void_p(int(raw_handle)))
+        if not closed:
+            raise DelegatedProcessTerminationError(
+                f"Windows adapter {label} handle could not be confirmed closed"
+            ) from OSError(
+                ctypes.get_last_error(), f"CloseHandle failed for {label}"
+            )
+    except DelegatedProcessTerminationError:
+        raise
     except BaseException as exc:  # noqa: BLE001 - 已从唯一所有者移除，禁止重试
         raise DelegatedProcessTerminationError(
             f"Windows adapter {label} handle close outcome is indeterminate"
         ) from exc
-    if not closed:
-        raise DelegatedProcessTerminationError(
-            f"Windows adapter {label} handle could not be confirmed closed"
-        ) from OSError(ctypes.get_last_error(), f"CloseHandle failed for {label}")
 
 
 def _close_windows_adapter_process_handles(
@@ -1766,14 +2107,14 @@ def _initialize_windows_launch_resources(
 def _close_windows_launch_resources(resources: _WindowsLaunchResources) -> None:
     failures: list[BaseException] = []
     if resources.attribute_list_initialized:
-        resources.attribute_list_initialized = False
         buffer = resources.attribute_buffer
-        resources.attribute_buffer = None
+        kernel32 = _windows_kernel32()
+        delete = kernel32.DeleteProcThreadAttributeList
+        delete.argtypes = [ctypes.c_void_p]
+        delete.restype = None
         try:
-            kernel32 = _windows_kernel32()
-            delete = kernel32.DeleteProcThreadAttributeList
-            delete.argtypes = [ctypes.c_void_p]
-            delete.restype = None
+            resources.attribute_list_initialized = False
+            resources.attribute_buffer = None
             assert buffer is not None
             delete(ctypes.c_void_p(ctypes.addressof(buffer)))
         except BaseException as exc:  # noqa: BLE001 - 属性列表同样只消费一次
@@ -1782,12 +2123,12 @@ def _close_windows_launch_resources(resources: _WindowsLaunchResources) -> None:
         raw_handle = resources.standard_handles[index]
         if not raw_handle:
             continue
-        resources.standard_handles[index] = None
+        kernel32 = _windows_kernel32()
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
         try:
-            kernel32 = _windows_kernel32()
-            close_handle = kernel32.CloseHandle
-            close_handle.argtypes = [ctypes.c_void_p]
-            close_handle.restype = ctypes.c_int
+            resources.standard_handles[index] = None
             if not close_handle(ctypes.c_void_p(int(raw_handle))):
                 raise OSError(
                     ctypes.get_last_error(),
@@ -2001,7 +2342,7 @@ def _stop_windows_adapter_job(job: _WindowsAdapterJob) -> None:
 
 
 def _ensure_adapter_process_boundary_empty(
-    process: subprocess.Popen[bytes] | _WindowsAdapterProcess,
+    process: _PosixAdapterProcess | _WindowsAdapterProcess,
     *,
     windows_job: _WindowsAdapterJob | None = None,
 ) -> None:
@@ -2032,7 +2373,7 @@ def _ensure_windows_adapter_root_stopped(
 
 
 def _stop_adapter_process(
-    process: subprocess.Popen[bytes] | _WindowsAdapterProcess,
+    process: _PosixAdapterProcess | _WindowsAdapterProcess,
     *,
     windows_job: _WindowsAdapterJob | None = None,
 ) -> None:
@@ -2116,7 +2457,7 @@ def _run_adapter_process(
                 raise DelegatedContractError(
                     f"Could not create the delegated adapter Job Object: {exc}"
                 ) from exc
-        process: subprocess.Popen[bytes] | _WindowsAdapterProcess
+        process: _PosixAdapterProcess | _WindowsAdapterProcess
         if os.name == "nt":
             assert windows_job is not None
             process = _WindowsAdapterProcess()
