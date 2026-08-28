@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import pytest
 
@@ -49,14 +49,35 @@ def declare_delegated_adapter(
     policy = root / ".solo-ai"
     scripts.mkdir(exist_ok=True)
     policy.mkdir(exist_ok=True)
-    (scripts / "worktree-flow.ps1").write_text(
-        "# mature lifecycle\n", encoding="utf-8"
-    )
+    (scripts / "worktree-flow.ps1").write_text("# mature lifecycle\n", encoding="utf-8")
     (scripts / "dww_adapter.py").write_text(
         f"""import json
 import sys
+from pathlib import Path
 
 request = json.load(sys.stdin)
+operation = request["operation"]
+operation_request = request["request"]
+if operation == "status":
+    if operation_request != {{}}:
+        raise SystemExit("status request must be empty")
+    result = {{
+        "available_slots": {available_slots},
+    }}
+elif operation == "start":
+    if set(operation_request) != {{"name", "request_id"}}:
+        raise SystemExit("start request fields are invalid")
+    result = {{
+        "request_id": operation_request["request_id"],
+        "task_id": "0123456789abcdef0123456789abcdef",
+        "worktree": str(Path(__file__).resolve().parent / "example-worktree"),
+        "slot_id": "slot-01",
+        "branch": "codex/example",
+        "base_head": "0" * 40,
+        "request_reused": False,
+    }}
+else:
+    raise SystemExit("unsupported operation")
 json.dump(
     {{
         "schema_version": 1,
@@ -64,10 +85,7 @@ json.dump(
         "fingerprint": request["fingerprint"],
         "operation": request["operation"],
         "ok": True,
-        "result": {{
-            "available_slots": {available_slots},
-            "received": request["request"],
-        }},
+        "result": result,
     }},
     sys.stdout,
 )

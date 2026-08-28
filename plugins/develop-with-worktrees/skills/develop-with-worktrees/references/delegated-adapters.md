@@ -16,7 +16,7 @@ tracked_inputs = [
   "scripts/dww_adapter.py",
   "scripts/worktree-flow.ps1",
 ]
-capabilities = ["start", "status", "ready", "finish", "recover", "abandon"]
+capabilities = ["start", "status"]
 max_parallel = 5
 ```
 
@@ -29,6 +29,8 @@ The runtime fixes the argv shape; the repository cannot inject shell arguments:
 - `sh`: `sh <entrypoint>`
 
 DWW limits contract and input count/size so the Codex hook can re-fingerprint them on every route without unbounded work. It hashes the raw contract and every declared input. A semantic edit, comment edit, script edit, marker addition, or marker removal therefore invalidates the local approval.
+
+Schema 1 deliberately exposes only two proven capabilities: read-only `status` and idempotent `start`. Ready, Finish, integration, recovery, abandonment, and cleanup remain native project commands. Adding names to the generic allowlist before their request, result, and interruption semantics are standardized would grant authority without a portable contract.
 
 ## Inspection and local approval
 
@@ -74,6 +76,11 @@ DWW sends one JSON object on stdin and passes no project-controlled argv:
 }
 ```
 
+Requests are exact:
+
+- `status` accepts only `{}`.
+- `start` accepts exactly `name` and a stable `request_id`; the request id uses letters, digits, `.`, `_`, `:`, or `-` and is at most 128 characters.
+
 The entrypoint must emit exactly one JSON object on stdout:
 
 ```json
@@ -87,7 +94,18 @@ The entrypoint must emit exactly one JSON object on stdout:
 }
 ```
 
-The response schema, adapter id, fingerprint, and operation must match. A successful `status` result must include integer `available_slots` between zero and the declared `max_parallel`; the orchestration layer uses this live value rather than assuming all declared capacity is idle. Other result fields are owned by the repository adapter. Failed responses use `ok = false` and a non-empty `error`.
+The response schema, adapter id, fingerprint, and operation must match. Outcome fields are mutually exclusive and exact: success has only `result`; failure has only a non-empty `error` and is surfaced as a failed invocation, never wrapped as success.
+
+Successful operation results are also exact:
+
+| Operation | Result fields |
+|---|---|
+| `status` | `available_slots`: integer from zero through the declared `max_parallel` |
+| `start` | `request_id`, `task_id`, absolute `worktree`, `slot_id`, `branch`, hexadecimal `base_head`, and boolean `request_reused` |
+
+The orchestration layer uses the live status count rather than assuming all declared capacity is idle. Project adapters may validate richer native output internally, but must not leak native fields through this minimal boundary.
+
+Transport is bounded: the JSON request, stdout, and stderr each have fixed byte limits; output must be strict UTF-8 and strict JSON; the caller enforces a positive deadline and terminates the owned process tree on timeout or output overflow. Adapter stderr and structured errors are redacted and truncated before they reach the caller. A timeout has unknown native side effects, so retry a mutating `start` only with the same `request_id` and use the repository's native recovery/status path if its outcome remains uncertain.
 
 This interface does not make the repository lifecycle generic. The repository still owns its task identities, leases, candidate pool, explicit seal, validation evidence, recovery, and cleanup. DWW owns only routing, approval, the bounded JSON call, and generic orchestration bookkeeping.
 

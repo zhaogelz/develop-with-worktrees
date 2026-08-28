@@ -46,3 +46,17 @@ def test_delegated_adapter_does_not_take_over_a_mature_repository(git_repo) -> N
     assert delegated.available_slots(repo, batch_limit=5) == 2
     with pytest.raises(SoloAIError, match="requires a managed repository"):
         adapter_for("dww").assert_available(repo)
+
+
+def test_delegated_orchestration_requires_the_standard_status_capability(
+    git_repo,
+) -> None:
+    repo = GitRepo(git_repo)
+    declare_delegated_adapter(
+        git_repo,
+        capabilities=("start",),
+    )
+
+    delegated = adapter_for("delegated")
+    with pytest.raises(SoloAIError, match="must declare status"):
+        delegated.assert_available(repo)

@@ -48,9 +48,14 @@ class DelegatedLifecycleAdapter:
     name: str = "delegated"
 
     def assert_available(self, repo: GitRepo) -> None:
-        if repository_route(repo)["action"] != "delegated":
+        route = repository_route(repo)
+        if route["action"] != "delegated":
             raise SoloAIError(
                 "The delegated lifecycle adapter requires a valid, locally approved repository contract"
+            )
+        if "status" not in route["adapter"]["capabilities"]:
+            raise SoloAIError(
+                "The delegated lifecycle adapter must declare status before orchestration can query capacity"
             )
 
     def available_slots(self, repo: GitRepo, *, batch_limit: int) -> int:
@@ -62,13 +67,11 @@ class DelegatedLifecycleAdapter:
                 repo.root,
                 repo.common_dir,
                 operation="status",
-                request={"purpose": "orchestration-capacity"},
+                request={},
                 timeout_seconds=30,
             )
         except DelegatedContractError as exc:
             raise SoloAIError(f"Delegated lifecycle status failed: {exc}") from exc
-        if not response["ok"]:
-            raise SoloAIError("Delegated lifecycle status reported failure")
         return min(
             batch_limit,
             int(route["adapter"]["max_parallel"]),
