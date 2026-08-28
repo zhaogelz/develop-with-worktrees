@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import time
@@ -68,6 +69,22 @@ def declare_runtime_adapter(
         fingerprint=inspection["adapter"]["fingerprint"],
     )
     return repo, inspection
+
+
+def exception_tree_contains(
+    error: BaseException, expected_type: type[BaseException], text: str
+) -> bool:
+    if isinstance(error, expected_type) and text in str(error):
+        return True
+    if isinstance(error, BaseExceptionGroup):
+        if any(
+            exception_tree_contains(item, expected_type, text)
+            for item in error.exceptions
+        ):
+            return True
+    if error.__cause__ is not None:
+        return exception_tree_contains(error.__cause__, expected_type, text)
+    return False
 
 
 def test_exact_local_approval_enables_delegated_route_and_limits_slots(
@@ -728,11 +745,11 @@ def test_changed_verified_input_path_is_preserved_instead_of_deleted(
         snapshot.unlink()
         snapshot.write_text("replacement must survive\n", encoding="utf-8")
         replacements.append(snapshot)
-        raise DelegatedContractError("synthetic launch failure")
+        raise KeyboardInterrupt("synthetic invocation interruption")
 
     monkeypatch.setattr(delegated, "_run_adapter_process", replace_snapshot)
 
-    with pytest.raises(DelegatedContractError, match="changed path was preserved"):
+    with pytest.raises(BaseExceptionGroup) as raised:
         invoke_delegated(
             repo.root,
             repo.common_dir,
@@ -741,6 +758,12 @@ def test_changed_verified_input_path_is_preserved_instead_of_deleted(
             timeout_seconds=30,
         )
 
+    assert exception_tree_contains(
+        raised.value, KeyboardInterrupt, "synthetic invocation interruption"
+    )
+    assert exception_tree_contains(
+        raised.value, DelegatedContractError, "changed path was preserved"
+    )
     assert len(replacements) == 1
     assert replacements[0].read_text(encoding="utf-8") == "replacement must survive\n"
     assert len(closure_roots) == 1
@@ -785,6 +808,253 @@ def test_verified_input_closure_is_removed_after_adapter_timeout(
 
     assert len(closure_roots) == 1
     assert not closure_roots[0].exists()
+
+
+@pytest.mark.parametrize(
+    "interruption", (KeyboardInterrupt, SystemExit, RuntimeError)
+)
+def test_abnormal_monitor_exit_stops_owned_tree_before_closure_cleanup(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: type[BaseException],
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    spawned = git_repo / "adapter-grandchild-spawned.txt"
+    pid_path = git_repo / "adapter-parent.pid"
+    late_marker = git_repo / "late-adapter-grandchild.txt"
+    grandchild = (
+        "import time; from pathlib import Path; time.sleep(0.8); "
+        f"Path({str(late_marker)!r}).write_text('late', encoding='utf-8')"
+    )
+    child = (
+        "import subprocess,sys,time; from pathlib import Path; "
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}]); "
+        f"Path({str(spawned)!r}).write_text('spawned', encoding='utf-8'); "
+        "time.sleep(2)"
+    )
+    adapter_path.write_text(
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+        "time.sleep(2)\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "add abnormal monitor fixture")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    closure_roots: list[Path] = []
+    original_run = delegated._run_adapter_process
+    original_sleep = time.sleep
+
+    def capture_then_run(*args: object, **kwargs: object) -> object:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+        return original_run(*args, **kwargs)
+
+    def interrupt_after_spawn(_seconds: float) -> None:
+        deadline = time.monotonic() + 5
+        while not spawned.exists() and time.monotonic() < deadline:
+            original_sleep(0.01)
+        assert spawned.exists()
+        raise interruption("synthetic monitor interruption")
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
+    monkeypatch.setattr(delegated, "_adapter_poll_pause", interrupt_after_spawn)
+
+    try:
+        with pytest.raises(interruption, match="synthetic monitor interruption"):
+            invoke_delegated(
+                repo.root,
+                repo.common_dir,
+                operation="status",
+                request={},
+                timeout_seconds=30,
+            )
+
+        assert len(closure_roots) == 1
+        assert not closure_roots[0].exists()
+        original_sleep(1)
+        assert not late_marker.exists()
+    finally:
+        if pid_path.exists():
+            from solo_ai.util import _stop_process_tree
+
+            _stop_process_tree(int(pid_path.read_text(encoding="utf-8")), force=True)
+
+
+def test_output_read_interruption_after_natural_exit_keeps_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stop_polls: list[int | None] = []
+    original_stop = delegated._stop_adapter_process
+
+    def fail_read(*args: object, **kwargs: object) -> bytes:
+        raise RuntimeError("synthetic output read failure")
+
+    def capture_stop(process: object) -> None:
+        assert hasattr(process, "poll")
+        stop_polls.append(process.poll())
+        original_stop(process)
+
+    monkeypatch.setattr(delegated, "_bounded_file_bytes", fail_read)
+    monkeypatch.setattr(delegated, "_stop_adapter_process", capture_stop)
+
+    with pytest.raises(RuntimeError, match="synthetic output read failure"):
+        delegated._run_adapter_process(
+            [sys.executable, "-c", "print('done')"],
+            root=tmp_path,
+            request_bytes=b"{}",
+            timeout_seconds=30,
+        )
+
+    assert len(stop_polls) == 1
+    assert stop_polls[0] is not None
+
+
+@pytest.mark.parametrize(
+    "termination_failure",
+    (delegated.DelegatedProcessTerminationError, RuntimeError),
+)
+def test_unconfirmed_termination_preserves_verified_input_closure(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    termination_failure: type[BaseException],
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    pid_path = git_repo / "unconfirmed-adapter.pid"
+    adapter_path.write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        f"Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "add unconfirmed termination fixture")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    closure_roots: list[Path] = []
+    original_run = delegated._run_adapter_process
+    original_sleep = time.sleep
+
+    def capture_then_run(*args: object, **kwargs: object) -> object:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+        return original_run(*args, **kwargs)
+
+    def interrupt_after_start(_seconds: float) -> None:
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            original_sleep(0.01)
+        assert pid_path.exists()
+        raise KeyboardInterrupt("synthetic monitor interruption")
+
+    def fail_stop(_process: object) -> None:
+        raise termination_failure("synthetic termination confirmation failure")
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
+    monkeypatch.setattr(delegated, "_adapter_poll_pause", interrupt_after_start)
+    monkeypatch.setattr(delegated, "_stop_adapter_process", fail_stop)
+
+    try:
+        with pytest.raises(BaseExceptionGroup) as raised:
+            invoke_delegated(
+                repo.root,
+                repo.common_dir,
+                operation="status",
+                request={},
+                timeout_seconds=30,
+            )
+
+        assert exception_tree_contains(
+            raised.value, KeyboardInterrupt, "synthetic monitor interruption"
+        )
+        assert exception_tree_contains(
+            raised.value,
+            delegated.DelegatedProcessTerminationError,
+            (
+                "synthetic termination confirmation failure"
+                if termination_failure is delegated.DelegatedProcessTerminationError
+                else "Unexpected failure while stopping"
+            ),
+        )
+        assert exception_tree_contains(
+            raised.value,
+            termination_failure,
+            "synthetic termination confirmation failure",
+        )
+        assert len(closure_roots) == 1
+        assert closure_roots[0].exists()
+        assert any(
+            str(closure_roots[0]) in note
+            for note in getattr(raised.value, "__notes__", ())
+        )
+    finally:
+        if pid_path.exists():
+            from solo_ai.util import _stop_process_tree
+
+            _stop_process_tree(int(pid_path.read_text(encoding="utf-8")), force=True)
+        for closure_root in closure_roots:
+            if closure_root.exists():
+                shutil.rmtree(closure_root)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups are required")
+def test_posix_stop_forces_term_ignoring_child_after_root_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spawned = tmp_path / "posix-tree-spawned.txt"
+    late_marker = tmp_path / "late-posix-child.txt"
+    child = (
+        "import signal,time; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"Path({str(spawned)!r}).write_text('spawned', encoding='utf-8'); "
+        "time.sleep(0.8); "
+        f"Path({str(late_marker)!r}).write_text('late', encoding='utf-8')"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        "time.sleep(30)"
+    )
+    original_sleep = time.sleep
+
+    def interrupt_after_spawn(_seconds: float) -> None:
+        deadline = time.monotonic() + 5
+        while not spawned.exists() and time.monotonic() < deadline:
+            original_sleep(0.01)
+        assert spawned.exists()
+        raise KeyboardInterrupt("synthetic POSIX interruption")
+
+    monkeypatch.setattr(delegated, "ADAPTER_TERMINATION_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(delegated, "_adapter_poll_pause", interrupt_after_spawn)
+
+    with pytest.raises(KeyboardInterrupt, match="synthetic POSIX interruption"):
+        delegated._run_adapter_process(
+            [sys.executable, "-c", parent],
+            root=tmp_path,
+            request_bytes=b"{}",
+            timeout_seconds=30,
+        )
+
+    original_sleep(1)
+    assert not late_marker.exists()
 
 
 def test_invoke_returns_the_exact_idempotent_start_receipt(git_repo: Path) -> None:

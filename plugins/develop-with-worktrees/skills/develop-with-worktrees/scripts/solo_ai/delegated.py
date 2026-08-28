@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +33,7 @@ MAX_ADAPTER_STDERR_BYTES = 64 * 1024
 MAX_ADAPTER_ERROR_CHARS = 1200
 ADAPTER_POLL_SECONDS = 0.05
 ADAPTER_TERMINATION_GRACE_SECONDS = 5.0
+ADAPTER_TERMINATION_POLL_SECONDS = 0.02
 VERIFIED_INPUT_ROOT_ENV = "DWW_VERIFIED_INPUT_ROOT"
 REPOSITORY_ROOT_ENV = "DWW_REPOSITORY_ROOT"
 ALLOWED_RUNTIMES = {"python", "powershell", "sh"}
@@ -46,6 +48,10 @@ _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 class DelegatedContractError(RuntimeError):
     """委托契约无效；调用方必须失败关闭，不能猜测仓库意图。"""
+
+
+class DelegatedProcessTerminationError(DelegatedContractError):
+    """委托进程树未能确认停止；执行闭包必须保留。"""
 
 
 @dataclass(frozen=True)
@@ -553,6 +559,23 @@ def _cleanup_verified_input_closure(manifest: _VerifiedClosureManifest) -> None:
         ) from exc
 
 
+def _exception_requires_closure_preservation(error: BaseException) -> bool:
+    if isinstance(error, DelegatedProcessTerminationError):
+        return True
+    if isinstance(error, BaseExceptionGroup):
+        return any(
+            _exception_requires_closure_preservation(item)
+            for item in error.exceptions
+        )
+    return False
+
+
+def _combined_failures(
+    message: str, first: BaseException, second: BaseException
+) -> BaseExceptionGroup:
+    return BaseExceptionGroup(message, [first, second])
+
+
 @contextmanager
 def _verified_input_closure(
     repository_root: Path,
@@ -644,7 +667,24 @@ def _verified_input_closure(
     )
     try:
         yield closure
-    finally:
+    except BaseException as body_error:
+        if _exception_requires_closure_preservation(body_error):
+            body_error.add_note(
+                "Verified delegated input closure was preserved because the "
+                f"owned process tree was not confirmed stopped: {closure.root}"
+            )
+            raise
+        try:
+            _cleanup_verified_input_closure(manifest)
+        except BaseException as cleanup_error:
+            raise _combined_failures(
+                "Delegated invocation failed and its verified input closure "
+                "also could not be cleaned safely",
+                body_error,
+                cleanup_error,
+            ) from None
+        raise
+    else:
         _cleanup_verified_input_closure(manifest)
 
 
@@ -665,23 +705,154 @@ def _bounded_file_bytes(handle: Any, *, limit: int, stream: str) -> bytes:
     return handle.read(limit + 1)
 
 
-def _stop_adapter_process(process: subprocess.Popen[bytes]) -> None:
-    # Hook 只导入本模块执行路由检查，不能因此加载主 CLI 的 psutil 依赖。
-    from .util import _stop_process_tree
+def _adapter_poll_pause(seconds: float) -> None:
+    """独立轮询 seam，确保中断回归不会干扰终止阶段的等待。"""
+    time.sleep(seconds)
 
-    if process.poll() is not None:
-        return
-    _stop_process_tree(process.pid, force=False)
+
+def _posix_process_group_exists(process_group: int) -> bool:
     try:
-        process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
+        os.killpg(process_group, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError as exc:
+        raise DelegatedProcessTerminationError(
+            "Delegated adapter process group still exists but cannot be inspected"
+        ) from exc
+
+
+def _wait_for_posix_process_group_exit(
+    process: subprocess.Popen[bytes], *, timeout: float
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        root_finished = process.poll() is not None
+        group_exists = _posix_process_group_exists(process.pid)
+        if root_finished and not group_exists:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
+
+
+def _stop_posix_adapter_process_group(process: subprocess.Popen[bytes]) -> None:
+    if not _posix_process_group_exists(process.pid):
+        if process.poll() is None:
+            raise DelegatedProcessTerminationError(
+                "Delegated adapter root left its owned process group and could "
+                "not be confirmed stopped"
+            )
         return
-    except subprocess.TimeoutExpired:
-        _stop_process_tree(process.pid, force=True)
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        if process.poll() is None:
+            raise DelegatedProcessTerminationError(
+                "Delegated adapter root could not be confirmed stopped after "
+                "its process group disappeared"
+            )
+        return
+    except OSError as exc:
+        raise DelegatedProcessTerminationError(
+            "Could not request delegated adapter process-group termination"
+        ) from exc
+    if _wait_for_posix_process_group_exit(
+        process, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+    ):
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        process.poll()
+    except OSError as exc:
+        raise DelegatedProcessTerminationError(
+            "Could not force delegated adapter process-group termination"
+        ) from exc
+    if not _wait_for_posix_process_group_exit(
+        process, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+    ):
+        raise DelegatedProcessTerminationError(
+            "Delegated adapter process group could not be confirmed stopped"
+        )
+
+
+def _stop_windows_adapter_process_tree(process: subprocess.Popen[bytes]) -> None:
+    # Hook 只导入本模块执行路由检查，不能因此加载主 CLI 的 psutil 依赖。
+    import psutil
+
+    try:
+        root = psutil.Process(process.pid)
+        owned = [*root.children(recursive=True), root]
+    except psutil.NoSuchProcess:
+        if process.poll() is None:
+            raise DelegatedProcessTerminationError(
+                "Delegated adapter root disappeared from process enumeration "
+                "without a confirmed exit"
+            )
+        return
+    except (OSError, psutil.Error) as exc:
+        raise DelegatedProcessTerminationError(
+            "Could not enumerate the delegated adapter process tree"
+        ) from exc
+    unique: dict[tuple[int, float], Any] = {}
+    for item in owned:
+        try:
+            unique[(item.pid, item.create_time())] = item
+        except psutil.NoSuchProcess:
+            continue
+        except (OSError, psutil.Error) as exc:
+            raise DelegatedProcessTerminationError(
+                "Could not identify every delegated adapter process"
+            ) from exc
+    owned = list(unique.values())
+    for item in reversed(owned):
+        try:
+            item.terminate()
+        except psutil.NoSuchProcess:
+            continue
+        except (OSError, psutil.Error) as exc:
+            raise DelegatedProcessTerminationError(
+                "Could not request delegated adapter process-tree termination"
+            ) from exc
+    _gone, alive = psutil.wait_procs(
+        owned, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+    )
+    for item in alive:
+        try:
+            item.kill()
+        except psutil.NoSuchProcess:
+            continue
+        except (OSError, psutil.Error) as exc:
+            raise DelegatedProcessTerminationError(
+                "Could not force delegated adapter process-tree termination"
+            ) from exc
+    _gone, alive = psutil.wait_procs(
+        alive, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+    )
+    if alive:
+        raise DelegatedProcessTerminationError(
+            "Delegated adapter process tree could not be confirmed stopped"
+        )
     try:
         process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired as exc:
-        raise DelegatedContractError(
-            "Delegated adapter process tree could not be confirmed stopped"
+        raise DelegatedProcessTerminationError(
+            "Delegated adapter root process could not be confirmed stopped"
+        ) from exc
+
+
+def _stop_adapter_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        if os.name == "nt":
+            _stop_windows_adapter_process_tree(process)
+        else:
+            _stop_posix_adapter_process_group(process)
+    except DelegatedProcessTerminationError:
+        raise
+    except BaseException as exc:
+        raise DelegatedProcessTerminationError(
+            "Unexpected failure while stopping the delegated adapter process tree"
         ) from exc
 
 
@@ -722,36 +893,53 @@ def _run_adapter_process(
             raise DelegatedContractError(
                 f"Could not start the delegated adapter: {exc}"
             ) from exc
-        deadline = time.monotonic() + timeout_seconds
-        violation: DelegatedContractError | None = None
-        while process.poll() is None:
-            if os.fstat(stdout_handle.fileno()).st_size > MAX_ADAPTER_STDOUT_BYTES:
-                violation = DelegatedContractError(
-                    f"Delegated adapter stdout exceeds the {MAX_ADAPTER_STDOUT_BYTES}-byte limit"
-                )
-                break
-            if os.fstat(stderr_handle.fileno()).st_size > MAX_ADAPTER_STDERR_BYTES:
-                violation = DelegatedContractError(
-                    f"Delegated adapter stderr exceeds the {MAX_ADAPTER_STDERR_BYTES}-byte limit"
-                )
-                break
-            if time.monotonic() >= deadline:
-                violation = DelegatedContractError(
-                    f"Delegated adapter timed out after {timeout_seconds:g} seconds"
-                )
-                break
-            time.sleep(ADAPTER_POLL_SECONDS)
-        if violation is not None:
-            _stop_adapter_process(process)
-            raise violation
-        returncode = process.wait()
-        stdout = _bounded_file_bytes(
-            stdout_handle, limit=MAX_ADAPTER_STDOUT_BYTES, stream="stdout"
-        )
-        stderr = _bounded_file_bytes(
-            stderr_handle, limit=MAX_ADAPTER_STDERR_BYTES, stream="stderr"
-        )
-        return _AdapterProcessResult(returncode, stdout, stderr)
+        try:
+            deadline = time.monotonic() + timeout_seconds
+            while process.poll() is None:
+                if os.fstat(stdout_handle.fileno()).st_size > MAX_ADAPTER_STDOUT_BYTES:
+                    raise DelegatedContractError(
+                        "Delegated adapter stdout exceeds the "
+                        f"{MAX_ADAPTER_STDOUT_BYTES}-byte limit"
+                    )
+                if os.fstat(stderr_handle.fileno()).st_size > MAX_ADAPTER_STDERR_BYTES:
+                    raise DelegatedContractError(
+                        "Delegated adapter stderr exceeds the "
+                        f"{MAX_ADAPTER_STDERR_BYTES}-byte limit"
+                    )
+                if time.monotonic() >= deadline:
+                    raise DelegatedContractError(
+                        "Delegated adapter timed out after "
+                        f"{timeout_seconds:g} seconds"
+                    )
+                _adapter_poll_pause(ADAPTER_POLL_SECONDS)
+            returncode = process.wait()
+            stdout = _bounded_file_bytes(
+                stdout_handle, limit=MAX_ADAPTER_STDOUT_BYTES, stream="stdout"
+            )
+            stderr = _bounded_file_bytes(
+                stderr_handle, limit=MAX_ADAPTER_STDERR_BYTES, stream="stderr"
+            )
+            return _AdapterProcessResult(returncode, stdout, stderr)
+        except BaseException as original_error:
+            try:
+                _stop_adapter_process(process)
+            except BaseException as termination_error:
+                if not isinstance(
+                    termination_error, DelegatedProcessTerminationError
+                ):
+                    unexpected_termination_error = termination_error
+                    termination_error = DelegatedProcessTerminationError(
+                        "Unexpected failure while stopping the delegated adapter "
+                        "process tree"
+                    )
+                    termination_error.__cause__ = unexpected_termination_error
+                raise _combined_failures(
+                    "Delegated adapter monitoring failed and its owned process "
+                    "tree could not be confirmed stopped",
+                    original_error,
+                    termination_error,
+                ) from None
+            raise
 
 
 def _require_operation_text(
