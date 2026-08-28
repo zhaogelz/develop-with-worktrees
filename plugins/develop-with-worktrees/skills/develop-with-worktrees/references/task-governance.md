@@ -2,6 +2,8 @@
 
 Use a short-lived task anchor to preserve the active implementation contract without turning every task into a permanent plan document.
 
+These are non-state governance rules. Routing decides which lifecycle or orchestrator owns task state; it does not disable plain-language plan confirmation, single-conversation coordination, temporary task context, or the durable-document boundary. Under `defer`, create no DWW task, lifecycle, or orchestration state. Apply these rules only after the routed owner has authorized the exact writable workspace: DWW `start` for `managed`, the repository workflow for `defer` or `delegated`, and the recorded user choice for `disabled` or `current-task`. Use an explicit repository rule instead when it covers the same concern.
+
 ## When to create an anchor
 
 Create one immediately after entering the authorized writable worktree when any of these is true:
@@ -12,7 +14,7 @@ Create one immediately after entering the authorized writable worktree when any 
 
 A clearly bounded single small edit may omit it. Read-only analysis never creates one.
 
-Use the repository-declared temporary anchor location when present. Otherwise prefer `.tmp/task-anchors/<task-id-or-purpose>.md` after confirming that Git ignores it. If the repository cannot safely keep an ignored workspace-local file, use `<git-common-dir>/solo-ai/task-anchors/<task-id>.md`. Never stage or commit an anchor, and do not modify `.gitignore` merely to store one.
+Use the repository-declared temporary anchor location when present. Otherwise prefer `.tmp/task-anchors/<task-id-or-purpose>.md` after confirming that Git ignores it and the routed workflow authorized that workspace. A `managed` task may fall back to `<git-common-dir>/solo-ai/task-anchors/<task-id>.md`. Other routes must not create that DWW common-dir fallback; if no safe workspace location exists, use a private repository-external temporary file for the current task. Never stage or commit an anchor, and do not modify `.gitignore` merely to store one.
 
 ## Minimum content
 

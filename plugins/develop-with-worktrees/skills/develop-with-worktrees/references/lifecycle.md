@@ -1,6 +1,8 @@
 # Lifecycle reference
 
-Mode precedence is detected mature workflow, local long-term current-directory choice, exact current-task authorization, managed policy, then the first-modification choice. A mature workflow always wins, including over choices 2/3. It receives zero writes unless its tracked delegated contract has been explicitly approved in local state.
+Mode precedence is detected mature workflow, local long-term current-directory choice, exact current-task authorization, managed policy, then the first-modification choice. A mature workflow always wins, including over choices 2/3. A command whose route admission observes that workflow performs zero DWW writes unless its tracked delegated contract has been explicitly approved in local state.
+
+Routing assigns lifecycle and orchestration-state ownership; it is not a global governance toggle. Plan confirmation, one user-facing coordinating conversation, temporary task context, and the durable-document boundary remain applicable unless the repository explicitly replaces the same rule. In `defer`, a repository's external orchestrator is the sole state and scheduling owner when one exists. With only a native lifecycle, the current conversation coordinates through native task identity, status, and evidence without creating or mutating a DWW batch.
 
 The trusted `SessionStart` hook normally injects one compact route. When that context is unavailable, the skill runs one read-only `dww route --json`; it never uses the full `doctor` report for first-write routing. The actions are `defer`, `delegated`, `disabled`, `current-task`, `managed`, and `ask`. `delegated` means the generic guard steps aside while calls cross the bounded, approved JSON adapter described in [Delegated adapter contract](delegated-adapters.md).
 

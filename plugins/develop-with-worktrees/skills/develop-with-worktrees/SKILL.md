@@ -31,7 +31,9 @@ uv run --script <DWW> --repo <repository-or-worktree> --json route
 
 Do not use the full `doctor` report for routing.
 
-- `defer`: the repository's mature workflow has absolute priority over choices 2/3 and DWW policy. Do not ask the DWW repository-choice question, initialize DWW, or change DWW state. Follow the repository's own instructions.
+The route selects only the owner of repository lifecycle and orchestration state. It does not switch off non-state governance: a complex request still gets one plain-language plan confirmation and one coordinating conversation, and multi-step work still uses the repository's temporary task context and durable-document boundary. A repository rule replaces this generic governance only when it explicitly covers the same concern.
+
+- `defer`: the repository's mature workflow owns lifecycle and orchestration state. Do not ask the DWW repository-choice question, initialize DWW, run a DWW lifecycle command, or create DWW orchestration state. Follow the repository's own instructions.
 - `delegated`: the repository's exact tracked adapter contract is locally approved. Follow [delegated-adapters.md](references/delegated-adapters.md) and the repository's instructions; do not initialize or run the managed DWW lifecycle. Contract or input drift returns the route to `defer` until the new fingerprint is reviewed and approved.
 - `disabled` or `current-task`: do not ask again or run the DWW lifecycle; use normal current-directory development.
 - `managed`: proactively start the normal isolated task.
@@ -39,13 +41,22 @@ Do not use the full `doctor` report for routing.
 
 ## Complex multi-AI work: one central conversation
 
-Treat a request as complex only when it has multiple independently verifiable outcomes, real dependencies, or an explicit shared contract. Keep a simple request as one normal DWW task: do not create a batch, extra worker, review worker, or status dashboard by default.
+Treat a request as complex only when it has multiple independently verifiable outcomes, real dependencies, or an explicit shared contract. Keep a simple request as one task in the routed lifecycle: do not create a batch, extra worker, review worker, or status dashboard by default.
 
-For a complex request, the current Codex conversation is the **only controller**. First give the user a short, plain-language plan made of vertical outcomes (or a contract-first task followed by its consumers), including the result each task will make visible. Ask for one confirmation. Do not dispatch a worker, create a DWW task, or write orchestration state before that confirmation.
+For a complex request, the current Codex conversation is the **only user-facing decision and coordination conversation**. First give the user a short, plain-language plan made of vertical outcomes (or a contract-first task followed by its consumers), including the result each task will make visible. Ask for one confirmation. Do not dispatch a worker, create a DWW task, or write orchestration state before that confirmation.
 
 If route is `ask`, fold the default isolated-directory choice into this same plan confirmation: say that confirmation will use separate directories and local-only integration. After the user confirms, run `choose --mode isolated`, then create and confirm the orchestration batch. Do not show the separate three-choice prompt as well. If the user instead explicitly asks for one AI or current-directory work, follow that explicit choice and do not create a batch.
 
-After confirmation, create one opaque controller identifier locally, pass it to `dww orchestrate plan` and `dww orchestrate confirm`, and never give it to workers. The scheduler may dispatch at most `min(5, configured DWW slots, idle DWW slots)` development tasks. Validation remains governed by DWW's machine-global weighted queue.
+After confirmation, coordinate through the routed owner:
+
+- `managed`: create one opaque controller identifier, pass it to `dww orchestrate plan`, then use `dww orchestrate confirm` only to record the confirmation already received; never ask again or give the identifier to workers.
+- `delegated`: use DWW orchestration only through the exact approved adapter and repository contract.
+- `defer`: never create or mutate a DWW batch. If the repository names an external orchestrator, it is the sole state and scheduling owner while the current conversation remains the sole user-facing coordinator. If the repository provides only a native lifecycle, the current conversation coordinates through native task identities, status, and evidence; do not invent an external command or batch store.
+- `disabled` or `current-task`: coordinate directly in the current conversation without DWW lifecycle or orchestration state. Use one writing agent serially unless the repository itself provides isolated workspaces and coordination.
+
+For `managed` or supported `delegated` batches, the scheduler may dispatch at most `min(5, configured DWW slots, idle DWW slots)` development tasks. Managed validation remains governed by DWW's machine-global weighted queue.
+
+Within a DWW orchestration batch:
 
 - Only the controller may call `orchestrate claim`, start workers, add an internal task, or hand off the controller. A worker receives one task and has no authority to spawn another worker.
 - Give each worker exactly one writer task. Same-file predictions do not serialize work. Only an explicit high-risk `exclusive_resources` value (for example a migration, lockfile, or shared contract) serializes tasks.
@@ -54,7 +65,7 @@ After confirmation, create one opaque controller identifier locally, pass it to 
 - Record existing proof/receipt references with `orchestrate complete`. At batch end, run only a targeted combination check that lacks evidence; do not add a default full repository test or review AI.
 - `orchestrate pause`, `resume`, `cancel`, and `take-over` preserve code and local state. Cancellation never deletes a branch or file. A future central conversation can inspect status, take over with the exact batch id, and continue; no resident daemon is implied.
 
-`dww` is the adapter for a `managed` repository. A mature repository may participate only through an explicit `delegated` adapter chosen by its own workflow; never parse arbitrary instructions or invent an external command. If it already has an external orchestrator, fully defer.
+`dww` is the lifecycle adapter for a `managed` repository. A mature repository may participate only through an explicit `delegated` adapter chosen by its own workflow; never parse arbitrary instructions or invent an external command.
 
 ### Optional delegated candidate batches
 
@@ -108,7 +119,7 @@ For an adopted repository, proactively run `start --name <purpose>` when a modif
 3. Use `plan` or `verify --level development` as useful feedback. Slow estimates are advice only.
 4. Run `ready`, then `finish` with the same task and lease.
 
-For a confirmed plan or another multi-step task, create an uncommitted task anchor immediately after entering the writable worktree. Re-read it before modifying files after context compression, model change, or a later continuation. At acceptance, update durable documentation only for facts that must survive future tasks, then remove the anchor. A clearly bounded single small edit may omit it. Follow [task-governance.md](references/task-governance.md) for fields, precedence, fallback storage, and the durable-document boundary.
+For a confirmed plan or another multi-step task, create an uncommitted task anchor immediately after entering the routed owner's authorized writable worktree. Re-read it before modifying files after context compression, model change, or a later continuation. At acceptance, update durable documentation only for facts that must survive future tasks, then remove the anchor. A clearly bounded single small edit may omit it. Follow [task-governance.md](references/task-governance.md) for fields, precedence, fallback storage, and the durable-document boundary.
 
 Ready/Finish synchronize only the recorded base branch. Ready checks the expected base after validation admission and again after validation; when another Finish advances that base, the same Ready call resynchronizes and reuses exact unchanged profile proofs, up to five retries. A deleted, rewound, or rewritten base requires explicit `retarget`; Finish only fast-forwards the recorded clean base worktree. It never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 

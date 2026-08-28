@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from conftest import declare_delegated_adapter
+from solo_ai.config import CommandSpec
+from solo_ai.lifecycle import initialize
 from solo_ai.orchestration import BatchStore, create_batch
 from solo_ai.orchestration.scheduler import frontier
 from solo_ai.repo import GitRepo
-from solo_ai.util import SoloAIError
+from solo_ai.util import DirectoryLock, SoloAIError
 
 
 def _tasks() -> list[dict[str, object]]:
@@ -45,6 +49,184 @@ def _create(repo: GitRepo, *, max_parallel: int = 5) -> dict[str, object]:
         adapter="delegated",
         max_parallel=max_parallel,
     )
+
+
+def _state_bytes(*roots: Path) -> dict[str, bytes]:
+    return {
+        f"{index}:{path.relative_to(root).as_posix()}": path.read_bytes()
+        for index, root in enumerate(roots)
+        if root.exists()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("adapter", ["dww", "delegated"])
+def test_deferred_repository_rejects_orchestration_without_writing_state(
+    git_repo, adapter: str
+) -> None:
+    marker = git_repo / "scripts" / "worktree-flow.ps1"
+    marker.parent.mkdir()
+    marker.write_text("# native lifecycle\n", encoding="utf-8")
+    repo = GitRepo(git_repo)
+
+    with pytest.raises(SoloAIError):
+        create_batch(
+            repo,
+            goal="由原生流程协调",
+            tasks=_tasks(),
+            controller="central-controller",
+            adapter=adapter,
+        )
+
+    assert not (repo.common_dir / "solo-ai-orchestration").exists()
+    assert not repo.local_dir.exists()
+
+
+@pytest.mark.parametrize("adapter", ["dww", "delegated"])
+def test_existing_batch_becomes_byte_stable_when_route_changes_to_defer(
+    git_repo, adapter: str
+) -> None:
+    repo = GitRepo(git_repo)
+    if adapter == "dww":
+        initialize(
+            repo,
+            slots=2,
+            commands=[CommandSpec(("git", "diff", "--check"))],
+            accept=True,
+            accept_static_only=False,
+        )
+        batch = create_batch(
+            repo,
+            goal="受管批次",
+            tasks=_tasks(),
+            controller="central-controller",
+            adapter="dww",
+        )
+        marker = git_repo / "scripts" / "worktree-flow.ps1"
+        marker.parent.mkdir()
+        marker.write_text("# native lifecycle appeared\n", encoding="utf-8")
+    else:
+        batch = _create(repo)
+        adapter_script = git_repo / "scripts" / "dww_adapter.py"
+        adapter_script.write_text(
+            adapter_script.read_text(encoding="utf-8") + "\n# contract drift\n",
+            encoding="utf-8",
+        )
+
+    batch_id = str(batch["id"])
+    store = BatchStore(repo)
+    state_roots = (store.root, repo.local_dir)
+    before = _state_bytes(*state_roots)
+    route_error = (
+        "requires a managed repository"
+        if adapter == "dww"
+        else "requires a valid, locally approved repository contract"
+    )
+    mutations = [
+        lambda: store.confirm(batch_id, controller="central-controller"),
+        lambda: store.pause(batch_id, controller="central-controller"),
+        lambda: store.resume(batch_id, controller="central-controller"),
+        lambda: store.take_over(
+            batch_id, controller="replacement-controller", confirm=batch_id
+        ),
+        lambda: store.claim(
+            batch_id,
+            task_id="api",
+            worker="worker-api",
+            controller="central-controller",
+        ),
+        lambda: store.link_lifecycle_task(
+            batch_id,
+            task_id="api",
+            lifecycle_task="native-task",
+            controller="central-controller",
+        ),
+        lambda: store.complete(
+            batch_id,
+            task_id="api",
+            evidence=[{"kind": "proof", "ref": "proof-api"}],
+            controller="central-controller",
+        ),
+        lambda: store.block(
+            batch_id,
+            task_id="api",
+            reason="blocked",
+            controller="central-controller",
+        ),
+        lambda: store.record_attempt(
+            batch_id,
+            task_id="api",
+            changed=False,
+            summary="unchanged failure",
+            controller="central-controller",
+        ),
+        lambda: store.cancel(
+            batch_id,
+            task_id="api",
+            confirm="api",
+            controller="central-controller",
+        ),
+        lambda: store.add_task(
+            batch_id,
+            raw_task={"id": "new", "title": "新任务", "acceptance": ["完成"]},
+            inside_approved_goal=True,
+            controller="central-controller",
+        ),
+        lambda: store.create_repair(
+            batch_id,
+            source_ids=["api"],
+            raw_task={
+                "id": "repair-api",
+                "title": "修复接口",
+                "acceptance": ["修复完成"],
+            },
+            reason="needs repair",
+            controller="central-controller",
+        ),
+    ]
+
+    for mutate in mutations:
+        with pytest.raises(SoloAIError, match=route_error):
+            mutate()
+        assert _state_bytes(*state_roots) == before
+
+
+def test_existing_batch_rechecks_route_after_taking_its_lock(
+    git_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = GitRepo(git_repo)
+    initialize(
+        repo,
+        slots=2,
+        commands=[CommandSpec(("git", "diff", "--check"))],
+        accept=True,
+        accept_static_only=False,
+    )
+    batch = create_batch(
+        repo,
+        goal="受管批次",
+        tasks=_tasks(),
+        controller="central-controller",
+        adapter="dww",
+    )
+    store = BatchStore(repo)
+    before = _state_bytes(store.root, repo.local_dir)
+    original_enter = DirectoryLock.__enter__
+
+    def enter_then_defer(lock: DirectoryLock) -> DirectoryLock:
+        acquired = original_enter(lock)
+        marker = git_repo / "scripts" / "worktree-flow.ps1"
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text("# native lifecycle appeared\n", encoding="utf-8")
+        return acquired
+
+    monkeypatch.setattr(DirectoryLock, "__enter__", enter_then_defer)
+
+    with pytest.raises(SoloAIError, match="requires a managed repository"):
+        store.confirm(str(batch["id"]), controller="central-controller")
+
+    assert _state_bytes(store.root, repo.local_dir) == before
 
 
 def test_complex_batch_waits_for_one_confirmation_and_uses_a_separate_namespace(

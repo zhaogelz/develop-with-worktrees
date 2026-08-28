@@ -1,10 +1,10 @@
 # Develop with Worktrees
 
-`0.3.0-beta.17` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.3.0-beta.18` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
 
 ## One conversation for complex work
 
-Simple work stays simple: one AI uses the normal isolated lifecycle. For a complex goal, Codex first presents a short plan in plain language and waits for one confirmation. Only then does the central conversation dispatch independently verifiable tasks, up to `min(5, configured slots, idle slots)` at once.
+Simple work stays simple: one AI uses the routed repository lifecycle. For a complex goal, Codex first presents a short plan in plain language and waits for one confirmation. Only then does the central conversation dispatch independently verifiable tasks. A DWW-managed or approved delegated batch may run up to `min(5, configured slots, idle slots)` at once; a deferred repository keeps its own lifecycle and orchestration state.
 
 The command center keeps only a compact local task graph, dependencies, task status, lifecycle/proof references, and key decisions in Git common-dir state. It does not keep chat transcripts, raw reasoning, leases, or secrets. Pausing, cancelling, or moving to a new central conversation preserves branches and files; cancellation never deletes work.
 
@@ -12,7 +12,9 @@ Same-file predictions are allowed to run optimistically. Only explicit high-risk
 
 ## Mature repository workflows win
 
-Before any repository choice, a compact read-only route checks for a mature worktree or orchestration workflow. An ordinary mature workflow makes DWW silently defer: it asks no three-choice question, writes no DWW state, and follows the repository's own instructions. A mature repository may instead commit a versioned adapter declaration; only after the exact declaration and tracked-input fingerprint is locally approved does the route become `delegated`. DWW then executes the final-checked contract and all tracked inputs from one private repository-external closure, while the live repository remains only the native Git/state target. Any drift returns to `defer`.
+Before any repository choice, a compact read-only route selects who owns lifecycle and orchestration state. An ordinary mature workflow makes DWW silently defer: it asks no three-choice question and writes no DWW lifecycle or orchestration state. Generic non-state governance still applies unless the repository explicitly replaces it: complex work gets one plain-language plan confirmation and one coordinating conversation, multi-step work uses the native writable workspace's temporary task context, and durable facts go only to their authoritative document. If the repository has a native lifecycle but no external orchestrator, the current conversation coordinates through native task identities, status, and evidence without creating a DWW batch.
+
+A mature repository may instead commit a versioned adapter declaration; only after the exact declaration and tracked-input fingerprint is locally approved does the route become `delegated`. DWW then executes the final-checked contract and all tracked inputs from one private repository-external closure, while the live repository remains only the native Git/state target. Any drift returns to `defer`.
 
 The trusted `SessionStart` hook normally injects this route once. If hook context is unavailable, the skill runs one lightweight `dww route --json` fallback; it does not load the full `doctor` report.
 
@@ -63,7 +65,7 @@ In Codex, the trusted `PreToolUse` hook hard-denies protected-worktree writes on
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.17
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.18
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

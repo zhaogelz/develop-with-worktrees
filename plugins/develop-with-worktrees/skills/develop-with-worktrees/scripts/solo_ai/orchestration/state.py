@@ -136,14 +136,21 @@ class BatchStore:
         self, batch_id: str, update: Callable[[dict[str, Any]], dict[str, Any] | None]
     ) -> dict[str, Any]:
         path = self.path(batch_id)
+        preflight = read_json(path, None)
+        if not isinstance(preflight, dict):
+            raise SoloAIError(f"Unknown orchestration batch: {batch_id}")
+        validate_batch(preflight)
+        adapter_for(str(preflight["adapter"])).assert_available(self.repo)
         with DirectoryLock(self.root / "locks" / f"{batch_id}.lock", wait=True):
             current = read_json(path, None)
             if not isinstance(current, dict):
                 raise SoloAIError(f"Unknown orchestration batch: {batch_id}")
             validate_batch(current)
+            adapter_for(str(current["adapter"])).assert_available(self.repo)
             outcome = update(current)
             current["updated_at"] = utc_timestamp()
             validate_batch(current)
+            adapter_for(str(current["adapter"])).assert_available(self.repo)
             atomic_write_json(path, current)
             if current.get("status") == "completed":
                 self._write_receipt(current)

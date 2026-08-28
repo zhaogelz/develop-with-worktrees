@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0-beta.18 — 2026-08-29
+
+- 将 `route` 的职责收窄为生命周期与编排状态所有者选择；复杂任务的一次通俗计划确认、当前会话单一协调、临时任务锚点和长期文档边界属于非状态治理，在 `defer` 下仍适用，除非仓库明确覆盖同一规则。
+- `defer` 明确禁止 DWW 初始化、生命周期命令和 orchestration state。已有外部编排时完全使用仓库编排器；只有原生生命周期时，当前会话通过原生任务身份、Status 与证据协调，不创建或修改 DWW batch。
+- orchestration 全部写入口在落锁和持久化前复核当前 route/adapter；仓库从 managed/delegated 转为 `defer` 后，既有 batch 也冻结为只读。增加新建和既有 batch 的 common-dir 字节零漂移行为回归；Hook 定义保持不变。
+
 ## 0.3.0-beta.17 — 2026-08-28
 
 - POSIX caller 在资源准备前预建唯一 process owner，launch 改为原地填充并与 GO、返回边界和监控共用同一个 `BaseException` guard；四条控制 channel 以自拥有 socket endpoint 对象整体落盘，不再把裸 FD tuple 跨越 `CALL → STORE_ATTR` 移交，端点关闭中断也可按同一对象安全重试。resource prepare、Popen、child-end close、status、GO 或 launch `RETURN_VALUE → STORE_FAST` 任一边界中断都会用同一 owner 幂等收束。
