@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import dis
+import errno
 import gc
 import inspect
 import json
@@ -10,7 +11,6 @@ import signal
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -29,18 +29,12 @@ from solo_ai.lifecycle import repository_route
 from solo_ai.repo import GitRepo
 
 
-def process_fd_snapshot() -> set[int]:
-    descriptors: set[int] = set()
-    for item in os.listdir("/proc/self/fd"):
-        descriptor = int(item)
-        try:
+def assert_posix_descriptors_closed(descriptors: list[int]) -> None:
+    assert descriptors
+    for descriptor in descriptors:
+        with pytest.raises(OSError) as raised:
             os.fstat(descriptor)
-        except OSError:
-            # /proc 枚举自身可能短暂占用一个 FD；列表返回后它已经关闭，
-            # 不属于被测进程仍拥有的资源。
-            continue
-        descriptors.add(descriptor)
-    return descriptors
+        assert raised.value.errno == errno.EBADF
 
 
 def declare_adapter(root: Path, *, max_parallel: int = 4) -> None:
@@ -2815,9 +2809,18 @@ def test_posix_child_end_close_return_interruption_uses_caller_owner(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
-def test_posix_channel_factory_return_before_store_closes_both_endpoints() -> None:
-    gc.collect()
-    baseline = process_fd_snapshot()
+def test_posix_channel_factory_return_before_store_closes_both_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_descriptors: list[int] = []
+    original_socketpair = delegated.socket.socketpair
+
+    def capture_socketpair(*args: object, **kwargs: object) -> object:
+        endpoints = original_socketpair(*args, **kwargs)
+        created_descriptors.extend(endpoint.fileno() for endpoint in endpoints)
+        return endpoints
+
+    monkeypatch.setattr(delegated.socket, "socketpair", capture_socketpair)
 
     class Holder:
         channel: object | None = None
@@ -2849,27 +2852,16 @@ def test_posix_channel_factory_return_before_store_closes_both_endpoints() -> No
     finally:
         sys.settrace(None)
     gc.collect()
-    final = process_fd_snapshot()
-    leaked = final - baseline
-    try:
-        assert final == baseline
-    finally:
-        for descriptor in leaked:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+    assert len(created_descriptors) == 2
+    assert_posix_descriptors_closed(created_descriptors)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
 def test_posix_endpoint_close_interruption_retains_owning_cleanup() -> None:
-    gc.collect()
-    baseline = process_fd_snapshot()
     created = delegated._create_cloexec_pipe()
-    if isinstance(created, tuple):
-        read_end, write_end = created
-    else:
-        read_end, write_end = created.read, created.write
+    read_end, write_end = created.read, created.write
+    created_descriptors = [read_end.value, write_end.value]
+    assert all(descriptor is not None for descriptor in created_descriptors)
     write_end.close()
     source, first_line = inspect.getsourcelines(type(read_end).close)
     native_close_line = next(
@@ -2900,51 +2892,80 @@ def test_posix_endpoint_close_interruption_retains_owning_cleanup() -> None:
     assert read_end.value is not None
     read_end.close()
     gc.collect()
-    final = process_fd_snapshot()
-    leaked = final - baseline
-    try:
-        assert final == baseline
-    finally:
-        for descriptor in leaked:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+    assert_posix_descriptors_closed(
+        [descriptor for descriptor in created_descriptors if descriptor is not None]
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
-def test_temporary_file_return_before_payload_store_closes_descriptor() -> None:
-    gc.collect()
-    baseline = process_fd_snapshot()
+def test_temporary_file_return_before_payload_store_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     process = delegated._PosixAdapterProcess()
+    channel_descriptors: list[int] = []
+    payload_descriptors: list[int] = []
+    original_channel_factory = delegated._create_cloexec_pipe
+    original_temporary_file = delegated.tempfile.TemporaryFile
 
-    def allocate_then_store() -> None:
-        process.payload_handle = tempfile.TemporaryFile()
+    def capture_channel() -> object:
+        channel = original_channel_factory()
+        assert channel.read.value is not None
+        assert channel.write.value is not None
+        channel_descriptors.extend((channel.read.value, channel.write.value))
+        return channel
 
-    opcodes = {
-        instruction.offset: instruction.opname
-        for instruction in dis.get_instructions(allocate_then_store)
+    def capture_temporary_file(*args: object, **kwargs: object) -> object:
+        handle = original_temporary_file(*args, **kwargs)
+        payload_descriptors.append(handle.fileno())
+        return handle
+
+    instructions = {
+        instruction.offset: instruction
+        for instruction in dis.get_instructions(
+            delegated._prepare_posix_launch_resources
+        )
     }
 
     def interrupt_store(frame: object, event: str, _arg: object) -> object:
-        if getattr(frame, "f_code", None) is allocate_then_store.__code__:
+        if (
+            getattr(frame, "f_code", None)
+            is delegated._prepare_posix_launch_resources.__code__
+        ):
             if event == "call":
                 frame.f_trace_opcodes = True  # type: ignore[attr-defined]
-            elif event == "opcode" and opcodes.get(frame.f_lasti) == "STORE_ATTR":  # type: ignore[attr-defined]
-                raise KeyboardInterrupt("synthetic payload STORE_ATTR interruption")
+            elif event == "opcode":
+                instruction = instructions.get(frame.f_lasti)  # type: ignore[attr-defined]
+                if (
+                    instruction is not None
+                    and instruction.opname == "STORE_ATTR"
+                    and instruction.argval == "payload_handle"
+                ):
+                    raise KeyboardInterrupt(
+                        "synthetic payload STORE_ATTR interruption"
+                    )
         return interrupt_store
 
+    monkeypatch.setattr(delegated, "_create_cloexec_pipe", capture_channel)
+    monkeypatch.setattr(delegated.tempfile, "TemporaryFile", capture_temporary_file)
     sys.settrace(interrupt_store)
     try:
         with pytest.raises(
             KeyboardInterrupt, match="synthetic payload STORE_ATTR interruption"
         ):
-            allocate_then_store()
+            delegated._prepare_posix_launch_resources(
+                process,
+                [sys.executable, "-c", "raise SystemExit(0)"],
+                root=tmp_path,
+                environment={},
+            )
     finally:
         sys.settrace(None)
+    delegated._stop_posix_adapter_process_group(process)
     gc.collect()
     assert process.payload_handle is None
-    assert process_fd_snapshot() == baseline
+    assert len(channel_descriptors) == 8
+    assert len(payload_descriptors) == 1
+    assert_posix_descriptors_closed([*channel_descriptors, *payload_descriptors])
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
