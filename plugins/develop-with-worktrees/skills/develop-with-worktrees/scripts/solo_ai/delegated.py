@@ -9,6 +9,7 @@ import re
 import secrets
 import select
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -719,18 +720,59 @@ def _adapter_poll_pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
-@dataclass
 class _OwnedPosixFd:
-    """先移交状态、再关闭，避免异步异常后重复消费同一 FD 数值。"""
+    """拥有一个裸 FD 或 owning socket；生产 channel 始终使用后者。"""
 
-    value: int | None
+    def __init__(
+        self,
+        value: int | None,
+        *,
+        resource: socket.socket | None = None,
+    ) -> None:
+        if value is not None and resource is not None:
+            raise ValueError("A POSIX descriptor cannot have two owners")
+        self._descriptor = value
+        self._resource = resource
+
+    @classmethod
+    def from_socket(cls, resource: socket.socket) -> _OwnedPosixFd:
+        return cls(None, resource=resource)
+
+    @property
+    def value(self) -> int | None:
+        if self._resource is not None:
+            descriptor = self._resource.fileno()
+            return descriptor if descriptor >= 0 else None
+        return self._descriptor
 
     def close(self) -> None:
-        if self.value is None:
+        if self._resource is not None:
+            # 保留 owning PyObject 直到 close 明确返回：close 前/内中断时 caller
+            # 仍可重试同一对象；原生已关而返回边界中断时 socket.close 也幂等，
+            # 不会把已经复用的裸 FD 数值作为新资源再次关闭。
+            resource = self._resource
+            resource.close()
+            self._resource = None
             return
-        descriptor = self.value
-        self.value = None
+        if self._descriptor is None:
+            return
+        descriptor = self._descriptor
+        self._descriptor = None
         os.close(descriptor)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
+@dataclass
+class _OwnedPosixChannel:
+    """单次 STORE_ATTR 的自拥有双端 channel；丢失返回值也会关闭两端。"""
+
+    read: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
+    write: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
 
 
 @dataclass
@@ -776,19 +818,16 @@ class _PosixAdapterProcess:
     ownership: _PosixSupervisorOwnership = field(
         default_factory=lambda: _PosixSupervisorOwnership(identity_proven=False)
     )
-    result_read: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
+    status_channel: _OwnedPosixChannel = field(default_factory=_OwnedPosixChannel)
+    gate_channel: _OwnedPosixChannel = field(default_factory=_OwnedPosixChannel)
+    control_channel: _OwnedPosixChannel = field(default_factory=_OwnedPosixChannel)
+    result_channel: _OwnedPosixChannel = field(default_factory=_OwnedPosixChannel)
     result_buffer: bytearray = field(default_factory=bytearray)
     adapter_returncode: int | None = None
     result_complete: bool = False
     launcher_identity: _PosixLauncherIdentity = field(
         default_factory=_PosixLauncherIdentity
     )
-    status_read: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
-    status_write: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
-    gate_read: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
-    gate_write: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
-    control_read: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
-    result_write: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
     payload_handle: Any | None = None
     child_creation_possible: bool = False
     launch_completed: bool = False
@@ -801,6 +840,34 @@ class _PosixAdapterProcess:
             )
         return self.ownership.pid
 
+    @property
+    def status_read(self) -> _OwnedPosixFd:
+        return self.status_channel.read
+
+    @property
+    def status_write(self) -> _OwnedPosixFd:
+        return self.status_channel.write
+
+    @property
+    def gate_read(self) -> _OwnedPosixFd:
+        return self.gate_channel.read
+
+    @property
+    def gate_write(self) -> _OwnedPosixFd:
+        return self.gate_channel.write
+
+    @property
+    def control_read(self) -> _OwnedPosixFd:
+        return self.control_channel.read
+
+    @property
+    def result_read(self) -> _OwnedPosixFd:
+        return self.result_channel.read
+
+    @property
+    def result_write(self) -> _OwnedPosixFd:
+        return self.result_channel.write
+
     def poll(self) -> int | None:
         return _poll_posix_adapter_result(self)
 
@@ -812,14 +879,22 @@ class _PosixAdapterProcess:
         return self.adapter_returncode
 
 
-def _create_cloexec_pipe() -> tuple[_OwnedPosixFd, _OwnedPosixFd]:
-    if hasattr(os, "pipe2"):
-        read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
-    else:  # pragma: no cover - 当前支持的 POSIX Python 都提供 pipe2
-        read_fd, write_fd = os.pipe()
-        os.set_inheritable(read_fd, False)
-        os.set_inheritable(write_fd, False)
-    return _OwnedPosixFd(read_fd), _OwnedPosixFd(write_fd)
+def _create_cloexec_pipe() -> _OwnedPosixChannel:
+    """返回自拥有 channel；系统调用返回到 caller STORE_ATTR 前也不暴露裸 FD。"""
+
+    read_socket, write_socket = socket.socketpair()
+    try:
+        # Python socket 默认 non-inheritable；显式核验使替代运行时也失败关闭。
+        read_socket.set_inheritable(False)
+        write_socket.set_inheritable(False)
+        return _OwnedPosixChannel(
+            read=_OwnedPosixFd.from_socket(read_socket),
+            write=_OwnedPosixFd.from_socket(write_socket),
+        )
+    except BaseException:
+        read_socket.close()
+        write_socket.close()
+        raise
 
 
 _POSIX_GATE_LAUNCHER = r"""
@@ -911,8 +986,7 @@ try:
     pid = os.getpid()
     pgid = os.getpgrp()
     frame = ("DWW1 %d %d\n" % (pid, pgid)).encode("ascii")
-    pipe_buf = os.fpathconf(status_fd, "PC_PIPE_BUF")
-    if pid <= 0 or pgid != pid or len(frame) > pipe_buf:
+    if pid <= 0 or pgid != pid or len(frame) > 64:
         fail_and_hold()
     if os.write(status_fd, frame) != len(frame):
         fail_and_hold()
@@ -1017,8 +1091,7 @@ while adapter_status is None:
 try:
     returncode = os.waitstatus_to_exitcode(adapter_status)
     result = ("DWWR1 %d\n" % returncode).encode("ascii")
-    pipe_buf = os.fpathconf(result_fd, "PC_PIPE_BUF")
-    if len(result) > 64 or len(result) > pipe_buf:
+    if len(result) > 64:
         fail_and_hold()
     if os.write(result_fd, result) != len(result):
         fail_and_hold()
@@ -1036,6 +1109,12 @@ def _posix_launcher_environment() -> dict[str, str]:
     # 绝对解释器路径与固定 ASCII 协议无需继承 PATH 或 loader/runtime 配置。
     # adapter 的完整批准环境只经 payload 在 GO 后应用。
     return {"LC_ALL": "C", "LANG": "C"}
+
+
+def _posix_launcher_cwd() -> str:
+    """固定 launcher 到文件系统根，解释器即使位于仓库内也不加载仓库 cwd。"""
+
+    return os.path.abspath(os.sep)
 
 
 def _posix_launch_payload(
@@ -1308,6 +1387,7 @@ def _stop_posix_adapter_process_group(process: _PosixAdapterProcess) -> None:
         for descriptor in (
             process.status_read,
             process.result_read,
+            process.control_channel.write,
             process.ownership.control_write,
         ):
             try:
@@ -1399,7 +1479,11 @@ def _stop_posix_adapter_process_group(process: _PosixAdapterProcess) -> None:
         except BaseException as exc:  # noqa: BLE001 - 只回收直接子，不发裸信号
             failures.append(exc)
     if process.ownership.termination_confirmed:
-        for descriptor in (process.result_read, process.ownership.control_write):
+        for descriptor in (
+            process.result_read,
+            process.control_channel.write,
+            process.ownership.control_write,
+        ):
             try:
                 descriptor.close()
             except BaseException as exc:  # noqa: BLE001 - 每个父方 FD 都要单次消费
@@ -1512,10 +1596,13 @@ def _prepare_posix_launch_resources(
     """把每项 launch resource 直接落入 caller 预建 owner，不返回所有权。"""
 
     payload = _posix_launch_payload(argv, root=root, environment=environment)
-    process.status_read, process.status_write = _create_cloexec_pipe()
-    process.gate_read, process.gate_write = _create_cloexec_pipe()
-    process.control_read, process.ownership.control_write = _create_cloexec_pipe()
-    process.result_read, process.result_write = _create_cloexec_pipe()
+    # 每个 factory 返回值自身拥有两端；CALL 返回到单次 STORE_ATTR 前即使中断，
+    # 临时 channel 的端点对象也会最终化关闭，不依赖尚未执行的 tuple unpack。
+    process.status_channel = _create_cloexec_pipe()
+    process.gate_channel = _create_cloexec_pipe()
+    process.control_channel = _create_cloexec_pipe()
+    process.ownership.control_write = process.control_channel.write
+    process.result_channel = _create_cloexec_pipe()
     process.payload_handle = tempfile.TemporaryFile()
     process.payload_handle.write(payload)
     process.payload_handle.flush()
@@ -1561,7 +1648,7 @@ def _launch_posix_adapter_process(
                     str(process.control_read.value),
                     str(process.result_write.value),
                 ],
-                cwd=Path(sys.executable).resolve().parent,
+                cwd=_posix_launcher_cwd(),
                 stdin=stdin_handle,
                 stdout=stdout_handle,
                 stderr=stderr_handle,

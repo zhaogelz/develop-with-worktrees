@@ -2,9 +2,9 @@
 
 ## 0.3.0-beta.17 — 2026-08-28
 
-- POSIX caller 在资源准备前预建唯一 process owner，launch 改为原地填充并与 GO、返回边界和监控共用同一个 `BaseException` guard；pipe、Popen 直接子、status identity、result reader 与 control writer 不再通过可丢失的返回值移交。resource prepare、Popen、child-end close、status、GO 或 launch `RETURN_VALUE → STORE_FAST` 任一边界中断都会用同一 owner 幂等收束。
+- POSIX caller 在资源准备前预建唯一 process owner，launch 改为原地填充并与 GO、返回边界和监控共用同一个 `BaseException` guard；四条控制 channel 以自拥有 socket endpoint 对象整体落盘，不再把裸 FD tuple 跨越 `CALL → STORE_ATTR` 移交，端点关闭中断也可按同一对象安全重试。resource prepare、Popen、child-end close、status、GO 或 launch `RETURN_VALUE → STORE_FAST` 任一边界中断都会用同一 owner 幂等收束。
 - control 命令交付改为 `not_attempted / indeterminate / delivered` 三态：只有原生 write 明确返回一个字节才是 delivered，不确定写保留唯一 writer 并由 stop 内部及 caller 外层安全重试。supervisor 每次只读一个字节，任一 `K` 都进入不可逆的自身进程组 `SIGKILL` 重试循环；重复 K 不再组成伪造帧，父方仍不向裸 PID/PGID 发送 destructive signal。
-- status 无效、伪造或无法证明 direct-child 身份时仍优先消费私有 control capability 终止真实 supervisor，但不得据此确认进程组为空或删除 verified-input closure。adapter child 在 exec 前必须确认全部控制 FD 已关闭，任一关闭结果不确定都以 126 失败且绝不执行批准入口。补充 pre/post-write 中断、连续不确定写、close 后中断、launch/cleanup 返回边界、伪造 identity、self-kill 重试与无残留 launcher 回归；Windows Job 与 Hook 定义保持不变。
+- status 无效、伪造或无法证明 direct-child 身份时仍优先消费私有 control capability 终止真实 supervisor，但不得据此确认进程组为空或删除 verified-input closure。adapter child 在 exec 前必须确认全部控制 FD 已关闭，任一关闭结果不确定都以 126 失败且绝不执行批准入口；固定 launcher `cwd=/`，即使绝对解释器位于仓库内也不会把仓库作为 GO 前启动目录。补充 pre/post-write 中断、连续不确定写、channel 落盘/关闭中断、launch/cleanup 返回边界、伪造 identity、self-kill 重试与无残留 launcher 回归；Windows Job 与 Hook 定义保持不变。
 
 ## 0.3.0-beta.16 — 2026-08-28
 

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import ctypes
+import dis
+import gc
+import inspect
 import json
 import os
 import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,6 +27,20 @@ from solo_ai.delegated import (
 )
 from solo_ai.lifecycle import repository_route
 from solo_ai.repo import GitRepo
+
+
+def process_fd_snapshot() -> set[int]:
+    descriptors: set[int] = set()
+    for item in os.listdir("/proc/self/fd"):
+        descriptor = int(item)
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            # /proc 枚举自身可能短暂占用一个 FD；列表返回后它已经关闭，
+            # 不属于被测进程仍拥有的资源。
+            continue
+        descriptors.add(descriptor)
+    return descriptors
 
 
 def declare_adapter(root: Path, *, max_parallel: int = 4) -> None:
@@ -1663,6 +1681,21 @@ def test_posix_unproven_identity_preserves_verified_input_closure_after_k(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher isolation is required")
+def test_posix_launcher_cwd_is_outside_repo_when_interpreter_is_inside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    interpreter = repository / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    monkeypatch.setattr(delegated.sys, "executable", str(interpreter))
+
+    launcher_cwd = Path(delegated._posix_launcher_cwd()).resolve()
+
+    assert launcher_cwd == Path(os.path.abspath(os.sep)).resolve()
+    assert not launcher_cwd.is_relative_to(repository.resolve())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher isolation is required")
 def test_posix_launcher_does_not_load_adapter_sitecustomize_before_go(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1841,13 +1874,13 @@ def test_posix_initial_status_write_failure_holds_for_controlled_stop(
     pipe_count = 0
     spawned: list[subprocess.Popen[bytes]] = []
 
-    def create_pipe_with_broken_status_reader() -> tuple[object, object]:
+    def create_pipe_with_broken_status_reader() -> object:
         nonlocal pipe_count
         pipe_count += 1
-        read_fd, write_fd = original_pipe()
+        channel = original_pipe()
         if pipe_count == 1:
-            read_fd.close()
-        return read_fd, write_fd
+            channel.read.close()
+        return channel
 
     def capture_popen(*args: object, **kwargs: object) -> object:
         process = original_popen(*args, **kwargs)
@@ -2165,7 +2198,7 @@ def test_unconfirmed_termination_preserves_verified_input_closure(
         fingerprint=inspection["adapter"]["fingerprint"],
     )
     closure_roots: list[Path] = []
-    interrupted_processes: list[object] = []
+    interrupted_ownerships: list[tuple[object, object | None]] = []
     original_run = delegated._run_adapter_process
     original_stop = delegated._stop_adapter_process
     original_sleep = time.sleep
@@ -2184,7 +2217,7 @@ def test_unconfirmed_termination_preserves_verified_input_closure(
         raise KeyboardInterrupt("synthetic monitor interruption")
 
     def fail_stop(process: object, **_kwargs: object) -> None:
-        interrupted_processes.append(process)
+        interrupted_ownerships.append((process, _kwargs.get("windows_job")))
         raise termination_failure("synthetic termination confirmation failure")
 
     monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
@@ -2225,20 +2258,40 @@ def test_unconfirmed_termination_preserves_verified_input_closure(
             for note in getattr(raised.value, "__notes__", ())
         )
     finally:
-        if os.name != "nt":
-            for process in {id(item): item for item in interrupted_processes}.values():
-                assert isinstance(process, delegated._PosixAdapterProcess)
-                original_stop(process)
-                assert process.ownership.termination_confirmed
-                assert process.supervisor is not None
-                assert process.supervisor.poll() is not None
-        if pid_path.exists():
+        cleanup_failure: BaseException | None = None
+        ownerships = {
+            id(process): (process, windows_job)
+            for process, windows_job in interrupted_ownerships
+        }
+        for process, windows_job in ownerships.values():
+            try:
+                original_stop(process, windows_job=windows_job)
+                if os.name == "nt":
+                    assert isinstance(process, delegated._WindowsAdapterProcess)
+                    assert isinstance(windows_job, delegated._WindowsAdapterJob)
+                    assert windows_job.empty_confirmed
+                    assert windows_job.closed_confirmed
+                    assert windows_job.handle is None
+                    assert not process.information.hProcess
+                    assert not process.information.hThread
+                else:
+                    assert isinstance(process, delegated._PosixAdapterProcess)
+                    assert process.ownership.termination_confirmed
+                    assert process.supervisor is not None
+                    assert process.supervisor.poll() is not None
+            except BaseException as exc:
+                cleanup_failure = exc
+        if cleanup_failure is not None and pid_path.exists():
+            # 精确 owner cleanup 失败时才以 adapter PID 子树作测试卫生兜底；
+            # cleanup_failure 仍在 finally 末尾抛出，绝不把兜底冒充通过。
             from solo_ai.util import _stop_process_tree
 
             _stop_process_tree(int(pid_path.read_text(encoding="utf-8")), force=True)
         for closure_root in closure_roots:
             if closure_root.exists():
                 shutil.rmtree(closure_root)
+        if cleanup_failure is not None:
+            raise cleanup_failure
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups are required")
@@ -2286,7 +2339,7 @@ def test_posix_normal_cleanup_never_polls_then_signals_a_reused_group(
     process = delegated._PosixAdapterProcess(
         supervisor=object(),  # type: ignore[arg-type]
         ownership=ownership,
-        result_read=delegated._OwnedPosixFd(None),
+        result_channel=delegated._OwnedPosixChannel(),
         result_buffer=bytearray(),
     )
     monkeypatch.setattr(delegated.os, "waitid", reaped_elsewhere)
@@ -2462,7 +2515,9 @@ def test_posix_result_protocol_rejects_untrusted_frames(
     process = delegated._PosixAdapterProcess(
         supervisor=object(),  # type: ignore[arg-type]
         ownership=ownership,
-        result_read=delegated._OwnedPosixFd(read_fd),
+        result_channel=delegated._OwnedPosixChannel(
+            read=delegated._OwnedPosixFd(read_fd)
+        ),
         result_buffer=bytearray(),
     )
     monkeypatch.setattr(
@@ -2757,6 +2812,139 @@ def test_posix_child_end_close_return_interruption_uses_caller_owner(
                 except ProcessLookupError:
                     pass
                 process.wait(timeout=2)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
+def test_posix_channel_factory_return_before_store_closes_both_endpoints() -> None:
+    gc.collect()
+    baseline = process_fd_snapshot()
+
+    class Holder:
+        channel: object | None = None
+
+    holder = Holder()
+
+    def allocate_then_store() -> None:
+        holder.channel = delegated._create_cloexec_pipe()
+
+    opcodes = {
+        instruction.offset: instruction.opname
+        for instruction in dis.get_instructions(allocate_then_store)
+    }
+
+    def interrupt_store(frame: object, event: str, _arg: object) -> object:
+        if getattr(frame, "f_code", None) is allocate_then_store.__code__:
+            if event == "call":
+                frame.f_trace_opcodes = True  # type: ignore[attr-defined]
+            elif event == "opcode" and opcodes.get(frame.f_lasti) == "STORE_ATTR":  # type: ignore[attr-defined]
+                raise KeyboardInterrupt("synthetic channel STORE_ATTR interruption")
+        return interrupt_store
+
+    sys.settrace(interrupt_store)
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic channel STORE_ATTR interruption"
+        ):
+            allocate_then_store()
+    finally:
+        sys.settrace(None)
+    gc.collect()
+    final = process_fd_snapshot()
+    leaked = final - baseline
+    try:
+        assert final == baseline
+    finally:
+        for descriptor in leaked:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
+def test_posix_endpoint_close_interruption_retains_owning_cleanup() -> None:
+    gc.collect()
+    baseline = process_fd_snapshot()
+    created = delegated._create_cloexec_pipe()
+    if isinstance(created, tuple):
+        read_end, write_end = created
+    else:
+        read_end, write_end = created.read, created.write
+    write_end.close()
+    source, first_line = inspect.getsourcelines(type(read_end).close)
+    native_close_line = next(
+        first_line + offset
+        for offset, line in enumerate(source)
+        if line.strip() in {"os.close(descriptor)", "resource.close()"}
+    )
+
+    def interrupt_native_close(frame: object, event: str, _arg: object) -> object:
+        if (
+            getattr(frame, "f_code", None) is type(read_end).close.__code__
+            and event == "line"
+            and getattr(frame, "f_lineno", None) == native_close_line
+        ):
+            raise KeyboardInterrupt("synthetic endpoint native close interruption")
+        return interrupt_native_close
+
+    sys.settrace(interrupt_native_close)
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic endpoint native close interruption"
+        ):
+            read_end.close()
+    finally:
+        sys.settrace(None)
+    # 中断发生在 native close 前，owner 必须仍保有同一 socket 对象，
+    # 从而可安全重试，而不是遗失或按可能复用的裸 FD 再次关闭。
+    assert read_end.value is not None
+    read_end.close()
+    gc.collect()
+    final = process_fd_snapshot()
+    leaked = final - baseline
+    try:
+        assert final == baseline
+    finally:
+        for descriptor in leaked:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
+def test_temporary_file_return_before_payload_store_closes_descriptor() -> None:
+    gc.collect()
+    baseline = process_fd_snapshot()
+    process = delegated._PosixAdapterProcess()
+
+    def allocate_then_store() -> None:
+        process.payload_handle = tempfile.TemporaryFile()
+
+    opcodes = {
+        instruction.offset: instruction.opname
+        for instruction in dis.get_instructions(allocate_then_store)
+    }
+
+    def interrupt_store(frame: object, event: str, _arg: object) -> object:
+        if getattr(frame, "f_code", None) is allocate_then_store.__code__:
+            if event == "call":
+                frame.f_trace_opcodes = True  # type: ignore[attr-defined]
+            elif event == "opcode" and opcodes.get(frame.f_lasti) == "STORE_ATTR":  # type: ignore[attr-defined]
+                raise KeyboardInterrupt("synthetic payload STORE_ATTR interruption")
+        return interrupt_store
+
+    sys.settrace(interrupt_store)
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic payload STORE_ATTR interruption"
+        ):
+            allocate_then_store()
+    finally:
+        sys.settrace(None)
+    gc.collect()
+    assert process.payload_handle is None
+    assert process_fd_snapshot() == baseline
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX resource ownership is required")
