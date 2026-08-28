@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.10` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.3.0-beta.11` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
 
 ## One conversation for complex work
 
@@ -12,7 +12,7 @@ Same-file predictions are allowed to run optimistically. Only explicit high-risk
 
 ## Mature repository workflows win
 
-Before any repository choice, a compact read-only route checks for a mature worktree or orchestration workflow. An ordinary mature workflow makes DWW silently defer: it asks no three-choice question, writes no DWW state, and follows the repository's own instructions. A mature repository may instead commit a versioned adapter declaration; only after the exact declaration and tracked-input fingerprint is locally approved does the route become `delegated`. DWW then constructs a fixed runtime argv and exchanges one JSON request/response, while the repository remains authoritative for lifecycle state. Any drift returns to `defer`.
+Before any repository choice, a compact read-only route checks for a mature worktree or orchestration workflow. An ordinary mature workflow makes DWW silently defer: it asks no three-choice question, writes no DWW state, and follows the repository's own instructions. A mature repository may instead commit a versioned adapter declaration; only after the exact declaration and tracked-input fingerprint is locally approved does the route become `delegated`. DWW then executes the final-checked contract and all tracked inputs from one private repository-external closure, while the live repository remains only the native Git/state target. Any drift returns to `defer`.
 
 The trusted `SessionStart` hook normally injects this route once. If hook context is unavailable, the skill runs one lightweight `dww route --json` fallback; it does not load the full `doctor` report.
 
@@ -63,7 +63,7 @@ In Codex, the trusted `PreToolUse` hook hard-denies protected-worktree writes on
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.10
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.11
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

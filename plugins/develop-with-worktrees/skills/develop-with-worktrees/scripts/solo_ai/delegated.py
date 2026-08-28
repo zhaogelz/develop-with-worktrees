@@ -32,6 +32,8 @@ MAX_ADAPTER_STDERR_BYTES = 64 * 1024
 MAX_ADAPTER_ERROR_CHARS = 1200
 ADAPTER_POLL_SECONDS = 0.05
 ADAPTER_TERMINATION_GRACE_SECONDS = 5.0
+VERIFIED_INPUT_ROOT_ENV = "DWW_VERIFIED_INPUT_ROOT"
+REPOSITORY_ROOT_ENV = "DWW_REPOSITORY_ROOT"
 ALLOWED_RUNTIMES = {"python", "powershell", "sh"}
 ALLOWED_CAPABILITIES = {
     "start",
@@ -68,6 +70,29 @@ class DelegatedContract:
             "max_parallel": self.max_parallel,
             "fingerprint": self.fingerprint,
         }
+
+
+@dataclass(frozen=True)
+class DelegatedMaterial:
+    """最终指纹核验实际读取的原始契约与声明输入字节。"""
+
+    contract_bytes: bytes
+    tracked_input_bytes: tuple[tuple[str, bytes], ...]
+
+
+@dataclass(frozen=True)
+class VerifiedInputClosure:
+    """仓库外私有执行闭包及其中的批准入口。"""
+
+    root: Path
+    entrypoint: Path
+
+
+@dataclass(frozen=True)
+class _VerifiedClosureManifest:
+    files: tuple[tuple[Path, dict[str, Any]], ...]
+    directories: tuple[tuple[Path, dict[str, Any]], ...]
+    children: tuple[tuple[Path, tuple[str, ...]], ...]
 
 
 def _stable_json(value: Any) -> str:
@@ -174,7 +199,9 @@ def _bounded_file_bytes_for_fingerprint(
     return content
 
 
-def _load_contract_material(root: Path) -> tuple[DelegatedContract, bytes]:
+def _load_contract_material(
+    root: Path,
+) -> tuple[DelegatedContract, DelegatedMaterial]:
     contract_path = root / DELEGATED_CONTRACT
     try:
         _plain_tracked_file(root, DELEGATED_CONTRACT, field="contract")
@@ -254,7 +281,7 @@ def _load_contract_material(root: Path) -> tuple[DelegatedContract, bytes]:
         )
     input_records: list[dict[str, str]] = []
     total_input_bytes = 0
-    entrypoint_bytes: bytes | None = None
+    captured_inputs: list[tuple[str, bytes]] = []
     for relative in tracked_inputs:
         path = _plain_tracked_file(root, relative, field="tracked_inputs")
         content = _bounded_file_bytes_for_fingerprint(
@@ -268,8 +295,7 @@ def _load_contract_material(root: Path) -> tuple[DelegatedContract, bytes]:
                 f"tracked inputs exceed the {MAX_TOTAL_INPUT_BYTES}-byte total limit"
             )
         input_records.append({"path": relative, "sha256": _sha256_bytes(content)})
-        if relative == entrypoint:
-            entrypoint_bytes = content
+        captured_inputs.append((relative, content))
     suffixes = {"python": ".py", "powershell": ".ps1", "sh": ".sh"}
     if Path(entrypoint).suffix.casefold() != suffixes[runtime]:
         raise DelegatedContractError(
@@ -297,13 +323,16 @@ def _load_contract_material(root: Path) -> tuple[DelegatedContract, bytes]:
         max_parallel=max_parallel,
         fingerprint=fingerprint,
     )
-    if entrypoint_bytes is None:
+    if not any(relative == entrypoint for relative, _content in captured_inputs):
         raise DelegatedContractError("The delegated entrypoint could not be captured")
-    return contract, entrypoint_bytes
+    return contract, DelegatedMaterial(
+        contract_bytes=raw_bytes,
+        tracked_input_bytes=tuple(captured_inputs),
+    )
 
 
 def _load_contract(root: Path) -> DelegatedContract:
-    contract, _entrypoint_bytes = _load_contract_material(root)
+    contract, _material = _load_contract_material(root)
     return contract
 
 
@@ -458,61 +487,165 @@ def _adapter_argv(
     return [executable, entrypoint]
 
 
-@contextmanager
-def _verified_entrypoint_snapshot(
-    root: Path, contract: DelegatedContract, content: bytes
-) -> Iterator[Path]:
-    """在原目录冻结已纳入指纹的入口字节，同时保留脚本目录语义。"""
-    original = root / contract.entrypoint
-    snapshot = original.with_name(
-        f".{original.stem}.dww-verified-{uuid.uuid4().hex}{original.suffix}"
-    )
+def _material_files(material: DelegatedMaterial) -> tuple[tuple[str, bytes], ...]:
+    files: dict[str, bytes] = {DELEGATED_CONTRACT: material.contract_bytes}
+    canonical_paths = {DELEGATED_CONTRACT.casefold(): DELEGATED_CONTRACT}
+    for relative, content in material.tracked_input_bytes:
+        canonical = relative.casefold()
+        previous = canonical_paths.get(canonical)
+        if previous is not None and previous != relative:
+            raise DelegatedContractError(
+                "Verified delegated inputs contain a case-colliding path: "
+                f"{previous}, {relative}"
+            )
+        canonical_paths[canonical] = relative
+        if relative in files and files[relative] != content:
+            raise DelegatedContractError(
+                f"Verified delegated input bytes conflict at {relative}"
+            )
+        files[relative] = content
+    return tuple(sorted(files.items()))
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        descriptor = os.open(snapshot, flags, 0o600)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                descriptor = -1
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-    except OSError as exc:
-        try:
-            snapshot.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise DelegatedContractError(
-            f"Could not create the verified delegated adapter snapshot: {exc}"
-        ) from exc
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _cleanup_verified_input_closure(manifest: _VerifiedClosureManifest) -> None:
     # 延迟加载主 CLI 工具，避免只读路由检查因此扩大依赖面。
     from .util import SoloAIError, delete_plain_path_if_unchanged, snapshot_plain_path
 
     try:
-        expected_snapshot = snapshot_plain_path(snapshot)
-    except (OSError, SoloAIError) as exc:
-        try:
-            snapshot.unlink(missing_ok=True)
-        except OSError:
-            pass
+        expected_children = dict(manifest.children)
+        for directory, expected in manifest.directories:
+            if snapshot_plain_path(directory) != expected:
+                raise SoloAIError(
+                    f"Verified input directory changed before cleanup: {directory}"
+                )
+            observed = tuple(sorted(entry.name for entry in os.scandir(directory)))
+            if observed != expected_children[directory]:
+                raise SoloAIError(
+                    f"Verified input directory contents changed before cleanup: {directory}"
+                )
+        for path, expected in manifest.files:
+            if snapshot_plain_path(path) != expected:
+                raise SoloAIError(
+                    f"Verified input file changed before cleanup: {path}"
+                )
+        for path, expected in sorted(
+            manifest.files, key=lambda item: len(item[0].parts), reverse=True
+        ):
+            delete_plain_path_if_unchanged(path, expected)
+        for path, expected in sorted(
+            manifest.directories,
+            key=lambda item: len(item[0].parts),
+            reverse=True,
+        ):
+            delete_plain_path_if_unchanged(path, expected)
+    except (FileNotFoundError, OSError, SoloAIError) as exc:
         raise DelegatedContractError(
-            f"Could not freeze the delegated adapter snapshot identity: {exc}"
+            "Could not safely remove the verified delegated input closure; "
+            f"the changed path was preserved: {exc}"
         ) from exc
+
+
+@contextmanager
+def _verified_input_closure(
+    repository_root: Path,
+    contract: DelegatedContract,
+    material: DelegatedMaterial,
+) -> Iterator[VerifiedInputClosure]:
+    """把最终核验字节冻结到仓库外私有树，并保留声明文件相对结构。"""
+    from .util import SoloAIError, snapshot_plain_path
+
+    closure_root = Path(tempfile.mkdtemp(prefix="dww-verified-delegated-")).resolve(
+        strict=True
+    )
+    files: dict[Path, dict[str, Any]] = {}
+    directories: dict[Path, dict[str, Any]] = {}
+    children: dict[Path, set[str]] = {closure_root: set()}
     try:
-        yield snapshot
-    finally:
         try:
-            if snapshot.exists() or snapshot.is_symlink():
-                delete_plain_path_if_unchanged(snapshot, expected_snapshot)
-        except FileNotFoundError:
-            pass
+            os.chmod(closure_root, 0o700)
+            directories[closure_root] = snapshot_plain_path(closure_root)
         except (OSError, SoloAIError) as exc:
             raise DelegatedContractError(
-                "Could not safely remove the verified delegated adapter snapshot; "
-                f"the changed path was preserved: {exc}"
+                f"Could not freeze the delegated input closure root: {exc}"
             ) from exc
+        if _path_is_within(closure_root, repository_root):
+            raise DelegatedContractError(
+                "Verified delegated input closure must be outside the repository"
+            )
+
+        for relative, content in _material_files(material):
+            destination = closure_root.joinpath(*PurePosixPath(relative).parts)
+            parent = closure_root
+            for part in PurePosixPath(relative).parts[:-1]:
+                child = parent / part
+                if child not in directories:
+                    try:
+                        os.mkdir(child, 0o700)
+                        directories[child] = snapshot_plain_path(child)
+                    except (OSError, SoloAIError) as exc:
+                        raise DelegatedContractError(
+                            "Could not create the verified delegated input directory "
+                            f"{relative}: {exc}"
+                        ) from exc
+                    children[parent].add(part)
+                    children[child] = set()
+                parent = child
+            descriptor = -1
+            try:
+                descriptor = os.open(
+                    destination,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                with os.fdopen(descriptor, "wb") as handle:
+                    descriptor = -1
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                files[destination] = snapshot_plain_path(destination)
+                children[parent].add(destination.name)
+            except (OSError, SoloAIError) as exc:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                raise DelegatedContractError(
+                    f"Could not create verified delegated input {relative}: {exc}"
+                ) from exc
+
+        manifest = _VerifiedClosureManifest(
+            files=tuple(files.items()),
+            directories=tuple(directories.items()),
+            children=tuple(
+                (path, tuple(sorted(names))) for path, names in children.items()
+            ),
+        )
+    except BaseException:
+        if directories:
+            partial_manifest = _VerifiedClosureManifest(
+                files=tuple(files.items()),
+                directories=tuple(directories.items()),
+                children=tuple(
+                    (path, tuple(sorted(names))) for path, names in children.items()
+                ),
+            )
+            _cleanup_verified_input_closure(partial_manifest)
+        raise
+
+    closure = VerifiedInputClosure(
+        root=closure_root,
+        entrypoint=closure_root.joinpath(*PurePosixPath(contract.entrypoint).parts),
+    )
+    try:
+        yield closure
+    finally:
+        _cleanup_verified_input_closure(manifest)
 
 
 @dataclass(frozen=True)
@@ -558,6 +691,7 @@ def _run_adapter_process(
     root: Path,
     request_bytes: bytes,
     timeout_seconds: float,
+    environment: dict[str, str] | None = None,
 ) -> _AdapterProcessResult:
     if len(request_bytes) > MAX_ADAPTER_REQUEST_BYTES:
         raise DelegatedContractError(
@@ -580,6 +714,7 @@ def _run_adapter_process(
                 stdin=stdin_handle,
                 stdout=stdout_handle,
                 stderr=stderr_handle,
+                env=environment,
                 start_new_session=os.name != "nt",
                 creationflags=creation_flags,
             )
@@ -766,7 +901,7 @@ def invoke_delegated(
         raise DelegatedContractError(
             f"Adapter {adapter['id']} does not declare capability {operation}"
         )
-    contract, entrypoint_bytes = _load_contract_material(root)
+    contract, material = _load_contract_material(root)
     if not secrets.compare_digest(contract.fingerprint, str(adapter["fingerprint"])):
         raise DelegatedContractError(
             "Delegated contract changed after approval inspection; retry from inspect"
@@ -782,12 +917,19 @@ def invoke_delegated(
         request_bytes = _stable_json(envelope).encode("utf-8")
     except (TypeError, ValueError, RecursionError) as exc:
         raise DelegatedContractError("Delegated request is not strict JSON") from exc
-    with _verified_entrypoint_snapshot(root, contract, entrypoint_bytes) as entrypoint:
+    with _verified_input_closure(root, contract, material) as closure:
+        environment = dict(os.environ)
+        environment[VERIFIED_INPUT_ROOT_ENV] = str(closure.root)
+        environment[REPOSITORY_ROOT_ENV] = str(root.resolve())
+        # Python 的 sibling import 默认会在脚本目录生成 __pycache__；执行闭包
+        # 必须保持只读且可精确清理，因此强制关闭字节码落盘。
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         completed = _run_adapter_process(
-            _adapter_argv(root, contract, entrypoint_path=entrypoint),
+            _adapter_argv(root, contract, entrypoint_path=closure.entrypoint),
             root=root,
             request_bytes=request_bytes,
             timeout_seconds=timeout_seconds,
+            environment=environment,
         )
     if completed.returncode != 0:
         # 与进程树工具一样延迟导入，保持只读 Hook 的依赖面不变。

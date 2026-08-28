@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -27,6 +28,46 @@ def declare_adapter(root: Path, *, max_parallel: int = 4) -> None:
         capabilities=("start", "status"),
         approve=False,
     )
+
+
+def declare_runtime_adapter(
+    root: Path,
+    *,
+    runtime: str,
+    entrypoint: str,
+    files: dict[str, str],
+    max_parallel: int = 5,
+) -> tuple[GitRepo, dict[str, object]]:
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8", newline="\n")
+    tracked_inputs = sorted(files)
+    policy = root / ".solo-ai"
+    policy.mkdir(exist_ok=True)
+    (policy / "delegated.toml").write_text(
+        "schema_version = 1\n"
+        'id = "runtime-closure-test"\n'
+        f'runtime = {json.dumps(runtime)}\n'
+        f'entrypoint = {json.dumps(entrypoint)}\n'
+        'workflow_markers = ["scripts/worktree-flow.ps1"]\n'
+        f"tracked_inputs = {json.dumps(tracked_inputs)}\n"
+        'capabilities = ["status"]\n'
+        f"max_parallel = {max_parallel}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    git(root, "add", ".solo-ai/delegated.toml", *tracked_inputs)
+    git(root, "commit", "-m", f"declare {runtime} closure fixture")
+    repo = GitRepo(root)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    assert inspection["valid"] is True
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    return repo, inspection
 
 
 def test_exact_local_approval_enables_delegated_route_and_limits_slots(
@@ -154,22 +195,34 @@ def test_invoke_never_executes_entrypoint_drift_after_final_approval_check(
     assert not marker.exists()
 
 
-def test_verified_python_entrypoint_preserves_repo_root_and_sibling_imports(
+def test_verified_python_input_closure_preserves_repo_root_and_sibling_imports(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     declare_adapter(git_repo)
     adapter_path = git_repo / "scripts" / "dww_adapter.py"
     helper_path = git_repo / "scripts" / "adapter_helper.py"
-    helper_path.write_text("AVAILABLE_SLOTS = 3\n", encoding="utf-8")
+    helper_path.write_text(
+        "from pathlib import Path\n"
+        "AVAILABLE_SLOTS = 3\n"
+        "HELPER_SOURCE = str(Path(__file__).resolve())\n",
+        encoding="utf-8",
+    )
     adapter_path.write_text(
         """import json
+import os
 import sys
 from pathlib import Path
 
-from adapter_helper import AVAILABLE_SLOTS
+from adapter_helper import AVAILABLE_SLOTS, HELPER_SOURCE
 
-if Path(__file__).resolve().parents[1] != Path.cwd().resolve():
-    raise SystemExit("repository root semantics changed")
+verified_root = Path(os.environ["DWW_VERIFIED_INPUT_ROOT"])
+repository_root = Path(os.environ["DWW_REPOSITORY_ROOT"])
+if repository_root.resolve() != Path.cwd().resolve():
+    raise SystemExit("repository working directory semantics changed")
+if Path(__file__).resolve() != verified_root / "scripts" / "dww_adapter.py":
+    raise SystemExit("entrypoint does not come from the verified closure")
+if HELPER_SOURCE != str(verified_root / "scripts" / "adapter_helper.py"):
+    raise SystemExit("sibling import does not come from the verified closure")
 request = json.load(sys.stdin)
 json.dump(
     {
@@ -206,13 +259,25 @@ json.dump(
         fingerprint=inspection["adapter"]["fingerprint"],
     )
     snapshots: list[Path] = []
+    closure_roots: list[Path] = []
     original_run = delegated._run_adapter_process
 
     def capture_snapshot(*args: object, **kwargs: object) -> object:
         argv = args[0]
         assert isinstance(argv, list)
         snapshots.append(Path(argv[-1]))
-        assert snapshots[-1].parent == adapter_path.parent
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_root = Path(environment["DWW_VERIFIED_INPUT_ROOT"])
+        closure_roots.append(closure_root)
+        with pytest.raises(ValueError):
+            closure_root.resolve().relative_to(git_repo.resolve())
+        assert snapshots[-1] == closure_root / "scripts" / "dww_adapter.py"
+        assert Path(environment["DWW_REPOSITORY_ROOT"]).resolve() == git_repo.resolve()
+        assert (closure_root / "scripts" / "adapter_helper.py").read_text(
+            encoding="utf-8"
+        ) == helper_path.read_text(encoding="utf-8")
+        assert "dww-verified" not in git(git_repo, "status", "--short")
         return original_run(*args, **kwargs)
 
     monkeypatch.setattr(delegated, "_run_adapter_process", capture_snapshot)
@@ -229,14 +294,342 @@ json.dump(
     assert len(snapshots) == 1
     assert snapshots[0] != adapter_path
     assert snapshots[0].suffix == ".py"
-    assert not snapshots[0].exists()
+    assert len(closure_roots) == 1
+    assert not closure_roots[0].exists()
+    assert git(git_repo, "status", "--short") == ""
+
+
+def test_invoke_never_executes_python_helper_drift_after_final_approval_check(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    helper_path = git_repo / "scripts" / "adapter_helper.py"
+    marker = git_repo / "unapproved-python-helper-ran.txt"
+    helper_path.write_text("AVAILABLE_SLOTS = 3\n", encoding="utf-8")
+    adapter_path.write_text(
+        """import json
+import sys
+
+from adapter_helper import AVAILABLE_SLOTS
+
+request = json.load(sys.stdin)
+json.dump(
+    {
+        "schema_version": 1,
+        "adapter_id": request["adapter_id"],
+        "fingerprint": request["fingerprint"],
+        "operation": request["operation"],
+        "ok": True,
+        "result": {"available_slots": AVAILABLE_SLOTS},
+    },
+    sys.stdout,
+)
+""",
+        encoding="utf-8",
+    )
+    contract_path = git_repo / ".solo-ai" / "delegated.toml"
+    contract_path.write_text(
+        contract_path.read_text(encoding="utf-8").replace(
+            'tracked_inputs = ["scripts/dww_adapter.py", "scripts/worktree-flow.ps1"]',
+            "tracked_inputs = ["
+            '"scripts/adapter_helper.py", '
+            '"scripts/dww_adapter.py", '
+            '"scripts/worktree-flow.ps1"]',
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/delegated.toml", "scripts")
+    git(git_repo, "commit", "-m", "add approved python helper")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    original_run = delegated._run_adapter_process
+
+    def drift_then_spawn(*args: object, **kwargs: object) -> object:
+        helper_path.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n"
+            "AVAILABLE_SLOTS = 1\n",
+            encoding="utf-8",
+        )
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", drift_then_spawn)
+
+    response = invoke_delegated(
+        repo.root,
+        repo.common_dir,
+        operation="status",
+        request={},
+        timeout_seconds=30,
+    )
+
+    assert response["result"] == {"available_slots": 3}
+    assert not marker.exists()
+
+
+def test_python_pep723_metadata_is_loaded_from_the_verified_closure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    approved_source = """# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+import json
+import sys
+
+request = json.load(sys.stdin)
+json.dump(
+    {
+        "schema_version": 1,
+        "adapter_id": request["adapter_id"],
+        "fingerprint": request["fingerprint"],
+        "operation": request["operation"],
+        "ok": True,
+        "result": {"available_slots": 2},
+    },
+    sys.stdout,
+)
+"""
+    adapter_path.write_text(approved_source, encoding="utf-8")
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "add approved PEP 723 metadata")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    original_run = delegated._run_adapter_process
+
+    def drift_then_spawn(*args: object, **kwargs: object) -> object:
+        adapter_path.write_text(
+            approved_source.replace('requires-python = ">=3.11"', 'requires-python = ">=99"'),
+            encoding="utf-8",
+        )
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", drift_then_spawn)
+
+    response = invoke_delegated(
+        repo.root,
+        repo.common_dir,
+        operation="status",
+        request={},
+        timeout_seconds=30,
+    )
+
+    assert response["result"] == {"available_slots": 2}
+
+
+def test_contract_bytes_are_available_only_from_the_verified_closure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declare_adapter(git_repo, max_parallel=4)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    adapter_path.write_text(
+        """import json
+import os
+import sys
+import tomllib
+from pathlib import Path
+
+contract = tomllib.loads(
+    (Path(os.environ["DWW_VERIFIED_INPUT_ROOT"]) / ".solo-ai" / "delegated.toml")
+    .read_text(encoding="utf-8")
+)
+request = json.load(sys.stdin)
+json.dump(
+    {
+        "schema_version": 1,
+        "adapter_id": request["adapter_id"],
+        "fingerprint": request["fingerprint"],
+        "operation": request["operation"],
+        "ok": True,
+        "result": {"available_slots": contract["max_parallel"]},
+    },
+    sys.stdout,
+)
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "read approved contract from closure")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    contract_path = git_repo / ".solo-ai" / "delegated.toml"
+    original_run = delegated._run_adapter_process
+
+    def drift_then_spawn(*args: object, **kwargs: object) -> object:
+        contract_path.write_text(
+            contract_path.read_text(encoding="utf-8").replace(
+                "max_parallel = 4", "max_parallel = 1"
+            ),
+            encoding="utf-8",
+        )
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", drift_then_spawn)
+
+    response = invoke_delegated(
+        repo.root,
+        repo.common_dir,
+        operation="status",
+        request={},
+        timeout_seconds=30,
+    )
+
+    assert response["result"] == {"available_slots": 4}
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe")),
+    reason="PowerShell runtime is unavailable",
+)
+@pytest.mark.parametrize(
+    ("drift_relative", "drift_content"),
+    (
+        (
+            "scripts/worktree-flow.ps1",
+            "Set-Content -LiteralPath (Join-Path $env:DWW_REPOSITORY_ROOT "
+            "'unapproved-powershell-input-ran.txt') -Value 'ran'\n"
+            "function Get-ControllerSlots { 0 }\n",
+        ),
+        (
+            "scripts/AdapterSupport.psm1",
+            "Set-Content -LiteralPath (Join-Path $env:DWW_REPOSITORY_ROOT "
+            "'unapproved-powershell-input-ran.txt') -Value 'ran'\n"
+            "function Get-ModuleSlots { 0 }\nExport-ModuleMember -Function Get-ModuleSlots\n",
+        ),
+        ("config/adapter.json", '{"slots": 0}\n'),
+    ),
+)
+def test_powershell_controller_module_and_config_drift_use_verified_closure(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift_relative: str,
+    drift_content: str,
+) -> None:
+    files = {
+        "scripts/dww_adapter.ps1": """$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'worktree-flow.ps1')
+Import-Module (Join-Path $PSScriptRoot 'AdapterSupport.psm1') -Force
+$config = Get-Content -Raw -LiteralPath (Join-Path $env:DWW_VERIFIED_INPUT_ROOT 'config/adapter.json') | ConvertFrom-Json
+if ((Resolve-Path -LiteralPath '.').Path -ne (Resolve-Path -LiteralPath $env:DWW_REPOSITORY_ROOT).Path) { throw 'repository cwd changed' }
+$request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$response = [ordered]@{
+  schema_version = 1
+  adapter_id = $request.adapter_id
+  fingerprint = $request.fingerprint
+  operation = $request.operation
+  ok = $true
+  result = [ordered]@{ available_slots = ((Get-ControllerSlots) + (Get-ModuleSlots) + [int]$config.slots) }
+}
+[Console]::Out.Write(($response | ConvertTo-Json -Compress -Depth 10))
+""",
+        "scripts/worktree-flow.ps1": "function Get-ControllerSlots { 1 }\n",
+        "scripts/AdapterSupport.psm1": (
+            "function Get-ModuleSlots { 1 }\n"
+            "Export-ModuleMember -Function Get-ModuleSlots\n"
+        ),
+        "config/adapter.json": '{"slots": 1}\n',
+    }
+    repo, _inspection = declare_runtime_adapter(
+        git_repo,
+        runtime="powershell",
+        entrypoint="scripts/dww_adapter.ps1",
+        files=files,
+    )
+    marker = git_repo / "unapproved-powershell-input-ran.txt"
+    drift_path = git_repo / drift_relative
+    original_run = delegated._run_adapter_process
+
+    def drift_then_spawn(*args: object, **kwargs: object) -> object:
+        drift_path.write_text(drift_content, encoding="utf-8")
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", drift_then_spawn)
+
+    response = invoke_delegated(
+        repo.root,
+        repo.common_dir,
+        operation="status",
+        request={},
+        timeout_seconds=30,
+    )
+
+    assert response["result"] == {"available_slots": 3}
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(not shutil.which("sh"), reason="sh runtime is unavailable")
+def test_shell_helper_drift_uses_verified_directory_semantics(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {
+        "scripts/dww_adapter.sh": """#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/adapter_helper.sh"
+payload=$(cat)
+AVAILABLE_SLOTS=$(approved_slots)
+export AVAILABLE_SLOTS
+printf '%s' "$payload" | "$DWW_TEST_PYTHON" -c 'import json,os,sys; r=json.load(sys.stdin); json.dump({"schema_version":1,"adapter_id":r["adapter_id"],"fingerprint":r["fingerprint"],"operation":r["operation"],"ok":True,"result":{"available_slots":int(os.environ["AVAILABLE_SLOTS"])}},sys.stdout)'
+""",
+        "scripts/adapter_helper.sh": "approved_slots() { printf '3'; }\n",
+        "scripts/worktree-flow.ps1": "# mature lifecycle marker\n",
+    }
+    repo, _inspection = declare_runtime_adapter(
+        git_repo,
+        runtime="sh",
+        entrypoint="scripts/dww_adapter.sh",
+        files=files,
+    )
+    marker = git_repo / "unapproved-shell-helper-ran.txt"
+    helper_path = git_repo / "scripts" / "adapter_helper.sh"
+    monkeypatch.setenv("DWW_TEST_PYTHON", sys.executable)
+    original_run = delegated._run_adapter_process
+
+    def drift_then_spawn(*args: object, **kwargs: object) -> object:
+        helper_path.write_text(
+            "printf 'ran' > \"$DWW_REPOSITORY_ROOT/unapproved-shell-helper-ran.txt\"\n"
+            "approved_slots() { printf '1'; }\n",
+            encoding="utf-8",
+        )
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", drift_then_spawn)
+
+    response = invoke_delegated(
+        repo.root,
+        repo.common_dir,
+        operation="status",
+        request={},
+        timeout_seconds=30,
+    )
+
+    assert response["result"] == {"available_slots": 3}
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize(
     ("runtime", "suffix"),
     (("python", ".py"), ("powershell", ".ps1"), ("sh", ".sh")),
 )
-def test_verified_entrypoint_snapshot_keeps_cross_runtime_directory_semantics(
+def test_verified_input_closure_keeps_cross_runtime_directory_semantics(
     tmp_path: Path, runtime: str, suffix: str
 ) -> None:
     root = tmp_path / "repo"
@@ -256,17 +649,25 @@ def test_verified_entrypoint_snapshot_keeps_cross_runtime_directory_semantics(
         fingerprint="0" * 64,
     )
 
-    with delegated._verified_entrypoint_snapshot(
-        root, contract, content
-    ) as snapshot:
-        assert snapshot.parent == entrypoint.parent
-        assert snapshot.suffix == suffix
-        assert snapshot.read_bytes() == content
+    material = delegated.DelegatedMaterial(
+        contract_bytes=b"approved contract bytes\n",
+        tracked_input_bytes=((f"scripts/adapter{suffix}", content),),
+    )
 
-    assert not snapshot.exists()
+    with delegated._verified_input_closure(root, contract, material) as closure:
+        with pytest.raises(ValueError):
+            closure.root.resolve().relative_to(root.resolve())
+        assert closure.entrypoint == closure.root / "scripts" / f"adapter{suffix}"
+        assert closure.entrypoint.suffix == suffix
+        assert closure.entrypoint.read_bytes() == content
+        assert (closure.root / ".solo-ai" / "delegated.toml").read_bytes() == (
+            material.contract_bytes
+        )
+
+    assert not closure.root.exists()
 
 
-def test_verified_entrypoint_snapshot_is_removed_when_launch_fails(
+def test_verified_input_closure_is_removed_when_launch_fails(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     declare_adapter(git_repo)
@@ -277,13 +678,15 @@ def test_verified_entrypoint_snapshot_is_removed_when_launch_fails(
         repo.common_dir,
         fingerprint=inspection["adapter"]["fingerprint"],
     )
-    snapshots: list[Path] = []
+    closure_roots: list[Path] = []
 
     def fail_launch(*args: object, **kwargs: object) -> object:
         argv = args[0]
         assert isinstance(argv, list)
-        snapshots.append(Path(argv[-1]))
-        assert snapshots[-1].exists()
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+        assert Path(argv[-1]).exists()
         raise DelegatedContractError("synthetic launch failure")
 
     monkeypatch.setattr(delegated, "_run_adapter_process", fail_launch)
@@ -297,11 +700,11 @@ def test_verified_entrypoint_snapshot_is_removed_when_launch_fails(
             timeout_seconds=30,
         )
 
-    assert len(snapshots) == 1
-    assert not snapshots[0].exists()
+    assert len(closure_roots) == 1
+    assert not closure_roots[0].exists()
 
 
-def test_changed_snapshot_path_is_preserved_instead_of_deleted(
+def test_changed_verified_input_path_is_preserved_instead_of_deleted(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     declare_adapter(git_repo)
@@ -313,10 +716,14 @@ def test_changed_snapshot_path_is_preserved_instead_of_deleted(
         fingerprint=inspection["adapter"]["fingerprint"],
     )
     replacements: list[Path] = []
+    closure_roots: list[Path] = []
 
     def replace_snapshot(*args: object, **kwargs: object) -> object:
         argv = args[0]
         assert isinstance(argv, list)
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
         snapshot = Path(argv[-1])
         snapshot.unlink()
         snapshot.write_text("replacement must survive\n", encoding="utf-8")
@@ -336,7 +743,48 @@ def test_changed_snapshot_path_is_preserved_instead_of_deleted(
 
     assert len(replacements) == 1
     assert replacements[0].read_text(encoding="utf-8") == "replacement must survive\n"
-    replacements[0].unlink()
+    assert len(closure_roots) == 1
+    assert closure_roots[0].exists()
+    shutil.rmtree(closure_roots[0])
+
+
+def test_verified_input_closure_is_removed_after_adapter_timeout(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    adapter_path.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "add timeout adapter fixture")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    closure_roots: list[Path] = []
+    original_run = delegated._run_adapter_process
+
+    def capture_then_run(*args: object, **kwargs: object) -> object:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
+
+    with pytest.raises(DelegatedContractError, match="timed out"):
+        invoke_delegated(
+            repo.root,
+            repo.common_dir,
+            operation="status",
+            request={},
+            timeout_seconds=0.1,
+        )
+
+    assert len(closure_roots) == 1
+    assert not closure_roots[0].exists()
 
 
 def test_invoke_returns_the_exact_idempotent_start_receipt(git_repo: Path) -> None:
@@ -397,6 +845,8 @@ def test_invoke_rejects_undeclared_capability(git_repo: Path) -> None:
 
 def test_v1_capability_interface_contains_only_proven_operations() -> None:
     assert ALLOWED_CAPABILITIES == {"status", "start"}
+    assert delegated.VERIFIED_INPUT_ROOT_ENV == "DWW_VERIFIED_INPUT_ROOT"
+    assert delegated.REPOSITORY_ROOT_ENV == "DWW_REPOSITORY_ROOT"
 
 
 def test_operation_requests_are_exact_before_the_adapter_runs(git_repo: Path) -> None:

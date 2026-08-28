@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.3.0-beta.10` 是一套默认不让并行 AI 改动互相覆盖的本地 Git 工作流。生命周期内核不绑定 Codex；本插件提供 Codex 的首次选择、多 AI 指挥中心、技能和写入保护适配。
+`0.3.0-beta.11` 是一套默认不让并行 AI 改动互相覆盖的本地 Git 工作流。生命周期内核不绑定 Codex；本插件提供 Codex 的首次选择、多 AI 指挥中心、技能和写入保护适配。
 
 ## 复杂任务只用一个中央对话
 
@@ -12,7 +12,7 @@
 
 ## 仓库已有成熟工作流时始终优先
 
-在任何仓库选择前，极小的只读路由会检查是否已有成熟工作树或编排流程。普通成熟流程命中后 DWW 静默让路：不弹三选一、不写 DWW 状态，只遵循仓库自己的指令。成熟仓库也可以提交版本化适配声明；只有精确声明及其受管输入的指纹在本机获批后，路由才变为 `delegated`。此时 DWW 只构造固定运行参数并交换一次 JSON 请求/响应，生命周期状态仍由仓库负责；任何漂移都会退回 `defer`。
+在任何仓库选择前，极小的只读路由会检查是否已有成熟工作树或编排流程。普通成熟流程命中后 DWW 静默让路：不弹三选一、不写 DWW 状态，只遵循仓库自己的指令。成熟仓库也可以提交版本化适配声明；只有精确声明及其受管输入的指纹在本机获批后，路由才变为 `delegated`。此时 DWW 会把最终核验的契约和全部受管输入放进仓库外私有闭包执行，活仓库只作为原生 Git/状态目标；任何漂移都会退回 `defer`。
 
 受信任的 `SessionStart` Hook 通常只注入一次该路由。Hook 上下文不可用时，技能只运行一次轻量 `dww route --json`，不会加载完整 `doctor`。
 
@@ -61,7 +61,7 @@ Codex 中，`PreToolUse` 受信任后会在支持的本地工具路径上真正�
 ## 安装
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.10
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.11
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

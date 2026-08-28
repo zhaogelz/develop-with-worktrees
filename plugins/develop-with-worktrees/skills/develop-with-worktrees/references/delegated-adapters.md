@@ -30,7 +30,14 @@ The runtime fixes the argv shape; the repository cannot inject shell arguments:
 
 DWW limits contract and input count/size so the Codex hook can re-fingerprint them on every route without unbounded work. It hashes the raw contract and every declared input. A semantic edit, comment edit, script edit, marker addition, or marker removal therefore invalidates the local approval.
 
-Immediately before invocation, DWW captures the entrypoint bytes used by the final fingerprint check and executes a private verified snapshot rather than reopening the live entrypoint. The snapshot stays in the entrypoint's directory only for the bounded process lifetime, so Python sibling imports, inline script metadata, PowerShell `$PSScriptRoot`, shell directory lookup, and the original repository working directory keep their existing meaning; success and failure both remove it. A concurrent edit to the live entrypoint can invalidate the next route, but cannot run under the already constructed approved envelope.
+Immediately before invocation, DWW retains the raw contract and every tracked-input byte read by the final fingerprint check, then creates one private repository-external execution closure with the same repository-relative layout. The runtime opens the entrypoint from that closure, so Python sibling imports and PEP 723 metadata, PowerShell `$PSScriptRoot` modules, shell directory helpers, workflow controllers, and declared configuration all resolve to the approved bytes instead of reopening the live checkout. The process working directory remains the original repository.
+
+DWW sets two authoritative environment variables for the bounded process lifetime:
+
+- `DWW_VERIFIED_INPUT_ROOT` is the immutable approved-input root. Adapter code, controllers, modules, and configuration must load executable or policy input only from this root (or from entrypoint-relative paths that stay inside it).
+- `DWW_REPOSITORY_ROOT` is the original live repository root. Use it only as the native workflow's Git/state target, not as a code or configuration source. It is also the process working directory.
+
+The closure contains `.solo-ai/delegated.toml` plus exactly the declared tracked inputs, disables Python bytecode writes, never appears in repository Git status, and is removed after success, failure, or confirmed process-tree termination. If any closure file, directory, or path identity is replaced or unexpected content appears, cleanup fails closed and preserves the changed path for diagnosis. A concurrent edit to any live contract or tracked input can invalidate the next route, but cannot alter the already constructed approved closure.
 
 Schema 1 deliberately exposes only two proven capabilities: read-only `status` and idempotent `start`. Ready, Finish, integration, recovery, abandonment, and cleanup remain native project commands. Adding names to the generic allowlist before their request, result, and interruption semantics are standardized would grant authority without a portable contract.
 

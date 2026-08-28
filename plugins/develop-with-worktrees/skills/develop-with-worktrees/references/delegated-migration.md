@@ -22,6 +22,8 @@ Transport schema version 1 is fixed by DWW. The repository adapter must echo `sc
 
 DWW enforces these request and result shapes. The repository owns stricter validation of the native controller facts before returning the minimal normalized result. Native lifecycle operations not listed here are not schema-1 capabilities and must stay behind the project's own reviewed commands.
 
+The adapter must separate approved executable input from the live operation target. Load every adapter helper, controller, module, and configuration file from `DWW_VERIFIED_INPUT_ROOT` (or an entrypoint-relative path inside it). Pass `DWW_REPOSITORY_ROOT` to the native controller only as its Git/state repository, and expect the process working directory to equal that same live root. An adapter that reopens tracked code or configuration under the live repository recreates a time-of-check/time-of-use gap and must stay inactive at `defer`.
+
 ## Dual-run rules
 
 Read-only operations may run sequentially against the same repository snapshot. Normalize both outputs and compare stable fields. A comparison tool must report field-level differences and exit nonzero; it must never silently prefer the adapter result.
@@ -40,6 +42,7 @@ Activate only when all are true:
 
 - `delegated inspect` is valid and lists exactly the intended workflow markers and inputs;
 - the adapter entrypoint delegates to the current native implementation rather than duplicating it;
+- every declared helper, controller, module, and configuration input is loaded from `DWW_VERIFIED_INPUT_ROOT`, while `DWW_REPOSITORY_ROOT` is used only as the native Git/state target;
 - `status` parity and, when declared, idempotent `start` parity and interruption tests pass;
 - Hook definition content is unchanged unless the user separately approved a reviewed Hook change;
 - the native command remains usable and the rollback command has been exercised.
