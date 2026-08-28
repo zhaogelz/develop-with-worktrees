@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0-beta.14 — 2026-08-28
+
+- Windows 委托适配器改为预建 `KILL_ON_JOB_CLOSE` Job Object，并以 `CREATE_SUSPENDED` 启动根进程；调用方先用 Popen 原生 process HANDLE 直接加入 Job，再恢复执行，不再通过可复用 PID 或事后 PPID 树建立所有权，也不使用 `CREATE_BREAKAWAY_FROM_JOB`。
+- Job handle 贯穿监控、等待和有界输出读取；success、nonzero、timeout、输出超限、读取异常及任意 `BaseException` 接受结果或清理输入闭包前，都必须确认 `ActiveProcesses == 0`，必要时终止整个 Job。配置、assign、resume、terminate、query 或关闭无法安全完成时失败关闭；仍可能使用批准输入时保留闭包。
+- 补充短命 launcher 留下断链孙进程、正常 0/非零退出留下继承 stdio 后代、运行中动态派生、首次 PID 身份前复用、Job 配置/assign/resume/terminate/query 故障及输出读取异常回归。POSIX 的正常 0/非零退出也会检查并清空完整进程组；主动 `setsid` 或绕开继承边界仍明确不属于 OS sandbox。Hook 定义保持不变。
+
 ## 0.3.0-beta.13 — 2026-08-28
 
 - Windows 异常委托终止先捕获根进程创建身份，冻结根与已发现后代，并重复递归枚举到身份集合稳定后再终止/强杀；首次快照后的非恶意动态派生不再逃出清理边界。

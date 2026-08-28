@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -778,231 +779,341 @@ def _stop_posix_adapter_process_group(process: subprocess.Popen[bytes]) -> None:
         )
 
 
-def _windows_process_tree_snapshot(root: Any) -> list[Any]:
-    """单独的快照 seam 让动态派生竞态可以被确定性回归。"""
-    return root.children(recursive=True)
+class _WindowsBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
 
 
-def _windows_process_identity(process: Any) -> tuple[int, float]:
-    return int(process.pid), float(process.create_time())
+class _WindowsIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
 
 
-def _capture_windows_root_identity(
-    process: subprocess.Popen[bytes],
-) -> tuple[int, float] | None:
-    import psutil
+class _WindowsExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _WindowsBasicLimitInformation),
+        ("IoInfo", _WindowsIoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
 
+
+class _WindowsBasicAccountingInformation(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", ctypes.c_uint32),
+        ("TotalProcesses", ctypes.c_uint32),
+        ("ActiveProcesses", ctypes.c_uint32),
+        ("TotalTerminatedProcesses", ctypes.c_uint32),
+    ]
+
+
+@dataclass
+class _WindowsAdapterJob:
+    """Popen 前建立的 Windows 所有权边界；不依赖可复用的 PID。"""
+
+    handle: int | None
+    empty_confirmed: bool = False
+
+
+def _windows_kernel32() -> Any:
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def _windows_ntdll() -> Any:
+    return ctypes.WinDLL("ntdll", use_last_error=True)
+
+
+def _create_windows_adapter_job() -> _WindowsAdapterJob:
+    kernel32 = _windows_kernel32()
+    create_job = kernel32.CreateJobObjectW
+    create_job.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    create_job.restype = ctypes.c_void_p
+    handle = create_job(None, None)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+    job = _WindowsAdapterJob(int(handle))
+    info = _WindowsExtendedLimitInformation()
+    info.BasicLimitInformation.LimitFlags = 0x00002000
+    set_information = kernel32.SetInformationJobObject
+    set_information.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    ]
+    set_information.restype = ctypes.c_int
     try:
-        return _windows_process_identity(psutil.Process(process.pid))
-    except psutil.NoSuchProcess:
-        if process.poll() is not None:
-            return None
-        raise DelegatedProcessTerminationError(
-            "Delegated adapter root identity disappeared before it could be captured"
+        configured = set_information(
+            ctypes.c_void_p(job.handle),
+            9,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
         )
-    except (OSError, psutil.Error) as exc:
-        raise DelegatedProcessTerminationError(
-            "Could not capture the delegated adapter root process identity"
-        ) from exc
+    except BaseException as configuration_error:
+        try:
+            _close_windows_adapter_job(job)
+        except BaseException as close_error:
+            raise _combined_failures(
+                "Windows adapter Job configuration and close both failed",
+                configuration_error,
+                close_error,
+            ) from None
+        raise
+    if not configured:
+        error = ctypes.get_last_error()
+        try:
+            _close_windows_adapter_job(job)
+        except OSError as close_error:
+            raise OSError(
+                error,
+                "SetInformationJobObject failed and its empty Job could not close",
+            ) from close_error
+        raise OSError(error, "SetInformationJobObject failed")
+    return job
 
 
-def _stop_windows_adapter_process_tree(
-    process: subprocess.Popen[bytes],
-    *,
-    root_identity: tuple[int, float] | None,
-) -> None:
-    # Hook 只导入本模块执行路由检查，不能因此加载主 CLI 的 psutil 依赖。
-    import psutil
-
-    try:
-        root = psutil.Process(process.pid)
-        observed_root_identity = _windows_process_identity(root)
-    except psutil.NoSuchProcess:
-        if process.poll() is None:
-            raise DelegatedProcessTerminationError(
-                "Delegated adapter root disappeared from process enumeration "
-                "without a confirmed exit"
-            )
+def _close_windows_adapter_job(job: _WindowsAdapterJob) -> None:
+    if job.handle is None:
         return
-    except (OSError, psutil.Error) as exc:
-        raise DelegatedProcessTerminationError(
-            "Could not enumerate the delegated adapter process tree"
-        ) from exc
-    if root_identity is not None and observed_root_identity != root_identity:
-        if process.poll() is not None:
-            # 原根已经自然退出；同 PID 的新进程不属于本次调用，绝不能触碰。
-            return
-        raise DelegatedProcessTerminationError(
-            "Delegated adapter root PID was reused before termination; the "
-            "unrelated process was preserved"
+    handle = job.handle
+    kernel32 = _windows_kernel32()
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    if not close_handle(ctypes.c_void_p(handle)):
+        raise OSError(ctypes.get_last_error(), "CloseHandle failed for adapter job")
+    job.handle = None
+
+
+def _windows_process_handle(process: subprocess.Popen[bytes]) -> int:
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        raise OSError("Popen did not expose its native Windows process handle")
+    return int(handle)
+
+
+def _assign_windows_adapter_job(
+    job: _WindowsAdapterJob, process: subprocess.Popen[bytes]
+) -> None:
+    if job.handle is None:
+        raise OSError("Windows adapter Job Object was already closed")
+    kernel32 = _windows_kernel32()
+    assign = kernel32.AssignProcessToJobObject
+    assign.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    assign.restype = ctypes.c_int
+    if not assign(
+        ctypes.c_void_p(job.handle),
+        ctypes.c_void_p(_windows_process_handle(process)),
+    ):
+        raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+
+
+def _confirm_windows_adapter_job_ownership(
+    job: _WindowsAdapterJob, process: subprocess.Popen[bytes]
+) -> None:
+    if job.handle is None:
+        raise OSError("Windows adapter Job Object was already closed")
+    kernel32 = _windows_kernel32()
+    is_process_in_job = kernel32.IsProcessInJob
+    is_process_in_job.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    is_process_in_job.restype = ctypes.c_int
+    belongs = ctypes.c_int()
+    if not is_process_in_job(
+        ctypes.c_void_p(_windows_process_handle(process)),
+        ctypes.c_void_p(job.handle),
+        ctypes.byref(belongs),
+    ):
+        raise OSError(ctypes.get_last_error(), "IsProcessInJob failed")
+    if not belongs.value:
+        raise OSError("Suspended delegated adapter root is not owned by its Job Object")
+
+
+def _resume_windows_adapter_process(process: subprocess.Popen[bytes]) -> None:
+    """恢复 CREATE_SUSPENDED 根进程，同时继续以原生 HANDLE 标识所有权。"""
+    ntdll = _windows_ntdll()
+    resume = ntdll.NtResumeProcess
+    resume.argtypes = [ctypes.c_void_p]
+    resume.restype = ctypes.c_long
+    status = int(resume(ctypes.c_void_p(_windows_process_handle(process))))
+    if status != 0:
+        convert_status = ntdll.RtlNtStatusToDosError
+        convert_status.argtypes = [ctypes.c_long]
+        convert_status.restype = ctypes.c_uint32
+        raise OSError(
+            int(convert_status(status)),
+            f"NtResumeProcess failed with NTSTATUS 0x{status & 0xFFFFFFFF:08x}",
         )
-    root_identity = root_identity or observed_root_identity
-    owned: dict[tuple[int, float], Any] = {root_identity: root}
-    pid_identities: dict[int, float] = {
-        root_identity[0]: root_identity[1]
-    }
-    frozen: set[tuple[int, float]] = set()
-    failures: list[tuple[str, BaseException | None]] = []
-    freeze_deadline = time.monotonic() + ADAPTER_TERMINATION_GRACE_SECONDS
-    stable_scans = 0
 
-    def record_failure(message: str, error: BaseException | None = None) -> None:
-        failures.append((message, error))
 
+def _query_windows_adapter_job_active_processes(job: _WindowsAdapterJob) -> int:
+    if job.handle is None:
+        if job.empty_confirmed:
+            return 0
+        raise OSError("Windows adapter Job Object closed before empty confirmation")
+    info = _WindowsBasicAccountingInformation()
+    kernel32 = _windows_kernel32()
+    query = kernel32.QueryInformationJobObject
+    query.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    query.restype = ctypes.c_int
+    if not query(
+        ctypes.c_void_p(job.handle),
+        1,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+        None,
+    ):
+        raise OSError(ctypes.get_last_error(), "QueryInformationJobObject failed")
+    return int(info.ActiveProcesses)
+
+
+def _terminate_windows_adapter_job(job: _WindowsAdapterJob) -> None:
+    if job.handle is None:
+        raise OSError("Windows adapter Job Object was already closed")
+    kernel32 = _windows_kernel32()
+    terminate = kernel32.TerminateJobObject
+    terminate.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    terminate.restype = ctypes.c_int
+    if not terminate(ctypes.c_void_p(job.handle), 1):
+        raise OSError(ctypes.get_last_error(), "TerminateJobObject failed")
+
+
+def _wait_for_windows_adapter_job_exit(
+    job: _WindowsAdapterJob, *, timeout: float
+) -> bool:
+    deadline = time.monotonic() + timeout
     while True:
-        for identity, item in tuple(owned.items()):
-            if identity in frozen:
-                continue
-            try:
-                item.suspend()
-                frozen.add(identity)
-            except psutil.NoSuchProcess as exc:
-                # 已发现进程在冻结前消失时，无法证明它没有在最后一刻派生后代。
-                frozen.add(identity)
-                record_failure(
-                    "an owned process disappeared before its subtree was frozen", exc
-                )
-            except (OSError, psutil.Error) as exc:
-                record_failure("an owned process could not be suspended", exc)
-
-        discovered = False
-        for _parent_identity, item in tuple(owned.items()):
-            try:
-                descendants = _windows_process_tree_snapshot(item)
-            except psutil.NoSuchProcess as exc:
-                record_failure(
-                    "a frozen process disappeared before its descendants were enumerated",
-                    exc,
-                )
-                continue
-            except (OSError, psutil.Error) as exc:
-                record_failure(
-                    "an owned process subtree could not be enumerated", exc
-                )
-                continue
-            for descendant in descendants:
-                try:
-                    identity = _windows_process_identity(descendant)
-                except psutil.NoSuchProcess as exc:
-                    record_failure(
-                        "a discovered descendant disappeared before identity capture",
-                        exc,
-                    )
-                    continue
-                except (OSError, psutil.Error) as exc:
-                    record_failure(
-                        "a discovered descendant identity could not be captured", exc
-                    )
-                    continue
-                previous_create_time = pid_identities.get(identity[0])
-                if (
-                    previous_create_time is not None
-                    and previous_create_time != identity[1]
-                ):
-                    record_failure(
-                        "a discovered PID was reused; the unrelated process was preserved"
-                    )
-                    continue
-                if identity[1] < root_identity[1]:
-                    record_failure(
-                        "a process predating the adapter root was excluded from its owned tree"
-                    )
-                    continue
-                if identity not in owned:
-                    owned[identity] = descendant
-                    pid_identities[identity[0]] = identity[1]
-                    discovered = True
-
-        if not discovered and len(frozen) == len(owned):
-            stable_scans += 1
-            if stable_scans >= 2:
-                break
-        else:
-            stable_scans = 0
-        if failures or time.monotonic() >= freeze_deadline:
-            if time.monotonic() >= freeze_deadline:
-                record_failure(
-                    "the delegated adapter process tree did not freeze before the deadline"
-                )
-            break
+        if _query_windows_adapter_job_active_processes(job) == 0:
+            job.empty_confirmed = True
+            return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(ADAPTER_TERMINATION_POLL_SECONDS)
 
-    owned_processes = list(owned.values())
-    for item in owned_processes:
-        try:
-            item.terminate()
-        except psutil.NoSuchProcess:
-            continue
-        except (OSError, psutil.Error) as exc:
-            record_failure("an owned process could not be terminated", exc)
-    try:
-        _gone, alive = psutil.wait_procs(
-            owned_processes, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
-        )
-    except (OSError, psutil.Error) as exc:
-        record_failure("the terminated process tree could not be waited", exc)
-        alive = owned_processes
-    for item in alive:
-        try:
-            item.kill()
-        except psutil.NoSuchProcess:
-            continue
-        except (OSError, psutil.Error) as exc:
-            record_failure("an owned process could not be force-killed", exc)
-    try:
-        _gone, alive = psutil.wait_procs(
-            alive, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
-        )
-    except (OSError, psutil.Error) as exc:
-        record_failure("the force-killed process tree could not be waited", exc)
-    try:
-        process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        record_failure("the delegated adapter root could not be waited", exc)
 
-    unconfirmed: list[tuple[int, float]] = []
-    for identity, item in owned.items():
+def _ensure_windows_adapter_job_empty(job: _WindowsAdapterJob) -> None:
+    if job.empty_confirmed:
+        return
+    failure: BaseException | None = None
+    try:
+        active_processes = _query_windows_adapter_job_active_processes(job)
+        if active_processes:
+            _terminate_windows_adapter_job(job)
+        if not _wait_for_windows_adapter_job_exit(
+            job, timeout=ADAPTER_TERMINATION_GRACE_SECONDS
+        ):
+            raise TimeoutError("Windows adapter Job Object remained active")
+    except BaseException as exc:  # noqa: BLE001 - 关闭句柄仍须触发 KILL_ON_JOB_CLOSE
+        failure = exc
+    if failure is not None:
         try:
-            if item.is_running() and _windows_process_identity(item) == identity:
-                unconfirmed.append(identity)
-        except psutil.NoSuchProcess:
-            continue
-        except (OSError, psutil.Error) as exc:
-            unconfirmed.append(identity)
-            record_failure("an owned process exit could not be confirmed", exc)
-    if alive:
-        record_failure("the delegated adapter process tree still has live members")
-    if unconfirmed:
-        record_failure(
-            "the delegated adapter process tree contains unconfirmed identities"
-        )
+            _close_windows_adapter_job(job)
+        except BaseException as close_error:  # noqa: BLE001 - 与确认失败合并报告
+            failure = _combined_failures(
+                "Windows adapter Job Object confirmation and close both failed",
+                failure,
+                close_error,
+            )
+        raise DelegatedProcessTerminationError(
+            "Delegated adapter Job Object could not be confirmed empty"
+        ) from failure
+
+
+def _stop_windows_adapter_job(job: _WindowsAdapterJob) -> None:
+    _ensure_windows_adapter_job_empty(job)
+    try:
+        _close_windows_adapter_job(job)
+    except OSError as exc:
+        raise DelegatedContractError(
+            "Confirmed-empty delegated adapter Job Object handle could not be closed"
+        ) from exc
+
+
+def _ensure_adapter_process_boundary_empty(
+    process: subprocess.Popen[bytes],
+    *,
+    windows_job: _WindowsAdapterJob | None = None,
+) -> None:
+    if os.name == "nt":
+        if windows_job is None:
+            raise DelegatedProcessTerminationError(
+                "Delegated adapter has no Windows Job Object ownership boundary"
+            )
+        _ensure_windows_adapter_job_empty(windows_job)
+    else:
+        _stop_posix_adapter_process_group(process)
+
+
+def _discard_suspended_windows_root(
+    process: subprocess.Popen[bytes], job: _WindowsAdapterJob
+) -> None:
+    failures: list[BaseException] = []
+    try:
+        process.terminate()
+        process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
+    except BaseException as exc:  # noqa: BLE001 - 根进程尚未执行但仍必须确认终止
+        failures.append(exc)
+    try:
+        _stop_windows_adapter_job(job)
+    except BaseException as exc:  # noqa: BLE001 - 两个所有权边界均须保留证据
+        failures.append(exc)
     if failures:
-        summary = "; ".join(dict.fromkeys(message for message, _ in failures))
         error = DelegatedProcessTerminationError(
-            "Delegated adapter process tree could not be safely frozen and "
-            f"confirmed stopped: {summary}"
+            "Suspended delegated adapter root could not be confirmed stopped"
         )
-        first_cause = next(
-            (cause for _message, cause in failures if cause is not None), None
+        if len(failures) == 1:
+            raise error from failures[0]
+        raise error from BaseExceptionGroup(
+            "Suspended adapter cleanup failures", failures
         )
-        if first_cause is not None:
-            raise error from first_cause
-        raise error
 
 
 def _stop_adapter_process(
     process: subprocess.Popen[bytes],
     *,
-    windows_root_identity: tuple[int, float] | None = None,
+    windows_job: _WindowsAdapterJob | None = None,
 ) -> None:
     try:
         if os.name == "nt":
-            _stop_windows_adapter_process_tree(
-                process, root_identity=windows_root_identity
-            )
+            if windows_job is None:
+                raise DelegatedProcessTerminationError(
+                    "Delegated adapter has no Windows Job Object ownership boundary"
+                )
+            _stop_windows_adapter_job(windows_job)
+            process.wait(timeout=ADAPTER_TERMINATION_GRACE_SECONDS)
         else:
             _stop_posix_adapter_process_group(process)
-    except DelegatedProcessTerminationError:
+    except DelegatedContractError:
         raise
     except BaseException as exc:
         raise DelegatedProcessTerminationError(
@@ -1022,9 +1133,11 @@ def _run_adapter_process(
         raise DelegatedContractError(
             f"Delegated adapter request exceeds the {MAX_ADAPTER_REQUEST_BYTES}-byte limit"
         )
-    creation_flags = (
-        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
-    )
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+            subprocess, "CREATE_SUSPENDED", 0x00000004
+        )
     with (
         tempfile.TemporaryFile() as stdin_handle,
         tempfile.TemporaryFile() as stdout_handle,
@@ -1032,6 +1145,14 @@ def _run_adapter_process(
     ):
         stdin_handle.write(request_bytes)
         stdin_handle.seek(0)
+        windows_job: _WindowsAdapterJob | None = None
+        if os.name == "nt":
+            try:
+                windows_job = _create_windows_adapter_job()
+            except OSError as exc:
+                raise DelegatedContractError(
+                    f"Could not create the delegated adapter Job Object: {exc}"
+                ) from exc
         try:
             process = subprocess.Popen(
                 argv,
@@ -1043,14 +1164,49 @@ def _run_adapter_process(
                 start_new_session=os.name != "nt",
                 creationflags=creation_flags,
             )
-        except OSError as exc:
-            raise DelegatedContractError(
-                f"Could not start the delegated adapter: {exc}"
-            ) from exc
-        windows_root_identity: tuple[int, float] | None = None
+        except BaseException as launch_error:
+            if windows_job is not None:
+                try:
+                    windows_job.empty_confirmed = True
+                    _close_windows_adapter_job(windows_job)
+                except BaseException as close_error:
+                    raise _combined_failures(
+                        "Delegated adapter launch and empty Job cleanup both failed",
+                        launch_error,
+                        close_error,
+                    ) from None
+            if isinstance(launch_error, OSError):
+                raise DelegatedContractError(
+                    f"Could not start the delegated adapter: {launch_error}"
+                ) from launch_error
+            raise
+        resume_attempted = False
+        resume_completed = False
         try:
             if os.name == "nt":
-                windows_root_identity = _capture_windows_root_identity(process)
+                assert windows_job is not None
+                try:
+                    _assign_windows_adapter_job(windows_job, process)
+                    _confirm_windows_adapter_job_ownership(windows_job, process)
+                except BaseException as assignment_error:
+                    try:
+                        _discard_suspended_windows_root(process, windows_job)
+                    except BaseException as termination_error:
+                        raise _combined_failures(
+                            "Delegated adapter Job assignment failed and its "
+                            "suspended root could not be confirmed stopped",
+                            assignment_error,
+                            termination_error,
+                        ) from None
+                    if isinstance(assignment_error, OSError):
+                        raise DelegatedContractError(
+                            "Could not assign the suspended delegated adapter "
+                            f"to its Job Object: {assignment_error}"
+                        ) from assignment_error
+                    raise
+                resume_attempted = True
+                _resume_windows_adapter_process(process)
+                resume_completed = True
             deadline = time.monotonic() + timeout_seconds
             while process.poll() is None:
                 if os.fstat(stdout_handle.fileno()).st_size > MAX_ADAPTER_STDOUT_BYTES:
@@ -1070,22 +1226,25 @@ def _run_adapter_process(
                     )
                 _adapter_poll_pause(ADAPTER_POLL_SECONDS)
             returncode = process.wait()
+            _ensure_adapter_process_boundary_empty(
+                process, windows_job=windows_job
+            )
             stdout = _bounded_file_bytes(
                 stdout_handle, limit=MAX_ADAPTER_STDOUT_BYTES, stream="stdout"
             )
             stderr = _bounded_file_bytes(
                 stderr_handle, limit=MAX_ADAPTER_STDERR_BYTES, stream="stderr"
             )
+            if windows_job is not None:
+                _close_windows_adapter_job(windows_job)
             return _AdapterProcessResult(returncode, stdout, stderr)
         except BaseException as original_error:
             try:
                 _stop_adapter_process(
-                    process, windows_root_identity=windows_root_identity
+                    process, windows_job=windows_job
                 )
             except BaseException as termination_error:  # noqa: BLE001 - 终止失败必须保留闭包
-                if not isinstance(
-                    termination_error, DelegatedProcessTerminationError
-                ):
+                if not isinstance(termination_error, DelegatedContractError):
                     unexpected_termination_error = termination_error
                     termination_error = DelegatedProcessTerminationError(
                         "Unexpected failure while stopping the delegated adapter "
@@ -1097,6 +1256,16 @@ def _run_adapter_process(
                     "tree could not be confirmed stopped",
                     original_error,
                     termination_error,
+                ) from None
+            if os.name == "nt" and resume_attempted and not resume_completed:
+                raise _combined_failures(
+                    "Delegated adapter resume failed after execution could no "
+                    "longer be excluded",
+                    original_error,
+                    DelegatedProcessTerminationError(
+                        "Verified input closure was preserved because the "
+                        "adapter resume outcome was indeterminate"
+                    ),
                 ) from None
             raise
 

@@ -892,11 +892,104 @@ def test_abnormal_monitor_exit_stops_owned_tree_before_closure_cleanup(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process trees are required")
-def test_windows_freeze_finds_descendant_spawned_after_initial_snapshot(
+def test_windows_short_lived_launcher_cannot_leave_detached_grandchild(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import psutil
 
+    base_python = str(getattr(sys, "_base_executable", sys.executable))
+    root_pid_path = tmp_path / "job-root.pid"
+    grandchild_pid_path = tmp_path / "job-grandchild.pid"
+    launcher_exited = tmp_path / "job-launcher-exited.txt"
+    late_marker = tmp_path / "job-late-grandchild.txt"
+    grandchild = (
+        "import os,time; from pathlib import Path; "
+        f"Path({str(grandchild_pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
+        "time.sleep(0.8); "
+        f"Path({str(late_marker)!r}).write_text('late', encoding='utf-8')"
+    )
+    launcher = (
+        "import subprocess,sys; "
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])"
+    )
+    root = (
+        "import os,subprocess,sys,time; from pathlib import Path; "
+        f"Path({str(root_pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
+        f"subprocess.Popen([sys.executable, '-c', {launcher!r}]).wait(); "
+        f"Path({str(launcher_exited)!r}).write_text('exited', encoding='utf-8'); "
+        "time.sleep(30)"
+    )
+    original_sleep = time.sleep
+
+    def interrupt_after_launcher_exits(_seconds: float) -> None:
+        deadline = time.monotonic() + 5
+        while not launcher_exited.exists() and time.monotonic() < deadline:
+            original_sleep(0.01)
+        assert launcher_exited.exists()
+        assert root_pid_path.exists()
+        observed_root = psutil.Process(
+            int(root_pid_path.read_text(encoding="utf-8"))
+        )
+        assert observed_root.children(recursive=True) == []
+        raise KeyboardInterrupt("synthetic detached-grandchild interruption")
+
+    monkeypatch.setattr(delegated, "_adapter_poll_pause", interrupt_after_launcher_exits)
+
+    try:
+        with pytest.raises(
+            KeyboardInterrupt, match="synthetic detached-grandchild interruption"
+        ):
+            delegated._run_adapter_process(
+                [base_python, "-c", root],
+                root=tmp_path,
+                request_bytes=b"{}",
+                timeout_seconds=30,
+            )
+
+        original_sleep(1)
+        assert not late_marker.exists()
+    finally:
+        from solo_ai.util import _stop_process_tree
+
+        for pid_path in (root_pid_path, grandchild_pid_path):
+            if pid_path.exists():
+                raw_pid = pid_path.read_text(encoding="utf-8").strip()
+                if raw_pid.isdigit():
+                    _stop_process_tree(int(raw_pid), force=True)
+
+
+@pytest.mark.parametrize("returncode", (0, 7))
+def test_natural_adapter_exit_cannot_leave_inherited_stdio_descendant(
+    tmp_path: Path, returncode: int
+) -> None:
+    marker = tmp_path / f"natural-{returncode}-late-child.txt"
+    child = (
+        "import time; from pathlib import Path; "
+        "time.sleep(0.8); "
+        f"Path({str(marker)!r}).write_text('late', encoding='utf-8')"
+    )
+    root = (
+        "import subprocess,sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        f"raise SystemExit({returncode})"
+    )
+
+    result = delegated._run_adapter_process(
+        [sys.executable, "-c", root],
+        root=tmp_path,
+        request_bytes=b"{}",
+        timeout_seconds=30,
+    )
+
+    assert result.returncode == returncode
+    time.sleep(1)
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_windows_job_contains_descendant_spawned_after_root_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     base_python = str(getattr(sys, "_base_executable", sys.executable))
     parent_pid_path = tmp_path / "dynamic-parent.pid"
     root_ready = tmp_path / "dynamic-root-ready.txt"
@@ -931,56 +1024,24 @@ def test_windows_freeze_finds_descendant_spawned_after_initial_snapshot(
         "time.sleep(30)"
     )
     original_sleep = time.sleep
-    original_snapshot = delegated._windows_process_tree_snapshot
-    original_windows_stop = delegated._stop_windows_adapter_process_tree
-    initial_snapshot_seen = False
 
     def interrupt_after_root_ready(_seconds: float) -> None:
         deadline = time.monotonic() + 5
         while not root_ready.exists() and time.monotonic() < deadline:
             original_sleep(0.01)
         assert root_ready.exists()
-        raise KeyboardInterrupt("synthetic Windows snapshot interruption")
-
-    def stop_after_stale_snapshot(
-        process: subprocess.Popen[bytes],
-        *,
-        root_identity: tuple[int, float] | None,
-    ) -> None:
-        nonlocal initial_snapshot_seen
-        assert process.poll() is None
-        assert parent_pid_path.exists()
-        root = psutil.Process(process.pid)
-        stale_snapshot = original_snapshot(root)
-        assert stale_snapshot == []
-        initial_snapshot_seen = True
         spawn_trigger.write_text("spawn", encoding="utf-8")
         deadline = time.monotonic() + 5
         while not tree_spawned.exists() and time.monotonic() < deadline:
             original_sleep(0.01)
         assert tree_spawned.exists()
-        stale_snapshot_pending = True
-
-        def return_stale_once(observed_root: object) -> list[object]:
-            nonlocal stale_snapshot_pending
-            if stale_snapshot_pending:
-                stale_snapshot_pending = False
-                return stale_snapshot
-            return original_snapshot(observed_root)
-
-        monkeypatch.setattr(
-            delegated, "_windows_process_tree_snapshot", return_stale_once
-        )
-        original_windows_stop(process, root_identity=root_identity)
+        raise KeyboardInterrupt("synthetic Windows Job interruption")
 
     monkeypatch.setattr(delegated, "_adapter_poll_pause", interrupt_after_root_ready)
-    monkeypatch.setattr(
-        delegated, "_stop_windows_adapter_process_tree", stop_after_stale_snapshot
-    )
 
     try:
         with pytest.raises(
-            KeyboardInterrupt, match="synthetic Windows snapshot interruption"
+            KeyboardInterrupt, match="synthetic Windows Job interruption"
         ):
             delegated._run_adapter_process(
                 [base_python, "-c", parent],
@@ -989,7 +1050,6 @@ def test_windows_freeze_finds_descendant_spawned_after_initial_snapshot(
                 timeout_seconds=30,
             )
 
-        assert initial_snapshot_seen
         original_sleep(1)
         assert not late_child_marker.exists()
         assert not late_marker.exists()
@@ -1003,65 +1063,213 @@ def test_windows_freeze_finds_descendant_spawned_after_initial_snapshot(
                 )
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows process identities are required")
-@pytest.mark.parametrize("original_still_running", (False, True))
-def test_windows_root_pid_reuse_never_targets_unrelated_process(
-    monkeypatch: pytest.MonkeyPatch, original_still_running: bool
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handles are required")
+def test_windows_job_assignment_uses_native_handle_before_pid_can_be_reused(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import psutil
 
-    class ReusedProcess:
-        pid = 43123
-        terminated = False
+    assigned: list[tuple[int, int]] = []
 
-        def create_time(self) -> float:
-            return 200.0
+    class Call:
+        argtypes: object = None
+        restype: object = None
 
-        def terminate(self) -> None:
-            self.terminated = True
+        def __call__(self, job: object, process: object) -> int:
+            assigned.append((job.value, process.value))
+            return 1
+
+    class Kernel32:
+        AssignProcessToJobObject = Call()
 
     class OriginalHandle:
-        pid = 43123
+        _handle = 0x123456
 
-        def poll(self) -> int | None:
-            return None if original_still_running else 0
+        @property
+        def pid(self) -> int:
+            raise AssertionError("PID lookup would permit reuse before ownership")
 
-    unrelated = ReusedProcess()
-    monkeypatch.setattr(psutil, "Process", lambda _pid: unrelated)
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        lambda _pid: pytest.fail("psutil PID identity must not establish ownership"),
+    )
+    monkeypatch.setattr(delegated, "_windows_kernel32", lambda: Kernel32())
 
-    if original_still_running:
-        with pytest.raises(
-            delegated.DelegatedProcessTerminationError, match="PID was reused"
-        ):
-            delegated._stop_windows_adapter_process_tree(
-                OriginalHandle(), root_identity=(43123, 100.0)
-            )
-    else:
-        delegated._stop_windows_adapter_process_tree(
-            OriginalHandle(), root_identity=(43123, 100.0)
+    delegated._assign_windows_adapter_job(
+        delegated._WindowsAdapterJob(0xABCDEF), OriginalHandle()
+    )
+
+    assert assigned == [(0xABCDEF, 0x123456)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+def test_windows_job_configuration_failure_occurs_before_popen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_job_configuration() -> object:
+        raise OSError("synthetic Job configuration failure")
+
+    def fail_if_started(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("root process must remain uncreated when Job setup fails")
+
+    monkeypatch.setattr(
+        delegated, "_create_windows_adapter_job", fail_job_configuration
+    )
+    monkeypatch.setattr(subprocess, "Popen", fail_if_started)
+
+    with pytest.raises(
+        delegated.DelegatedContractError, match="Job configuration failure"
+    ):
+        delegated._run_adapter_process(
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            root=tmp_path,
+            request_bytes=b"{}",
+            timeout_seconds=30,
         )
 
-    assert unrelated.terminated is False
 
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows process suspension is required")
-def test_windows_suspend_failure_preserves_verified_input_closure(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+@pytest.mark.parametrize("failure_point", ("assign", "ownership-query"))
+def test_windows_job_setup_failure_never_executes_root_and_cleans_closure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, failure_point: str
 ) -> None:
-    import psutil
-
     declare_adapter(git_repo)
     adapter_path = git_repo / "scripts" / "dww_adapter.py"
-    pid_path = git_repo / "suspend-failure-adapter.pid"
+    marker = git_repo / f"{failure_point}-failure-adapter-ran.txt"
     adapter_path.write_text(
-        "import os,time\n"
         "from pathlib import Path\n"
-        f"Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", f"add {failure_point} failure fixture")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    closure_roots: list[Path] = []
+    original_run = delegated._run_adapter_process
+
+    def capture_then_run(*args: object, **kwargs: object) -> object:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+        return original_run(*args, **kwargs)
+
+    def fail_setup(*_args: object, **_kwargs: object) -> None:
+        raise OSError(f"synthetic Job {failure_point} failure")
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
+    if failure_point == "assign":
+        monkeypatch.setattr(delegated, "_assign_windows_adapter_job", fail_setup)
+    else:
+        monkeypatch.setattr(
+            delegated, "_confirm_windows_adapter_job_ownership", fail_setup
+        )
+
+    with pytest.raises(
+        delegated.DelegatedContractError,
+        match=f"Job {failure_point} failure",
+    ):
+        invoke_delegated(
+            repo.root,
+            repo.common_dir,
+            operation="status",
+            request={},
+            timeout_seconds=30,
+        )
+
+    assert not marker.exists()
+    assert len(closure_roots) == 1
+    assert not closure_roots[0].exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended launch is required")
+def test_windows_resume_failure_never_writes_marker_and_preserves_closure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    marker = git_repo / "resume-failure-adapter-ran.txt"
+    adapter_path.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "scripts/dww_adapter.py")
+    git(git_repo, "commit", "-m", "add resume failure fixture")
+    repo = GitRepo(git_repo)
+    inspection = inspect_delegated(repo.root, repo.common_dir)
+    approve_delegated(
+        repo.root,
+        repo.common_dir,
+        fingerprint=inspection["adapter"]["fingerprint"],
+    )
+    closure_roots: list[Path] = []
+    original_run = delegated._run_adapter_process
+
+    def capture_then_run(*args: object, **kwargs: object) -> object:
+        environment = kwargs["environment"]
+        assert isinstance(environment, dict)
+        closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
+        return original_run(*args, **kwargs)
+
+    def fail_resume(*_args: object, **_kwargs: object) -> None:
+        raise OSError("synthetic resume failure")
+
+    monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
+    monkeypatch.setattr(delegated, "_resume_windows_adapter_process", fail_resume)
+
+    try:
+        with pytest.raises(BaseExceptionGroup) as raised:
+            invoke_delegated(
+                repo.root,
+                repo.common_dir,
+                operation="status",
+                request={},
+                timeout_seconds=30,
+            )
+
+        assert exception_tree_contains(
+            raised.value, OSError, "synthetic resume failure"
+        )
+        assert exception_tree_contains(
+            raised.value,
+            delegated.DelegatedProcessTerminationError,
+            "resume outcome was indeterminate",
+        )
+        assert not marker.exists()
+        assert len(closure_roots) == 1
+        assert closure_roots[0].exists()
+    finally:
+        for closure_root in closure_roots:
+            if closure_root.exists():
+                shutil.rmtree(closure_root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
+@pytest.mark.parametrize("failure_point", ("terminate", "query"))
+def test_windows_job_confirmation_failure_preserves_verified_input_closure(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    declare_adapter(git_repo)
+    adapter_path = git_repo / "scripts" / "dww_adapter.py"
+    started = git_repo / f"job-{failure_point}-started.txt"
+    adapter_path.write_text(
+        "import time\n"
+        "from pathlib import Path\n"
+        f"Path({str(started)!r}).write_text('started', encoding='utf-8')\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
     git(git_repo, "add", "scripts/dww_adapter.py")
-    git(git_repo, "commit", "-m", "add suspend failure fixture")
+    git(git_repo, "commit", "-m", f"add Job {failure_point} fixture")
     repo = GitRepo(git_repo)
     inspection = inspect_delegated(repo.root, repo.common_dir)
     approve_delegated(
@@ -1072,7 +1280,6 @@ def test_windows_suspend_failure_preserves_verified_input_closure(
     closure_roots: list[Path] = []
     original_run = delegated._run_adapter_process
     original_sleep = time.sleep
-    original_suspend = psutil.Process.suspend
 
     def capture_then_run(*args: object, **kwargs: object) -> object:
         environment = kwargs["environment"]
@@ -1082,21 +1289,22 @@ def test_windows_suspend_failure_preserves_verified_input_closure(
 
     def interrupt_after_start(_seconds: float) -> None:
         deadline = time.monotonic() + 5
-        while not pid_path.exists() and time.monotonic() < deadline:
+        while not started.exists() and time.monotonic() < deadline:
             original_sleep(0.01)
-        assert pid_path.exists()
-        raise KeyboardInterrupt("synthetic suspend failure interruption")
+        assert started.exists()
+        raise KeyboardInterrupt(f"synthetic Job {failure_point} interruption")
 
-    def fail_root_suspend(process: psutil.Process) -> None:
-        if pid_path.exists() and process.pid == int(
-            pid_path.read_text(encoding="utf-8")
-        ):
-            raise psutil.AccessDenied(process.pid)
-        original_suspend(process)
+    def fail_job_api(*_args: object, **_kwargs: object) -> None:
+        raise OSError(f"synthetic Job {failure_point} failure")
 
     monkeypatch.setattr(delegated, "_run_adapter_process", capture_then_run)
     monkeypatch.setattr(delegated, "_adapter_poll_pause", interrupt_after_start)
-    monkeypatch.setattr(psutil.Process, "suspend", fail_root_suspend)
+    if failure_point == "terminate":
+        monkeypatch.setattr(delegated, "_terminate_windows_adapter_job", fail_job_api)
+    else:
+        monkeypatch.setattr(
+            delegated, "_query_windows_adapter_job_active_processes", fail_job_api
+        )
 
     try:
         with pytest.raises(BaseExceptionGroup) as raised:
@@ -1111,24 +1319,16 @@ def test_windows_suspend_failure_preserves_verified_input_closure(
         assert exception_tree_contains(
             raised.value,
             KeyboardInterrupt,
-            "synthetic suspend failure interruption",
+            f"synthetic Job {failure_point} interruption",
         )
         assert exception_tree_contains(
             raised.value,
             delegated.DelegatedProcessTerminationError,
-            "could not be suspended",
+            "Job Object could not be confirmed empty",
         )
         assert len(closure_roots) == 1
         assert closure_roots[0].exists()
-        assert any(
-            str(closure_roots[0]) in note
-            for note in getattr(raised.value, "__notes__", ())
-        )
     finally:
-        if pid_path.exists():
-            from solo_ai.util import _stop_process_tree
-
-            _stop_process_tree(int(pid_path.read_text(encoding="utf-8")), force=True)
         for closure_root in closure_roots:
             if closure_root.exists():
                 shutil.rmtree(closure_root)
@@ -1138,24 +1338,31 @@ def test_output_read_interruption_after_natural_exit_keeps_original_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stop_polls: list[int | None] = []
+    job_close_calls: list[int | None] = []
     original_stop = delegated._stop_adapter_process
+    original_close_job = delegated._close_windows_adapter_job
 
     def fail_read(*args: object, **kwargs: object) -> bytes:
+        if os.name == "nt":
+            assert job_close_calls == []
         raise RuntimeError("synthetic output read failure")
+
+    def capture_close_job(job: object) -> None:
+        job_close_calls.append(job.handle)
+        original_close_job(job)
 
     def capture_stop(
         process: object,
         *,
-        windows_root_identity: tuple[int, float] | None = None,
+        windows_job: object | None = None,
     ) -> None:
         assert hasattr(process, "poll")
         stop_polls.append(process.poll())
-        original_stop(
-            process, windows_root_identity=windows_root_identity
-        )
+        original_stop(process, windows_job=windows_job)
 
     monkeypatch.setattr(delegated, "_bounded_file_bytes", fail_read)
     monkeypatch.setattr(delegated, "_stop_adapter_process", capture_stop)
+    monkeypatch.setattr(delegated, "_close_windows_adapter_job", capture_close_job)
 
     with pytest.raises(RuntimeError, match="synthetic output read failure"):
         delegated._run_adapter_process(
@@ -1167,6 +1374,8 @@ def test_output_read_interruption_after_natural_exit_keeps_original_error(
 
     assert len(stop_polls) == 1
     assert stop_polls[0] is not None
+    if os.name == "nt":
+        assert len(job_close_calls) == 1
 
 
 @pytest.mark.parametrize(
