@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.request
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,12 @@ from .repo import GitRepo
 from .routing import decide_route, detect_existing_workflows
 from .safety import require_safe
 from .state import FINAL_TASK_STATES, IN_PLACE_MODE, ISOLATED_MODE, StateStore
-from .task_context import create_anchor, delete_anchor, require_anchor
+from .task_context import (
+    adopt_legacy_anchor,
+    create_anchor,
+    delete_anchor,
+    require_anchor,
+)
 from .util import (
     DirectoryLock,
     SoloAIError,
@@ -526,6 +532,31 @@ def _base_ref(repo: GitRepo) -> str:
     return str(bootstrap.get("branch") or repo.default_branch())
 
 
+def adopt_task_anchor(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    objective: str,
+    target: str,
+    scope: str,
+    acceptance: str,
+    confirm: str,
+) -> dict[str, Any]:
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        task = StateStore(repo).task(task_id)
+        path = adopt_legacy_anchor(
+            repo,
+            task,
+            objective=objective,
+            target=target,
+            scope=scope,
+            acceptance=acceptance,
+            confirm=confirm,
+        )
+        return {"task_id": task_id, "anchor_path": str(path.resolve())}
+
+
 def _checked_out_branch_worktree(repo: GitRepo, branch: str) -> Path:
     for item in repo.worktrees():
         if repo.branch(item.path) == branch:
@@ -837,6 +868,11 @@ def commit_task(
             raise SoloAIError(
                 "Commit paths must be unique, repository-relative exact paths"
             )
+        merge_head = repo.git(
+            ["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+            cwd=worktree,
+            check=False,
+        )
         changed = set(repo.changed_paths(worktree))
         requested = set(paths)
         if changed != requested:
@@ -859,7 +895,10 @@ def commit_task(
         ]
         if existing_paths:
             repo.git(["add", "--", *existing_paths], cwd=worktree)
-        if set(repo.changed_paths(worktree)) != requested:
+        staged_changes = set(repo.changed_paths(worktree))
+        if staged_changes != requested and not (
+            merge_head.returncode == 0 and staged_changes.issubset(requested)
+        ):
             raise SoloAIError(
                 "Task changes changed while staging; inspect the task diff and retry"
             )
@@ -871,19 +910,26 @@ def commit_task(
             staged=True,
             allowlist=config.sensitive_allowlist,
         )
-        merge_head = repo.git(
-            ["rev-parse", "--verify", "-q", "MERGE_HEAD"],
-            cwd=worktree,
-            check=False,
-        )
         if merge_head.returncode == 0:
             preparation = task.get("repair_preparation") or {}
-            if (
-                not task.get("supersedes")
-                or merge_head.stdout.strip() != preparation.get("source_head")
-            ):
+            merge_head_value = merge_head.stdout.strip()
+            repair_merge = bool(
+                task.get("supersedes")
+                and merge_head_value == preparation.get("source_head")
+            )
+            current_base_head = repo.ref_head(
+                f"refs/heads/{task['base_ref']}", cwd=worktree
+            )
+            base_merge = bool(
+                current_base_head
+                and merge_head_value == current_base_head
+                and repo.is_ancestor(
+                    str(task["base_head"]), current_base_head, cwd=worktree
+                )
+            )
+            if not repair_merge and not base_merge:
                 raise SoloAIError(
-                    "Only a recorded candidate repair may complete a prepared merge"
+                    "Only the current recorded base or a recorded candidate repair may complete a prepared merge"
                 )
             unresolved = repo.git(
                 ["diff", "--name-only", "--diff-filter=U"],
@@ -892,7 +938,7 @@ def commit_task(
             ).stdout.splitlines()
             if unresolved:
                 raise SoloAIError(
-                    "Candidate repair still has unresolved paths:\n"
+                    "Prepared merge still has unresolved paths:\n"
                     + "\n".join(f"- {path}" for path in unresolved)
                 )
             repo.git(["commit", "-m", message], cwd=worktree)
@@ -1451,6 +1497,7 @@ def _prepare_candidate_publication(
         "proof": proof["fingerprint"],
         "proof_kind": proof["kind"],
         "supersedes": task.get("supersedes"),
+        "integration_policy": task.get("integration_policy"),
         "anchor_path": str(require_anchor(repo, task).resolve()),
         "prepared_by_operation_id": operation_id,
         "prepared_at": utc_timestamp(),
@@ -1478,6 +1525,7 @@ def _resume_candidate_publication(
         "proof",
         "worktree_identity",
         "managed_root_identity",
+        "integration_policy",
     )
     if publication.get("schema_version") != 1 or any(
         not publication.get(key) for key in required
@@ -1520,12 +1568,17 @@ def _resume_candidate_publication(
             "Unknown or protected ignored files block candidate publication:\n"
             + "\n".join(f"- {item}" for item in unknown[:20])
         )
-    config = load_repo_config(repo, cwd=worktree)
-    if config.integration.mode != "batched":
-        raise SoloAIError("Candidate publication requires integration.mode = batched")
-    published = CandidateBatchStore(repo).publish(
-        dict(publication), capacity=config.integration.candidate_capacity
+    load_repo_config(repo, cwd=worktree)
+    policy = publication.get("integration_policy") or {}
+    if policy.get("mode") != "batched":
+        raise SoloAIError("Candidate publication requires a batched task policy")
+    publication_result = CandidateBatchStore(repo).publish(
+        dict(publication),
+        capacity=int(policy["candidate_capacity"]),
+        batch_size=int(policy["batch_size"]),
+        seal_policy=str(policy["seal_policy"]),
     )
+    published = publication_result["candidate"]
     branch_head = repo.ref_head(branch_ref)
     if current_branch is not None:
         if branch_head != head:
@@ -1572,14 +1625,25 @@ def _resume_candidate_publication(
         "base_ref": published["base_ref"],
         "anchor_path": published["anchor_path"],
         "proof": published["proof"],
+        "auto_batch_id": (
+            publication_result["auto_batch"]["id"]
+            if publication_result.get("auto_batch")
+            else None
+        ),
+        "seal_policy": policy["seal_policy"],
     }
 
 
 def finish(
     repo: GitRepo, *, task_id: str, lease: str, session_id: str | None = None
 ) -> dict[str, Any]:
-    _, _, _ = _config_and_mode(repo)
+    config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
+    initial = store.task(task_id)
+    if not initial.get("integration_policy"):
+        initial = store.ensure_task_integration_policy(task_id, config)
+    policy = initial.get("integration_policy") or {}
+    candidate_result: dict[str, Any] | None = None
     with store.operation(task_id, lease, "finish") as active_task:
         if _is_in_place(active_task):
             result = _finish_in_place(
@@ -1593,7 +1657,12 @@ def finish(
             return result
         if active_task.get("status") not in {"ready", "finishing", "publishing"}:
             raise SoloAIError("Finish requires a successful Ready")
-        with maintenance_lock(repo), integration_turn(repo, task_id):
+        turn = (
+            integration_turn(repo, task_id)
+            if policy.get("mode") != "batched"
+            else nullcontext()
+        )
+        with maintenance_lock(repo), turn:
             pending = _bootstrap(repo)
             if pending:
                 primary, _ = repo.ensure_default_primary_clean()
@@ -1614,79 +1683,104 @@ def finish(
             store.require_lease(task, lease)
             _assert_no_in_place_integration_conflict(store, task)
             if task.get("candidate_publication"):
-                return _resume_candidate_publication(repo, store=store, task=task)
-            if task.get("integration"):
+                candidate_result = _resume_candidate_publication(
+                    repo, store=store, task=task
+                )
+            elif task.get("integration"):
                 result = resume_integration(
                     repo, store=store, task=task, allow_stale=False
                 )
                 delete_anchor(repo, task_id)
                 return result
-            if task.get("status") != "ready":
-                raise SoloAIError("Finish requires a successful Ready")
-            _recorded_base_worktree(repo, task)
-            worktree = Path(str(task["worktree"]))
-            _assert_exact_candidate(
-                repo, task, candidate_head=str(task["candidate_head"])
-            )
-            task = _sync_base(repo, task)
-            candidate_head = repo.head(worktree)
-            task = store.update_task(
-                task_id,
-                candidate_head=candidate_head,
-                base_head=task["base_head"],
-                ready_proof=None,
-            )
-            _assert_exact_candidate(repo, task, candidate_head=candidate_head)
-            # 候选必须在任何策略、敏感内容和验证门禁之前冻结。
-            config = load_repo_config(repo, cwd=worktree)
-            store.require_slot_layout(config)
-            verification = load_verification_config(repo, cwd=worktree)
-            require_approval(repo, verification, cwd=worktree)
-            _run_declared_secret_scanner(
-                repo, cwd=worktree, scanner=config.secret_scanner
-            )
-            _assert_exact_candidate(repo, task, candidate_head=candidate_head)
-            require_safe(
-                repo,
-                cwd=worktree,
-                base=str(task["base_ref"]),
-                allowlist=config.sensitive_allowlist,
-            )
-            _assert_exact_candidate(repo, task, candidate_head=candidate_head)
-            proof = validate(
-                repo,
-                cwd=worktree,
-                base=str(task["base_ref"]),
-                verification=verification,
-                task_id=task_id,
-                expected_base_head=str(task["base_head"]),
-                expected_candidate_head=candidate_head,
-            )
-            _assert_exact_candidate(repo, task, candidate_head=candidate_head)
-            if unknown := _unknown_ignored(repo, worktree):
-                raise SoloAIError(
-                    "Unknown or protected ignored files block slot release:\n"
-                    + "\n".join(f"- {item}" for item in unknown[:20])
+            else:
+                if task.get("status") != "ready":
+                    raise SoloAIError("Finish requires a successful Ready")
+                _recorded_base_worktree(repo, task)
+                worktree = Path(str(task["worktree"]))
+                _assert_exact_candidate(
+                    repo, task, candidate_head=str(task["candidate_head"])
                 )
-            _stop_registered_processes(store, task)
-            _assert_exact_candidate(repo, task, candidate_head=candidate_head)
-            task = store.update_task(
-                task_id,
-                candidate_head=candidate_head,
-                base_head=task["base_head"],
-                ready_proof=proof["fingerprint"],
-            )
-            if config.integration.mode == "batched":
-                prepared = _prepare_candidate_publication(
-                    repo, store=store, task=task, proof=proof
+                task = _sync_base(repo, task)
+                candidate_head = repo.head(worktree)
+                task = store.update_task(
+                    task_id,
+                    candidate_head=candidate_head,
+                    base_head=task["base_head"],
+                    ready_proof=None,
                 )
-                return _resume_candidate_publication(repo, store=store, task=prepared)
-            prepared = prepare_integration(repo, store=store, task=task, proof=proof)
-            result = resume_integration(
-                repo, store=store, task=prepared, allow_stale=False
-            )
-            delete_anchor(repo, task_id)
-            return result
+                _assert_exact_candidate(repo, task, candidate_head=candidate_head)
+                # Freeze the exact candidate before policy, safety, and validation gates.
+                candidate_config = load_repo_config(repo, cwd=worktree)
+                store.require_slot_layout(candidate_config)
+                verification = load_verification_config(repo, cwd=worktree)
+                require_approval(repo, verification, cwd=worktree)
+                _run_declared_secret_scanner(
+                    repo, cwd=worktree, scanner=candidate_config.secret_scanner
+                )
+                _assert_exact_candidate(repo, task, candidate_head=candidate_head)
+                require_safe(
+                    repo,
+                    cwd=worktree,
+                    base=str(task["base_ref"]),
+                    allowlist=candidate_config.sensitive_allowlist,
+                )
+                _assert_exact_candidate(repo, task, candidate_head=candidate_head)
+                proof = validate(
+                    repo,
+                    cwd=worktree,
+                    base=str(task["base_ref"]),
+                    verification=verification,
+                    task_id=task_id,
+                    expected_base_head=str(task["base_head"]),
+                    expected_candidate_head=candidate_head,
+                )
+                _assert_exact_candidate(repo, task, candidate_head=candidate_head)
+                if unknown := _unknown_ignored(repo, worktree):
+                    raise SoloAIError(
+                        "Unknown or protected ignored files block slot release:\n"
+                        + "\n".join(f"- {item}" for item in unknown[:20])
+                    )
+                _stop_registered_processes(store, task)
+                _assert_exact_candidate(repo, task, candidate_head=candidate_head)
+                task = store.update_task(
+                    task_id,
+                    candidate_head=candidate_head,
+                    base_head=task["base_head"],
+                    ready_proof=proof["fingerprint"],
+                )
+                if policy.get("mode") == "batched":
+                    prepared = _prepare_candidate_publication(
+                        repo, store=store, task=task, proof=proof
+                    )
+                    candidate_result = _resume_candidate_publication(
+                        repo, store=store, task=prepared
+                    )
+                else:
+                    prepared = prepare_integration(
+                        repo, store=store, task=task, proof=proof
+                    )
+                    result = resume_integration(
+                        repo, store=store, task=prepared, allow_stale=False
+                    )
+                    delete_anchor(repo, task_id)
+                    return result
+    if candidate_result is None:
+        raise SoloAIError("Candidate publication did not produce a durable result")
+    auto_batch_id = candidate_result.get("auto_batch_id")
+    if auto_batch_id:
+        from .candidate_batches import run_batch
+
+        batch = run_batch(repo, batch_id=str(auto_batch_id))
+        candidate_result.update(
+            {
+                "outcome": "batch_integrated",
+                "batch_id": batch["id"],
+                "batch_status": batch["status"],
+                "integrated_head": batch.get("integrated_head"),
+                "candidate_count": len(batch["candidate_ids"]),
+            }
+        )
+    return candidate_result
 
 
 def recover(repo: GitRepo, *, task_id: str) -> dict[str, Any]:

@@ -32,6 +32,7 @@ from .delegated import (
 )
 from .lifecycle import (
     abandon,
+    adopt_task_anchor,
     approve,
     choose,
     commit_task,
@@ -371,13 +372,14 @@ def _parser() -> argparse.ArgumentParser:
     candidate_withdraw.add_argument("--candidate", required=True)
 
     batch = sub.add_parser(
-        "batch", help="explicitly seal, inspect, or recover candidate integration"
+        "batch", help="close a smaller tail, inspect, or recover candidate integration"
     )
     batch_sub = batch.add_subparsers(dest="batch_command", required=True)
     batch_status = batch_sub.add_parser("status", help="show integration batches")
     batch_status.add_argument("--batch")
     batch_seal = batch_sub.add_parser(
-        "seal", help="freeze and integrate exactly the listed candidate generation"
+        "seal",
+        help="explicitly close and integrate the exact listed tail candidates",
     )
     batch_seal.add_argument("--candidate", action="append", required=True)
     batch_recover = batch_sub.add_parser(
@@ -385,6 +387,20 @@ def _parser() -> argparse.ArgumentParser:
         help="resume an interrupted sealed generation from recorded Git facts",
     )
     batch_recover.add_argument("--batch", required=True)
+
+    anchor = sub.add_parser(
+        "anchor", help="explicitly reconstruct a reviewed pre-anchor task context"
+    )
+    anchor_sub = anchor.add_subparsers(dest="anchor_command", required=True)
+    anchor_adopt = anchor_sub.add_parser(
+        "adopt", help="adopt one legacy task after reviewing its execution contract"
+    )
+    anchor_adopt.add_argument("--task", required=True)
+    anchor_adopt.add_argument("--objective", required=True)
+    anchor_adopt.add_argument("--target", required=True)
+    anchor_adopt.add_argument("--scope", required=True)
+    anchor_adopt.add_argument("--acceptance", required=True)
+    anchor_adopt.add_argument("--confirm", required=True)
 
     commit = sub.add_parser(
         "commit", help="stage only an exact reviewed task path list and commit it"
@@ -1308,6 +1324,18 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
         raise SoloAIError(f"Unknown batch command: {args.batch_command}")
+    if args.command == "anchor":
+        if args.anchor_command == "adopt":
+            return adopt_task_anchor(
+                repo,
+                task_id=args.task,
+                objective=args.objective,
+                target=args.target,
+                scope=args.scope,
+                acceptance=args.acceptance,
+                confirm=args.confirm,
+            )
+        raise SoloAIError(f"Unknown anchor command: {args.anchor_command}")
     if args.command == "commit":
         return commit_task(
             repo,
@@ -1491,10 +1519,22 @@ def _human(command: str, result: dict[str, Any]) -> str:
             )
         )
     if command == "finish":
+        if result.get("outcome") == "batch_integrated":
+            return (
+                f"Published {result['candidate_id']} and integrated full batch "
+                f"{result['batch_id']} at {result['integrated_head']} "
+                f"from {result['candidate_count']} candidates."
+            )
         if result.get("outcome") == "candidate_published":
+            next_step = (
+                "It will join the next full automatic batch; the coordinating task "
+                "may explicitly close an exact smaller tail when all intended work is done."
+                if result.get("seal_policy") == "auto_full"
+                else "This legacy policy requires an explicit exact candidate batch."
+            )
             return (
                 f"Published {result['candidate_id']} at {result['candidate_head']}.\n"
-                "The base branch did not move; seal an explicit candidate batch when ready."
+                f"The base branch did not move. {next_step}"
             )
         label = (
             "static checks only; no test command ran"
@@ -1508,7 +1548,8 @@ def _human(command: str, result: dict[str, Any]) -> str:
     if command == "batch" and result.get("status") == "completed":
         return (
             f"Integrated batch {result['id']} at {result['integrated_head']} "
-            f"from {len(result['candidate_ids'])} explicit candidate(s)."
+            f"from {len(result['candidate_ids'])} candidate(s) "
+            f"({result.get('trigger', 'explicit_tail')})."
         )
     if command in {"recover", "resume-in-place"}:
         if result.get("status") == "completed":

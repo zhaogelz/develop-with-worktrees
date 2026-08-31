@@ -27,8 +27,16 @@ from .util import (
     utc_timestamp,
 )
 
-POOL_SCHEMA = 1
+POOL_SCHEMA = 2
 ACTIVE_BATCH_STATES = {"sealed", "composing", "composed", "validated", "promoted"}
+LEGACY_EXPLICIT_POLICY = {
+    "schema_version": 1,
+    "mode": "batched",
+    "batch_size": 5,
+    "candidate_capacity": 10,
+    "seal_policy": "explicit",
+    "activation_epoch": "legacy-explicit",
+}
 AUTOMATIC_REPAIR_LIMIT = 2
 
 
@@ -49,17 +57,36 @@ class CandidateBatchStore:
             "schema_version": POOL_SCHEMA,
             "candidates": {},
             "batches": {},
+            "next_publication_sequence": 1,
             "updated_at": utc_timestamp(),
         }
 
     def read(self) -> dict[str, Any]:
         value = read_json(self.path, self._empty())
-        if value.get("schema_version") != POOL_SCHEMA:
+        if value.get("schema_version") == 1:
+            sequence = 1
+            for candidate in value.get("candidates", {}).values():
+                candidate.setdefault("publication_sequence", sequence)
+                candidate.setdefault(
+                    "integration_policy", copy.deepcopy(LEGACY_EXPLICIT_POLICY)
+                )
+                if candidate.get("sealed_batch") and candidate.get("status") == "pending":
+                    candidate["status"] = "sealed"
+                sequence = max(
+                    sequence + 1,
+                    int(candidate.get("publication_sequence", sequence)) + 1,
+                )
+            value["next_publication_sequence"] = sequence
+            value["schema_version"] = POOL_SCHEMA
+        elif value.get("schema_version") != POOL_SCHEMA:
             raise SoloAIError("Unsupported candidate-pool state schema")
+        value.setdefault("next_publication_sequence", 1)
+        for candidate in value.get("candidates", {}).values():
+            candidate.setdefault("repair_attempt", 0)
         return value
 
     def mutate(self, callback: Callable[[dict[str, Any]], Any]) -> Any:
-        with DirectoryLock(self.lock_path):
+        with DirectoryLock(self.lock_path, wait=True):
             value = self.read()
             result = callback(value)
             value["updated_at"] = utc_timestamp()
@@ -95,7 +122,81 @@ class CandidateBatchStore:
             raise SoloAIError(f"Unknown candidate: {candidate_id}")
         return copy.deepcopy(candidate)
 
-    def publish(self, candidate: dict[str, Any], *, capacity: int) -> dict[str, Any]:
+    def _seal_in_value(
+        self,
+        value: dict[str, Any],
+        candidate_ids: list[str],
+        *,
+        batch_size: int,
+        trigger: str,
+    ) -> dict[str, Any]:
+        if not candidate_ids or len(candidate_ids) > batch_size:
+            raise SoloAIError(
+                f"Seal requires between 1 and {batch_size} explicit candidates"
+            )
+        if trigger == "auto_full" and len(candidate_ids) != batch_size:
+            raise SoloAIError("Automatic sealing requires one complete batch")
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise SoloAIError("Seal candidates must be unique")
+        candidates: list[dict[str, Any]] = []
+        base_refs: set[str] = set()
+        for candidate_id in candidate_ids:
+            candidate = value["candidates"].get(candidate_id)
+            if not candidate or candidate.get("status") not in {"pending", "retained"}:
+                raise SoloAIError(
+                    f"Candidate is not available for sealing: {candidate_id}"
+                )
+            if candidate.get("sealed_batch"):
+                raise SoloAIError(
+                    f"Candidate is already in an active batch: {candidate_id}"
+                )
+            if self.repo.ref_head(str(candidate["ref"])) != candidate.get("head"):
+                raise SoloAIError(f"Candidate ref changed: {candidate_id}")
+            candidates.append(copy.deepcopy(candidate))
+            base_refs.add(str(candidate["base_ref"]))
+        if len(base_refs) != 1:
+            raise SoloAIError("One batch can target only one local base branch")
+        base_ref = next(iter(base_refs))
+        base_before = self.repo.ref_head(f"refs/heads/{base_ref}")
+        if base_before is None:
+            raise SoloAIError("Batch base branch no longer exists")
+        batch_id = (
+            f"batch-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-"
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        batch = {
+            "id": batch_id,
+            "status": "sealed",
+            "trigger": trigger,
+            "base_ref": base_ref,
+            "base_before": base_before,
+            "candidate_ids": list(candidate_ids),
+            "candidates": candidates,
+            "integration_policy": copy.deepcopy(
+                candidates[0].get("integration_policy") or LEGACY_EXPLICIT_POLICY
+            ),
+            "applied_candidate_ids": [],
+            "integration_head": base_before,
+            "proof": None,
+            "worktree": None,
+            "created_at": utc_timestamp(),
+            "updated_at": utc_timestamp(),
+        }
+        value["batches"][batch_id] = batch
+        for candidate_id in candidate_ids:
+            value["candidates"][candidate_id].update(
+                {"status": "sealed", "sealed_batch": batch_id}
+            )
+        return copy.deepcopy(batch)
+
+    def publish(
+        self,
+        candidate: dict[str, Any],
+        *,
+        capacity: int,
+        batch_size: int,
+        seal_policy: str,
+    ) -> dict[str, Any]:
         created_ref = False
 
         def update(value: dict[str, Any]) -> dict[str, Any]:
@@ -112,7 +213,15 @@ class CandidateBatchStore:
                 immutable = ("candidate_id", "head", "ref", "task_id", "proof")
                 if any(existing.get(key) != candidate.get(key) for key in immutable):
                     raise SoloAIError("Task already published a different candidate")
-                return copy.deepcopy(existing)
+                batch_id = existing.get("sealed_batch")
+                return {
+                    "candidate": copy.deepcopy(existing),
+                    "auto_batch": copy.deepcopy(value["batches"].get(batch_id))
+                    if batch_id
+                    and value["batches"].get(batch_id, {}).get("trigger")
+                    == "auto_full"
+                    else None,
+                }
             supersedes = candidate.get("supersedes")
             source = value["candidates"].get(str(supersedes)) if supersedes else None
             if supersedes and not source:
@@ -124,7 +233,7 @@ class CandidateBatchStore:
             active = [
                 item
                 for item in value["candidates"].values()
-                if item.get("status") == "pending"
+                if item.get("status") in {"pending", "sealed"}
                 and item.get("candidate_id") != supersedes
             ]
             if len(active) >= capacity:
@@ -142,16 +251,19 @@ class CandidateBatchStore:
                 if created.returncode:
                     raise SoloAIError("Could not create the immutable candidate ref")
                 created_ref = True
+            sequence = int(value.get("next_publication_sequence", 1))
+            value["next_publication_sequence"] = sequence + 1
             repair_attempt = (
                 int(source.get("repair_attempt", 0)) + 1 if source else 0
             )
             record = {
                 **copy.deepcopy(candidate),
                 "status": "pending",
+                "publication_sequence": sequence,
                 "repair_attempt": repair_attempt,
             }
             value["candidates"][str(candidate["candidate_id"])] = record
-            if source and source.get("status") == "pending":
+            if source and source.get("status") in {"pending", "retained"}:
                 source.update(
                     {
                         "status": "superseded",
@@ -160,7 +272,43 @@ class CandidateBatchStore:
                         "updated_at": utc_timestamp(),
                     }
                 )
-            return copy.deepcopy(record)
+            auto_batch = None
+            policy = record.get("integration_policy") or {}
+            if seal_policy == "auto_full":
+                eligible = sorted(
+                    (
+                        item
+                        for item in value["candidates"].values()
+                        if item.get("status") == "pending"
+                        and not item.get("sealed_batch")
+                        and item.get("base_ref") == record.get("base_ref")
+                        and (item.get("integration_policy") or {}).get(
+                            "seal_policy"
+                        )
+                        == "auto_full"
+                        and (item.get("integration_policy") or {}).get(
+                            "activation_epoch"
+                        )
+                        == policy.get("activation_epoch")
+                    ),
+                    key=lambda item: (
+                        int(item.get("publication_sequence", 0)),
+                        str(item.get("candidate_id")),
+                    ),
+                )
+                if len(eligible) >= batch_size:
+                    auto_batch = self._seal_in_value(
+                        value,
+                        [str(item["candidate_id"]) for item in eligible[:batch_size]],
+                        batch_size=batch_size,
+                        trigger="auto_full",
+                    )
+            return {
+                "candidate": copy.deepcopy(
+                    value["candidates"][str(candidate["candidate_id"])]
+                ),
+                "auto_batch": auto_batch,
+            }
 
         try:
             return self.mutate(update)
@@ -172,60 +320,14 @@ class CandidateBatchStore:
             raise
 
     def seal(self, candidate_ids: list[str], *, batch_size: int) -> dict[str, Any]:
-        if not candidate_ids or len(candidate_ids) > batch_size:
-            raise SoloAIError(
-                f"Seal requires between 1 and {batch_size} explicit candidates"
+        return self.mutate(
+            lambda value: self._seal_in_value(
+                value,
+                candidate_ids,
+                batch_size=batch_size,
+                trigger="explicit_tail",
             )
-        if len(candidate_ids) != len(set(candidate_ids)):
-            raise SoloAIError("Seal candidates must be unique")
-        batch_id = (
-            f"batch-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-"
-            f"{uuid.uuid4().hex[:8]}"
         )
-
-        def update(value: dict[str, Any]) -> dict[str, Any]:
-            candidates: list[dict[str, Any]] = []
-            base_refs: set[str] = set()
-            for candidate_id in candidate_ids:
-                candidate = value["candidates"].get(candidate_id)
-                if not candidate or candidate.get("status") != "pending":
-                    raise SoloAIError(
-                        f"Candidate is not available for sealing: {candidate_id}"
-                    )
-                if candidate.get("sealed_batch"):
-                    raise SoloAIError(
-                        f"Candidate is already in an active batch: {candidate_id}"
-                    )
-                if self.repo.ref_head(str(candidate["ref"])) != candidate.get("head"):
-                    raise SoloAIError(f"Candidate ref changed: {candidate_id}")
-                candidates.append(copy.deepcopy(candidate))
-                base_refs.add(str(candidate["base_ref"]))
-            if len(base_refs) != 1:
-                raise SoloAIError("One batch can target only one local base branch")
-            base_ref = next(iter(base_refs))
-            base_before = self.repo.ref_head(f"refs/heads/{base_ref}")
-            if base_before is None:
-                raise SoloAIError("Batch base branch no longer exists")
-            batch = {
-                "id": batch_id,
-                "status": "sealed",
-                "base_ref": base_ref,
-                "base_before": base_before,
-                "candidate_ids": list(candidate_ids),
-                "candidates": candidates,
-                "applied_candidate_ids": [],
-                "integration_head": base_before,
-                "proof": None,
-                "worktree": None,
-                "created_at": utc_timestamp(),
-                "updated_at": utc_timestamp(),
-            }
-            value["batches"][batch_id] = batch
-            for candidate_id in candidate_ids:
-                value["candidates"][candidate_id]["sealed_batch"] = batch_id
-            return copy.deepcopy(batch)
-
-        return self.mutate(update)
 
     def batch(self, batch_id: str) -> dict[str, Any]:
         batch = self.read()["batches"].get(batch_id)
@@ -268,7 +370,7 @@ class CandidateBatchStore:
             for candidate_id in batch["candidate_ids"]:
                 candidate = value["candidates"].get(candidate_id)
                 if candidate and candidate.get("sealed_batch") == batch_id:
-                    candidate["sealed_batch"] = None
+                    candidate.update({"sealed_batch": None, "status": "retained"})
                     candidate.setdefault("failed_batches", []).append(batch_id)
                     candidate["last_failed_batch"] = batch_id
                     candidate["last_failure_kind"] = failure_kind
@@ -282,9 +384,11 @@ class CandidateBatchStore:
 
     def repair_source(self, candidate_id: str) -> dict[str, Any]:
         candidate = self.candidate(candidate_id)
-        if candidate.get("status") != "pending" or candidate.get("sealed_batch"):
+        if candidate.get("status") not in {"pending", "retained"} or candidate.get(
+            "sealed_batch"
+        ):
             raise SoloAIError(
-                "Only an unsealed pending candidate can start a repair task"
+                "Only an unsealed pending or retained candidate can start a repair task"
             )
         if not candidate.get("repair_eligible"):
             kind = candidate.get("last_failure_kind") or "unknown"
@@ -332,8 +436,14 @@ class CandidateBatchStore:
                 raise SoloAIError(f"Unknown candidate: {candidate_id}")
             if candidate.get("status") == "withdrawn":
                 return copy.deepcopy(candidate)
-            if candidate.get("status") not in {"pending", "withdrawing"}:
-                raise SoloAIError("Only an unsealed pending candidate can be withdrawn")
+            if candidate.get("status") not in {
+                "pending",
+                "retained",
+                "withdrawing",
+            }:
+                raise SoloAIError(
+                    "Only an unsealed pending or retained candidate can be withdrawn"
+                )
             if candidate.get("sealed_batch"):
                 raise SoloAIError("A candidate in an active batch cannot be withdrawn")
             candidate["status"] = "withdrawing"
@@ -482,8 +592,9 @@ def _validate_batch(
     if not repo.is_clean(worktree) or repo.head(worktree) != batch["integration_head"]:
         raise SoloAIError("Composed batch changed before final validation")
     config = load_repo_config(repo, cwd=worktree)
-    if config.integration.mode != "batched":
-        raise SoloAIError("The composed policy no longer enables batched integration")
+    policy = batch.get("integration_policy") or {}
+    if policy.get("mode") != "batched":
+        raise SoloAIError("The sealed generation has no batched integration policy")
     verification = load_verification_config(repo, cwd=worktree)
     _require_approval(repo, cwd=worktree)
     _run_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
@@ -600,11 +711,16 @@ def seal_batch(repo: GitRepo, *, candidate_ids: list[str]) -> dict[str, Any]:
         )
     store = CandidateBatchStore(repo)
     batch = store.seal(candidate_ids, batch_size=config.integration.batch_size)
+    return run_batch(repo, batch_id=str(batch["id"]))
+
+
+def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
+    """Run one already frozen generation without blocking candidate publication."""
+
+    store = CandidateBatchStore(repo)
+    batch = store.batch(batch_id)
     try:
-        with (
-            DirectoryLock(repo.common_dir / "solo-ai-maintenance.lock"),
-            integration_turn(repo, str(batch["id"])),
-        ):
+        with integration_turn(repo, str(batch["id"])):
             return _resume(repo, store, batch)
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -749,13 +865,7 @@ def recover_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
     from .lifecycle import _config_and_mode
 
     _config_and_mode(repo)
-    store = CandidateBatchStore(repo)
-    batch = store.batch(batch_id)
-    with (
-        DirectoryLock(repo.common_dir / "solo-ai-maintenance.lock"),
-        integration_turn(repo, batch_id),
-    ):
-        return _resume(repo, store, batch)
+    return run_batch(repo, batch_id=batch_id)
 
 
 def withdraw_candidate(repo: GitRepo, *, candidate_id: str) -> dict[str, Any]:

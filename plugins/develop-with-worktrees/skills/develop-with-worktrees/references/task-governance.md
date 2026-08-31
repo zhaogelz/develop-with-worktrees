@@ -47,4 +47,4 @@ Bug fixes that restore an existing contract, implementation details, tests, buil
 
 When a durable fact changed, update only the repository's existing canonical document for that topic. Do not duplicate the same fact across a root plan, feature plan, README, and task log.
 
-For direct integration, DWW removes the anchor after successful Finish. In batched mode it remains after candidate publication and is removed only when that candidate's explicit batch completes, the pending candidate is withdrawn, or the task is abandoned. Failed or interrupted integration keeps the anchor for recovery.
+For legacy direct integration, DWW removes the anchor after successful Finish. In candidate-first mode it remains after publication and is removed only when the candidate's automatic full batch or explicit exact tail completes, the unsealed candidate is withdrawn, or the task is abandoned. Failed or interrupted integration keeps the anchor for recovery. A pre-anchor legacy task must use reviewed `anchor adopt` fields; neither DWW nor the host may invent its old execution contract.

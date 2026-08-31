@@ -51,6 +51,52 @@ This local file is not committed. Keep it current, and reread it after context l
     return path
 
 
+def adopt_legacy_anchor(
+    repo: GitRepo,
+    task: dict[str, Any],
+    *,
+    objective: str,
+    target: str,
+    scope: str,
+    acceptance: str,
+    confirm: str,
+) -> Path:
+    """Create a reviewed anchor for a pre-anchor task without inventing intent."""
+
+    if confirm != str(task["id"]):
+        raise SoloAIError("Legacy anchor adoption confirmation must equal the task id")
+    fields = {
+        "objective": objective.strip(),
+        "target": target.strip(),
+        "scope": scope.strip(),
+        "acceptance": acceptance.strip(),
+    }
+    if any(not value for value in fields.values()):
+        raise SoloAIError("Legacy anchor adoption requires every reviewed field")
+    if task.get("status") in {"finished", "abandoned"}:
+        raise SoloAIError("A terminal task does not accept a new active anchor")
+    path = anchor_path(repo, str(task["id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if is_link_or_junction(path.parent) or not path.parent.is_dir():
+        raise SoloAIError("Task anchor directory is not a plain local directory")
+    if path.exists():
+        return require_anchor(repo, task)
+    content = f"""# Task anchor: {task["name"]}
+
+- Task ID: `{task["id"]}`
+- Original purpose: {fields["objective"]}
+- Implementation target: {fields["target"]}
+- Reference baseline: `{task.get("base_ref")}` at `{task.get("base_head")}`
+- Scope boundary: {fields["scope"]}
+- Acceptance criteria: {fields["acceptance"]}
+- Current progress: legacy task anchor reviewed and adopted at {utc_timestamp()}
+
+This local file was explicitly reconstructed for a pre-anchor task. It is not committed. Reread it before continuing changes.
+"""
+    atomic_write_text(path, content)
+    return require_anchor(repo, task)
+
+
 def require_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:
     path = anchor_path(repo, str(task["id"]))
     content = _require_plain_anchor(path)

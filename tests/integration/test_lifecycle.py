@@ -21,6 +21,7 @@ from solo_ai import lifecycle
 from solo_ai import proof as proof_module
 from solo_ai import state as state_module
 from solo_ai.cli import _prune
+from solo_ai.candidate_batches import seal_batch
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
     abandon,
@@ -57,6 +58,19 @@ def initialized(path: Path) -> GitRepo:
         repo, slots=3, commands=[VERIFY], accept=True, accept_static_only=False
     )
     assert result["decision"] == "adopted"
+    # Most lifecycle tests exercise the legacy immediate-promotion transaction.
+    # Candidate-first defaults have their own integration suite.
+    config = path / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full" }',
+            'integration = { mode = "direct", batch_size = 5, candidate_capacity = 10, seal_policy = "explicit" }',
+        ),
+        encoding="utf-8",
+    )
+    git(path, "add", ".solo-ai/config.toml")
+    git(path, "commit", "-m", "test: use legacy direct lifecycle")
+    approve(repo, load_verification_config(repo))
     return repo
 
 
@@ -380,7 +394,7 @@ def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
     assert StateStore(repo).task(task["id"])["mode"] == "isolated"
     ready(repo, task_id=task["id"], lease=task["lease"])
     finish(repo, task_id=task["id"], lease=task["lease"])
-    assert read_json(state_path, {})["schema_version"] == 5
+    assert read_json(state_path, {})["schema_version"] == 6
 
 
 def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
@@ -408,7 +422,7 @@ def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
     assert repo.head(git_repo) == candidate
     assert finished["status"] == "finished"
     assert finished["integration"]["transaction_id"].startswith("legacy-")
-    assert read_json(state_path, {})["schema_version"] == 5
+    assert read_json(state_path, {})["schema_version"] == 6
     upgraded = read_json(state_path, {})
     assert upgraded["pending_operation_outcomes"] == {}
     assert isinstance(upgraded["slots"][task["slot_id"]]["generation"], int)
@@ -1692,7 +1706,8 @@ def test_finish_retains_standard_tool_caches_created_by_validation(
     commit_one(repo, task, "cached.txt", "cached\n", "test: cache validation")
 
     ready(repo, task_id=task["id"], lease=task["lease"])
-    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    published = finish(repo, task_id=task["id"], lease=task["lease"])
+    result = seal_batch(repo, candidate_ids=[published["candidate_id"]])
 
     worktree = Path(task["worktree"])
     assert result["integrated_head"] == repo.head(git_repo)
@@ -1718,7 +1733,8 @@ def test_dirty_primary_bootstrap_is_pending_then_first_finish_integrates(
     with pytest.raises(SoloAIError, match="clean before integration"):
         finish(repo, task_id=task["id"], lease=task["lease"])
     git(git_repo, "restore", "README.md")
-    finish(repo, task_id=task["id"], lease=task["lease"])
+    published = finish(repo, task_id=task["id"], lease=task["lease"])
+    seal_batch(repo, candidate_ids=[published["candidate_id"]])
     assert (git_repo / ".solo-ai" / "config.toml").exists()
     assert (git_repo / "task.txt").exists()
 
@@ -2390,6 +2406,62 @@ def test_rewritten_base_blocks_ready_until_explicit_retarget(git_repo: Path) -> 
         base="main",
         confirm=f"{task['id']}:main",
     )
+    assert ready(repo, task_id=task["id"], lease=task["lease"])["status"] == "ready"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_exact_commit_can_complete_reviewed_current_base_merge(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    (git_repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    (git_repo / "kept.txt").write_text("base\n", encoding="utf-8")
+    git(git_repo, "add", "shared.txt", "kept.txt")
+    git(git_repo, "commit", "-m", "test: add shared base")
+    task = start(repo, name="resolve current base conflict")
+    worktree = Path(task["worktree"])
+    (worktree / "shared.txt").write_text("task\n", encoding="utf-8")
+    (worktree / "kept.txt").write_text("task\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: change shared in task",
+        paths=["shared.txt", "kept.txt"],
+    )
+
+    (git_repo / "shared.txt").write_text("main\n", encoding="utf-8")
+    (git_repo / "kept.txt").write_text("main\n", encoding="utf-8")
+    git(git_repo, "add", "shared.txt", "kept.txt")
+    git(git_repo, "commit", "-m", "test: change shared in main")
+    current_base_head = repo.head(git_repo)
+    with pytest.raises(SoloAIError, match="merge prediction found a conflict"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+
+    merged = repo.git(
+        ["merge", "--no-commit", "--no-ff", "main"],
+        cwd=worktree,
+        check=False,
+    )
+    assert merged.returncode != 0
+    (worktree / "shared.txt").write_text("main\ntask\n", encoding="utf-8")
+    # Resolving this path to the task-side contents intentionally produces no
+    # tree difference from the first parent after staging.
+    (worktree / "kept.txt").write_text("task\n", encoding="utf-8")
+    committed = commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: resolve current base conflict",
+        paths=["shared.txt", "kept.txt"],
+    )
+
+    parents = repo.git(
+        ["rev-list", "--parents", "-n", "1", committed["candidate_head"]],
+        cwd=worktree,
+    ).stdout.split()
+    assert len(parents) == 3
+    assert current_base_head in parents[1:]
     assert ready(repo, task_id=task["id"], lease=task["lease"])["status"] == "ready"
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 

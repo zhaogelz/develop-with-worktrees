@@ -54,7 +54,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
         encoding="utf-8"
     )
     assert payload["verification_schema"] == 3
-    assert payload["state_schema"] == 5
+    assert payload["state_schema"] == 6
     assert "PreToolUse deny" in payload["codex_guard"]
     assert Path(payload["script"]).name == "dww.py"
 
@@ -122,6 +122,9 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "optional hardening" in text
     assert "hooks/hooks.json" in text
     assert 'integration.mode = "batched"' in text
+    assert 'seal_policy = "auto_full"' in text
+    assert "Every five candidates" in text
+    assert "每满 5 个候选" in text
     assert "batch seal" in text
     assert "candidate_capacity = 10" in text
     assert "task anchor" in text
@@ -679,9 +682,14 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
     call_json(
         "ready", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
     )
-    call_json(
+    published = call_json(
         "finish", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
     )
+    assert published["outcome"] == "candidate_published"
+    tail = call_json(
+        "batch", "seal", "--candidate", published["candidate_id"]
+    )
+    assert tail["status"] == "completed"
     assert (git_repo / "cli.txt").exists()
 
     started_direct = subprocess.run(

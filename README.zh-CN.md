@@ -1,58 +1,43 @@
 # Develop with Worktrees
 
-`0.5.0-beta.1` 是一个通用的本地 Git 安全开发底座。它负责为修改任务选择正确的仓库流程、建立任务锚点、隔离工作树、精确提交、验证、候选发布、合入和恢复；任务怎么拆、由几个 AI 做、依赖谁，则交给 Codex 等宿主自带的任务/子智能体能力。
+多个 AI 或多个任务同时修改一个 Git 项目时，很容易互相覆盖、在错误目录提交，或者没有完整验证就进入主线。DWW 会给每个修改任务分配独立目录，记录任务目标，只提交明确检查过的文件，并在验证通过后安全合入。
 
-## 一句话理解
+## 它能带来什么
 
-- 宿主任務系统管“谁做什么、什么时候做”。
-- DWW 管“每个修改在哪个安全目录做、改了什么、验证过没有、哪些确定候选可以合回”。
-- Hook 只是一层可选的提前拦截，不再承担正确性。
+- 每个任务在自己的工作树施工，互不覆盖。
+- 任务目标和验收条件写在本地任务锚点里，换模型或续作也不容易跑偏。
+- 每个任务只提交明确检查过的路径，完成后成为不可修改的候选。
+- 多任务默认每满 5 个候选集中组合、完整验证并合入。
+- 冲突、测试失败或中途退出时主线不动，可以从已记录状态恢复。
 
-旧 `dww orchestrate` 不再创建新任务批次，也不再追加或生成修复任务；它只保留已有旧批次的查看、收尾、暂停、恢复、移交和取消兼容入口。
+任务怎么拆、谁先做、谁依赖谁，由 Codex 等宿主自带的任务系统负责；DWW 只负责这些成果怎样安全进入 Git 主线。
 
-## 成熟项目优先
+## 默认怎么工作
 
-第一次修改前，DWW 只读判断仓库由谁管理：
+1. `Start` 建立任务锚点，并返回专用工作树。
+2. AI 只在该工作树修改，用 `commit` 提交精确路径，再执行 `ready`。
+3. `Finish` 发布已验证候选并释放开发工作树，主线暂时不动。
+4. 每满 5 个候选，DWW 自动冻结最早 5 个，在独立集成工作树完成组合和 Full 验证，通过后推进主线。
+5. 预定任务都完成但不足 5 个时，当前协调任务明确收尾；单任务就是只有 1 个候选的尾批。
 
-- 已有成熟流程：DWW 静默让路，不写自己的任务、锚点、候选或批次状态。
-- 已批准的项目适配器：严格走该适配器，不混用 DWW managed 生命周期。
-- 已启用 DWW：自动领取独立工作树。
-- 尚未选择：只问一次“独立目录、仅本次当前目录、以后当前目录”。
+普通用户不用手工抄候选 ID。负责协调的 AI 会收集各任务返回的候选，并在确认工作结束后提交精确尾批。
 
-`SessionStart` Hook 可以提前提供这个判断；没有 Hook 时，技能运行一次只读 `dww route --json`，效果相同。
+## 为什么默认是 5 和 10
 
-## 普通开发流程
+一批 5 个可以减少频繁完整验证，同时把冲突范围控制在容易排查的大小。候选池容量 10，通常可让一批正在集成时，下一批继续积累。容量满时 DWW 会保留当前任务并要求稍后重试，不会丢弃成果。
 
-```text
-route → start → 更新自动生成的任务锚点 → 只在返回目录修改
-      → commit 精确路径 → ready → finish
-```
+## DWW 不会做什么
 
-`Start` 自动在 `<git-common-dir>/solo-ai/task-anchors/<task-id>.md` 建立不提交的任务锚点，记录目标、对象、基线、边界、验收和进度。上下文压缩、换模型、交接或续作后，修改前先重读。重复传入同一个 `request_id` 会返回原任务，不会多占一个工作树。
+- 不根据空闲时间、活跃任务数量、Hook 或会话结束猜测尾批。
+- 不接管 Codex 的任务拆分、子代理调度和依赖关系。
+- 不自动 fetch、pull、push、创建 PR、部署、rebase、squash、amend 或改写历史。
+- 不把端口、数据库、浏览器、业务测试和部署规则从项目里搬走。
 
-通用默认是直接模式：Finish 验证后本地快进目标分支，释放工作树并删除锚点。DWW 不会 fetch、pull、push、创建 PR、rebase、squash、amend 或改写历史。
+Hook 只是可选的提前拦截。即使没有安装或信任 Hook，路由、任务锚点、工作树、验证、候选、批次和恢复仍须完整可用。
 
-## 可选候选批次
+组合阶段若能明确定位到某个冲突候选，DWW 可在最新主线上准备最多两代受管返修；只有代码、契约和测试能唯一决定结果时才自动继续，产品、权限、迁移、删除或安全取舍仍交给人决定。最终验证失败不会冒充合并冲突盲目重跑。
 
-需要“一批改动一起最终验收”的项目可以显式配置：
-
-```toml
-integration = { mode = "batched", batch_size = 5, candidate_capacity = 10 }
-```
-
-这时：
-
-1. 每个任务 Finish 后只发布一个已验证、不可变的候选并立即释放工作树，主分支不动，锚点保留。
-2. 候选池默认最多 10 个；满了只会停止继续发布，不会自动封批。
-3. 只有明确执行 `batch seal --candidate <id> ...` 才冻结本次候选，默认一批最多 5 个。
-4. DWW 在独立集成工作树组合这些确定候选，执行最终 Full 验证，再核对主分支仍是原基线，最后才快进。
-5. 冲突或最终验证失败时主分支不动；组合冲突先用 `candidate repair --candidate <id>` 在最新基线上准备最多两代受管返修，能由代码、契约和测试唯一确定时自动继续，只有产品、权限、迁移、删除、安全或合法测试预期需要取舍时才通知人工。最终验证失败不会被当作合并冲突盲重跑。
-
-不会因为“刚好有 5 个”“现在没有活跃任务”“等了一段时间”或“会话结束”自动封批。候选撤回、批次成功或任务放弃后才删除对应锚点。
-
-## Hook 的位置
-
-受信任的 `PreToolUse` Hook 仍能在 Codex 支持的本地工具路径上提前拒绝未授权写入，这是有价值的强化保护，但不是操作系统沙箱。即使 Hook 未安装、未信任或宿主没有 Hook，DWW 的路由、锚点、工作树、验证、候选池、显式封批和恢复仍可正常工作。`hooks/hooks.json` 在普通更新中保持不变，避免重复信任。
+旧项目可以继续显式使用 direct 或手工封批策略；它们只用于平稳升级，新项目默认使用候选流水线。
 
 ## 安装
 
@@ -61,6 +46,6 @@ codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.1
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-只有用户明确要求时，成功合入后的干净基线工作树才可另行执行一次 dry-run 优先、非强制的普通推送。
+安装或更新后新开一个 Codex 会话，使新版技能文案稳定加载。DWW 的本地生命周期不包含远程发布；只有用户另行明确要求时，才可从已合入且干净的基线工作树执行 dry-run 优先的普通非强制推送。
 
-详细边界见[配置参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)、[生命周期参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md)、[任务治理参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md)和[安全参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md)。
+详细配置、升级兼容、异常恢复和安全原理见[配置参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)、[生命周期参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md)、[任务治理参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md)和[安全参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md)。

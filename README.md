@@ -1,47 +1,43 @@
 # Develop with Worktrees
 
-`0.5.0-beta.1` is a host-neutral local Git safety lifecycle. It routes modifying work, creates first-class task anchors, isolates worktrees, commits exact paths, validates candidates, integrates directly or through explicit candidate batches, and recovers from persisted Git facts. The host's native task/subagent system owns decomposition, dependencies, workers, waits, and task status.
+When several AI tasks modify one Git repository, they can overwrite each other, commit from the wrong directory, or reach the main branch without combined validation. DWW gives each modifying task an isolated worktree and local task anchor, accepts only exact reviewed paths, and promotes verified results safely.
 
-## Responsibility boundary
+## What it gives you
 
-- Native task orchestration answers who works on which outcome and when.
-- DWW answers where each Git change is made, what exact candidate was verified, and which explicit candidates may move the base.
-- Codex Hooks are optional hardening, not lifecycle truth.
+- One isolated worktree per modifying task.
+- A local task anchor that survives continuation, handoff, and model changes.
+- Exact-path commits and immutable verified candidates.
+- Automatic integration whenever five eligible candidates accumulate.
+- A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
 
-The old `dww orchestrate` family is drain-only compatibility. It can finish or inspect existing legacy batches, but it no longer creates batches, appends tasks, or creates repair tasks.
+The host's native task system still decides who does what and when. DWW owns only the Git safety lifecycle that carries completed work into the base branch.
 
-## Routing and managed work
+## Default flow
 
-A compact read-only route lets mature repository workflows win. A deferred repository receives no DWW task, anchor, candidate, or batch state. An approved delegated adapter remains exact and locally fingerprinted. A managed repository receives an isolated task; an unchosen repository gets one plain-language choice.
+1. `Start` creates the task anchor and returns an isolated worktree.
+2. The agent edits only there, commits exact paths, and runs `ready`.
+3. `Finish` publishes a verified candidate and releases the task worktree without moving the base.
+4. Every five candidates, DWW freezes the oldest eligible five, composes them in a dedicated integration worktree, runs Full validation, and then advances the base.
+5. When intended work is complete with fewer than five candidates, the coordinating task explicitly closes that exact tail. A single task is a one-candidate tail.
 
-Hook route context is optional. Without it, the skill runs one `dww route --json` fallback.
+Users do not need to copy candidate IDs. The coordinating agent collects worker results and closes the exact tail after it knows the intended work is complete.
 
-```text
-route → start → update generated task anchor → edit returned worktree only
-      → commit exact paths → ready → finish
-```
+## Why five and ten
 
-Start creates `<git-common-dir>/solo-ai/task-anchors/<task-id>.md` before returning. It records purpose, target, baseline, boundaries, acceptance, and progress. Reread it after context loss, model changes, handoff, or continuation. A repeated caller `request_id` returns the same managed task rather than consuming another slot.
+Five candidates amortise combined validation while keeping conflicts reviewable. The pool holds ten nonterminal candidates by default, so one batch can integrate while the next accumulates. A full pool preserves the publishing task and asks it to retry; it never drops work.
 
-Direct integration is the default. Finish validates, fast-forwards the recorded clean local base, releases the worktree, and deletes the anchor. DWW never fetches, pulls, pushes, opens PRs, rebases, squashes, amends, deploys, or rewrites history.
+## What DWW never does
 
-## Optional explicit candidate batches
+- It never guesses a tail from idleness, active-task counts, Hooks, or session end.
+- It does not replace native task decomposition, dependencies, or worker scheduling.
+- It never fetches, pulls, pushes, opens PRs, deploys, rebases, squashes, amends, or rewrites history.
+- It does not absorb repository-specific ports, databases, browsers, test selection, or deployment rules.
 
-Repositories that need one combined acceptance boundary may configure:
+Hooks are optional early hardening. Routing, anchors, worktrees, validation, candidates, batching, and recovery must still work without them.
 
-```toml
-integration = { mode = "batched", batch_size = 5, candidate_capacity = 10 }
-```
+A composition conflict tied to one candidate can prepare up to two managed repair generations on the latest base. The agent continues only when code, contracts, and tests determine one answer; product, permission, migration, deletion, and security choices still stop for a human. Final-validation failures are never disguised as merge conflicts and blindly retried.
 
-In batched mode, Finish publishes one immutable verified candidate and immediately releases its slot without moving the base. The anchor remains. The pool defaults to ten candidates and never seals itself.
-
-Only `batch seal --candidate <id> ...` freezes a generation, with at most five candidates by default. DWW composes their exact tree differences in a dedicated integration worktree, runs combined Full validation, rechecks the frozen base, and then fast-forwards the clean checked-out base. Conflict or final-validation failure preserves the base and is never blindly rerun. A recorded composition conflict can use `candidate repair --candidate <id>` to prepare one bounded managed repair on the latest base; deterministic validation, product, permission, migration, destructive, and security choices still stop for review.
-
-Candidate count, timers, apparent idleness, task completion, and SessionEnd never trigger a seal. Candidate withdrawal, successful batch integration, or explicit abandonment removes the associated anchor.
-
-## Optional Hook hardening
-
-A trusted `PreToolUse` Hook can deny unauthorised writes on supported Codex local-tool paths. It is valuable defence in depth, not an operating-system sandbox and not required for route, anchors, worktrees, validation, candidates, sealing, or recovery. Ordinary releases keep `hooks/hooks.json` stable to avoid needless re-trust.
+Legacy repositories may keep explicit direct or explicit-seal policies during migration. New repositories use the candidate-first flow.
 
 ## Installation
 
@@ -50,6 +46,6 @@ codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.1
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-An explicit user request may separately push an already integrated clean base branch with a dry-run-first ordinary non-force push.
+Start a new Codex session after installing or updating so the new skill text is loaded. Remote publishing is separate and requires an explicit user request for a dry-run-first ordinary non-force push from the clean integrated base.
 
-See [Chinese documentation](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), [lifecycle](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md), [task governance](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md), and [architecture](docs/architecture.md).
+See the [Chinese guide](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), [lifecycle](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md), [task governance](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md), and [architecture](docs/architecture.md) for details.

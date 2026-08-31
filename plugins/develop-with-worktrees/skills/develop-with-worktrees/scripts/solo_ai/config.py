@@ -41,6 +41,7 @@ class IntegrationSpec:
     mode: str
     batch_size: int
     candidate_capacity: int
+    seal_policy: str
 
 
 @dataclass(frozen=True)
@@ -302,6 +303,7 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     cleanup = data.get("cleanup", {})
     if not isinstance(cleanup, dict):
         raise SoloAIError("cleanup must be a TOML table")
+    integration_declared = "integration" in data
     integration_raw = data.get("integration", {})
     if not isinstance(integration_raw, dict):
         raise SoloAIError("integration must be a TOML table")
@@ -323,6 +325,24 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         raise SoloAIError(
             "integration.candidate_capacity must be between batch_size and 100"
         )
+    seal_policy = _string(
+        integration_raw.get("seal_policy", "explicit"),
+        field="integration.seal_policy",
+    )
+    if seal_policy not in {"explicit", "auto_full"}:
+        raise SoloAIError(
+            'integration.seal_policy must be "explicit" or "auto_full"'
+        )
+    if integration_mode == "direct" and seal_policy != "explicit":
+        raise SoloAIError(
+            'integration.seal_policy = "auto_full" requires mode = "batched"'
+        )
+    # Repositories adopted before candidate-first integration often have no
+    # integration table. Treat that absence as the old direct policy; only a
+    # newly rendered or explicitly upgraded table opts into the new default.
+    if not integration_declared:
+        integration_mode = "direct"
+        seal_policy = "explicit"
     readiness_raw = lifecycle.get("readiness")
     if "dev_start" in lifecycle:
         dev_start = _command(lifecycle["dev_start"], field="lifecycle.dev_start")
@@ -378,6 +398,7 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
             mode=integration_mode,
             batch_size=batch_size,
             candidate_capacity=candidate_capacity,
+            seal_policy=seal_policy,
         ),
     )
 
@@ -613,8 +634,8 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # Only exact top-level paths explicitly declared here may be removed by prune-slot.
 # An empty list means no dependencies or caches are ever removed automatically.
 cleanup = {{ owned_paths = [] }}
-# direct: Finish 合回当前基线；batched: Finish 发布候选，随后显式 seal。
-integration = {{ mode = "direct", batch_size = 5, candidate_capacity = 10 }}
+# 默认每满 5 个候选自动封批；不足 5 个只由协调任务显式收尾。
+integration = {{ mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full" }}
 
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{{port}}"]
@@ -664,7 +685,7 @@ def managed_block() -> str:
 ## Isolated coding tasks
 
 For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in the returned worktree, stage an exact reviewed path list with `commit`, then run `ready` and `finish`. Read-only analysis does not claim a slot. Do not bypass a failed gate. The DWW lifecycle is local-only and must not fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After a successful Finish, an explicit user request may be fulfilled with an ordinary non-force push of the current branch from the clean base worktree; that publishing step is separate from DWW.
-`Start` creates the local task anchor; keep it current and reread it after continuation or context loss. In direct mode Finish integrates locally. In batched mode Finish only publishes a verified candidate and releases the slot; move the base only with an explicit `batch seal` listing the intended candidate ids. Never seal from count, idle time, or session end. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only.
+`Start` creates the local task anchor; keep it current and reread it after continuation or context loss. New repositories publish verified candidates, release the task worktree, and automatically freeze each full configured batch. The current coordinating task explicitly seals an exact smaller tail after it knows the intended work is complete. Never infer a tail from idle time, active-task counts, Hook delivery, or session end. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only. Explicit legacy direct policy remains upgrade compatibility only.
 {MANAGED_END}
 """
 

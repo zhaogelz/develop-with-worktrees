@@ -206,16 +206,50 @@ def test_rejects_empty_declared_secret_scanner(git_repo: Path) -> None:
         load_repo_config(GitRepo(git_repo))
 
 
-def test_integration_defaults_are_direct_with_five_and_ten(git_repo: Path) -> None:
+def test_new_integration_defaults_are_batched_auto_full_with_five_and_ten(
+    git_repo: Path,
+) -> None:
     config = git_repo / ".solo-ai"
     config.mkdir()
     (config / "config.toml").write_text(render_repo_config(), encoding="utf-8")
 
     loaded = load_repo_config(GitRepo(git_repo))
 
-    assert loaded.integration.mode == "direct"
+    assert loaded.integration.mode == "batched"
     assert loaded.integration.batch_size == 5
     assert loaded.integration.candidate_capacity == 10
+    assert loaded.integration.seal_policy == "auto_full"
+
+
+def test_missing_integration_table_preserves_legacy_direct_policy(
+    git_repo: Path,
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    rendered = render_repo_config()
+    rendered = "\n".join(
+        line for line in rendered.splitlines() if not line.startswith("integration =")
+    )
+    (config / "config.toml").write_text(rendered, encoding="utf-8")
+
+    loaded = load_repo_config(GitRepo(git_repo))
+
+    assert loaded.integration.mode == "direct"
+    assert loaded.integration.seal_policy == "explicit"
+
+
+def test_batched_table_without_seal_policy_preserves_legacy_explicit_mode(
+    git_repo: Path,
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    rendered = render_repo_config().replace(', seal_policy = "auto_full"', "")
+    (config / "config.toml").write_text(rendered, encoding="utf-8")
+
+    loaded = load_repo_config(GitRepo(git_repo))
+
+    assert loaded.integration.mode == "batched"
+    assert loaded.integration.seal_policy == "explicit"
 
 
 @pytest.mark.parametrize(
@@ -224,6 +258,7 @@ def test_integration_defaults_are_direct_with_five_and_ten(git_repo: Path) -> No
         ('mode = "automatic"', "integration.mode"),
         ("batch_size = 6", "batch_size"),
         ("candidate_capacity = 4", "candidate_capacity"),
+        ('seal_policy = "idle"', "seal_policy"),
     ],
 )
 def test_rejects_unsafe_integration_settings(
@@ -233,11 +268,13 @@ def test_rejects_unsafe_integration_settings(
     config.mkdir()
     rendered = render_repo_config()
     if replacement.startswith("mode"):
-        rendered = rendered.replace('mode = "direct"', replacement)
+        rendered = rendered.replace('mode = "batched"', replacement)
     elif replacement.startswith("batch_size"):
         rendered = rendered.replace("batch_size = 5", replacement)
-    else:
+    elif replacement.startswith("candidate_capacity"):
         rendered = rendered.replace("candidate_capacity = 10", replacement)
+    else:
+        rendered = rendered.replace('seal_policy = "auto_full"', replacement)
     (config / "config.toml").write_text(rendered, encoding="utf-8")
 
     with pytest.raises(SoloAIError, match=message):

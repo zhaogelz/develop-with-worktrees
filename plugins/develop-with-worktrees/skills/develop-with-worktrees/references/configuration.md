@@ -31,12 +31,14 @@ sensitive_allowlist = []
 
 # Empty by default. Each item is one exact top-level directory or file name.
 cleanup = { owned_paths = [] }
-integration = { mode = "direct", batch_size = 5, candidate_capacity = 10 }
+integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full" }
 ```
 
 `slots` is 1–32. Existing extra slots drain when the configured count is reduced and are never allocated until re-enabled. The worktree root is immutable after adoption. `cleanup.owned_paths` does not cause automatic deletion: it only names potential manual `prune-slot` targets. Entries must be unique under case-insensitive comparison so one Windows path cannot be declared twice with different casing.
 
-`integration.mode` is `direct` or `batched`. Direct is the generic default and makes Finish integrate immediately. Batched mode makes Finish publish an immutable verified candidate and release the slot; only an explicit `batch seal` promotes the exact listed generation. `batch_size` is 1–5 and defaults to 5. `candidate_capacity` must be at least the batch size, defaults to 10, and bounds pending candidate pressure rather than triggering an automatic seal.
+Newly rendered policy uses batched candidate-first integration. Finish publishes an immutable verified candidate and releases the slot. With `seal_policy = "auto_full"`, publishing the fifth eligible candidate atomically freezes the oldest configured full batch; that Finish runs or waits for its persisted integration. A smaller final tail is sealed only through an exact `batch seal --candidate ...` call by the coordinating native task after it knows intended work is complete. `batch_size` is 1–5 and defaults to 5. `candidate_capacity` must be at least the batch size, defaults to 10, and counts pending or sealed nonterminal candidates.
+
+`seal_policy = "explicit"` preserves the 0.4 manual-seal behavior. `integration.mode = "direct"` preserves immediate local promotion. A pre-0.5 repository with no `integration` table is interpreted as direct, and an existing batched table without `seal_policy` is interpreted as explicit. These compatibility defaults prevent an installed plugin update from changing active repository behavior. Each new task snapshots the resolved policy at Start; a migrated pre-upgrade task receives an explicit legacy snapshot before it can continue. Candidates published without the new auto-full policy epoch are never selected by automatic sealing.
 
 Candidate-pool records distinguish `composition_conflict`, `validation_failed`, and `promotion_blocked`. Only the exact candidate identified by a composition conflict may use `candidate repair`; the repair command is idempotent for the candidate and latest base and stops after two published repair generations. This bound is a fixed safety contract rather than a repository-tunable retry loop.
 
@@ -62,7 +64,7 @@ resource_class = "normal"       # normal or heavy
 commands = [["uv", "run", "pytest"]]
 ```
 
-All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 5 with existing tasks treated as isolated and direct integration preserved.
+All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 6. Existing execution identities are preserved, and a missing integration-policy snapshot is frozen as legacy explicit behavior before that task continues. Candidate-pool schema 1 remains readable; migrated candidates use a legacy explicit policy epoch and cannot be pulled into a new automatic batch.
 
 ## Machine-local validation capacity
 

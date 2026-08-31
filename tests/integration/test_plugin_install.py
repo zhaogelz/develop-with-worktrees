@@ -139,7 +139,7 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert f'"version": "{expected_version}"' in version.stdout
     assert f'"plugin_version": "{expected_version}"' in version.stdout
     assert '"verification_schema": 3' in version.stdout
-    assert '"state_schema": 5' in version.stdout
+    assert '"state_schema": 6' in version.stdout
     started = run_runner("start", "--name", "installed artifact smoke")
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
@@ -176,8 +176,14 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert verified.returncode == 0, verified.stderr
     prepared = run_runner("ready", "--task", task_id, "--lease", lease, cwd=worktree)
     assert prepared.returncode == 0, prepared.stderr
-    finished = run_runner("finish", "--task", task_id, "--lease", lease, cwd=worktree)
+    finished = run_runner(
+        "--json", "finish", "--task", task_id, "--lease", lease, cwd=worktree
+    )
     assert finished.returncode == 0, finished.stderr
+    candidate_id = json.loads(finished.stdout)["result"]["candidate_id"]
+    tail = run_runner("--json", "batch", "seal", "--candidate", candidate_id)
+    assert tail.returncode == 0, tail.stderr
+    assert json.loads(tail.stdout)["result"]["status"] == "completed"
     assert (smoke_repo / "smoke.txt").exists()
     in_place = run_runner(
         "start",

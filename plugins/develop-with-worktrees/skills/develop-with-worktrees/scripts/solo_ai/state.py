@@ -23,7 +23,7 @@ from .util import (
     utc_timestamp,
 )
 
-STATE_SCHEMA = 5
+STATE_SCHEMA = 6
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 IN_PLACE_MODE = "in-place"
 ISOLATED_MODE = "isolated"
@@ -126,15 +126,62 @@ class StateStore:
                 task.setdefault("supersedes", None)
                 task.setdefault("candidate_publication", None)
             state["schema_version"] = STATE_SCHEMA
+        elif version == 5:
+            for task in state.get("tasks", {}).values():
+                task.setdefault("integration_policy", None)
+            state["schema_version"] = STATE_SCHEMA
         elif version != STATE_SCHEMA:
             raise SoloAIError(
                 "Unsupported local state schema; run doctor before changing this repository"
             )
         for slot in state.get("slots", {}).values():
             slot.setdefault("generation", 0)
+        for task in state.get("tasks", {}).values():
+            task.setdefault("integration_policy", None)
         state.setdefault("pending_operation_outcomes", {})
         self._apply_guard_quarantines(state)
         return state
+
+    @staticmethod
+    def integration_policy(
+        config: RepoConfig, *, legacy_explicit: bool = False
+    ) -> dict[str, Any]:
+        seal_policy = (
+            "explicit" if legacy_explicit else config.integration.seal_policy
+        )
+        mode = config.integration.mode
+        if mode == "direct":
+            seal_policy = "explicit"
+        identity = (
+            f"candidate-policy-v1:{mode}:{config.integration.batch_size}:"
+            f"{config.integration.candidate_capacity}:{seal_policy}"
+        )
+        return {
+            "schema_version": 1,
+            "mode": mode,
+            "batch_size": config.integration.batch_size,
+            "candidate_capacity": config.integration.candidate_capacity,
+            "seal_policy": seal_policy,
+            "activation_epoch": sha256_text(identity),
+        }
+
+    def ensure_task_integration_policy(
+        self, task_id: str, config: RepoConfig
+    ) -> dict[str, Any]:
+        """Freeze a safe legacy policy before repository config can affect a task."""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            if not task:
+                raise SoloAIError(f"Unknown task: {task_id}")
+            if not task.get("integration_policy"):
+                task["integration_policy"] = self.integration_policy(
+                    config, legacy_explicit=True
+                )
+                task["updated_at"] = utc_timestamp()
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
 
     def mutate(self, callback: Callable[[dict[str, Any]], Any]) -> Any:
         with DirectoryLock(self.lock_path):
@@ -287,6 +334,10 @@ class StateStore:
                         raise SoloAIError(
                             "The request id is already bound to a different task"
                         )
+                    if not existing.get("integration_policy"):
+                        existing["integration_policy"] = self.integration_policy(
+                            config, legacy_explicit=True
+                        )
                     return {**copy.deepcopy(existing), "request_reused": True}
             candidates = [
                 slot
@@ -324,6 +375,7 @@ class StateStore:
                 "request_id": request_id,
                 "supersedes": supersedes,
                 "candidate_publication": None,
+                "integration_policy": self.integration_policy(config),
                 "slot_worktree_identity": copy.deepcopy(
                     slot.get("released_worktree_identity")
                 ),
@@ -398,6 +450,16 @@ class StateStore:
                 "request_id": None,
                 "supersedes": None,
                 "candidate_publication": None,
+                "integration_policy": {
+                    "schema_version": 1,
+                    "mode": "direct",
+                    "batch_size": 1,
+                    "candidate_capacity": 1,
+                    "seal_policy": "explicit",
+                    "activation_epoch": sha256_text(
+                        "candidate-policy-v1:in-place-direct"
+                    ),
+                },
             }
             state["tasks"][task_id] = task
             return copy.deepcopy(task)

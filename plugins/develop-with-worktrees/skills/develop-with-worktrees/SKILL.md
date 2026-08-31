@@ -1,6 +1,6 @@
 ---
 name: develop-with-worktrees
-description: "Use for any Git-repository task that may modify files. Route lifecycle ownership first, then use first-class task anchors, safe isolated worktrees, exact validation, and either direct or explicit candidate-batch integration. Let the host's native task/subagent system own task orchestration. Do not use for read-only analysis."
+description: "Use for any Git-repository task that may modify files. Route lifecycle ownership, anchor and isolate the task, validate exact changes, publish an immutable candidate, auto-integrate each full batch, and explicitly close only the coordinated smaller tail. Do not use for read-only analysis."
 ---
 
 # Develop with Worktrees
@@ -90,31 +90,30 @@ uv run --script <DWW> --repo <repo> start --name <purpose> [--request-id <stable
 5. Use `plan` or `verify --level development` when useful.
 6. Run `ready`, then `finish` with the same task and lease.
 
-Ready refuses a missing, linked, oversized, non-UTF-8, or identity-mismatched anchor. It validates the exact clean candidate and synchronizes only the recorded local base. DWW never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
+Ready refuses a missing, linked, oversized, non-UTF-8, or identity-mismatched anchor. For a genuine pre-anchor task, review its objective, target, scope, and acceptance, then use `anchor adopt` with the exact task-id confirmation; never invent those fields automatically. Ready validates the exact clean candidate and synchronizes only the recorded local base. DWW never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 
-## Direct and batched integration
+## Candidate-first integration
 
-`integration.mode = "direct"` is the generic default. A successful Finish fast-forwards the recorded clean base worktree, releases the slot, and deletes the anchor.
-
-A repository may explicitly configure `integration.mode = "batched"`. The defaults are `batch_size = 5` and `candidate_capacity = 10`:
+New repositories use `integration.mode = "batched"`, `batch_size = 5`, `candidate_capacity = 10`, and `seal_policy = "auto_full"`:
 
 - Finish validates and publishes one immutable candidate ref, releases its worktree slot, leaves the base unchanged, and keeps its anchor.
-- `candidate status` shows the bounded pool.
-- Only `batch seal --candidate <id> ...` freezes a generation. List every intended candidate explicitly; one seal accepts at most the configured batch size.
+- Publishing the configured fifth eligible candidate atomically freezes the oldest five candidates in that base-and-policy lane. That Finish then runs or waits for the persisted integration generation; no Hook or resident process is required.
+- While one batch owns the integration turn, later Finish calls may keep publishing into the remaining bounded pool.
 - DWW composes the exact frozen tree differences in a dedicated integration worktree, runs combined Full validation, verifies the base snapshot again, then fast-forwards the clean base.
-- A later revision never changes a sealed generation. Use `start --supersedes <candidate-id>` for a repair task and seal a new explicit generation.
-- When composition identifies one conflicting candidate, run `candidate repair --candidate <id>` before notifying the user. It creates or idempotently returns a managed repair task on the latest base and preserves a clean or conflicted merge for review.
-- `candidate withdraw --candidate <id>` removes only a pending candidate not captured by an active batch.
-- `batch recover --batch <id>` resumes only an interrupted recorded generation. A deterministically failed generation is not automatically rerun.
+- The coordinating native task explicitly runs `batch seal --candidate <id> ...` only for the exact smaller tail after it knows all intended work is complete. Workers publish and stop; users do not manually copy ids.
+- Never infer a tail from idle time, active-task counts, timers, Hook delivery, or SessionEnd.
+- A deterministic failed generation is retained and never blindly rerun. When composition identifies one conflicting candidate, run `candidate repair --candidate <id>` to prepare an idempotent managed repair on the latest base; continue without user interruption only when code, contracts, and tests determine one result, and stop after two repair generations.
+- Use `start --supersedes <candidate-id>` for other reviewed repair work. Unchanged compatible retained candidates may be explicitly reused in a new generation.
+- `candidate withdraw` removes an unsealed pending or retained candidate. `batch recover` resumes only an interrupted nonfailed generation.
 
-Never seal because the pool reached five, because no worker appears active, because a timer elapsed, or because a session ended. The caller decides the exact intended set. On a composition conflict, prepare the bounded repair automatically, inspect the source diff, resolve only when code, contracts, and tests determine one result, then Commit/Ready/Finish and seal the replacement generation. A successful automatic repair needs an audit result, not a user interruption. Escalate only when product rules, permissions, migrations, destructive behavior, security boundaries, or legitimate tests require a choice, or when two repair attempts fail. Final-validation and promotion failures are not semantic-merge repairs: preserve them and report their evidence. Unchanged compatible candidates may be reused only by naming their exact identities again.
+The task snapshots its integration policy at Start. Missing integration policy in a pre-upgrade repository remains legacy direct, and pre-upgrade explicit candidates never become eligible for automatic sealing merely because configuration changes. Explicit direct and explicit-seal modes are compatibility paths, not the recommended new-user flow.
 
 ## Task-anchor lifetime and durable facts
 
 The anchor remains until the Git result reaches its real terminal boundary:
 
 - direct integration succeeds;
-- the candidate's explicit batch succeeds;
+- the candidate's full or explicit-tail batch succeeds;
 - the pending candidate is explicitly withdrawn; or
 - the task is explicitly abandoned.
 
