@@ -13,9 +13,9 @@ AGENTS.md managed block        Codex lifecycle reminder
 
 `preferences.json` in the Git common directory is the machine-local long-term choice for this repository. `enabled = false` means normal current-directory development and never changes tracked files. `session-overrides.json` contains only hashed current-task session authorizations and delegated capability hashes; it contains neither raw session identifiers nor delegation codes and never enters version control.
 
-`dww route --json` is a compact read-only lifecycle/state-owner query. It returns one action: `defer`, `delegated`, `disabled`, `current-task`, `managed`, or `ask`. A detected mature workflow normally returns `defer`; existing preference and session files are left untouched but inactive while that workflow marker remains, and DWW creates no lifecycle or orchestration state. It returns `delegated` only when `.solo-ai/delegated.toml` is valid and its exact contract-plus-input fingerprint has been approved in local Git-common-dir state. See [Delegated adapter contract](delegated-adapters.md).
+`dww route --json` is a compact read-only lifecycle-owner query. It returns one action: `defer`, `delegated`, `disabled`, `current-task`, `managed`, or `ask`. A detected mature workflow normally returns `defer`; existing preference and session files are left untouched but inactive while that workflow marker remains, and DWW creates no lifecycle, anchor, candidate, or integration-batch state. It returns `delegated` only when `.solo-ai/delegated.toml` is valid and its exact contract-plus-input fingerprint has been approved in local Git-common-dir state. See [Delegated adapter contract](delegated-adapters.md).
 
-State-changing orchestration commands linearize at route admission; DWW is not a background watcher and cannot lock files owned by another workflow. A command whose admission observes `defer` performs no DWW state write. If a mature marker or delegated input changes concurrently after a command was admitted, the in-flight command may finish the mutation admitted by the earlier route; every later state-changing command re-routes, and existing batches become read-only. Batch mutations also recheck after taking their own lock and immediately before primary batch persistence, with any completion receipt treated as part of that same admitted mutation, so a change observed at either boundary leaves batch bytes unchanged.
+State-changing lifecycle commands linearize at route admission; DWW is not a background watcher and cannot lock files owned by another workflow. A command whose admission observes `defer` performs no DWW state write. New task orchestration uses the host's native task/subagent system. The old `orchestrate` state remains only for draining existing batches and is not created for new work.
 
 ## `config.toml`
 
@@ -31,11 +31,14 @@ sensitive_allowlist = []
 
 # Empty by default. Each item is one exact top-level directory or file name.
 cleanup = { owned_paths = [] }
+integration = { mode = "direct", batch_size = 5, candidate_capacity = 10 }
 ```
 
 `slots` is 1–32. Existing extra slots drain when the configured count is reduced and are never allocated until re-enabled. The worktree root is immutable after adoption. `cleanup.owned_paths` does not cause automatic deletion: it only names potential manual `prune-slot` targets. Entries must be unique under case-insensitive comparison so one Windows path cannot be declared twice with different casing.
 
-`remote_policy = "local-only"` governs DWW itself: Start, Ready, Finish, orchestration, and recovery never contact or mutate a remote. It does not prohibit a separate ordinary push after Finish when the user explicitly requests publishing. That push must come from the clean base worktree, use a dry-run first, and must not force-update a remote ref.
+`integration.mode` is `direct` or `batched`. Direct is the generic default and makes Finish integrate immediately. Batched mode makes Finish publish an immutable verified candidate and release the slot; only an explicit `batch seal` promotes the exact listed generation. `batch_size` is 1–5 and defaults to 5. `candidate_capacity` must be at least the batch size, defaults to 10, and bounds pending candidate pressure rather than triggering an automatic seal.
+
+`remote_policy = "local-only"` governs DWW itself: Start, Ready, Finish, candidate publication, batch integration, and recovery never contact or mutate a remote. It does not prohibit a separate ordinary push after successful integration when the user explicitly requests publishing. That push must come from the clean base worktree, use a dry-run first, and must not force-update a remote ref.
 
 ## `verification.toml` schema 3
 
@@ -57,7 +60,7 @@ resource_class = "normal"       # normal or heavy
 commands = [["uv", "run", "pytest"]]
 ```
 
-All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 3 with existing tasks treated as isolated.
+All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 5 with existing tasks treated as isolated and direct integration preserved.
 
 ## Machine-local validation capacity
 

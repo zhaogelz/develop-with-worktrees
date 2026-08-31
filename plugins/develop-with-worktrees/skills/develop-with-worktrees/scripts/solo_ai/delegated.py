@@ -549,9 +549,7 @@ def _cleanup_verified_input_closure(manifest: _VerifiedClosureManifest) -> None:
                 )
         for path, expected in manifest.files:
             if snapshot_plain_path(path) != expected:
-                raise SoloAIError(
-                    f"Verified input file changed before cleanup: {path}"
-                )
+                raise SoloAIError(f"Verified input file changed before cleanup: {path}")
         for path, expected in sorted(
             manifest.files, key=lambda item: len(item[0].parts), reverse=True
         ):
@@ -574,8 +572,7 @@ def _exception_requires_closure_preservation(error: BaseException) -> bool:
         return True
     if isinstance(error, BaseExceptionGroup):
         return any(
-            _exception_requires_closure_preservation(item)
-            for item in error.exceptions
+            _exception_requires_closure_preservation(item) for item in error.exceptions
         )
     return False
 
@@ -794,9 +791,7 @@ class _PosixSupervisorOwnership:
 
     pid: int = 0
     process_group: int = 0
-    control_write: _OwnedPosixFd = field(
-        default_factory=lambda: _OwnedPosixFd(None)
-    )
+    control_write: _OwnedPosixFd = field(default_factory=lambda: _OwnedPosixFd(None))
     process: subprocess.Popen[bytes] | None = None
     identity_proven: bool = True
     termination_delivery: str = _POSIX_TERMINATION_NOT_ATTEMPTED
@@ -1421,12 +1416,9 @@ def _stop_posix_adapter_process_group(process: _PosixAdapterProcess) -> None:
                     timeout=ADAPTER_TERMINATION_GRACE_SECONDS,
                 )
             launcher_pid, process_group = process.launcher_identity.require()
-            if (
-                process.supervisor is not None
-                and (
-                    launcher_pid != process.supervisor.pid
-                    or process_group != process.supervisor.pid
-                )
+            if process.supervisor is not None and (
+                launcher_pid != process.supervisor.pid
+                or process_group != process.supervisor.pid
             ):
                 raise DelegatedProcessTerminationError(
                     "POSIX supervisor status identity does not match its direct child"
@@ -1438,12 +1430,9 @@ def _stop_posix_adapter_process_group(process: _PosixAdapterProcess) -> None:
         except BaseException as exc:  # noqa: BLE001 - K 已优先请求，无身份不得猜
             try:
                 launcher_pid, process_group = process.launcher_identity.require()
-                if (
-                    process.supervisor is None
-                    or (
-                        launcher_pid == process.supervisor.pid
-                        and process_group == process.supervisor.pid
-                    )
+                if process.supervisor is None or (
+                    launcher_pid == process.supervisor.pid
+                    and process_group == process.supervisor.pid
                 ):
                     process.ownership.pid = launcher_pid
                     process.ownership.process_group = process_group
@@ -1547,9 +1536,7 @@ def _poll_posix_adapter_result(process: _PosixAdapterProcess) -> int | None:
     frame = bytes(process.result_buffer)
     match = re.fullmatch(rb"DWWR1 (-?[0-9]{1,3})\n", frame)
     if match is None:
-        raise DelegatedContractError(
-            "POSIX delegated adapter result frame is invalid"
-        )
+        raise DelegatedContractError("POSIX delegated adapter result frame is invalid")
     returncode = int(match.group(1))
     if returncode < -255 or returncode > 255:
         raise DelegatedContractError(
@@ -1621,9 +1608,7 @@ def _launch_posix_adapter_process(
 ) -> None:
     """原地填充 caller 预建 owner，避免返回值落盘前丢失进程所有权。"""
 
-    _prepare_posix_launch_resources(
-        process, argv, root=root, environment=environment
-    )
+    _prepare_posix_launch_resources(process, argv, root=root, environment=environment)
     child_close_error: BaseException | None = None
     try:
         try:
@@ -1873,9 +1858,7 @@ class _WindowsAdapterProcess:
         wait = kernel32.WaitForSingleObject
         wait.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
         wait.restype = ctypes.c_uint32
-        result = int(
-            wait(ctypes.c_void_p(self.process_handle()), milliseconds)
-        )
+        result = int(wait(ctypes.c_void_p(self.process_handle()), milliseconds))
         if result == 0x00000102:
             raise subprocess.TimeoutExpired([], timeout)
         if result == 0xFFFFFFFF:
@@ -1900,7 +1883,6 @@ class _WindowsLaunchResources:
             self.standard_handles = (ctypes.c_void_p * 3)()
         if self.job_handles is None:
             self.job_handles = (ctypes.c_void_p * 1)()
-
 
 
 def _windows_kernel32() -> Any:
@@ -1985,7 +1967,7 @@ def _close_windows_adapter_job(job: _WindowsAdapterJob) -> None:
         job.close_outcome_uncertain = False
     except DelegatedProcessTerminationError:
         raise
-    except BaseException as exc:  # noqa: BLE001 - 关闭结果可能已生效，禁止复用数值
+    except BaseException as exc:
         raise DelegatedProcessTerminationError(
             "Windows adapter Job handle close outcome is indeterminate"
         ) from exc
@@ -2031,12 +2013,10 @@ def _consume_windows_process_handle(
         if not closed:
             raise DelegatedProcessTerminationError(
                 f"Windows adapter {label} handle could not be confirmed closed"
-            ) from OSError(
-                ctypes.get_last_error(), f"CloseHandle failed for {label}"
-            )
+            ) from OSError(ctypes.get_last_error(), f"CloseHandle failed for {label}")
     except DelegatedProcessTerminationError:
         raise
-    except BaseException as exc:  # noqa: BLE001 - 已从唯一所有者移除，禁止重试
+    except BaseException as exc:
         raise DelegatedProcessTerminationError(
             f"Windows adapter {label} handle close outcome is indeterminate"
         ) from exc
@@ -2046,9 +2026,9 @@ def _close_windows_adapter_process_handles(
     process: _WindowsAdapterProcess,
 ) -> None:
     failures: list[BaseException] = []
-    for field, label in (("hThread", "thread"), ("hProcess", "process")):
+    for handle_field, label in (("hThread", "thread"), ("hProcess", "process")):
         try:
-            _consume_windows_process_handle(process, field, label=label)
+            _consume_windows_process_handle(process, handle_field, label=label)
         except BaseException as exc:  # noqa: BLE001 - 两个句柄都只消费一次
             failures.append(exc)
     if failures:
@@ -2100,7 +2080,9 @@ def _initialize_windows_launch_resources(
     attribute_bytes = ctypes.c_size_t()
     ctypes.set_last_error(0)
     if initialize(None, 2, 0, ctypes.byref(attribute_bytes)):
-        raise OSError("InitializeProcThreadAttributeList size probe unexpectedly succeeded")
+        raise OSError(
+            "InitializeProcThreadAttributeList size probe unexpectedly succeeded"
+        )
     if ctypes.get_last_error() != 122 or attribute_bytes.value <= 0:
         raise OSError(
             ctypes.get_last_error(),
@@ -2165,9 +2147,7 @@ def _initialize_windows_launch_resources(
         ctypes.c_void_p,
     ]
     update.restype = ctypes.c_int
-    attribute_pointer = ctypes.c_void_p(
-        ctypes.addressof(resources.attribute_buffer)
-    )
+    attribute_pointer = ctypes.c_void_p(ctypes.addressof(resources.attribute_buffer))
     if not update(
         attribute_pointer,
         0,
@@ -2189,9 +2169,7 @@ def _initialize_windows_launch_resources(
         None,
         None,
     ):
-        raise OSError(
-            ctypes.get_last_error(), "PROC_THREAD_ATTRIBUTE_JOB_LIST failed"
-        )
+        raise OSError(ctypes.get_last_error(), "PROC_THREAD_ATTRIBUTE_JOB_LIST failed")
 
     startup = _WindowsStartupInformationEx()
     startup.StartupInfo.cb = ctypes.sizeof(startup)
@@ -2254,7 +2232,7 @@ def _windows_environment_block(
         return None
     entries: list[str] = []
     for key, value in sorted(environment.items(), key=lambda item: item[0].upper()):
-        invalid_equals = "=" in (key[1:] if key.startswith("=") else key)
+        invalid_equals = "=" in (key.removeprefix("="))
         if not key or invalid_equals or "\0" in key or "\0" in value:
             raise ValueError("Windows delegated adapter environment is invalid")
         entries.append(f"{key}={value}")
@@ -2344,7 +2322,7 @@ def _launch_windows_adapter_process(
         launch_error = exc
     try:
         _close_windows_launch_resources(resources)
-    except BaseException as resource_error:  # noqa: BLE001 - 与创建错误保留双证据
+    except BaseException as resource_error:
         if launch_error is None:
             raise
         raise _combined_failures(
@@ -2488,7 +2466,9 @@ def _stop_adapter_process(
                 _stop_windows_adapter_job(windows_job)
             except BaseException as exc:  # noqa: BLE001 - 句柄也必须继续单次消费
                 failures.append(exc)
-            root_stopped = process.job_ownership_confirmed and windows_job.empty_confirmed
+            root_stopped = (
+                process.job_ownership_confirmed and windows_job.empty_confirmed
+            )
             if not root_stopped:
                 try:
                     _ensure_windows_adapter_root_stopped(process)
@@ -2631,14 +2611,11 @@ def _run_adapter_process(
                     )
                 if time.monotonic() >= deadline:
                     raise DelegatedContractError(
-                        "Delegated adapter timed out after "
-                        f"{timeout_seconds:g} seconds"
+                        f"Delegated adapter timed out after {timeout_seconds:g} seconds"
                     )
                 _adapter_poll_pause(ADAPTER_POLL_SECONDS)
             returncode = process.wait()
-            _ensure_adapter_process_boundary_empty(
-                process, windows_job=windows_job
-            )
+            _ensure_adapter_process_boundary_empty(process, windows_job=windows_job)
             stdout = _bounded_file_bytes(
                 stdout_handle, limit=MAX_ADAPTER_STDOUT_BYTES, stream="stdout"
             )

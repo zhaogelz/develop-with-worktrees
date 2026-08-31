@@ -11,8 +11,14 @@ from .cleanup import (
 )
 from .repo import GitRepo
 from .state import FINAL_TASK_STATES, StateStore
-from .util import SoloAIError, atomic_write_json, read_json, utc_timestamp
-from .util import path_identity, snapshot_plain_path
+from .util import (
+    SoloAIError,
+    atomic_write_json,
+    path_identity,
+    read_json,
+    snapshot_plain_path,
+    utc_timestamp,
+)
 
 ABANDONMENT_SCHEMA = 1
 ABANDONMENT_RECEIPT_SCHEMA = 1
@@ -55,7 +61,9 @@ def _active_ref_snapshot(
         if head is None:
             raise SoloAIError(f"Active task branch is missing: {other['id']}")
         if repo.is_ancestor(candidate, head):
-            raise SoloAIError(f"Candidate is still referenced by active task {other['id']}")
+            raise SoloAIError(
+                f"Candidate is still referenced by active task {other['id']}"
+            )
         snapshot[ref] = head
     return snapshot
 
@@ -73,7 +81,9 @@ def new_transaction(
     try:
         managed_root.relative_to(ensure_root)
     except ValueError as exc:
-        raise SoloAIError("Task worktree is outside the repository managed area") from exc
+        raise SoloAIError(
+            "Task worktree is outside the repository managed area"
+        ) from exc
     resolved_worktree = require_managed_directory_identity(
         worktree, managed_root=managed_root
     )
@@ -187,9 +197,7 @@ def prepare(
     )
 
 
-def resume(
-    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
-) -> dict[str, Any]:
+def resume(repo: GitRepo, *, store: StateStore, task: dict[str, Any]) -> dict[str, Any]:
     transaction = task.get("abandonment")
     if not transaction:
         raise SoloAIError("Task has no abandonment transaction")
@@ -212,9 +220,10 @@ def resume(
     current_branch = repo.branch(worktree)
     current_head = repo.head(worktree)
     if current_branch == transaction["branch"]:
-        if current_head != expected_tip or repo.ref_head(
-            f"refs/heads/{transaction['branch']}"
-        ) != expected_tip:
+        if (
+            current_head != expected_tip
+            or repo.ref_head(f"refs/heads/{transaction['branch']}") != expected_tip
+        ):
             raise SoloAIError("Task branch changed during abandonment")
         current_tracked_status = repo.git(
             ["status", "--porcelain=v1", "--untracked-files=no"], cwd=worktree

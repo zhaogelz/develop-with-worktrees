@@ -4,9 +4,10 @@
 
 """Codex PreToolUse guard for develop-with-worktrees.
 
-The hook is deliberately stdlib-only.  It provides a hard PreToolUse denial for
-the local Codex tool paths that invoke hooks; it is not an operating-system
-sandbox.  State is held under the Git common directory, never in user files.
+The optional hook is deliberately stdlib-only. It provides a hard PreToolUse
+denial for local Codex tool paths that invoke hooks; lifecycle correctness does
+not depend on it and it is not an operating-system sandbox. State is held under
+the Git common directory, never in user files.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ if str(SKILL_SCRIPTS) not in sys.path:
 from solo_ai.delegated import inspect_delegated
 from solo_ai.routing import decide_route, detect_existing_workflows
 
-FINAL_TASK_STATES = {"finished", "abandoned"}
+FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
 DWW_SUBCOMMANDS = {
     "version",
@@ -49,6 +50,8 @@ DWW_SUBCOMMANDS = {
     "route",
     "delegated",
     "orchestrate",
+    "candidate",
+    "batch",
     "start",
     "commit",
     "ready",

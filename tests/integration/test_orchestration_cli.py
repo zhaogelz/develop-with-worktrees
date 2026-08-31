@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
-
-from conftest import declare_delegated_adapter
 
 
 def _runner() -> Path:
@@ -20,7 +17,9 @@ def _runner() -> Path:
     )
 
 
-def _call(repo: Path, *arguments: str) -> dict[str, object]:
+def test_orchestration_cli_rejects_new_batches_and_points_to_native_tasks(
+    git_repo: Path,
+) -> None:
     completed = subprocess.run(
         [
             "uv",
@@ -28,75 +27,24 @@ def _call(repo: Path, *arguments: str) -> dict[str, object]:
             "--script",
             str(_runner()),
             "--repo",
-            str(repo),
+            str(git_repo),
             "--json",
-            *arguments,
+            "orchestrate",
+            "plan",
+            "--controller",
+            "legacy-controller",
+            "--goal",
+            "new work",
         ],
         text=True,
         encoding="utf-8",
         errors="replace",
-        env={**os.environ, "PYTHONIOENCODING": "cp1252"},
         capture_output=True,
         check=False,
         timeout=90,
     )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+    assert completed.returncode == 2
     payload = json.loads(completed.stdout)
-    assert payload["ok"] is True
-    return payload["result"]
-
-
-def _approve_test_adapter(repo: Path) -> None:
-    declare_delegated_adapter(
-        repo,
-        adapter_id="orchestration-test",
-        available_slots=5,
-        max_parallel=5,
-    )
-
-
-def test_orchestration_cli_requires_confirmation_then_returns_frontier(
-    git_repo: Path,
-) -> None:
-    _approve_test_adapter(git_repo)
-    planned = _call(
-        git_repo,
-        "orchestrate",
-        "plan",
-        "--adapter",
-        "delegated",
-        "--controller",
-        "central-controller",
-        "--goal",
-        "让用户看见结果",
-        "--task",
-        json.dumps({"id": "api", "title": "提供结果", "acceptance": ["可读取"]}),
-        "--task",
-        json.dumps(
-            {
-                "id": "page",
-                "title": "显示结果",
-                "acceptance": ["可看见"],
-                "depends_on": ["api"],
-            }
-        ),
-    )
-    batch_id = str(planned["id"])
-    assert planned["goal"] == "让用户看见结果"
-    assert planned["tasks"]["api"]["title"] == "提供结果"
-    assert planned["status"] == "awaiting-confirmation"
-    assert "controller" not in planned
-
-    before = _call(git_repo, "orchestrate", "frontier", "--batch", batch_id)
-    assert before["tasks"] == []
-    _call(
-        git_repo,
-        "orchestrate",
-        "confirm",
-        "--batch",
-        batch_id,
-        "--controller",
-        "central-controller",
-    )
-    after = _call(git_repo, "orchestrate", "frontier", "--batch", batch_id)
-    assert [task["id"] for task in after["tasks"]] == ["api"]
+    assert payload["ok"] is False
+    assert "native task/subagent system" in payload["error"]

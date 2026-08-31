@@ -31,7 +31,9 @@ class CleanupPolicy:
     protected_file_suffixes: tuple[str, ...] = (".db", ".sqlite", ".sqlite3")
 
 
-def classify_cleanup_path(relative: str, policy: CleanupPolicy = CleanupPolicy()) -> str:
+def classify_cleanup_path(
+    relative: str, policy: CleanupPolicy = CleanupPolicy()
+) -> str:
     parts = tuple(part.casefold() for part in Path(relative).parts)
     leaf = parts[-1] if parts else ""
     if leaf == ".env" or leaf.startswith(".env."):
@@ -50,7 +52,9 @@ def _require_plain_path(path: Path, root: Path) -> Path:
     try:
         relative = path.absolute().relative_to(root)
     except ValueError as exc:
-        raise SoloAIError(f"Cleanup content is outside the managed worktree: {path}") from exc
+        raise SoloAIError(
+            f"Cleanup content is outside the managed worktree: {path}"
+        ) from exc
     current = root
     for part in relative.parts:
         current = current / part
@@ -75,7 +79,9 @@ def require_managed_directory_identity(
     try:
         relative = raw_path.relative_to(raw_root)
     except ValueError as exc:
-        raise SoloAIError(f"Managed directory escaped its configured root: {path}") from exc
+        raise SoloAIError(
+            f"Managed directory escaped its configured root: {path}"
+        ) from exc
     if is_link_or_junction(raw_root):
         raise SoloAIError(f"Managed root became a link or junction: {raw_root}")
     current = raw_root
@@ -116,9 +122,10 @@ def inspect_untracked(
             result[classification].append(relative)
         elif relative in ignored:
             parts = tuple(part.casefold() for part in Path(relative).parts)
-            if any(part in KNOWN_RETAINED_ROOTS for part in parts) or Path(
-                relative
-            ).name.casefold() == "uv.toml":
+            if (
+                any(part in KNOWN_RETAINED_ROOTS for part in parts)
+                or Path(relative).name.casefold() == "uv.toml"
+            ):
                 result["retained"].append(relative)
             else:
                 result["unknown_ignored"].append(relative)
@@ -177,12 +184,12 @@ def remove_abandoned_untracked(
         while parent != cwd:
             directories.add(parent)
             parent = parent.parent
-    for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+    for directory in sorted(
+        directories, key=lambda item: len(item.parts), reverse=True
+    ):
         _require_plain_path(directory, cwd)
         if directory.exists() and not any(directory.iterdir()):
-            delete_plain_path_if_unchanged(
-                directory, snapshot_plain_path(directory)
-            )
+            delete_plain_path_if_unchanged(directory, snapshot_plain_path(directory))
     remaining = inspect_untracked(repo, cwd=cwd, policy=policy)
     blocked = [
         *remaining["keep"],
@@ -191,4 +198,6 @@ def remove_abandoned_untracked(
         *remaining["ordinary"],
     ]
     if blocked:
-        raise SoloAIError("Untracked content changed during abandon; files were preserved")
+        raise SoloAIError(
+            "Untracked content changed during abandon; files were preserved"
+        )

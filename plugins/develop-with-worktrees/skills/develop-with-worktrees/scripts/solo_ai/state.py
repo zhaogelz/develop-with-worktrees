@@ -23,8 +23,8 @@ from .util import (
     utc_timestamp,
 )
 
-STATE_SCHEMA = 4
-FINAL_TASK_STATES = {"finished", "abandoned"}
+STATE_SCHEMA = 5
+FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 IN_PLACE_MODE = "in-place"
 ISOLATED_MODE = "isolated"
 
@@ -119,6 +119,12 @@ class StateStore:
             for task in state.get("tasks", {}).values():
                 task.setdefault("integration", None)
                 task.setdefault("abandonment", None)
+            state["schema_version"] = STATE_SCHEMA
+        elif version == 4:
+            for task in state.get("tasks", {}).values():
+                task.setdefault("request_id", None)
+                task.setdefault("supersedes", None)
+                task.setdefault("candidate_publication", None)
             state["schema_version"] = STATE_SCHEMA
         elif version != STATE_SCHEMA:
             raise SoloAIError(
@@ -259,11 +265,29 @@ class StateStore:
         base_head: str,
         base_ref: str,
         base_worktree: Path,
+        request_id: str | None = None,
+        supersedes: str | None = None,
     ) -> dict[str, Any]:
         task_id = f"task-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         lease = uuid.uuid4().hex
 
         def update(state: dict[str, Any]) -> dict[str, Any]:
+            if request_id:
+                matches = [
+                    task
+                    for task in state["tasks"].values()
+                    if task.get("request_id") == request_id
+                ]
+                if matches:
+                    existing = matches[0]
+                    if (
+                        existing.get("name") != name
+                        or existing.get("base_ref") != base_ref
+                    ):
+                        raise SoloAIError(
+                            "The request id is already bound to a different task"
+                        )
+                    return {**copy.deepcopy(existing), "request_reused": True}
             candidates = [
                 slot
                 for slot in state["slots"].values()
@@ -297,6 +321,9 @@ class StateStore:
                 "processes": [],
                 "integration": None,
                 "abandonment": None,
+                "request_id": request_id,
+                "supersedes": supersedes,
+                "candidate_publication": None,
                 "slot_worktree_identity": copy.deepcopy(
                     slot.get("released_worktree_identity")
                 ),
@@ -312,7 +339,7 @@ class StateStore:
             slot.update(
                 {"status": "starting", "task_id": task_id, "quarantine_reason": None}
             )
-            return copy.deepcopy(task)
+            return {**copy.deepcopy(task), "request_reused": False}
 
         return self.mutate(update)
 
@@ -368,6 +395,9 @@ class StateStore:
                 "processes": [],
                 "integration": None,
                 "abandonment": None,
+                "request_id": None,
+                "supersedes": None,
+                "candidate_publication": None,
             }
             state["tasks"][task_id] = task
             return copy.deepcopy(task)
@@ -446,7 +476,9 @@ class StateStore:
             active = task.get("active_operation") or {}
             if operation_id is not None:
                 if active.get("id") != operation_id or active.get("kind") != "finish":
-                    raise SoloAIError("Integration preparation lost its Finish operation")
+                    raise SoloAIError(
+                        "Integration preparation lost its Finish operation"
+                    )
             elif (
                 active
                 and active.get("kind") != "recover"
@@ -461,8 +493,91 @@ class StateStore:
             task["updated_at"] = utc_timestamp()
             slot = state["slots"][task["slot_id"]]
             if slot.get("task_id") != task_id:
-                raise SoloAIError("Slot ownership changed before integration preparation")
+                raise SoloAIError(
+                    "Slot ownership changed before integration preparation"
+                )
             slot["status"] = "finishing"
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def prepare_candidate_publication(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        publication: dict[str, Any],
+    ) -> dict[str, Any]:
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            if not task or task.get("status") not in {"ready", "publishing"}:
+                raise SoloAIError("Only a ready task can publish a candidate")
+            active = task.get("active_operation") or {}
+            if active.get("id") != operation_id or active.get("kind") != "finish":
+                raise SoloAIError("Candidate publication lost its Finish operation")
+            existing = task.get("candidate_publication")
+            if existing and existing != publication:
+                raise SoloAIError("A different candidate publication already exists")
+            task["candidate_publication"] = copy.deepcopy(publication)
+            task["status"] = "publishing"
+            task["updated_at"] = utc_timestamp()
+            slot = state["slots"][task["slot_id"]]
+            if slot.get("task_id") != task_id:
+                raise SoloAIError("Slot ownership changed before candidate publication")
+            slot["status"] = "publishing"
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def complete_candidate_publication(
+        self, task_id: str, *, candidate_id: str
+    ) -> dict[str, Any]:
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            publication = task.get("candidate_publication") if task else None
+            if (
+                not publication
+                or publication.get("candidate_id") != candidate_id
+                or task.get("status") not in {"publishing", "candidate-published"}
+            ):
+                raise SoloAIError("Candidate publication identity changed")
+            slot = state["slots"][task["slot_id"]]
+            if slot.get("task_id") not in {task_id, None}:
+                raise SoloAIError("Candidate slot was reallocated before release")
+            now = utc_timestamp()
+            publication.update(
+                {
+                    "phase": "completed",
+                    "completed_at": publication.get("completed_at") or now,
+                }
+            )
+            task.update(
+                {
+                    "status": "candidate-published",
+                    "lease": None,
+                    "lease_owner": None,
+                    "active_operation": None,
+                    "updated_at": now,
+                }
+            )
+            slot.update(
+                {
+                    "status": "idle",
+                    "task_id": None,
+                    "last_used": time.time(),
+                    "quarantine_reason": None,
+                    "released_worktree_identity": copy.deepcopy(
+                        publication["worktree_identity"]
+                    ),
+                    "released_managed_root_identity": copy.deepcopy(
+                        publication["managed_root_identity"]
+                    ),
+                    "released_worktree_resolved": publication["worktree_resolved"],
+                    "released_managed_root_resolved": publication[
+                        "managed_root_resolved"
+                    ],
+                }
+            )
             return copy.deepcopy(task)
 
         return self.mutate(update)
@@ -519,6 +634,7 @@ class StateStore:
         self, task_id: str, *, transaction_id: str
     ) -> dict[str, Any]:
         """记录集成终态，但保持槽位不可分配，直到外部现场终检完成。"""
+
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
             integration = task.get("integration") if task else None
@@ -528,7 +644,9 @@ class StateStore:
                 raise SoloAIError("Only a promoted integration can complete")
             slot = state["slots"][task["slot_id"]]
             if slot.get("task_id") != task_id:
-                raise SoloAIError("Slot ownership changed before integration completion")
+                raise SoloAIError(
+                    "Slot ownership changed before integration completion"
+                )
             now = utc_timestamp()
             integration.update(
                 {
@@ -575,7 +693,10 @@ class StateStore:
             ):
                 raise SoloAIError("Integration completion identity changed")
             slot = state["slots"][task["slot_id"]]
-            if slot.get("task_id") != task_id or slot.get("status") != "release-checking":
+            if (
+                slot.get("task_id") != task_id
+                or slot.get("status") != "release-checking"
+            ):
                 raise SoloAIError("Integration slot release state changed")
             integration.setdefault("cleanup", {})["slot_released"] = True
             slot.update(
@@ -616,15 +737,21 @@ class StateStore:
             existing = task.get("integration")
             if existing:
                 if existing != integration:
-                    raise SoloAIError("A different integration transaction already exists")
+                    raise SoloAIError(
+                        "A different integration transaction already exists"
+                    )
                 return copy.deepcopy(task)
             if completed:
                 if task.get("status") != "finished":
-                    raise SoloAIError("Only a finished legacy task can import completed integration")
+                    raise SoloAIError(
+                        "Only a finished legacy task can import completed integration"
+                    )
                 task["integration"] = copy.deepcopy(integration)
             else:
                 if task.get("status") != "ready":
-                    raise SoloAIError("Only a ready legacy task can import promoted integration")
+                    raise SoloAIError(
+                        "Only a ready legacy task can import promoted integration"
+                    )
                 slot = state["slots"][task["slot_id"]]
                 if slot.get("task_id") != task_id:
                     raise SoloAIError("Legacy integration slot ownership changed")
@@ -670,6 +797,7 @@ class StateStore:
         self, task_id: str, *, transaction_id: str
     ) -> dict[str, Any]:
         """记录业务终态，但保持槽位不可分配，直到外部现场终检完成。"""
+
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
             abandonment = task.get("abandonment") if task else None
@@ -729,7 +857,10 @@ class StateStore:
             ):
                 raise SoloAIError("Abandonment completion identity changed")
             slot = state["slots"][task["slot_id"]]
-            if slot.get("task_id") != task_id or slot.get("status") != "release-checking":
+            if (
+                slot.get("task_id") != task_id
+                or slot.get("status") != "release-checking"
+            ):
                 raise SoloAIError("Abandonment slot release state changed")
             slot.update(
                 {
@@ -785,6 +916,7 @@ class StateStore:
                 },
             )
         except Exception:
+
             def rollback_begin(state: dict[str, Any]) -> None:
                 current = state["tasks"].get(task_id)
                 active = current.get("active_operation") if current else None
@@ -850,6 +982,7 @@ class StateStore:
                 # state 已预写待补终态，后续 status/recover 会修复该投影。
                 pass
             if receipt_written:
+
                 def clear_pending(state: dict[str, Any]) -> None:
                     state.setdefault("pending_operation_outcomes", {}).pop(
                         operation_id, None
@@ -867,9 +1000,11 @@ class StateStore:
         pending_ids = set(state.get("pending_operation_outcomes", {}))
         for path in (self.repo.local_dir / "operations").glob("*.json"):
             receipt = read_json(path, {})
-            if receipt.get("status") != "running" or process_matches(
-                receipt.get("owner", {})
-            ) or str(receipt.get("id") or path.stem) in pending_ids:
+            if (
+                receipt.get("status") != "running"
+                or process_matches(receipt.get("owner", {}))
+                or str(receipt.get("id") or path.stem) in pending_ids
+            ):
                 continue
             kind = receipt.get("kind")
             outcome = {
@@ -898,6 +1033,7 @@ class StateStore:
             atomic_write_json(path, receipt)
             completed.append(operation_id)
         if completed:
+
             def clear(state: dict[str, Any]) -> None:
                 values = state.setdefault("pending_operation_outcomes", {})
                 for operation_id in completed:
@@ -931,6 +1067,7 @@ class StateStore:
         try:
             yield task
         finally:
+
             def end(state: dict[str, Any]) -> None:
                 current = state["tasks"].get(task_id)
                 active = current.get("active_operation") if current else None
@@ -992,7 +1129,9 @@ class StateStore:
                 raise SoloAIError("Only a final task can quarantine its released slot")
             slot = state["slots"].get(task["slot_id"])
             if not slot or slot.get("task_id") not in {None, task_id}:
-                raise SoloAIError("Released slot was already reallocated; preserve it manually")
+                raise SoloAIError(
+                    "Released slot was already reallocated; preserve it manually"
+                )
             slot.update({"status": "quarantined", "quarantine_reason": reason})
 
         self.mutate(update)
@@ -1029,7 +1168,9 @@ class StateStore:
 
         self.mutate(update)
 
-    def recover(self, task_id: str, *, operation_id: str | None = None) -> dict[str, Any]:
+    def recover(
+        self, task_id: str, *, operation_id: str | None = None
+    ) -> dict[str, Any]:
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
             if not task or task.get("status") in FINAL_TASK_STATES:
@@ -1039,7 +1180,11 @@ class StateStore:
                     "In-place tasks require resume-in-place; ordinary recovery cannot change their session binding"
                 )
             active = task.get("active_operation")
-            if active and active.get("id") != operation_id and process_matches(active.get("owner", {})):
+            if (
+                active
+                and active.get("id") != operation_id
+                and process_matches(active.get("owner", {}))
+            ):
                 raise SoloAIError("Task still has a live operation; recovery is unsafe")
             live_runs: list[str] = []
             interrupted_runs: list[Path] = []

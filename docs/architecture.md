@@ -1,35 +1,60 @@
 # Architecture
 
 ```text
-Codex central conversation
-  simple goal ──────────────────────────────→ one normal DWW task
-  complex goal → plain plan → one confirmation
+Host-native task / subagent orchestration
+  goals, dependencies, workers, waits, user-facing status
+                    ↓ one Git-writing task per worker
+DWW lifecycle router
+  defer → mature repository lifecycle
+  delegated → exact approved adapter
+  managed → task identity + anchor + isolated worktree
                     ↓
-Host-neutral orchestration layer
-  batch state → dependency frontier → controller-only worker dispatch
-  pause / cancel / handoff → minimal evidence ledger → compact receipt
+Git safety and evidence
+  exact Commit → Ready proof → Finish
                     ↓
-Lifecycle adapter boundary
-  managed repository → DWW adapter → Start / exact Commit / Ready / Finish
-  mature repository → explicit delegated adapter → repository-owned lifecycle
-                    ↓
-Git common-dir local state
-  solo-ai/                 DWW slots, leases, proofs, lifecycle receipts
-  solo-ai-orchestration/   batch graph, decisions, task/proof references, receipts
+Integration policy
+  direct  → exact local fast-forward
+  batched → immutable candidate pool → explicit seal → combined Full proof → fast-forward
 ```
 
-The orchestration layer is deliberately separate from `StateStore`. A batch has a goal, a maximum development concurrency of at most five, a lifecycle adapter, and minimal task summaries. It starts in `awaiting-confirmation`; no worker is schedulable before the central conversation calls `confirm`. A new central conversation can make a confirmed handoff using the exact batch id, while branches and worker files remain untouched.
+The top seam is intentional: DWW does not compete with the host's task graph, worker dispatch, dependency management, or task UI. The legacy `solo-ai-orchestration` package remains only to drain already-created state. New work never creates a DWW controller identity or orchestration batch.
 
-The scheduler is pure: it returns planned tasks whose dependencies are completed, subject to the batch limit and the currently available DWW slots. `write_scope` is advisory and never serializes a task by itself. `exclusive_resources` is the narrow opt-in gate for migrations, lockfiles, shared contracts, or another explicitly high-risk artifact. A blocked task prevents only its descendants; unrelated ready work remains in the frontier.
+## Local state
 
-Only the central Codex conversation is a supported dispatcher. It claims one writer per task, starts the worker’s ordinary lifecycle, and records its lifecycle task id. A worker may edit only its own task and may not create another worker. This is a host-workflow rule, not an operating-system security boundary.
+All lifecycle state stays under the repository's Git common directory:
 
-DWW remains the Git authority for managed repositories. The orchestration layer neither copies slots, leases, integration locks, validation scheduling, nor semantic merge logic. Its `dww` adapter is available only when the shared route is `managed`; it references DWW task ids and Ready/Finish proof or receipt ids. A mature repository crosses the `delegated` seam only through a tracked, versioned declaration plus a machine-local approval of the exact contract and input hashes. DWW constructs the runtime argv, exchanges one bounded JSON protocol, and reads live capacity from `status`; the repository remains authoritative for all lifecycle state and implementation. Invalid, changed, unapproved, or ambiguous declarations fail back to `defer`. Repositories with an undeclared external orchestrator still fully defer.
+```text
+solo-ai/state.json                 slots, tasks, leases, direct transactions
+solo-ai/task-anchors/              active execution contracts
+solo-ai/proofs/                    exact validation evidence
+solo-ai/candidate-batches.json     immutable candidates and sealed generations
+solo-ai/*-receipts/                rebuildable completion projections
+```
 
-The isolated Finish/Recover seam is the integration transaction stored in local state. Before changing the recorded base ref, Finish freezes task, slot, worktree (path plus file identity), branch, base and candidate identities plus the proof. The transaction moves only from `prepared` to `promoted` to `completed`; Git ancestry classifies interrupted work, while the final receipt is a rebuildable, strictly validated projection of completed state. Detach and exact-ref deletion are internal idempotent cleanup, not authoritative stages. Completed integration and abandonment keep their slot in `release-checking` until a final identity/content check publishes it idle; Start then performs the matching intake check before touching the worktree, closing the release-to-reuse handoff. Recover itself is a published task operation, legacy receipts are imported only after exact proof and Git-fact validation, invalid transaction phases stop before any Git write, and pending operation outcomes repair auxiliary audit receipts without changing the business result.
+Tracked `.solo-ai/config.toml` selects `integration.mode = direct|batched`. Direct remains the generic default. Batched mode defaults to five candidates per explicit seal and ten pending candidates in the pool. Capacity is backpressure only and never a seal trigger.
 
-Abandonment is a separate persisted transaction but uses the same FIFO integration lock. Both transaction modules require exact worktree path and file-object identity. Abandonment verifies all active refs and deletes its task ref in one Git transaction, refuses tracked changes, and conditionally deletes only the unchanged untracked objects it recorded. Cleanup classification is shared; project-specific cache ownership stays in tracked configuration rather than lifecycle code.
+## Task anchors
 
-Each completion requires existing acceptance evidence with a `kind` and `ref`. When every task is complete and evidenced, the batch writes a small receipt. The controller runs only missing targeted combination validation; there is no default full test, reviewer AI, resident service, push, PR, deployment, or release. Repeated unchanged failures stop after two reports; progressive repairs are governed by the batch’s configurable effective-change and elapsed-time budget.
+Managed Start creates the anchor before returning the writable worktree. Ready verifies that it is a regular local UTF-8 file, at most 64 KiB, with the exact task id. The anchor is available through the Git common-dir rather than copied into every worktree. Direct completion and abandonment remove it. Candidate publication keeps it until explicit batch success or withdrawal.
 
-The Codex hook remains a strong adapter, not the core authority. It recognizes the `dww orchestrate` and `dww delegated` command families as trusted DWW commands, while the existing route still gives mature workflows absolute priority. The hook only steps aside for delegated execution after the same exact local approval check used by the CLI. It cannot cover specialized execution paths that do not invoke it and never rolls back user files.
+## Direct transaction
+
+Before changing a base ref, Finish freezes task, slot, worktree path and file identity, branch, base, candidate, and proof. The transaction advances `prepared → promoted → completed`. Git ancestry classifies interruption. Completion keeps the slot unavailable until a final identity/content check publishes it idle. The receipt is a validated projection, not the transaction authority.
+
+## Candidate publication
+
+Batched Finish records a publication transaction before Git cleanup. It creates one exact `refs/dww/candidates/<id>` ref, persists candidate identity and proof under a lock, detaches the worktree, deletes only the exact task branch, and releases the slot with its directory identity. Pool exhaustion leaves the task in a recoverable publishing state and does not touch the base.
+
+## Explicit batch transaction
+
+`batch seal` accepts an explicit ordered list of one through the configured batch size. It snapshots every candidate ref and the current base head. No worker count, queue count, timer, idle heuristic, Hook, or SessionEnd event can create this record.
+
+The batch uses a dedicated detached worktree. For each frozen candidate it applies the exact binary tree difference from that candidate's recorded base and commits the composed result. After composition it runs the repository's Ready plus Full profiles over the combined tree, checks the base still equals the sealed snapshot, and fast-forwards the one clean worktree that owns the target branch.
+
+Failure before promotion records a failed generation and preserves the base. It is deliberately not auto-retried. A repair publishes a new candidate and the caller names the intended candidates in a new seal. An interruption leaves a nonfailed recorded phase; `batch recover` resumes only that generation. Promotion is followed by idempotent worktree/ref cleanup, candidate completion, and anchor deletion.
+
+## Delegation and Hooks
+
+A mature repository crosses the delegated seam only through a tracked declaration and machine-local approval of the exact contract and input hashes. Managed candidate batches are never imposed on a delegated workflow.
+
+Hooks are adapters around this architecture. SessionStart may cache route context; PreToolUse may deny unsafe supported writes. The CLI and persisted Git facts remain authoritative when Hooks are absent. Hook code never seals a batch, marks a task complete, releases a slot, deletes an anchor, or repairs state.

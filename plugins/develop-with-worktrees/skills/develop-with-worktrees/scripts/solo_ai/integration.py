@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .cleanup import inspect_untracked, require_managed_directory_identity
 from .proof import require_exact_passed_proof
@@ -14,10 +15,10 @@ from .util import (
     DirectoryLock,
     SoloAIError,
     atomic_write_json,
+    path_identity,
     process_matches,
     process_snapshot,
     read_json,
-    path_identity,
     sha256_text,
     stable_json,
     utc_timestamp,
@@ -46,7 +47,11 @@ def queue_ticket(repo: GitRepo, task_id: str) -> Path:
     ticket = queue / f"{time.time_ns():020d}-{uuid.uuid4().hex}-{task_id}.json"
     atomic_write_json(
         ticket,
-        {"task_id": task_id, "owner": process_snapshot(), "created_at": utc_timestamp()},
+        {
+            "task_id": task_id,
+            "owner": process_snapshot(),
+            "created_at": utc_timestamp(),
+        },
     )
     return ticket
 
@@ -157,9 +162,7 @@ def _assert_identity(
     expected_status = "finished" if phase == "completed" else "finishing"
     if task.get("status") != expected_status:
         raise SoloAIError("Integration transaction and task status disagree")
-    proof = read_json(
-        repo.local_dir / "proofs" / f"{transaction['proof']}.json", {}
-    )
+    proof = read_json(repo.local_dir / "proofs" / f"{transaction['proof']}.json", {})
     require_exact_passed_proof(
         proof,
         fingerprint=str(transaction["proof"]),
@@ -177,21 +180,23 @@ def _base_head(repo: GitRepo, transaction: dict[str, Any]) -> str:
     return head
 
 
-def _classify(
-    repo: GitRepo, transaction: dict[str, Any]
-) -> tuple[str, str]:
+def _classify(repo: GitRepo, transaction: dict[str, Any]) -> tuple[str, str]:
     candidate = str(transaction["candidate_head"])
     base_before = str(transaction["base_before"])
     base_head = _base_head(repo, transaction)
     if repo.is_ancestor(candidate, base_head):
         return "promoted", base_head
     if transaction.get("phase") == "promoted":
-        raise SoloAIError("Promoted candidate is no longer contained in its base branch")
+        raise SoloAIError(
+            "Promoted candidate is no longer contained in its base branch"
+        )
     if base_head == base_before:
         return "prepared", base_head
     if repo.is_ancestor(base_before, base_head):
         return "stale", base_head
-    raise SoloAIError("Integration base was rewritten; preserve the task for inspection")
+    raise SoloAIError(
+        "Integration base was rewritten; preserve the task for inspection"
+    )
 
 
 def _unknown_or_protected_ignored(repo: GitRepo, worktree: Path) -> list[str]:
@@ -259,7 +264,9 @@ def _assert_prepared_worktree_identity(
         or repo.ref_head(f"refs/heads/{transaction['branch']}")
         != transaction["candidate_head"]
     ):
-        raise SoloAIError("Prepared candidate identity changed; preserve the transaction")
+        raise SoloAIError(
+            "Prepared candidate identity changed; preserve the transaction"
+        )
     if blocked := _unknown_or_protected_ignored(repo, worktree):
         raise SoloAIError(
             "Prepared worktree content changed; preserve the transaction:\n"
@@ -268,7 +275,11 @@ def _assert_prepared_worktree_identity(
 
 
 def _cleanup(
-    repo: GitRepo, *, store: StateStore, task: dict[str, Any], transaction: dict[str, Any]
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    transaction: dict[str, Any],
 ) -> dict[str, Any]:
     _assert_identity(repo, task, transaction)
     candidate = str(transaction["candidate_head"])
@@ -284,7 +295,9 @@ def _cleanup(
         expected_identity=dict(transaction["worktree_identity"]),
         expected_root_identity=dict(transaction["managed_root_identity"]),
     )
-    if not worktree.is_dir() or not any(item.path == resolved_worktree for item in repo.worktrees()):
+    if not worktree.is_dir() or not any(
+        item.path == resolved_worktree for item in repo.worktrees()
+    ):
         raise SoloAIError("Integration worktree is missing or no longer registered")
     if not repo.is_clean(worktree):
         raise SoloAIError("Integration worktree changed; preserve it for inspection")
@@ -305,7 +318,11 @@ def _cleanup(
         raise SoloAIError("Task branch advanced after integration; preserve it")
     if current_branch is not None:
         repo.git(["switch", "--detach", candidate], cwd=worktree)
-    if not repo.is_clean(worktree) or repo.head(worktree) != candidate or repo.branch(worktree) is not None:
+    if (
+        not repo.is_clean(worktree)
+        or repo.head(worktree) != candidate
+        or repo.branch(worktree) is not None
+    ):
         raise SoloAIError("Integration worktree changed during cleanup; preserve it")
     if blocked := _unknown_or_protected_ignored(repo, worktree):
         raise SoloAIError(
@@ -359,7 +376,9 @@ def write_completed_receipt(repo: GitRepo, task: dict[str, Any]) -> dict[str, An
     if not observed_base or not repo.is_ancestor(
         str(transaction["candidate_head"]), observed_base
     ):
-        raise SoloAIError("Completed integration base fact does not contain its candidate")
+        raise SoloAIError(
+            "Completed integration base fact does not contain its candidate"
+        )
     expected = _completed_receipt(task)
     path = receipt_path(repo, task["id"])
     existing = read_json(path, {})
@@ -381,7 +400,9 @@ def write_completed_receipt(repo: GitRepo, task: dict[str, Any]) -> dict[str, An
         }
         for key, value in legacy_expected.items():
             if existing.get(key) != value:
-                raise SoloAIError(f"Legacy integration receipt conflicts with state: {key}")
+                raise SoloAIError(
+                    f"Legacy integration receipt conflicts with state: {key}"
+                )
     elif existing:
         immutable = (
             "transaction_id",
@@ -402,7 +423,10 @@ def write_completed_receipt(repo: GitRepo, task: dict[str, Any]) -> dict[str, An
 
 
 def legacy_transaction(
-    task: dict[str, Any], *, proof: dict[str, Any], receipt: dict[str, Any] | None = None
+    task: dict[str, Any],
+    *,
+    proof: dict[str, Any],
+    receipt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """为旧任务构造稳定事务身份，使重复恢复不会生成第二个事务。"""
     transaction = new_transaction(task, proof=proof, operation_id="legacy-recovery")
@@ -459,7 +483,9 @@ def migrate_legacy_receipt(
     )
     base_head = _base_head(repo, {"base_ref": task["base_ref"]})
     if not repo.is_ancestor(candidate, base_head):
-        raise SoloAIError("Legacy receipt candidate is not contained in its base branch")
+        raise SoloAIError(
+            "Legacy receipt candidate is not contained in its base branch"
+        )
     transaction = legacy_transaction(task, proof=proof, receipt=existing)
     completed = task.get("status") == "finished"
     if completed:
@@ -513,8 +539,13 @@ def resume_prepared(
         if repo.branch(base_worktree) != transaction["base_ref"] or not repo.is_clean(
             base_worktree
         ):
-            raise SoloAIError("Recorded base worktree is not ready for exact integration")
-        repo.git(["merge", "--ff-only", str(transaction["candidate_head"])], cwd=base_worktree)
+            raise SoloAIError(
+                "Recorded base worktree is not ready for exact integration"
+            )
+        repo.git(
+            ["merge", "--ff-only", str(transaction["candidate_head"])],
+            cwd=base_worktree,
+        )
         base_head = _base_head(repo, transaction)
         if not repo.is_ancestor(str(transaction["candidate_head"]), base_head):
             raise SoloAIError("Exact candidate was not integrated")

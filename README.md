@@ -1,74 +1,55 @@
 # Develop with Worktrees
 
-`0.3.0-beta.18` is a local-first workflow that keeps parallel AI changes from overwriting one another. Its lifecycle core is host-neutral; this plugin provides the Codex first-choice UX, multi-AI command center, skill, and write guard.
+`0.4.0-beta.1` is a host-neutral local Git safety lifecycle. It routes modifying work, creates first-class task anchors, isolates worktrees, commits exact paths, validates candidates, integrates directly or through explicit candidate batches, and recovers from persisted Git facts. The host's native task/subagent system owns decomposition, dependencies, workers, waits, and task status.
 
-## One conversation for complex work
+## Responsibility boundary
 
-Simple work stays simple: one AI uses the routed repository lifecycle. For a complex goal, Codex first presents a short plan in plain language and waits for one confirmation. Only then does the central conversation dispatch independently verifiable tasks. A DWW-managed or approved delegated batch may run up to `min(5, configured slots, idle slots)` at once; a deferred repository keeps its own lifecycle and orchestration state.
+- Native task orchestration answers who works on which outcome and when.
+- DWW answers where each Git change is made, what exact candidate was verified, and which explicit candidates may move the base.
+- Codex Hooks are optional hardening, not lifecycle truth.
 
-The command center keeps only a compact local task graph, dependencies, task status, lifecycle/proof references, and key decisions in Git common-dir state. It does not keep chat transcripts, raw reasoning, leases, or secrets. Pausing, cancelling, or moving to a new central conversation preserves branches and files; cancellation never deletes work.
+The old `dww orchestrate` family is drain-only compatibility. It can finish or inspect existing legacy batches, but it no longer creates batches, appends tasks, or creates repair tasks.
 
-Same-file predictions are allowed to run optimistically. Only explicit high-risk resources such as migrations, lockfiles, and shared contracts are serialized. In an ordinary DWW-managed repository, clean Git merges that pass Ready/Finish integrate locally; text or semantic conflicts are sent to a fresh repair task instead of guessed. A mature delegated repository may instead explicitly own a candidate pool and one batch-seal action: workers publish independently, the central controller seals one immutable generation when it decides the intended candidates are ready, and a later B1 waits for the next seal. DWW never infers, schedules, or implements that repository-specific mode. There is no default reviewer AI, resident daemon, push, PR, deploy, or full-repository final test.
+## Routing and managed work
 
-## Mature repository workflows win
+A compact read-only route lets mature repository workflows win. A deferred repository receives no DWW task, anchor, candidate, or batch state. An approved delegated adapter remains exact and locally fingerprinted. A managed repository receives an isolated task; an unchosen repository gets one plain-language choice.
 
-Before any repository choice, a compact read-only route selects who owns lifecycle and orchestration state. An ordinary mature workflow makes DWW silently defer: it asks no three-choice question and writes no DWW lifecycle or orchestration state. Generic non-state governance still applies unless the repository explicitly replaces it: complex work gets one plain-language plan confirmation and one coordinating conversation, multi-step work uses the native writable workspace's temporary task context, and durable facts go only to their authoritative document. If the repository has a native lifecycle but no external orchestrator, the current conversation coordinates through native task identities, status, and evidence without creating a DWW batch.
-
-A mature repository may instead commit a versioned adapter declaration; only after the exact declaration and tracked-input fingerprint is locally approved does the route become `delegated`. DWW then executes the final-checked contract and all tracked inputs from one private repository-external closure, while the live repository remains only the native Git/state target. Any drift returns to `defer`.
-
-The trusted `SessionStart` hook normally injects this route once. If hook context is unavailable, the skill runs one lightweight `dww route --json` fallback; it does not load the full `doctor` report.
-
-## One question on the first modification
-
-When a user first intends to modify an unchosen repository, Codex asks one plain-language question:
+Hook route context is optional. Without it, the skill runs one `dww route --json` fallback.
 
 ```text
-How should this repository be changed?
-
-1. Use a separate directory for each task (recommended)
-   Tasks do not affect one another and merge back automatically when finished.
-
-2. Change the current directory this time
-   Skip only this task; ask again next time.
-
-3. Always change the current directory for this repository
-   Remember this choice and do not ask again here.
-
-This affects only this machine and can be changed later.
+route → start → update generated task anchor → edit returned worktree only
+      → commit exact paths → ready → finish
 ```
 
-- Choice 1 sets up the normal isolated lifecycle from the current local branch, not an assumed `main`.
-- Choice 2 makes this task behave as if the plugin were absent: no policy files, task, Commit/Ready/Finish, or write guard. A new Codex task asks again.
-- Choice 3 records a local-only repository preference without changing tracked files. Other clones and machines choose independently.
+Start creates `<git-common-dir>/solo-ai/task-anchors/<task-id>.md` before returning. It records purpose, target, baseline, boundaries, acceptance, and progress. Reread it after context loss, model changes, handoff, or continuation. A repeated caller `request_id` returns the same managed task rather than consuming another slot.
 
-If no automated test is found, choice 1 still isolates the task and uses internal basic checks without another question. A user can later say to use isolated directories or the current directory for this repository to change the local preference.
+Direct integration is the default. Finish validates, fast-forwards the recorded clean local base, releases the worktree, and deletes the anchor. DWW never fetches, pulls, pushes, opens PRs, rebases, squashes, amends, deploys, or rewrites history.
 
-## After choosing isolated work
+## Optional explicit candidate batches
 
-```text
-route → start → edit only in returned directory → commit exact paths
-       → plan / verify → ready → finish
+Repositories that need one combined acceptance boundary may configure:
+
+```toml
+integration = { mode = "batched", batch_size = 5, candidate_capacity = 10 }
 ```
 
-- Each normal task receives its own reusable managed directory and lease. Finish persists an exact-candidate integration transaction before fast-forwarding the recorded clean base worktree. Recover uses Git ancestry to finish an interrupted promotion without merging a newer candidate.
-- Abandon preserves and stops on tracked working-tree changes, protected content, same-path object replacement, or another active task reference; it never force-resets or blanket-cleans the slot.
-- Ready rechecks its base after machine validation admission. If another task advances the base, the same Ready call resynchronizes and reuses exact content proofs, with five bounded retries instead of handing Finish a stale proof.
-- Validation uses schema 3 profiles and a machine-global weighted FIFO queue. Slow estimates advise splitting mappings or removing repeated preparation; they never weaken coverage.
-- Finish preserves caches and dependencies. Destructive cleanup remains an explicit reviewed, generation-bound, one-shot `prune-slot` action; an interrupted move or delete resumes only from that exact manifest.
+In batched mode, Finish publishes one immutable verified candidate and immediately releases its slot without moving the base. The anchor remains. The pool defaults to ten candidates and never seals itself.
 
-For a confirmed plan or another multi-step task, the AI creates one ignored, uncommitted task anchor after entering the writable worktree. It records only the active objective, baseline, boundaries, acceptance checks, and progress; it is re-read after context compression or continuation and removed after acceptance. Permanent documentation changes only when a fact must survive future tasks, such as a product rule, public contract, data model, permission, architecture, or stable UI boundary. Ordinary fixes, implementation details, tests, and validation evidence do not create permanent task ledgers.
+Only `batch seal --candidate <id> ...` freezes a generation, with at most five candidates by default. DWW composes their exact tree differences in a dedicated integration worktree, runs combined Full validation, rechecks the frozen base, and then fast-forwards the clean checked-out base. Conflict or final-validation failure preserves the base and is never blindly rerun. Publish repair work with `start --supersedes <candidate-id>` and explicitly seal a new generation.
 
-`start --in-place` remains an advanced compatibility path for a user who explicitly wants DWW's exact Commit/Ready/Finish safeguards in the current clean worktree; it is not choice 2.
+Candidate count, timers, apparent idleness, task completion, and SessionEnd never trigger a seal. Candidate withdrawal, successful batch integration, or explicit abandonment removes the associated anchor.
 
-In Codex, the trusted `PreToolUse` hook hard-denies protected-worktree writes on supported local tool paths. It is a strong guardrail, not operating-system enforcement: specialised paths can opt out. When a later hooked call or `doctor` observes escaped dirty state, it preserves and records an alert; it never promises immediate observation. Codex persists trust against the exact hook definition, so ordinary plugin updates keep the stable definition and require no repeated user action. Only a first install or an intentional definition change needs review. When Codex actually reports pending review, the AI explains the change and asks once; after approval it uses available host UI control to complete `/hooks` instead of asking the user to click through it. A surface without host UI control must report that limitation and must not claim the hard guard is active.
+## Optional Hook hardening
+
+A trusted `PreToolUse` Hook can deny unauthorised writes on supported Codex local-tool paths. It is valuable defence in depth, not an operating-system sandbox and not required for route, anchors, worktrees, validation, candidates, sealing, or recovery. Ordinary releases keep `hooks/hooks.json` stable to avoid needless re-trust.
 
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.3.0-beta.18
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.4.0-beta.1
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-The plugin and DWW lifecycle never update themselves, fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After Finish, a user may explicitly request a separate ordinary push from the clean base worktree; it is dry-run first, current-branch only, and never forced.
+An explicit user request may separately push an already integrated clean base branch with a dry-run-first ordinary non-force push.
 
-See [Chinese documentation](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), [task governance](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md), and [architecture](docs/architecture.md).
+See [Chinese documentation](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), [lifecycle](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md), [task governance](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md), and [architecture](docs/architecture.md).

@@ -1,6 +1,6 @@
 [project]
 name = "develop-with-worktrees"
-version = "0.3.0-beta.18"
+version = "0.4.0-beta.1"
 requires-python = ">=3.11"
 dependencies = ["psutil>=7.0,<8"]
 
@@ -10,3 +10,13 @@ dev = ["pytest>=8.3,<10"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"plugins/develop-with-worktrees/hooks/worktree_guard.py" = ["E402"]
+"tests/conftest.py" = ["E402"]

@@ -206,6 +206,44 @@ def test_rejects_empty_declared_secret_scanner(git_repo: Path) -> None:
         load_repo_config(GitRepo(git_repo))
 
 
+def test_integration_defaults_are_direct_with_five_and_ten(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "config.toml").write_text(render_repo_config(), encoding="utf-8")
+
+    loaded = load_repo_config(GitRepo(git_repo))
+
+    assert loaded.integration.mode == "direct"
+    assert loaded.integration.batch_size == 5
+    assert loaded.integration.candidate_capacity == 10
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ('mode = "automatic"', "integration.mode"),
+        ("batch_size = 6", "batch_size"),
+        ("candidate_capacity = 4", "candidate_capacity"),
+    ],
+)
+def test_rejects_unsafe_integration_settings(
+    git_repo: Path, replacement: str, message: str
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    rendered = render_repo_config()
+    if replacement.startswith("mode"):
+        rendered = rendered.replace('mode = "direct"', replacement)
+    elif replacement.startswith("batch_size"):
+        rendered = rendered.replace("batch_size = 5", replacement)
+    else:
+        rendered = rendered.replace("candidate_capacity = 10", replacement)
+    (config / "config.toml").write_text(rendered, encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match=message):
+        load_repo_config(GitRepo(git_repo))
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [

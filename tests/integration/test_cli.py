@@ -46,7 +46,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.3.0-beta.18"
+    assert payload["version"] == "0.4.0-beta.1"
     assert payload["version"] == payload["plugin_version"] == manifest["version"]
     assert payload["version"] == pyproject["project"]["version"]
     assert payload["version"] == __version__
@@ -54,7 +54,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
         encoding="utf-8"
     )
     assert payload["verification_schema"] == 3
-    assert payload["state_schema"] == 4
+    assert payload["state_schema"] == 5
     assert "PreToolUse deny" in payload["codex_guard"]
     assert Path(payload["script"]).name == "dww.py"
 
@@ -117,14 +117,16 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "machine-global weighted FIFO" in text
     assert "--json route" in text
     assert "mature workflow" in text
-    assert "multi-AI" in text
-    assert "one-confirmation" in text
-    assert "post-Finish publishing" in text
-    assert "stable compatibility contract" in text
-    assert "explicit batch-seal" in text
-    assert "候选池 + 显式封板" in text
+    assert "native task/subagent" in text
+    assert "drain-only" in text
+    assert "optional hardening" in text
+    assert "hooks/hooks.json" in text
+    assert 'integration.mode = "batched"' in text
+    assert "batch seal" in text
+    assert "candidate_capacity = 10" in text
     assert "task anchor" in text
     assert "任务锚点" in text
+    assert "不再是多 AI 任务指挥中心" in text
     assert "Dual-run rules" in text
     assert "delegated revoke" in text
     assert not (repository_root / "需求.md").exists()

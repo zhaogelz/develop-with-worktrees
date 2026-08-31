@@ -2,19 +2,21 @@
 
 Use a short-lived task anchor to preserve the active implementation contract without turning every task into a permanent plan document.
 
-These are non-state governance rules. Routing decides which lifecycle or orchestrator owns task state; it does not disable plain-language plan confirmation, single-conversation coordination, temporary task context, or the durable-document boundary. Under `defer`, create no DWW task, lifecycle, or orchestration state. Apply these rules only after the routed owner has authorized the exact writable workspace: DWW `start` for `managed`, the repository workflow for `defer` or `delegated`, and the recorded user choice for `disabled` or `current-task`. Use an explicit repository rule instead when it covers the same concern.
+Routing decides which lifecycle owns task state. DWW-managed task context is now part of that lifecycle; task decomposition and worker scheduling remain owned by the host's native task/subagent system. Under `defer`, create no DWW task, anchor, candidate, or batch state. Apply the repository's own context rule after its lifecycle authorizes the writable workspace.
 
 ## When to create an anchor
 
-Create one immediately after entering the authorized writable worktree when any of these is true:
+Managed `Start` always creates one before returning the writable worktree. For a deferred or disabled workflow, follow its own rule and create a temporary anchor when any of these is true:
 
 - the user confirmed a plan and asked to start or continue it;
 - the task has multiple implementation steps, repositories, modules, or acceptance checks;
 - completion is likely to span context compression, a model change, or a later continuation.
 
-A clearly bounded single small edit may omit it. Read-only analysis never creates one.
+A clearly bounded single small edit may omit it only outside the managed lifecycle. Read-only analysis never creates one.
 
-Use the repository-declared temporary anchor location when present. Otherwise prefer `.tmp/task-anchors/<task-id-or-purpose>.md` after confirming that Git ignores it and the routed workflow authorized that workspace. A `managed` task may fall back to `<git-common-dir>/solo-ai/task-anchors/<task-id>.md`. Other routes must not create that DWW common-dir fallback; if no safe workspace location exists, use a private repository-external temporary file for the current task. Never stage or commit an anchor, and do not modify `.gitignore` merely to store one.
+A managed task always uses `<git-common-dir>/solo-ai/task-anchors/<task-id>.md`. This makes the anchor available from the base checkout, task worktree, and recovery commands without placing it in the repository or requiring `.gitignore` changes. `Start` returns the exact path, Ready validates its regular-file, size, UTF-8, and task-id identity, and `status` lists it.
+
+Other routes must not create this DWW common-dir state. Use the repository-declared location, or a private repository-external temporary file if no safe ignored workspace location exists. Never stage or commit an anchor.
 
 ## Minimum content
 
@@ -41,4 +43,6 @@ At acceptance, first decide whether the work changed a fact that future tasks mu
 
 Bug fixes that restore an existing contract, implementation details, tests, builds, validation evidence, debugging steps, and ordinary engineering adjustments stay in code, tests, configuration, receipts, or the existing engineering reference. Do not create a generic `CONTEXT.md`, `requirements.md`, `plan.md`, task ledger, or ADR directory unless the repository explicitly designates it as the canonical home.
 
-When a durable fact changed, update only the repository's existing canonical document for that topic. Do not duplicate the same fact across a root plan, feature plan, README, and task log. Once validation and any required durable update are complete, remove the task anchor.
+When a durable fact changed, update only the repository's existing canonical document for that topic. Do not duplicate the same fact across a root plan, feature plan, README, and task log.
+
+For direct integration, DWW removes the anchor after successful Finish. In batched mode it remains after candidate publication and is removed only when that candidate's explicit batch completes, the pending candidate is withdrawn, or the task is abandoned. Failed or interrupted integration keeps the anchor for recovery.

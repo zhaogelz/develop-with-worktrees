@@ -9,12 +9,18 @@ from pathlib import Path
 from typing import Any
 
 from . import VERSION
+from .candidate_batches import (
+    CandidateBatchStore,
+    recover_batch,
+    seal_batch,
+    withdraw_candidate,
+)
+from .cleanup import classify_cleanup_path, require_managed_directory_identity
 from .config import (
     CommandSpec,
     load_repo_config,
     load_verification_config,
 )
-from .cleanup import classify_cleanup_path, require_managed_directory_identity
 from .delegated import (
     ALLOWED_CAPABILITIES,
     DelegatedContractError,
@@ -45,7 +51,7 @@ from .lifecycle import (
     start,
     warm_slot,
 )
-from .orchestration import BatchStore, create_batch
+from .orchestration import BatchStore
 from .orchestration.adapters import adapter_for
 from .orchestration.models import MAX_DEVELOPMENT_PARALLELISM
 from .proof import approval_plan, proof_inputs, validate
@@ -55,14 +61,14 @@ from .state import FINAL_TASK_STATES, STATE_SCHEMA, StateStore
 from .util import (
     SoloAIError,
     atomic_write_json,
-    directory_size,
     delete_plain_path_if_unchanged,
+    directory_size,
     ensure_within,
     format_bytes,
     is_link_or_junction,
     new_id,
-    read_json,
     path_identity,
+    read_json,
     sha256_file,
     sha256_text,
     snapshot_plain_path,
@@ -177,14 +183,13 @@ def _parser() -> argparse.ArgumentParser:
         "delegated",
         help="inspect, approve, or invoke an explicitly declared repository adapter",
     )
-    delegated_sub = delegated.add_subparsers(
-        dest="delegated_command", required=True
-    )
+    delegated_sub = delegated.add_subparsers(dest="delegated_command", required=True)
     delegated_sub.add_parser(
         "inspect", help="read and fingerprint the declared adapter without executing it"
     )
     delegated_approve = delegated_sub.add_parser(
-        "approve", help="approve one exact adapter and tracked-input fingerprint locally"
+        "approve",
+        help="approve one exact adapter and tracked-input fingerprint locally",
     )
     delegated_approve.add_argument("--fingerprint", required=True)
     delegated_approve.add_argument("--accept", action="store_true", required=True)
@@ -195,7 +200,8 @@ def _parser() -> argparse.ArgumentParser:
     delegated_revoke.add_argument("--fingerprint", required=True)
     delegated_revoke.add_argument("--confirm", action="store_true", required=True)
     delegated_invoke = delegated_sub.add_parser(
-        "invoke", help="invoke one capability through the approved JSON adapter protocol"
+        "invoke",
+        help="invoke one capability through the approved JSON adapter protocol",
     )
     delegated_invoke.add_argument(
         "--operation", required=True, choices=sorted(ALLOWED_CAPABILITIES)
@@ -205,7 +211,7 @@ def _parser() -> argparse.ArgumentParser:
 
     orchestration = sub.add_parser(
         "orchestrate",
-        help="record and schedule a confirmed multi-AI task batch in local state",
+        help="legacy drain-only task orchestration; use the host's native task system for new work",
     )
     orchestration_sub = orchestration.add_subparsers(
         dest="orchestration_command", required=True
@@ -339,6 +345,40 @@ def _parser() -> argparse.ArgumentParser:
         "--session",
         help="Codex session identifier supplied by the trusted hook; required for in-place tasks",
     )
+    start_parser.add_argument(
+        "--request-id",
+        help="optional caller identity; repeating it returns the same managed task",
+    )
+    start_parser.add_argument(
+        "--supersedes",
+        help="candidate id replaced by this repair task when it is published",
+    )
+
+    candidate = sub.add_parser(
+        "candidate", help="inspect or withdraw verified candidates in batched mode"
+    )
+    candidate_sub = candidate.add_subparsers(dest="candidate_command", required=True)
+    candidate_sub.add_parser("status", help="show the local candidate pool")
+    candidate_withdraw = candidate_sub.add_parser(
+        "withdraw", help="withdraw one pending candidate that is not in an active batch"
+    )
+    candidate_withdraw.add_argument("--candidate", required=True)
+
+    batch = sub.add_parser(
+        "batch", help="explicitly seal, inspect, or recover candidate integration"
+    )
+    batch_sub = batch.add_subparsers(dest="batch_command", required=True)
+    batch_status = batch_sub.add_parser("status", help="show integration batches")
+    batch_status.add_argument("--batch")
+    batch_seal = batch_sub.add_parser(
+        "seal", help="freeze and integrate exactly the listed candidate generation"
+    )
+    batch_seal.add_argument("--candidate", action="append", required=True)
+    batch_recover = batch_sub.add_parser(
+        "recover",
+        help="resume an interrupted sealed generation from recorded Git facts",
+    )
+    batch_recover.add_argument("--batch", required=True)
 
     commit = sub.add_parser(
         "commit", help="stage only an exact reviewed task path list and commit it"
@@ -385,7 +425,8 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("--detailed", action="store_true")
 
     recover = sub.add_parser(
-        "recover", help="recover an interrupted task from persisted identity and Git facts"
+        "recover",
+        help="recover an interrupted task from persisted identity and Git facts",
     )
     recover.add_argument("--task", required=True)
 
@@ -515,6 +556,9 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
     store.reconcile_operation_receipts()
     state = store.read()
     route = repository_route(repo)
+    candidate_batches = CandidateBatchStore(repo).summary()
+    from .task_context import list_anchors
+
     result: dict[str, Any] = {
         "repository": str(repo.root),
         "mode": "uninitialized" if route["action"] == "ask" else route["action"],
@@ -530,6 +574,9 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
             StateStore.public_task(task) for task in state.get("tasks", {}).values()
         ],
         "guard_alerts": store.guard_alerts(),
+        "task_anchors": list_anchors(repo),
+        "candidate_pool": candidate_batches["candidates"],
+        "integration_batches": candidate_batches["batches"],
     }
     if detailed:
         for slot in result["slots"]:
@@ -549,7 +596,7 @@ def _version() -> dict[str, Any]:
         "plugin_version": manifest.get("version"),
         "verification_schema": 3,
         "state_schema": STATE_SCHEMA,
-        "codex_guard": "PreToolUse deny on supported local tool paths after user trusts this plugin hook",
+        "codex_guard": "optional PreToolUse deny on supported local tool paths after user trusts this plugin hook; core lifecycle is hookless",
         "script": str(Path(sys.argv[0]).resolve()),
         "validation_queue": queue_status(),
     }
@@ -577,12 +624,14 @@ def _doctor(repo: GitRepo) -> dict[str, Any]:
             task["status"] not in FINAL_TASK_STATES
             for task in StateStore(repo).read()["tasks"].values()
         )
+        and not CandidateBatchStore(repo).active()
     )
     report["uninstall_rule"] = (
         "Run deinit successfully before removing the Codex plugin. The plugin registry never scans disks."
     )
     report["hook_trust"] = (
-        "Codex persists trust against the exact hook definition. Ordinary updates keep "
+        "Hooks are optional hardening, not a lifecycle dependency. Codex persists trust "
+        "against the exact hook definition. Ordinary updates keep "
         "hooks/hooks.json stable and need no repeated review. Only when Codex reports a "
         "new or changed hook pending review should the AI explain it, ask once, and use "
         "available host UI control after approval. Otherwise it must not claim the hard "
@@ -599,6 +648,8 @@ def _require_idle(repo: GitRepo) -> None:
         raise SoloAIError("Active or quarantined tasks block pruning")
     if any((repo.local_dir / "queue").glob("*.json")):
         raise SoloAIError("Integration queue tickets block pruning")
+    if CandidateBatchStore(repo).active():
+        raise SoloAIError("Pending candidates or integration batches block pruning")
     locks = repo.local_dir / "locks"
     # A stale lock is not removed by pruning; doctor/recover must assess it first.
     if locks.exists() and any(path.name != "state.lock" for path in locks.iterdir()):
@@ -763,7 +814,9 @@ def _execute_slot_prune(
                 raise SoloAIError(
                     "Cleanup source reappeared after completion; the plan was quarantined"
                 )
-        raise SoloAIError("Cleanup plan was already executed and completed; it cannot be replayed")
+        raise SoloAIError(
+            "Cleanup plan was already executed and completed; it cannot be replayed"
+        )
     if status not in {"planned", "creating", "executing", "deleting"}:
         raise SoloAIError("Cleanup plan has an unsupported recovery state")
     payload = dict(plan["payload"])
@@ -783,7 +836,9 @@ def _execute_slot_prune(
             or int(details.get("generation", 0))
             != int(payload.get("slot_generation", 0))
         ):
-            raise SoloAIError("Cleanup slot generation or ownership changed during recovery")
+            raise SoloAIError(
+                "Cleanup slot generation or ownership changed during recovery"
+            )
     if not payload["worktree_retained"]:
         plan.update({"status": "completed", "completed_at": utc_timestamp()})
         atomic_write_json(plan_path, plan)
@@ -807,7 +862,9 @@ def _execute_slot_prune(
 
     def require_staging() -> None:
         if not plan.get("staging_identity"):
-            raise SoloAIError("Cleanup staging identity is missing; files were preserved")
+            raise SoloAIError(
+                "Cleanup staging identity is missing; files were preserved"
+            )
         require_managed_directory_identity(
             staging,
             managed_root=root,
@@ -819,7 +876,9 @@ def _execute_slot_prune(
 
     if status == "planned":
         if staging.exists() or staging.is_symlink():
-            raise SoloAIError("Cleanup staging path already exists; nothing was deleted")
+            raise SoloAIError(
+                "Cleanup staging path already exists; nothing was deleted"
+            )
         plan.update(
             {
                 "status": "creating",
@@ -847,7 +906,9 @@ def _execute_slot_prune(
         require_managed_directory_identity(staging, managed_root=root)
         unexpected = [item for item in staging.iterdir() if item != marker]
         if unexpected:
-            raise SoloAIError("Cleanup staging was populated before ownership was recorded")
+            raise SoloAIError(
+                "Cleanup staging was populated before ownership was recorded"
+            )
         if marker.exists():
             if marker.read_text(encoding="utf-8") != str(plan["staging_nonce"]):
                 raise SoloAIError("Cleanup staging ownership marker changed")
@@ -867,9 +928,9 @@ def _execute_slot_prune(
 
     if status == "executing":
         require_staging()
-        if snapshot_plain_path(marker) != plan.get("marker_identity") or marker.read_text(
-            encoding="utf-8"
-        ) != str(plan["staging_nonce"]):
+        if snapshot_plain_path(marker) != plan.get(
+            "marker_identity"
+        ) or marker.read_text(encoding="utf-8") != str(plan["staging_nonce"]):
             raise SoloAIError("Cleanup staging ownership marker changed")
         for target in payload["targets"]:
             require_staging()
@@ -878,10 +939,14 @@ def _execute_slot_prune(
             source_exists = source.exists() or source.is_symlink()
             destination_exists = destination.exists() or destination.is_symlink()
             if source_exists and destination_exists:
-                raise SoloAIError("Cleanup source was recreated during staging; files were preserved")
+                raise SoloAIError(
+                    "Cleanup source was recreated during staging; files were preserved"
+                )
             if source_exists:
                 if is_link_or_junction(source):
-                    raise SoloAIError(f"Cleanup target became a link or junction: {source}")
+                    raise SoloAIError(
+                        f"Cleanup target became a link or junction: {source}"
+                    )
                 if stable_json(_cleanup_target(source, root)) != stable_json(target):
                     raise SoloAIError("Cleanup target changed before staging")
                 require_staging()
@@ -889,9 +954,13 @@ def _execute_slot_prune(
                 require_staging()
                 source.rename(destination)
             elif not destination_exists:
-                raise SoloAIError("Cleanup target disappeared outside the recorded transaction")
+                raise SoloAIError(
+                    "Cleanup target disappeared outside the recorded transaction"
+                )
             require_staging()
-            if stable_json(_cleanup_target(destination, staging)) != stable_json(target):
+            if stable_json(_cleanup_target(destination, staging)) != stable_json(
+                target
+            ):
                 raise SoloAIError("Cleanup target changed while being staged")
         plan["status"] = "deleting"
         plan["deleting_at"] = utc_timestamp()
@@ -905,7 +974,9 @@ def _execute_slot_prune(
             or (root / str(target["path"])).is_symlink()
             for target in payload["targets"]
         ):
-            raise SoloAIError("Cleanup source reappeared after staging; files were preserved")
+            raise SoloAIError(
+                "Cleanup source reappeared after staging; files were preserved"
+            )
         if not staging.exists():
             pass
         else:
@@ -936,9 +1007,13 @@ def _execute_slot_prune(
                             f"Cleanup staging contains unreviewed content: {candidate}"
                         )
                     observed = snapshot_plain_path(candidate)
-                    comparable = {key: value for key, value in expected.items() if key != "path"}
+                    comparable = {
+                        key: value for key, value in expected.items() if key != "path"
+                    }
                     if observed != comparable:
-                        raise SoloAIError("Cleanup staging content changed after review")
+                        raise SoloAIError(
+                            "Cleanup staging content changed after review"
+                        )
                     descendants.append(candidate)
             for candidate in sorted(
                 descendants, key=lambda item: len(item.parts), reverse=True
@@ -952,9 +1027,7 @@ def _execute_slot_prune(
                 )
             require_staging()
             if marker.exists():
-                delete_plain_path_if_unchanged(
-                    marker, dict(plan["marker_identity"])
-                )
+                delete_plain_path_if_unchanged(marker, dict(plan["marker_identity"]))
             # marker 已缺失表示上次进程已完成该条件删除子阶段。
             require_managed_directory_identity(
                 staging,
@@ -1074,15 +1147,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         store = BatchStore(repo)
         command = args.orchestration_command
         if command == "plan":
-            return create_batch(
-                repo,
-                goal=args.goal,
-                tasks=_parse_json_objects(args.task, option="--task"),
-                controller=args.controller,
-                adapter=args.adapter,
-                max_parallel=args.max_parallel,
-                max_effective_changes=args.max_effective_changes,
-                max_repair_minutes=args.max_repair_minutes,
+            raise SoloAIError(
+                "DWW task orchestration is retired for new work; use the host's native task/subagent system. Existing orchestration batches remain drainable."
             )
         if command == "confirm":
             return store.confirm(args.batch, controller=args.controller)
@@ -1150,19 +1216,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 args.batch, controller=args.controller, confirm=args.confirm
             )
         if command == "add-task":
-            return store.add_task(
-                args.batch,
-                raw_task=_parse_json_objects([args.task], option="--task")[0],
-                inside_approved_goal=args.inside_approved_goal,
-                controller=args.controller,
+            raise SoloAIError(
+                "Legacy orchestration batches cannot add new tasks; drain or cancel the existing batch"
             )
         if command == "repair":
-            return store.create_repair(
-                args.batch,
-                source_ids=args.source,
-                raw_task=_parse_json_objects([args.task], option="--task")[0],
-                reason=args.reason,
-                controller=args.controller,
+            raise SoloAIError(
+                "Create repair work with the host's native task system, not the retired DWW orchestrator"
             )
         if command == "cancel":
             return store.cancel(
@@ -1221,7 +1280,26 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             base=args.base,
             in_place=args.in_place,
             session_id=args.session,
+            request_id=args.request_id,
+            supersedes=args.supersedes,
         )
+    if args.command == "candidate":
+        if args.candidate_command == "status":
+            return CandidateBatchStore(repo).summary()
+        if args.candidate_command == "withdraw":
+            return withdraw_candidate(repo, candidate_id=args.candidate)
+        raise SoloAIError(f"Unknown candidate command: {args.candidate_command}")
+    if args.command == "batch":
+        if args.batch_command == "status":
+            store = CandidateBatchStore(repo)
+            if args.batch:
+                return {"batches": [store.batch(args.batch)]}
+            return store.summary()
+        if args.batch_command == "seal":
+            return seal_batch(repo, candidate_ids=args.candidate)
+        if args.batch_command == "recover":
+            return recover_batch(repo, batch_id=args.batch)
+        raise SoloAIError(f"Unknown batch command: {args.batch_command}")
     if args.command == "commit":
         return commit_task(
             repo,
@@ -1399,10 +1477,17 @@ def _human(command: str, result: dict[str, Any]) -> str:
                 f"Mode: {mode}",
                 f"Worktree: {result['worktree']}",
                 f"Branch: {result['branch']}",
+                f"Anchor: {result['anchor_path']}",
                 f"Lease: {result['lease']}",
+                *(("Request reused: yes",) if result.get("request_reused") else ()),
             )
         )
     if command == "finish":
+        if result.get("outcome") == "candidate_published":
+            return (
+                f"Published {result['candidate_id']} at {result['candidate_head']}.\n"
+                "The base branch did not move; seal an explicit candidate batch when ready."
+            )
         label = (
             "static checks only; no test command ran"
             if result.get("proof_kind") == "static-only"
@@ -1412,6 +1497,11 @@ def _human(command: str, result: dict[str, Any]) -> str:
             "Completed in place" if result.get("mode") == "in-place" else "Integrated"
         )
         return f"{verb} {result['task_id']} at {result['integrated_head']} ({label})."
+    if command == "batch" and result.get("status") == "completed":
+        return (
+            f"Integrated batch {result['id']} at {result['integrated_head']} "
+            f"from {len(result['candidate_ids'])} explicit candidate(s)."
+        )
     if command in {"recover", "resume-in-place"}:
         if result.get("status") == "completed":
             return (

@@ -7,8 +7,8 @@ import gc
 import inspect
 import json
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -64,8 +64,8 @@ def declare_runtime_adapter(
     (policy / "delegated.toml").write_text(
         "schema_version = 1\n"
         'id = "runtime-closure-test"\n'
-        f'runtime = {json.dumps(runtime)}\n'
-        f'entrypoint = {json.dumps(entrypoint)}\n'
+        f"runtime = {json.dumps(runtime)}\n"
+        f"entrypoint = {json.dumps(entrypoint)}\n"
         'workflow_markers = ["scripts/worktree-flow.ps1"]\n'
         f"tracked_inputs = {json.dumps(tracked_inputs)}\n"
         'capabilities = ["status"]\n'
@@ -92,8 +92,7 @@ def exception_tree_contains(
     if isinstance(error, expected_type) and text in str(error):
         return True
     if isinstance(error, BaseExceptionGroup) and any(
-        exception_tree_contains(item, expected_type, text)
-        for item in error.exceptions
+        exception_tree_contains(item, expected_type, text) for item in error.exceptions
     ):
         return True
     if error.__cause__ is not None:
@@ -443,7 +442,9 @@ json.dump(
 
     def drift_then_spawn(*args: object, **kwargs: object) -> object:
         adapter_path.write_text(
-            approved_source.replace('requires-python = ">=3.11"', 'requires-python = ">=99"'),
+            approved_source.replace(
+                'requires-python = ">=3.11"', 'requires-python = ">=99"'
+            ),
             encoding="utf-8",
         )
         return original_run(*args, **kwargs)
@@ -824,9 +825,7 @@ def test_verified_input_closure_is_removed_after_adapter_timeout(
     assert not closure_roots[0].exists()
 
 
-@pytest.mark.parametrize(
-    "interruption", (KeyboardInterrupt, SystemExit, RuntimeError)
-)
+@pytest.mark.parametrize("interruption", (KeyboardInterrupt, SystemExit, RuntimeError))
 def test_abnormal_monitor_exit_stops_owned_tree_before_closure_cleanup(
     git_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -941,13 +940,13 @@ def test_windows_short_lived_launcher_cannot_leave_detached_grandchild(
             original_sleep(0.01)
         assert launcher_exited.exists()
         assert root_pid_path.exists()
-        observed_root = psutil.Process(
-            int(root_pid_path.read_text(encoding="utf-8"))
-        )
+        observed_root = psutil.Process(int(root_pid_path.read_text(encoding="utf-8")))
         assert observed_root.children(recursive=True) == []
         raise KeyboardInterrupt("synthetic detached-grandchild interruption")
 
-    monkeypatch.setattr(delegated, "_adapter_poll_pause", interrupt_after_launcher_exits)
+    monkeypatch.setattr(
+        delegated, "_adapter_poll_pause", interrupt_after_launcher_exits
+    )
 
     try:
         with pytest.raises(
@@ -1033,7 +1032,7 @@ def test_windows_job_contains_descendant_spawned_after_root_resumes(
         f"ready=Path({str(root_ready)!r}); trigger=Path({str(spawn_trigger)!r}); "
         "ready.write_text('ready', encoding='utf-8'); "
         "deadline=time.monotonic()+5; "
-        "exec(\"while not trigger.exists() and time.monotonic() < deadline:\\n time.sleep(0.01)\"); "
+        'exec("while not trigger.exists() and time.monotonic() < deadline:\\n time.sleep(0.01)"); '
         f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
         "time.sleep(30)"
     )
@@ -1089,9 +1088,7 @@ def test_windows_job_ownership_query_uses_native_handle_before_pid_can_be_reused
         argtypes: object = None
         restype: object = None
 
-        def __call__(
-            self, process: object, job: object, belongs: object
-        ) -> int:
+        def __call__(self, process: object, job: object, belongs: object) -> int:
             assigned.append((job.value, process.value))
             belongs._obj.value = 1
             return 1
@@ -1262,9 +1259,7 @@ def test_windows_process_handle_close_interruption_is_explicit_after_detach(
         delegated.DelegatedProcessTerminationError,
         match="process handle close outcome is indeterminate",
     ):
-        delegated._consume_windows_process_handle(
-            process, "hProcess", label="process"
-        )
+        delegated._consume_windows_process_handle(process, "hProcess", label="process")
 
     assert not process.information.hProcess
     assert calls == [0x654321]
@@ -1280,9 +1275,7 @@ def test_windows_create_process_return_interruption_cannot_leak_suspended_root(
     original_create = delegated._call_windows_create_process
     observer_handles: list[int] = []
 
-    def create_then_interrupt(
-        process: object, *args: object, **kwargs: object
-    ) -> None:
+    def create_then_interrupt(process: object, *args: object, **kwargs: object) -> None:
         original_create(process, *args, **kwargs)
         kernel32 = delegated._windows_kernel32()
         current_process = kernel32.GetCurrentProcess
@@ -1380,9 +1373,7 @@ def test_windows_post_create_interruption_cleans_confirmed_unused_closure(
         closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
         return original_run(*args, **kwargs)
 
-    def create_then_interrupt(
-        process: object, *args: object, **kwargs: object
-    ) -> None:
+    def create_then_interrupt(process: object, *args: object, **kwargs: object) -> None:
         original_create(process, *args, **kwargs)
         raise KeyboardInterrupt("synthetic post-create closure interruption")
 
@@ -1564,7 +1555,9 @@ def test_posix_post_fork_interruption_cleans_confirmed_unused_closure(
         assert isinstance(environment, dict)
         closure_roots.append(Path(environment["DWW_VERIFIED_INPUT_ROOT"]))
 
-        def create_then_interrupt(*popen_args: object, **popen_kwargs: object) -> object:
+        def create_then_interrupt(
+            *popen_args: object, **popen_kwargs: object
+        ) -> object:
             original_popen(*popen_args, **popen_kwargs)
             raise KeyboardInterrupt("synthetic post-fork closure interruption")
 
@@ -1790,9 +1783,7 @@ def test_posix_launcher_rejects_status_that_does_not_match_direct_child(
             parent_signals.append((process_group, requested_signal))
         original_killpg(process_group, requested_signal)
 
-    monkeypatch.setattr(
-        delegated, "_read_posix_launcher_status", mismatched_status
-    )
+    monkeypatch.setattr(delegated, "_read_posix_launcher_status", mismatched_status)
     monkeypatch.setattr(subprocess, "Popen", capture_popen)
     monkeypatch.setattr(delegated.os, "killpg", record_parent_signal)
 
@@ -1836,13 +1827,9 @@ def test_posix_status_read_interruption_after_identity_stops_supervisor(
         original_read_status(*args, **kwargs)
         raise KeyboardInterrupt("synthetic post-status interruption")
 
-    monkeypatch.setattr(
-        delegated, "_read_posix_launcher_status", read_then_interrupt
-    )
+    monkeypatch.setattr(delegated, "_read_posix_launcher_status", read_then_interrupt)
 
-    with pytest.raises(
-        KeyboardInterrupt, match="synthetic post-status interruption"
-    ):
+    with pytest.raises(KeyboardInterrupt, match="synthetic post-status interruption"):
         delegated._run_adapter_process(
             [
                 sys.executable,
@@ -2954,9 +2941,7 @@ def test_temporary_file_return_before_payload_store_closes_descriptor(
                     and instruction.opname == "STORE_ATTR"
                     and instruction.argval == "payload_handle"
                 ):
-                    raise KeyboardInterrupt(
-                        "synthetic payload STORE_ATTR interruption"
-                    )
+                    raise KeyboardInterrupt("synthetic payload STORE_ATTR interruption")
         return interrupt_store
 
     monkeypatch.setattr(delegated, "_create_cloexec_pipe", capture_channel)
@@ -3073,9 +3058,7 @@ def test_posix_stop_retries_after_control_was_delivered_then_interrupted(
         original_wait(ownership, timeout=timeout)
 
     monkeypatch.setattr(delegated.os, "write", deliver_then_interrupt)
-    monkeypatch.setattr(
-        delegated, "_wait_and_reap_posix_supervisor", resume_then_wait
-    )
+    monkeypatch.setattr(delegated, "_wait_and_reap_posix_supervisor", resume_then_wait)
 
     try:
         os.kill(process.pid, signal.SIGSTOP)
@@ -3170,9 +3153,7 @@ def test_posix_control_writer_close_interruption_is_single_consumption(
         lambda *_args, **_kwargs: None,
     )
 
-    with pytest.raises(
-        KeyboardInterrupt, match="synthetic post-close interruption"
-    ):
+    with pytest.raises(KeyboardInterrupt, match="synthetic post-close interruption"):
         delegated._stop_posix_supervisor(ownership)
 
     assert ownership.termination_confirmed

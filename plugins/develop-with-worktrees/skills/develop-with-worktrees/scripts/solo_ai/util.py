@@ -627,7 +627,9 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
     open_existing = 3
     backup_semantics = 0x02000000
     open_reparse = 0x00200000
-    flags = open_reparse | (backup_semantics if expected.get("kind") == "directory" else 0)
+    flags = open_reparse | (
+        backup_semantics if expected.get("kind") == "directory" else 0
+    )
     handle = create_file(
         str(path),
         generic_read | delete_access,
@@ -671,7 +673,9 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
             ctypes.byref(disposition),
             ctypes.sizeof(disposition),
         ):
-            raise SoloAIError(f"Cleanup path could not be conditionally deleted: {path}")
+            raise SoloAIError(
+                f"Cleanup path could not be conditionally deleted: {path}"
+            )
     finally:
         if fd is not None:
             os.close(fd)

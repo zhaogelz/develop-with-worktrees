@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
-import shutil
 import sys
 import threading
 import time
@@ -13,14 +13,14 @@ from pathlib import Path
 
 import pytest
 from conftest import git
-from solo_ai import lifecycle
 from solo_ai import abandonment as abandonment_module
+from solo_ai import cleanup as cleanup_module
+from solo_ai import cli as cli_module
 from solo_ai import integration as integration_module
+from solo_ai import lifecycle
 from solo_ai import proof as proof_module
 from solo_ai import state as state_module
 from solo_ai.cli import _prune
-from solo_ai import cli as cli_module
-from solo_ai import cleanup as cleanup_module
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
     abandon,
@@ -380,7 +380,7 @@ def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
     assert StateStore(repo).task(task["id"])["mode"] == "isolated"
     ready(repo, task_id=task["id"], lease=task["lease"])
     finish(repo, task_id=task["id"], lease=task["lease"])
-    assert read_json(state_path, {})["schema_version"] == 4
+    assert read_json(state_path, {})["schema_version"] == 5
 
 
 def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
@@ -389,9 +389,7 @@ def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
     repo = initialized(git_repo)
     task = start(repo, name="schema three promoted task")
     commit_one(repo, task, "legacy.txt", "legacy\n", "test: legacy candidate")
-    candidate = ready(repo, task_id=task["id"], lease=task["lease"])[
-        "candidate_head"
-    ]
+    candidate = ready(repo, task_id=task["id"], lease=task["lease"])["candidate_head"]
     git(git_repo, "merge", "--ff-only", candidate)
     state_path = repo.local_dir / "state.json"
     legacy = read_json(state_path, {})
@@ -410,7 +408,7 @@ def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
     assert repo.head(git_repo) == candidate
     assert finished["status"] == "finished"
     assert finished["integration"]["transaction_id"].startswith("legacy-")
-    assert read_json(state_path, {})["schema_version"] == 4
+    assert read_json(state_path, {})["schema_version"] == 5
     upgraded = read_json(state_path, {})
     assert upgraded["pending_operation_outcomes"] == {}
     assert isinstance(upgraded["slots"][task["slot_id"]]["generation"], int)
@@ -530,7 +528,9 @@ def test_recover_rejects_unknown_transaction_phase_before_git_write(
     monkeypatch.setattr(
         lifecycle,
         "resume_integration",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after prepare")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("stop after prepare")
+        ),
     )
     with pytest.raises(RuntimeError, match="stop after prepare"):
         finish(repo, task_id=task["id"], lease=task["lease"])
@@ -557,7 +557,9 @@ def test_stale_prepared_recovery_preserves_changed_task_branch_identity(
     monkeypatch.setattr(
         lifecycle,
         "resume_integration",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after prepare")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("stop after prepare")
+        ),
     )
     with pytest.raises(RuntimeError, match="stop after prepare"):
         finish(repo, task_id=task["id"], lease=task["lease"])
@@ -587,7 +589,9 @@ def test_integration_recovery_rejects_same_path_worktree_replacement(
     monkeypatch.setattr(
         lifecycle,
         "resume_integration",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after prepare")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("stop after prepare")
+        ),
     )
     with pytest.raises(RuntimeError, match="stop after prepare"):
         finish(repo, task_id=task["id"], lease=task["lease"])
@@ -673,11 +677,9 @@ def test_public_recover_converges_after_real_finish_process_exit(
     repo = initialized(git_repo)
     task = start(repo, name=f"hard exit {stage}")
     commit_one(repo, task, "hard-exit.txt", stage + "\n", "test: hard exit candidate")
-    candidate = ready(repo, task_id=task["id"], lease=task["lease"])[
-        "candidate_head"
-    ]
+    candidate = ready(repo, task_id=task["id"], lease=task["lease"])["candidate_head"]
     source_root = str(Path(lifecycle.__file__).parent.parent)
-    child = r'''
+    child = r"""
 import os
 import sys
 from pathlib import Path
@@ -714,7 +716,7 @@ elif stage == "after-complete-state":
         return original(path, value)
     integration_module.atomic_write_json = crash_receipt
 finish(repo, task_id=task_id, lease=lease)
-'''
+"""
     crashed = subprocess.run(
         [
             sys.executable,
@@ -926,7 +928,7 @@ def test_recover_repairs_dead_running_operation_after_hard_exit(
     commit_one(repo, task, "dead-operation.txt", "ok\n", "test: dead operation")
     ready(repo, task_id=task["id"], lease=task["lease"])
     source_root = str(Path(lifecycle.__file__).parent.parent)
-    child = r'''
+    child = r"""
 import os
 import sys
 from pathlib import Path
@@ -943,7 +945,7 @@ def exit_on_terminal(path, value):
     return original(path, value)
 state_module.atomic_write_json = exit_on_terminal
 finish(repo, task_id=sys.argv[3], lease=sys.argv[4])
-'''
+"""
     crashed = subprocess.run(
         [
             sys.executable,
@@ -977,7 +979,9 @@ def test_recover_repairs_in_place_receipt_after_release(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = initialized(git_repo)
-    task = start(repo, name="in-place receipt crash", in_place=True, session_id="session-a")
+    task = start(
+        repo, name="in-place receipt crash", in_place=True, session_id="session-a"
+    )
     (git_repo / "in-place-receipt.txt").write_text("done\n", encoding="utf-8")
     commit_task(
         repo,
@@ -1015,9 +1019,7 @@ def test_recover_repairs_in_place_receipt_after_release(
 
     monkeypatch.setattr(lifecycle, "_write_in_place_receipt", original)
     result = recover(repo, task_id=task["id"])
-    receipt = read_json(
-        repo.local_dir / "in-place-receipts" / f"{task['id']}.json", {}
-    )
+    receipt = read_json(repo.local_dir / "in-place-receipts" / f"{task['id']}.json", {})
     assert result["status"] == "completed"
     assert receipt["stage"] == "released"
 
@@ -1026,7 +1028,9 @@ def test_in_place_finish_rejects_forged_local_completion_receipt(
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
-    task = start(repo, name="forged in-place receipt", in_place=True, session_id="session-a")
+    task = start(
+        repo, name="forged in-place receipt", in_place=True, session_id="session-a"
+    )
     (git_repo / "forged.txt").write_text("done\n", encoding="utf-8")
     commit_task(
         repo,
@@ -1196,7 +1200,7 @@ def test_public_recover_completes_abandonment_after_real_process_exit(
     task = start(repo, name="abandon hard exit")
     commit_one(repo, task, "discard-hard.txt", "discard\n", "test: hard abandon")
     source_root = str(Path(lifecycle.__file__).parent.parent)
-    child = r'''
+    child = r"""
 import os
 import sys
 from pathlib import Path
@@ -1223,7 +1227,7 @@ else:
         os._exit(86)
     StateStore.complete_abandonment = complete_then_exit
 abandon(repo, task_id=task_id, lease=lease, confirm=task_id)
-'''
+"""
     crashed = subprocess.run(
         [
             sys.executable,
@@ -1329,7 +1333,14 @@ def test_abandon_cas_preserves_branch_advanced_during_cleanup(
         expected = repo_arg.ref_head(f"refs/heads/{task['branch']}")
         assert expected
         new_head = repo_arg.git(
-            ["commit-tree", f"{expected}^{{tree}}", "-p", expected, "-m", "late abandon"],
+            [
+                "commit-tree",
+                f"{expected}^{{tree}}",
+                "-p",
+                expected,
+                "-m",
+                "late abandon",
+            ],
             cwd=cwd,
         ).stdout.strip()
         repo_arg.git(
@@ -1337,14 +1348,18 @@ def test_abandon_cas_preserves_branch_advanced_during_cleanup(
         )
         advanced["head"] = new_head
 
-    monkeypatch.setattr(abandonment_module, "remove_abandoned_untracked", advance_after_inventory)
+    monkeypatch.setattr(
+        abandonment_module, "remove_abandoned_untracked", advance_after_inventory
+    )
     with pytest.raises(SoloAIError, match="advanced during abandonment"):
         abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     assert repo.ref_head(f"refs/heads/{task['branch']}") == advanced["head"]
     assert StateStore(repo).task(task["id"])["status"] == "abandoning"
 
 
-@pytest.mark.parametrize("relative", ["README.md", "scratch.txt", ".ENV.local", "late.DB"])
+@pytest.mark.parametrize(
+    "relative", ["README.md", "scratch.txt", ".ENV.local", "late.DB"]
+)
 def test_recover_abandonment_refuses_late_worktree_content(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, relative: str
 ) -> None:
@@ -1354,7 +1369,9 @@ def test_recover_abandonment_refuses_late_worktree_content(
     monkeypatch.setattr(
         StateStore,
         "complete_abandonment",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop before release")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("stop before release")
+        ),
     )
     with pytest.raises(RuntimeError, match="stop before release"):
         abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
@@ -1362,7 +1379,9 @@ def test_recover_abandonment_refuses_late_worktree_content(
     target = Path(task["worktree"]) / relative
     target.write_text("late\n", encoding="utf-8")
 
-    with pytest.raises(SoloAIError, match="changed before release|files were preserved"):
+    with pytest.raises(
+        SoloAIError, match="changed before release|files were preserved"
+    ):
         recover(repo, task_id=task["id"])
     assert target.read_text(encoding="utf-8") == "late\n"
     assert StateStore(repo).task(task["id"])["status"] == "abandoning"
@@ -1449,7 +1468,14 @@ def test_abandon_atomically_verifies_other_active_refs_before_delete(
         old_b = self.ref_head(b_ref)
         assert old_b
         new_b = self.git(
-            ["commit-tree", f"{candidate}^{{tree}}", "-p", candidate, "-m", "include a"],
+            [
+                "commit-tree",
+                f"{candidate}^{{tree}}",
+                "-p",
+                candidate,
+                "-m",
+                "include a",
+            ],
             cwd=cwd,
         ).stdout.strip()
         self.git(["update-ref", b_ref, new_b, old_b], cwd=cwd)
@@ -1492,7 +1518,9 @@ def test_abandon_quarantines_released_slot_when_content_arrives_at_complete(
         return completed
 
     monkeypatch.setattr(StateStore, "complete_abandonment", complete_after_write)
-    with pytest.raises(SoloAIError, match="changed before release|files were preserved"):
+    with pytest.raises(
+        SoloAIError, match="changed before release|files were preserved"
+    ):
         abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     state = StateStore(repo).read()
     assert state["tasks"][task["id"]]["status"] == "abandoned"
@@ -1515,7 +1543,9 @@ def test_abandon_quarantines_content_created_at_release_publish(
         return original(self, task_id, transaction_id=transaction_id)
 
     monkeypatch.setattr(StateStore, "publish_abandonment_release", publish_after_write)
-    with pytest.raises(SoloAIError, match="changed.*abandonment release|changed before release"):
+    with pytest.raises(
+        SoloAIError, match="changed.*abandonment release|changed before release"
+    ):
         abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     state = StateStore(repo).read()
     assert state["slots"][task["slot_id"]]["status"] == "quarantined"
@@ -1539,7 +1569,9 @@ def test_finish_quarantines_content_created_at_release_publish(
         return original(self, task_id, transaction_id=transaction_id)
 
     monkeypatch.setattr(StateStore, "publish_integration_release", publish_after_write)
-    with pytest.raises(SoloAIError, match="changed.*integration release|changed before slot release"):
+    with pytest.raises(
+        SoloAIError, match="changed.*integration release|changed before slot release"
+    ):
         finish(repo, task_id=task["id"], lease=task["lease"])
     state = StateStore(repo).read()
     assert state["slots"][task["slot_id"]]["status"] == "quarantined"
@@ -2612,7 +2644,7 @@ def test_prune_slot_recovers_after_real_process_exit(
     sibling.write_text("preserve\n", encoding="utf-8")
     plan = _prune(repo, kind="slot", slot="01")
     source_root = str(Path(lifecycle.__file__).parent.parent)
-    child = r'''
+    child = r"""
 import os
 import sys
 from pathlib import Path
@@ -2649,7 +2681,7 @@ else:
         return original(path, value)
     cli_module.atomic_write_json = crash_completed
 _prune(repo, kind="slot", slot="01", plan_id=sys.argv[3], confirm=sys.argv[4])
-'''
+"""
     crashed = subprocess.run(
         [
             sys.executable,
@@ -2676,9 +2708,7 @@ _prune(repo, kind="slot", slot="01", plan_id=sys.argv[3], confirm=sys.argv[4])
         plan_id=plan["plan_id"],
         confirm=plan["digest"],
     )
-    stored = read_json(
-        repo.local_dir / "cleanup-plans" / f"{plan['plan_id']}.json", {}
-    )
+    stored = read_json(repo.local_dir / "cleanup-plans" / f"{plan['plan_id']}.json", {})
     assert result["status"] == "pruned"
     assert stored["status"] == "completed"
     assert not (worktree / ".venv").exists()
@@ -2748,7 +2778,9 @@ def test_prune_preserves_file_replaced_at_conditional_delete(
             replaced["path"] = path
         original(path, expected)
 
-    monkeypatch.setattr(cli_module, "delete_plain_path_if_unchanged", replace_then_delete)
+    monkeypatch.setattr(
+        cli_module, "delete_plain_path_if_unchanged", replace_then_delete
+    )
     with pytest.raises(SoloAIError, match="changed before deletion"):
         _prune(
             repo,
@@ -2775,7 +2807,10 @@ def test_prune_quarantines_plan_when_source_reappears_at_completion(
     original = cli_module.atomic_write_json
 
     def recreate_before_completed(path: Path, value: dict[str, object]) -> None:
-        if path.name == f"{plan['plan_id']}.json" and value.get("status") == "completed":
+        if (
+            path.name == f"{plan['plan_id']}.json"
+            and value.get("status") == "completed"
+        ):
             source.mkdir(exist_ok=True)
             (source / "late").write_text("late\n", encoding="utf-8")
         original(path, value)
@@ -2789,9 +2824,7 @@ def test_prune_quarantines_plan_when_source_reappears_at_completion(
             plan_id=plan["plan_id"],
             confirm=plan["digest"],
         )
-    stored = read_json(
-        repo.local_dir / "cleanup-plans" / f"{plan['plan_id']}.json", {}
-    )
+    stored = read_json(repo.local_dir / "cleanup-plans" / f"{plan['plan_id']}.json", {})
     assert stored["status"] == "quarantined"
     assert (source / "late").read_text(encoding="utf-8") == "late\n"
     assert StateStore(repo).read()["slots"][task["slot_id"]]["status"] == "quarantined"
@@ -3161,13 +3194,13 @@ def test_dev_start_refuses_task_finalization_states(
     config = git_repo / ".solo-ai" / "config.toml"
     config.write_text(
         config.read_text(encoding="utf-8")
-        + f'''\ndev_start = [{json.dumps(sys.executable)}, "-c", "import time; time.sleep(5)"]
+        + f"""\ndev_start = [{json.dumps(sys.executable)}, "-c", "import time; time.sleep(5)"]
 
 [lifecycle.readiness]
 kind = "tcp"
 target = "127.0.0.1:{{port}}"
 timeout_seconds = 1
-''',
+""",
         encoding="utf-8",
     )
     git(git_repo, "add", ".solo-ai/config.toml")

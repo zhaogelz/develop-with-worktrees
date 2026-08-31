@@ -37,6 +37,13 @@ class ReadinessSpec:
 
 
 @dataclass(frozen=True)
+class IntegrationSpec:
+    mode: str
+    batch_size: int
+    candidate_capacity: int
+
+
+@dataclass(frozen=True)
 class RepoConfig:
     schema_version: int
     mode: str
@@ -52,6 +59,7 @@ class RepoConfig:
     dev_start: CommandSpec | None
     readiness: ReadinessSpec | None
     cleanup_owned_paths: tuple[str, ...]
+    integration: IntegrationSpec
 
 
 @dataclass(frozen=True)
@@ -294,6 +302,27 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     cleanup = data.get("cleanup", {})
     if not isinstance(cleanup, dict):
         raise SoloAIError("cleanup must be a TOML table")
+    integration_raw = data.get("integration", {})
+    if not isinstance(integration_raw, dict):
+        raise SoloAIError("integration must be a TOML table")
+    integration_mode = _string(
+        integration_raw.get("mode", "direct"), field="integration.mode"
+    )
+    if integration_mode not in {"direct", "batched"}:
+        raise SoloAIError('integration.mode must be "direct" or "batched"')
+    batch_size = _integer(
+        integration_raw.get("batch_size", 5), field="integration.batch_size"
+    )
+    if not 1 <= batch_size <= 5:
+        raise SoloAIError("integration.batch_size must be between 1 and 5")
+    candidate_capacity = _integer(
+        integration_raw.get("candidate_capacity", 10),
+        field="integration.candidate_capacity",
+    )
+    if not batch_size <= candidate_capacity <= 100:
+        raise SoloAIError(
+            "integration.candidate_capacity must be between batch_size and 100"
+        )
     readiness_raw = lifecycle.get("readiness")
     if "dev_start" in lifecycle:
         dev_start = _command(lifecycle["dev_start"], field="lifecycle.dev_start")
@@ -344,6 +373,11 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
             field="cleanup.owned_paths",
             default=DEFAULT_CLEANUP_OWNED_PATHS,
             allow_patterns=False,
+        ),
+        integration=IntegrationSpec(
+            mode=integration_mode,
+            batch_size=batch_size,
+            candidate_capacity=candidate_capacity,
         ),
     )
 
@@ -579,6 +613,8 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # Only exact top-level paths explicitly declared here may be removed by prune-slot.
 # An empty list means no dependencies or caches are ever removed automatically.
 cleanup = {{ owned_paths = [] }}
+# direct: Finish 合回当前基线；batched: Finish 发布候选，随后显式 seal。
+integration = {{ mode = "direct", batch_size = 5, candidate_capacity = 10 }}
 
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{{port}}"]
@@ -628,6 +664,7 @@ def managed_block() -> str:
 ## Isolated coding tasks
 
 For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in the returned worktree, stage an exact reviewed path list with `commit`, then run `ready` and `finish`. Read-only analysis does not claim a slot. Do not bypass a failed gate. The DWW lifecycle is local-only and must not fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After a successful Finish, an explicit user request may be fulfilled with an ordinary non-force push of the current branch from the clean base worktree; that publishing step is separate from DWW.
+`Start` creates the local task anchor; keep it current and reread it after continuation or context loss. In direct mode Finish integrates locally. In batched mode Finish only publishes a verified candidate and releases the slot; move the base only with an explicit `batch seal` listing the intended candidate ids. Never seal from count, idle time, or session end. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only.
 {MANAGED_END}
 """
 

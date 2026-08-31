@@ -1,11 +1,11 @@
 ---
 name: develop-with-worktrees
-description: "Use for any Git-repository task that may modify files. Route first, let mature workflows win, and use one plain-language plan confirmation for complex multi-AI work; otherwise use safe isolated local worktrees. Do not use for read-only analysis."
+description: "Use for any Git-repository task that may modify files. Route lifecycle ownership first, then use first-class task anchors, safe isolated worktrees, exact validation, and either direct or explicit candidate-batch integration. Let the host's native task/subagent system own task orchestration. Do not use for read-only analysis."
 ---
 
 # Develop with Worktrees
 
-Use this lifecycle for every modifying Git task unless the user chooses ordinary current-directory development. Explain in the user's language. The core CLI is host-neutral; the trusted Codex hook is a hard write guard for Codex-supported local tool paths, not an operating-system sandbox.
+DWW is a host-neutral Git safety lifecycle. It owns repository routing, local task identity, task anchors, worktree isolation, exact-path commits, validation evidence, candidate publication, integration, cleanup, and recovery. It does not own user-facing task decomposition or worker scheduling; use the host's native task/subagent facilities for those concerns.
 
 Set `DWW` to this skill's absolute `scripts/dww.py` and invoke it only with `uv`:
 
@@ -13,75 +13,44 @@ Set `DWW` to this skill's absolute `scripts/dww.py` and invoke it only with `uv`
 uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
 ```
 
-## Hook trust without repeated user work
+## Hooks are optional hardening
 
-Codex persists trust against the exact hook definition. Treat `hooks/hooks.json` as a stable compatibility contract: ordinary plugin, skill, and guard-script updates must not change it and must not cause a repeated trust request. Missing `SessionStart` context alone is not evidence that trust is missing; use the read-only route fallback without asking.
+The CLI lifecycle must remain correct with no Hook installed or trusted. A trusted `SessionStart` Hook may provide route context and a trusted `PreToolUse` Hook may hard-deny unsafe writes on supported Codex local-tool paths, but neither is a source of task completion, candidate sealing, cleanup, or recovery truth. Never use `SessionEnd`, idle time, or Hook delivery as a correctness condition.
 
-Only act when Codex actually reports that a new or changed hook needs review. Explain the exact guard behavior change in plain language and ask for one confirmation. After explicit approval, if the current host exposes UI control, use it to open `/hooks` and complete the trust action instead of instructing the user to click through the interface. If host UI control is unavailable, state that product-surface limitation and do not claim the hard guard is active.
+Keep `hooks/hooks.json` stable during ordinary updates so existing trust is not needlessly invalidated. Only when Codex actually reports a new or changed Hook pending review should you explain the exact protection change and ask once. The plugin never edits trust storage, bypasses Hook trust, or claims an untrusted Hook is active.
 
-The plugin and hook cannot approve their own trust. Never edit Codex trust storage, use `--dangerously-bypass-hook-trust`, or convert this personal plugin to an enterprise managed hook to avoid review.
+## Route before modifying
 
-## Route before any repository choice
-
-At the first modifying intent, use the compact route already injected by the trusted `SessionStart` hook. If no route context is available, run exactly one read-only fallback:
+Use route context already supplied by the host when present. Otherwise run exactly one read-only fallback:
 
 ```text
 uv run --script <DWW> --repo <repository-or-worktree> --json route
 ```
 
-Do not use the full `doctor` report for routing.
+The result selects the repository lifecycle owner:
 
-The route selects only the owner of repository lifecycle and orchestration state. It does not switch off non-state governance: a complex request still gets one plain-language plan confirmation and one coordinating conversation, and multi-step work still uses the repository's temporary task context and durable-document boundary. A repository rule replaces this generic governance only when it explicitly covers the same concern.
+- `defer`: follow the repository's mature lifecycle. Do not initialize or mutate DWW lifecycle, candidate, or batch state.
+- `delegated`: use only the repository's exact locally approved adapter contract. Do not also start the managed lifecycle.
+- `disabled` or `current-task`: use ordinary current-directory development for the recorded scope.
+- `managed`: start the normal isolated DWW task.
+- `ask`: and only `ask`, use the single choice below.
 
-- `defer`: the repository's mature workflow owns lifecycle and orchestration state. Do not ask the DWW repository-choice question, initialize DWW, run a DWW lifecycle command, or create DWW orchestration state. Follow the repository's own instructions.
-- `delegated`: the repository's exact tracked adapter contract is locally approved. Follow [delegated-adapters.md](references/delegated-adapters.md) and the repository's instructions; do not initialize or run the managed DWW lifecycle. Contract or input drift returns the route to `defer` until the new fingerprint is reviewed and approved.
-- `disabled` or `current-task`: do not ask again or run the DWW lifecycle; use normal current-directory development.
-- `managed`: proactively start the normal isolated task.
-- `ask`: and only `ask`, show the single question below.
+Read-only analysis never claims a slot or creates an anchor.
 
-## Complex multi-AI work: one central conversation
+## Task orchestration belongs to the host
 
-Treat a request as complex only when it has multiple independently verifiable outcomes, real dependencies, or an explicit shared contract. Keep a simple request as one task in the routed lifecycle: do not create a batch, extra worker, review worker, or status dashboard by default.
+For multiple independently verifiable outcomes, use the host's native task, subagent, dependency, wait, and status facilities. Each writing worker still receives one routed DWW lifecycle task and its own worktree. DWW does not create a second DAG, controller identity, worker dashboard, or scheduling state.
 
-For a complex request, the current Codex conversation is the **only user-facing decision and coordination conversation**. First give the user a short, plain-language plan made of vertical outcomes (or a contract-first task followed by its consumers), including the result each task will make visible. Ask for one confirmation. Do not dispatch a worker, create a DWW task, or write orchestration state before that confirmation.
+The legacy `dww orchestrate` command family is drain-only compatibility. Existing batches may be inspected, completed, paused, resumed, handed over, or cancelled as supported, but do not create a new orchestration batch, add tasks, or create repairs there.
 
-If route is `ask`, fold the default isolated-directory choice into this same plan confirmation: say that confirmation will use separate directories and local-only integration. After the user confirms, run `choose --mode isolated`, then create and confirm the orchestration batch. Do not show the separate three-choice prompt as well. If the user instead explicitly asks for one AI or current-directory work, follow that explicit choice and do not create a batch.
+Do not confuse task orchestration with candidate integration batches:
 
-After confirmation, coordinate through the routed owner:
-
-- `managed`: create one opaque controller identifier, pass it to `dww orchestrate plan`, then use `dww orchestrate confirm` only to record the confirmation already received; never ask again or give the identifier to workers.
-- `delegated`: use DWW orchestration only through the exact approved adapter and repository contract.
-- `defer`: never create or mutate a DWW batch. If the repository names an external orchestrator, it is the sole state and scheduling owner while the current conversation remains the sole user-facing coordinator. If the repository provides only a native lifecycle, the current conversation coordinates through native task identities, status, and evidence; do not invent an external command or batch store.
-- `disabled` or `current-task`: coordinate directly in the current conversation without DWW lifecycle or orchestration state. Use one writing agent serially unless the repository itself provides isolated workspaces and coordination.
-
-For `managed` or supported `delegated` batches, the scheduler may dispatch at most `min(5, configured DWW slots, idle DWW slots)` development tasks. Managed validation remains governed by DWW's machine-global weighted queue.
-
-Within a DWW orchestration batch:
-
-- Only the controller may call `orchestrate claim`, start workers, add an internal task, or hand off the controller. A worker receives one task and has no authority to spawn another worker.
-- Give each worker exactly one writer task. Same-file predictions do not serialize work. Only an explicit high-risk `exclusive_resources` value (for example a migration, lockfile, or shared contract) serializes tasks.
-- For a `managed` repository, let each worker use its own ordinary DWW lifecycle: Ready/Finish integrates its exact candidate locally. For a `delegated` mature workflow, follow only its declared lifecycle. If that workflow explicitly declares a candidate pool and an explicit batch-seal action, a worker's “finish” may mean “publish a verified candidate” rather than “move the base branch”; the controller alone performs the declared seal. Never infer such a mode from task wording or simulate it with DWW commands.
-- A blocked task stops only its dependents. Continue unrelated frontier tasks. Record a repair attempt only when the diagnosis changed; two unchanged failures, business ambiguity, safety, data, permission, or scope changes require the central conversation to ask the user.
-- Record existing proof/receipt references with `orchestrate complete`. At batch end, run only a targeted combination check that lacks evidence; do not add a default full repository test or review AI.
-- `orchestrate pause`, `resume`, `cancel`, and `take-over` preserve code and local state. Cancellation never deletes a branch or file. A future central conversation can inspect status, take over with the exact batch id, and continue; no resident daemon is implied.
-
-`dww` is the lifecycle adapter for a `managed` repository. A mature repository may participate only through an explicit `delegated` adapter chosen by its own workflow; never parse arbitrary instructions or invent an external command.
-
-### Optional delegated candidate batches
-
-This is a repository-owned protocol, not a second DWW lifecycle. Use it only when a mature delegated workflow explicitly supplies all of: immutable candidate identities, an explicit seal command, one final verification boundary, and a compare-and-swap or equivalent protected base promotion.
-
-- Workers independently develop and verify their exact candidate, then publish it. They do not wait for other workers and do not run final integration validation.
-- The central controller decides when the intended candidates are all published and invokes one explicit seal. Do not use a timer, a queue length, or “the channel happens to be idle” as a seal trigger.
-- A seal captures one immutable generation. A later revision such as B1 never alters the captured B; it waits for a later explicit seal. One seal must not silently consume a later generation after completing the first.
-- On final-validation failure, preserve the base branch. Diagnose first; the responsible task publishes a new candidate. Unchanged, compatible candidates may be retained only if the delegated workflow records their exact identities and says they are reusable. Never automatically rerun the same failed generation.
-- On interruption, resume only the captured generation from its recorded Git facts and final-verification evidence. If the base changed, require a refresh instead of treating the old proof as current.
-
-The controller records only the delegated evidence and result through orchestration; DWW does not create a pool database, choose candidates, or execute the seal itself.
+- native orchestration answers “who works on which outcome and when?”;
+- DWW candidate batches answer “which exact verified Git candidates are intentionally combined and promoted together?”.
 
 ## First modifying intent in an unchosen repository
 
-Read-only analysis never asks a question or claims a task. For a simple request, after repository instructions and the compact route are read, when the result is `ask`, show exactly this one question:
+When route is `ask`, show exactly this question:
 
 ```text
 此仓库怎么修改？
@@ -98,52 +67,71 @@ Read-only analysis never asks a question or claims a task. For a simple request,
 只影响本机，可随时修改。
 ```
 
-Do not add an initialization, test-discovery, or static-validation question. Do not explain internal terms unless the user asks.
+- Choice 1: run `choose --mode isolated`. Initialization silently selects discovered checks or internal static checks.
+- Choice 2: when a trusted session identifier is available, run `choose --mode current-task --session <id>` and otherwise explain that this optional session-bound bypass is unavailable without Hook context. Do not weaken managed safety to simulate it.
+- Choice 3: run `choose --mode current-repository`; this writes only local preference state.
 
-- Choice 1: run `choose --mode isolated`. It sets up the managed lifecycle once. If no automated test is found, it silently uses its internal basic checks; it does not ask again.
-- Choice 2: obtain the session identifier from trusted hook context and run `choose --mode current-task --session <id>`. For the rest of this session, work in the current directory exactly as if this skill were absent: do not create policy files, start a task, or run Commit/Ready/Finish. A new task asks again.
-- Choice 3: run `choose --mode current-repository`. It locally disables this repository on this machine without changing tracked files; do not initialize or run this skill later unless the user changes the choice.
+If a mature workflow appears before `choose`, the command returns `deferred` and writes no DWW state.
 
-If a mature workflow appears before `choose`, the command returns `deferred` for every mode and changes no DWW state.
+## Managed task lifecycle
 
-The choices are local to the current clone/common Git directory. A different clone or machine chooses independently. Natural-language changes such as “以后使用独立目录开发” and “以后直接在当前目录开发” are explicit new choices; apply them with `choose` without repeating the prompt. “在主分支完成 / 合到 main / 提交到 main” is not a bypass: ask whether current-directory execution is required if the intent is unclear.
+When modifying intent is clear, start proactively:
 
-When choice 2 needs a writing child agent, pass its returned one-time delegation code only in that child’s task instruction. The child registers its own hook session with `choose --mode current-task --session <child-id> --delegate <code>` before writing. Do not reuse the code for an unrelated task. Codex currently supplies no reliable parent-agent hook identifier, so this explicit delegation is the only safe way to extend the one-task choice without opening concurrent unrelated tasks.
+```text
+uv run --script <DWW> --repo <repo> start --name <purpose> [--request-id <stable-caller-id>]
+```
 
-## Default managed task
+`Start` returns the worktree, private lease, immutable base identity, and task-anchor path. A repeated `request_id` returns the same managed task instead of consuming another slot. Never expose the lease to another worker.
 
-For an adopted repository, proactively run `start --name <purpose>` when a modifying intent is clear. It derives from the invocation worktree's current local branch.
+1. Work only in the returned worktree.
+2. Read and update the generated anchor before editing. It lives at `<git-common-dir>/solo-ai/task-anchors/<task-id>.md`, is never committed, and records objective, target, baseline, scope, acceptance, and progress.
+3. After context compression, model change, handoff, or continuation, reread the anchor before the next modification.
+4. Commit exactly the reviewed paths with repeated `--path`; never use broad staging.
+5. Use `plan` or `verify --level development` when useful.
+6. Run `ready`, then `finish` with the same task and lease.
 
-1. Work only in the returned worktree. Keep its lease private.
-2. Commit exactly the reviewed paths with repeated `--path`; never use unscoped staging.
-3. Use `plan` or `verify --level development` as useful feedback. Slow estimates are advice only.
-4. Run `ready`, then `finish` with the same task and lease.
+Ready refuses a missing, linked, oversized, non-UTF-8, or identity-mismatched anchor. It validates the exact clean candidate and synchronizes only the recorded local base. DWW never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 
-For a confirmed plan or another multi-step task, create an uncommitted task anchor immediately after entering the routed owner's authorized writable worktree. Re-read it before modifying files after context compression, model change, or a later continuation. At acceptance, update durable documentation only for facts that must survive future tasks, then remove the anchor. A clearly bounded single small edit may omit it. Follow [task-governance.md](references/task-governance.md) for fields, precedence, fallback storage, and the durable-document boundary.
+## Direct and batched integration
 
-Ready/Finish synchronize only the recorded base branch. Ready checks the expected base after validation admission and again after validation; when another Finish advances that base, the same Ready call resynchronizes and reuses exact unchanged profile proofs, up to five retries. A deleted, rewound, or rewritten base requires explicit `retarget`; Finish only fast-forwards the recorded clean base worktree. It never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
+`integration.mode = "direct"` is the generic default. A successful Finish fast-forwards the recorded clean base worktree, releases the slot, and deletes the anchor.
 
-## Explicit post-Finish publishing
+A repository may explicitly configure `integration.mode = "batched"`. The defaults are `batch_size = 5` and `candidate_capacity = 10`:
 
-DWW and the orchestration layer never publish automatically. When the user explicitly asks to sync a completed result to a remote after a successful Finish, treat publishing as a separate operation outside the DWW lifecycle:
+- Finish validates and publishes one immutable candidate ref, releases its worktree slot, leaves the base unchanged, and keeps its anchor.
+- `candidate status` shows the bounded pool.
+- Only `batch seal --candidate <id> ...` freezes a generation. List every intended candidate explicitly; one seal accepts at most the configured batch size.
+- DWW composes the exact frozen tree differences in a dedicated integration worktree, runs combined Full validation, verifies the base snapshot again, then fast-forwards the clean base.
+- A later revision never changes a sealed generation. Use `start --supersedes <candidate-id>` for a repair task and seal a new explicit generation.
+- `candidate withdraw --candidate <id>` removes only a pending candidate not captured by an active batch.
+- `batch recover --batch <id>` resumes only an interrupted recorded generation. A deterministically failed generation is not automatically rerun.
 
-1. Work only from the clean recorded base worktree and confirm its current branch and remote.
-2. Run a normal push dry-run for that current branch first.
-3. If the dry-run succeeds, use an ordinary non-force push of that branch. Set its upstream only when it has none.
+Never seal because the pool reached five, because no worker appears active, because a timer elapsed, or because a session ended. The caller decides the exact intended set. On conflict or final-validation failure, the base remains unchanged; diagnose, publish a repair candidate, and explicitly seal a new generation. Unchanged compatible candidates may be reused only by naming their exact identities again.
 
-Do not fetch, pull, force-push, delete a remote ref, push tags, create a PR, or deploy unless the user separately and explicitly asks for that action. A failed or non-fast-forward dry-run stops publishing; preserve local work and report the remote divergence.
+## Task-anchor lifetime and durable facts
 
-## Advanced guarded current-worktree task
+The anchor remains until the Git result reaches its real terminal boundary:
 
-`start --in-place` remains a compatibility path only when the user explicitly asks to retain DWW's exact Commit/Ready/Finish safeguards while using the current clean worktree. It is not the meaning of choice 2. Follow [lifecycle.md](references/lifecycle.md) for its session, identity, and recovery requirements.
+- direct integration succeeds;
+- the candidate's explicit batch succeeds;
+- the pending candidate is explicitly withdrawn; or
+- the task is explicitly abandoned.
 
-## Validation, cleanup, and limits
+Do not store chat transcripts, hidden reasoning, credentials, leases, or unrelated history in it. Only facts that future tasks must continue to obey belong in the repository's existing authoritative document: lasting product rules, public contracts, data models, permissions, architecture boundaries, stable responsibilities, or long-lived UI contracts. Ordinary fixes, implementation details, tests, builds, and validation receipts stay out of permanent task ledgers.
 
-- `verification.toml` supports schema 3 only. Commands are registered argv arrays, never shell strings.
-- Development, Ready, and Full evidence are separate. All changed candidate paths need Ready coverage unless internal static-only policy is active.
-- Validation uses a machine-global weighted FIFO queue. `settings --validation-capacity auto|1..4` is local-only.
-- Finish never removes dependencies or caches. Interrupted Finish/Abandon operations resume only from persisted exact-candidate transactions and Git facts. `prune-slot` requires a reviewed generation-bound one-shot plan and digest; `.env*`, databases, upload/storage content, symlinks, junctions, or changes stop deletion.
+## Explicit remote publishing
 
-Read [configuration.md](references/configuration.md), [lifecycle.md](references/lifecycle.md), [task-governance.md](references/task-governance.md), and [safety.md](references/safety.md) before changing policy or handling an exception.
+DWW never publishes remotely. After a successful direct Finish or completed candidate batch, an explicit user request may be fulfilled as a separate operation from the clean base worktree: confirm branch and remote, run a normal push dry-run, then use an ordinary non-force push. Do not fetch, pull, force-push, delete remote refs, push tags, create a PR, or deploy without separate explicit authorization.
 
-When introducing a delegated adapter to an existing mature repository, also follow [delegated-migration.md](references/delegated-migration.md); never treat declaration alone as activation.
+## Advanced current-worktree compatibility
+
+`start --in-place` remains a compatibility path only when the user explicitly requests DWW's Commit/Ready/Finish safeguards in the current clean worktree and trusted session identity is available. It is not the ordinary meaning of choice 2. Follow [lifecycle.md](references/lifecycle.md) for binding and recovery requirements.
+
+## Validation, cleanup, and references
+
+- `verification.toml` schema 3 uses explicit argv arrays. All candidate paths require Ready coverage unless static-only policy is explicitly active.
+- Development, Ready, and Full evidence are separate. The machine-global weighted FIFO queue limits expensive validation.
+- Finish never removes dependencies or caches. `prune-slot` requires a reviewed generation-bound plan; protected data, links, path drift, or unknown content stop deletion.
+- Existing mature workflows cross the delegated seam only through the tracked, locally approved bounded adapter contract.
+
+Read [configuration.md](references/configuration.md), [lifecycle.md](references/lifecycle.md), [task-governance.md](references/task-governance.md), and [safety.md](references/safety.md) before changing policy or handling an exception. For delegated adoption, also read [delegated-migration.md](references/delegated-migration.md).

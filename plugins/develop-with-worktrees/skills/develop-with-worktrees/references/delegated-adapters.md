@@ -124,6 +124,6 @@ On Windows the caller creates a Job Object with `KILL_ON_JOB_CLOSE` before proce
 
 This is a reliable cleanup boundary for approved adapters that stay inside the inherited process boundary; it is not an operating-system sandbox. On POSIX an adapter that deliberately creates a new session with `setsid`, or on any platform uses an external broker, privilege boundary, Hook bypass, or another deliberate escape, is outside the portable contract and must not be approved.
 
-This interface does not make the repository lifecycle generic. The repository still owns its task identities, leases, candidate pool, explicit seal, validation evidence, recovery, and cleanup. DWW owns only routing, approval, the bounded JSON call, and generic orchestration bookkeeping.
+This interface does not replace the delegated repository's lifecycle. That repository still owns its task identities, leases, candidate pool, explicit seal, validation evidence, recovery, and cleanup. DWW's managed candidate-batch implementation applies only when DWW itself owns the managed lifecycle; it is never imposed through delegation. The legacy generic orchestration store is not used for new delegated work.
 
 For staged adoption, parity testing, rollout, and rollback, follow [Delegated adapter migration](delegated-migration.md).

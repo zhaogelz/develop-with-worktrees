@@ -1,30 +1,32 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.3.0-beta.18",
-  "description": "A local-first Codex workflow with safe isolated integration, task governance, and approved mature-workflow delegation.",
+  "version": "0.4.0-beta.1",
+  "description": "A host-neutral Git safety lifecycle for isolated worktrees, task anchors, validation, candidates, and explicit local integration.",
   "skills": "./skills/",
   "author": {
     "name": "develop-with-worktrees contributors"
   },
   "interface": {
     "displayName": "Develop with Worktrees",
-    "shortDescription": "One confirmed plan for complex multi-AI work; safe local integration.",
-    "longDescription": "Route only lifecycle and orchestration-state ownership: mature repositories keep native state while one plain-language confirmation, one coordinating conversation, temporary task anchors, and authoritative durable-document boundaries remain available unless explicitly replaced. Managed or approved delegated work can use local-only DWW orchestration and evidence-led completion. Explicit publishing remains a separate dry-run-first, non-force operation after Finish.",
+    "shortDescription": "Safe Git worktrees, verified candidates, and explicit local integration.",
+    "longDescription": "Route repository lifecycle ownership, isolate modifying tasks, keep a local task anchor, validate exact candidates, and integrate locally without remote side effects. Optional batched mode publishes immutable candidates into a bounded pool and moves the base only after an explicit seal and combined validation. Native host task/subagent tools own task orchestration; Codex hooks are optional hardening rather than a correctness dependency.",
     "developerName": "develop-with-worktrees contributors",
     "category": "developer-tools",
     "capabilities": [
       "Git worktree task isolation",
-      "One-confirmation multi-AI task orchestration",
       "Exact locally approved mature-workflow delegation",
-      "Temporary task anchors and durable-document routing",
+      "First-class local task anchors",
+      "Bounded immutable candidate pool",
+      "Explicit candidate batch integration",
       "Session-bound one-task direct-development choice",
       "Local validation and integration gates",
-      "Safe local lifecycle cleanup"
+      "Safe local lifecycle cleanup",
+      "Optional Codex write guard"
     ],
     "defaultPrompt": [
-      "Use the repository's required workflow for this Git change.",
-      "Handle this change in an isolated worktree and finish the managed lifecycle."
+      "Use $develop-with-worktrees to route and safely complete this Git change.",
+      "Use $develop-with-worktrees to publish verified candidates and explicitly seal their integration batch."
     ]
   },
   "license": "MIT",

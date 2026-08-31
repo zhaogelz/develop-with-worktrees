@@ -41,13 +41,16 @@ def test_only_an_approved_declared_adapter_changes_mature_routing() -> None:
 
     adapter["approved"] = False
     adapter["reason"] = "approval-required"
-    assert decide_route(
-        workflows=["repository worktree-flow"],
-        local_enabled=True,
-        current_task=False,
-        adopted=False,
-        delegated=adapter,
-    )["reason"] == "delegated-approval-required"
+    assert (
+        decide_route(
+            workflows=["repository worktree-flow"],
+            local_enabled=True,
+            current_task=False,
+            adopted=False,
+            delegated=adapter,
+        )["reason"]
+        == "delegated-approval-required"
+    )
 
 
 def test_route_orders_local_and_managed_dww_modes_after_defer() -> None:

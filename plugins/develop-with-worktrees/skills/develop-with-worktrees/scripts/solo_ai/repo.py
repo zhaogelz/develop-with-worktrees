@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-import subprocess
 
 from .util import CommandResult, SoloAIError, run
 
@@ -205,9 +205,7 @@ class GitRepo:
 
     def delete_ref(self, ref: str, *, expected: str, cwd: Path | None = None) -> None:
         """仅当引用仍指向预期提交时原子删除，避免并发推进的新提交丢失。"""
-        result = self.git(
-            ["update-ref", "-d", ref, expected], cwd=cwd, check=False
-        )
+        result = self.git(["update-ref", "-d", ref, expected], cwd=cwd, check=False)
         if result.returncode != 0:
             raise SoloAIError(
                 f"Git ref changed before deletion and was preserved: {ref}"
