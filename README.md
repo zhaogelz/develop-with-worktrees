@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.4.0-beta.1` is a host-neutral local Git safety lifecycle. It routes modifying work, creates first-class task anchors, isolates worktrees, commits exact paths, validates candidates, integrates directly or through explicit candidate batches, and recovers from persisted Git facts. The host's native task/subagent system owns decomposition, dependencies, workers, waits, and task status.
+`0.5.0-beta.1` is a host-neutral local Git safety lifecycle. It routes modifying work, creates first-class task anchors, isolates worktrees, commits exact paths, validates candidates, integrates directly or through explicit candidate batches, and recovers from persisted Git facts. The host's native task/subagent system owns decomposition, dependencies, workers, waits, and task status.
 
 ## Responsibility boundary
 
@@ -35,7 +35,7 @@ integration = { mode = "batched", batch_size = 5, candidate_capacity = 10 }
 
 In batched mode, Finish publishes one immutable verified candidate and immediately releases its slot without moving the base. The anchor remains. The pool defaults to ten candidates and never seals itself.
 
-Only `batch seal --candidate <id> ...` freezes a generation, with at most five candidates by default. DWW composes their exact tree differences in a dedicated integration worktree, runs combined Full validation, rechecks the frozen base, and then fast-forwards the clean checked-out base. Conflict or final-validation failure preserves the base and is never blindly rerun. Publish repair work with `start --supersedes <candidate-id>` and explicitly seal a new generation.
+Only `batch seal --candidate <id> ...` freezes a generation, with at most five candidates by default. DWW composes their exact tree differences in a dedicated integration worktree, runs combined Full validation, rechecks the frozen base, and then fast-forwards the clean checked-out base. Conflict or final-validation failure preserves the base and is never blindly rerun. A recorded composition conflict can use `candidate repair --candidate <id>` to prepare one bounded managed repair on the latest base; deterministic validation, product, permission, migration, destructive, and security choices still stop for review.
 
 Candidate count, timers, apparent idleness, task completion, and SessionEnd never trigger a seal. Candidate withdrawal, successful batch integration, or explicit abandonment removes the associated anchor.
 
@@ -46,7 +46,7 @@ A trusted `PreToolUse` Hook can deny unauthorised writes on supported Codex loca
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.4.0-beta.1
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.1
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

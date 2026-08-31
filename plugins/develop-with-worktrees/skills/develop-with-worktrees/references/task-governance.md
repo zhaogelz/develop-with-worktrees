@@ -16,6 +16,8 @@ A clearly bounded single small edit may omit it only outside the managed lifecyc
 
 A managed task always uses `<git-common-dir>/solo-ai/task-anchors/<task-id>.md`. This makes the anchor available from the base checkout, task worktree, and recovery commands without placing it in the repository or requiring `.gitignore` changes. `Start` returns the exact path, Ready validates its regular-file, size, UTF-8, and task-id identity, and `status` lists it.
 
+`candidate repair` fills the managed anchor before preparing the source merge. It records the immutable source candidate, latest repair base, bounded attempt, scope boundary, acceptance path, and the rule that semantic product or safety choices must be escalated rather than guessed.
+
 Other routes must not create this DWW common-dir state. Use the repository-declared location, or a private repository-external temporary file if no safe ignored workspace location exists. Never stage or commit an anchor.
 
 ## Minimum content

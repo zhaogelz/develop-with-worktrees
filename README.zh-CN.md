@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-`0.4.0-beta.1` 是一个通用的本地 Git 安全开发底座。它负责为修改任务选择正确的仓库流程、建立任务锚点、隔离工作树、精确提交、验证、候选发布、合入和恢复；任务怎么拆、由几个 AI 做、依赖谁，则交给 Codex 等宿主自带的任务/子智能体能力。
+`0.5.0-beta.1` 是一个通用的本地 Git 安全开发底座。它负责为修改任务选择正确的仓库流程、建立任务锚点、隔离工作树、精确提交、验证、候选发布、合入和恢复；任务怎么拆、由几个 AI 做、依赖谁，则交给 Codex 等宿主自带的任务/子智能体能力。
 
 ## 一句话理解
 
@@ -46,7 +46,7 @@ integration = { mode = "batched", batch_size = 5, candidate_capacity = 10 }
 2. 候选池默认最多 10 个；满了只会停止继续发布，不会自动封批。
 3. 只有明确执行 `batch seal --candidate <id> ...` 才冻结本次候选，默认一批最多 5 个。
 4. DWW 在独立集成工作树组合这些确定候选，执行最终 Full 验证，再核对主分支仍是原基线，最后才快进。
-5. 冲突或最终验证失败时主分支不动；诊断后用 `start --supersedes <candidate-id>` 发布修复候选，再显式封一个新批次。失败代次不会被自动重跑。
+5. 冲突或最终验证失败时主分支不动；组合冲突先用 `candidate repair --candidate <id>` 在最新基线上准备最多两代受管返修，能由代码、契约和测试唯一确定时自动继续，只有产品、权限、迁移、删除、安全或合法测试预期需要取舍时才通知人工。最终验证失败不会被当作合并冲突盲重跑。
 
 不会因为“刚好有 5 个”“现在没有活跃任务”“等了一段时间”或“会话结束”自动封批。候选撤回、批次成功或任务放弃后才删除对应锚点。
 
@@ -57,7 +57,7 @@ integration = { mode = "batched", batch_size = 5, candidate_capacity = 10 }
 ## 安装
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.4.0-beta.1
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.1
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

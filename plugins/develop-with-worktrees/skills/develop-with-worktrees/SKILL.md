@@ -103,10 +103,11 @@ A repository may explicitly configure `integration.mode = "batched"`. The defaul
 - Only `batch seal --candidate <id> ...` freezes a generation. List every intended candidate explicitly; one seal accepts at most the configured batch size.
 - DWW composes the exact frozen tree differences in a dedicated integration worktree, runs combined Full validation, verifies the base snapshot again, then fast-forwards the clean base.
 - A later revision never changes a sealed generation. Use `start --supersedes <candidate-id>` for a repair task and seal a new explicit generation.
+- When composition identifies one conflicting candidate, run `candidate repair --candidate <id>` before notifying the user. It creates or idempotently returns a managed repair task on the latest base and preserves a clean or conflicted merge for review.
 - `candidate withdraw --candidate <id>` removes only a pending candidate not captured by an active batch.
 - `batch recover --batch <id>` resumes only an interrupted recorded generation. A deterministically failed generation is not automatically rerun.
 
-Never seal because the pool reached five, because no worker appears active, because a timer elapsed, or because a session ended. The caller decides the exact intended set. On conflict or final-validation failure, the base remains unchanged; diagnose, publish a repair candidate, and explicitly seal a new generation. Unchanged compatible candidates may be reused only by naming their exact identities again.
+Never seal because the pool reached five, because no worker appears active, because a timer elapsed, or because a session ended. The caller decides the exact intended set. On a composition conflict, prepare the bounded repair automatically, inspect the source diff, resolve only when code, contracts, and tests determine one result, then Commit/Ready/Finish and seal the replacement generation. A successful automatic repair needs an audit result, not a user interruption. Escalate only when product rules, permissions, migrations, destructive behavior, security boundaries, or legitimate tests require a choice, or when two repair attempts fail. Final-validation and promotion failures are not semantic-merge repairs: preserve them and report their evidence. Unchanged compatible candidates may be reused only by naming their exact identities again.
 
 ## Task-anchor lifetime and durable facts
 

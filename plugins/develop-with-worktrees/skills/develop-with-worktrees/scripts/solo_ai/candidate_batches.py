@@ -13,11 +13,13 @@ from .integration import integration_turn
 from .proof import approval_plan, validate
 from .repo import GitRepo
 from .safety import require_safe
-from .task_context import delete_anchor
+from .state import StateStore
+from .task_context import delete_anchor, require_anchor
 from .util import (
     DirectoryLock,
     SoloAIError,
     atomic_write_json,
+    atomic_write_text,
     read_json,
     run_logged,
     sha256_text,
@@ -27,6 +29,13 @@ from .util import (
 
 POOL_SCHEMA = 1
 ACTIVE_BATCH_STATES = {"sealed", "composing", "composed", "validated", "promoted"}
+AUTOMATIC_REPAIR_LIMIT = 2
+
+
+class CandidateCompositionConflict(SoloAIError):
+    def __init__(self, candidate_id: str, detail: str):
+        super().__init__(detail)
+        self.candidate_id = candidate_id
 
 
 class CandidateBatchStore:
@@ -80,6 +89,12 @@ class CandidateBatchStore:
                 return copy.deepcopy(candidate)
         return None
 
+    def candidate(self, candidate_id: str) -> dict[str, Any]:
+        candidate = self.read()["candidates"].get(candidate_id)
+        if not candidate:
+            raise SoloAIError(f"Unknown candidate: {candidate_id}")
+        return copy.deepcopy(candidate)
+
     def publish(self, candidate: dict[str, Any], *, capacity: int) -> dict[str, Any]:
         created_ref = False
 
@@ -127,13 +142,21 @@ class CandidateBatchStore:
                 if created.returncode:
                     raise SoloAIError("Could not create the immutable candidate ref")
                 created_ref = True
-            record = {**copy.deepcopy(candidate), "status": "pending"}
+            repair_attempt = (
+                int(source.get("repair_attempt", 0)) + 1 if source else 0
+            )
+            record = {
+                **copy.deepcopy(candidate),
+                "status": "pending",
+                "repair_attempt": repair_attempt,
+            }
             value["candidates"][str(candidate["candidate_id"])] = record
             if source and source.get("status") == "pending":
                 source.update(
                     {
                         "status": "superseded",
                         "superseded_by": candidate["candidate_id"],
+                        "repair_eligible": False,
                         "updated_at": utc_timestamp(),
                     }
                 )
@@ -221,22 +244,62 @@ class CandidateBatchStore:
 
         return self.mutate(update)
 
-    def fail(self, batch_id: str, error: str) -> dict[str, Any]:
+    def fail(
+        self,
+        batch_id: str,
+        error: str,
+        *,
+        failure_kind: str,
+        failed_candidate_id: str | None = None,
+    ) -> dict[str, Any]:
         def update(value: dict[str, Any]) -> dict[str, Any]:
             batch = value["batches"][batch_id]
             if batch.get("status") == "promoted":
                 return copy.deepcopy(batch)
             batch.update(
-                {"status": "failed", "error": error, "failed_at": utc_timestamp()}
+                {
+                    "status": "failed",
+                    "error": error,
+                    "failure_kind": failure_kind,
+                    "failed_candidate_id": failed_candidate_id,
+                    "failed_at": utc_timestamp(),
+                }
             )
             for candidate_id in batch["candidate_ids"]:
                 candidate = value["candidates"].get(candidate_id)
                 if candidate and candidate.get("sealed_batch") == batch_id:
                     candidate["sealed_batch"] = None
                     candidate.setdefault("failed_batches", []).append(batch_id)
+                    candidate["last_failed_batch"] = batch_id
+                    candidate["last_failure_kind"] = failure_kind
+                    candidate["repair_eligible"] = bool(
+                        failure_kind == "composition_conflict"
+                        and candidate_id == failed_candidate_id
+                    )
             return copy.deepcopy(batch)
 
         return self.mutate(update)
+
+    def repair_source(self, candidate_id: str) -> dict[str, Any]:
+        candidate = self.candidate(candidate_id)
+        if candidate.get("status") != "pending" or candidate.get("sealed_batch"):
+            raise SoloAIError(
+                "Only an unsealed pending candidate can start a repair task"
+            )
+        if not candidate.get("repair_eligible"):
+            kind = candidate.get("last_failure_kind") or "unknown"
+            raise SoloAIError(
+                "Automatic repair is limited to a candidate that caused a composition conflict; "
+                f"the latest failure kind is {kind}. Review the failure before choosing a new result."
+            )
+        attempt = int(candidate.get("repair_attempt", 0))
+        if attempt >= AUTOMATIC_REPAIR_LIMIT:
+            raise SoloAIError(
+                f"Automatic repair stopped after {attempt} attempts; manual product or implementation review is required"
+            )
+        if self.repo.ref_head(str(candidate["ref"])) != candidate.get("head"):
+            raise SoloAIError("Candidate ref changed before repair preparation")
+        return candidate
 
     def complete(self, batch_id: str, *, integrated_head: str) -> dict[str, Any]:
         def update(value: dict[str, Any]) -> dict[str, Any]:
@@ -316,7 +379,12 @@ def _require_approval(repo: GitRepo, *, cwd: Path) -> None:
 
 
 def _apply_candidate_diff(
-    repo: GitRepo, *, worktree: Path, base_head: str, candidate_head: str
+    repo: GitRepo,
+    *,
+    worktree: Path,
+    base_head: str,
+    candidate_head: str,
+    candidate_id: str,
 ) -> None:
     diff = subprocess.run(
         [
@@ -345,7 +413,8 @@ def _apply_candidate_diff(
     )
     if applied.returncode:
         detail = applied.stderr.decode("utf-8", errors="replace").strip()
-        raise SoloAIError(
+        raise CandidateCompositionConflict(
+            candidate_id,
             "Candidate conflicts with the sealed batch; base was preserved"
             + (f": {detail}" if detail else "")
         )
@@ -387,6 +456,7 @@ def _compose(
             worktree=worktree,
             base_head=str(candidate["base_head"]),
             candidate_head=str(candidate["head"]),
+            candidate_id=candidate_id,
         )
         staged = repo.git(["diff", "--cached", "--quiet"], cwd=worktree, check=False)
         if staged.returncode not in {0, 1}:
@@ -539,8 +609,140 @@ def seal_batch(repo: GitRepo, *, candidate_ids: list[str]) -> dict[str, Any]:
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:
-        store.fail(str(batch["id"]), str(exc))
+        current = store.batch(str(batch["id"]))
+        if isinstance(exc, CandidateCompositionConflict):
+            failure_kind = "composition_conflict"
+            failed_candidate_id = exc.candidate_id
+        elif current.get("status") == "composed":
+            failure_kind = "validation_failed"
+            failed_candidate_id = None
+        elif current.get("status") == "validated":
+            failure_kind = "promotion_blocked"
+            failed_candidate_id = None
+        else:
+            failure_kind = "composition_failed"
+            failed_candidate_id = None
+        store.fail(
+            str(batch["id"]),
+            str(exc),
+            failure_kind=failure_kind,
+            failed_candidate_id=failed_candidate_id,
+        )
         raise
+
+
+def prepare_candidate_repair(
+    repo: GitRepo, *, candidate_id: str
+) -> dict[str, Any]:
+    """在最新基线上准备一次受管候选修复，保留可由代理解决的冲突现场。"""
+
+    from .lifecycle import _config_and_mode, start
+
+    config, _, _ = _config_and_mode(repo)
+    if config.integration.mode != "batched":
+        raise SoloAIError("Candidate repair requires integration.mode = batched")
+    store = CandidateBatchStore(repo)
+    source = store.repair_source(candidate_id)
+    base_ref = str(source["base_ref"])
+    base_head = repo.ref_head(f"refs/heads/{base_ref}")
+    if base_head is None:
+        raise SoloAIError("Candidate repair base branch no longer exists")
+    if repo.is_ancestor(str(source["head"]), base_head):
+        return {
+            "outcome": "already_in_base",
+            "candidate_id": candidate_id,
+            "candidate_head": source["head"],
+            "base_ref": base_ref,
+            "base_head": base_head,
+        }
+
+    attempt = int(source.get("repair_attempt", 0)) + 1
+    request_id = f"candidate-repair:{candidate_id}:{base_head}"
+    task = start(
+        repo,
+        name=f"repair {candidate_id}",
+        base=base_ref,
+        request_id=request_id,
+        supersedes=candidate_id,
+    )
+    worktree = Path(str(task["worktree"]))
+    existing = task.get("repair_preparation")
+    if task.get("request_reused") and existing:
+        return {**task, **copy.deepcopy(existing), "request_reused": True}
+
+    anchor = require_anchor(repo, task)
+    atomic_write_text(
+        anchor,
+        f"""# Task anchor: repair {candidate_id}
+
+- Task ID: `{task['id']}`
+- Original purpose: automatically repair candidate `{candidate_id}` after a deterministic composition conflict
+- Implementation target: replay candidate `{source['head']}` onto `{base_ref}` at `{base_head}` and preserve its verified intent
+- Reference baseline: source `{source['base_head']}` → `{source['head']}`; repair base `{base_ref}` at `{base_head}`
+- Scope boundary: change only the source candidate's intent and the minimum conflict resolution; do not choose between competing product, permission, migration, deletion, or security rules
+- Acceptance criteria: resolve every recorded conflict, review the exact path manifest, run Commit/Ready/Finish, then explicitly seal the replacement candidate and prove it is in the base
+- Current progress: repair attempt {attempt} prepared at {utc_timestamp()}
+
+This local file is not committed. Keep it current, and reread it after context loss or continuation.
+""",
+    )
+
+    merge_head = repo.git(
+        ["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+        cwd=worktree,
+        check=False,
+    )
+    unmerged = repo.git(
+        ["diff", "--name-only", "--diff-filter=U"],
+        cwd=worktree,
+        check=False,
+    ).stdout.splitlines()
+    if merge_head.returncode == 0:
+        if merge_head.stdout.strip() != source["head"]:
+            reason = "Repair worktree already contains a different merge identity"
+            StateStore(repo).quarantine(str(task["id"]), reason)
+            raise SoloAIError(f"{reason}; the repair worktree was preserved")
+        outcome = "conflicted" if unmerged else "prepared"
+    else:
+        if repo.changed_paths(worktree):
+            reason = "Repair worktree changed before candidate preparation"
+            StateStore(repo).quarantine(str(task["id"]), reason)
+            raise SoloAIError(f"{reason}; the repair worktree was preserved")
+        merged = repo.git(
+            ["merge", "--no-commit", "--no-ff", str(source["ref"])],
+            cwd=worktree,
+            check=False,
+        )
+        unmerged = repo.git(
+            ["diff", "--name-only", "--diff-filter=U"],
+            cwd=worktree,
+            check=False,
+        ).stdout.splitlines()
+        if merged.returncode == 0:
+            outcome = "prepared"
+        elif unmerged:
+            outcome = "conflicted"
+        else:
+            reason = "Candidate repair merge failed without a reviewable conflict set"
+            StateStore(repo).quarantine(str(task["id"]), reason)
+            raise SoloAIError(f"{reason}; the repair worktree was preserved")
+
+    preparation = {
+        "outcome": outcome,
+        "candidate_id": candidate_id,
+        "source_head": source["head"],
+        "source_ref": source["ref"],
+        "base_ref": base_ref,
+        "base_head": base_head,
+        "repair_attempt": attempt,
+        "changed_paths": repo.changed_paths(worktree),
+        "conflict_paths": unmerged,
+        "manual_notification_required": False,
+    }
+    updated = StateStore(repo).update_task(
+        str(task["id"]), repair_preparation=preparation
+    )
+    return {**updated, **preparation, "anchor_path": str(anchor.resolve())}
 
 
 def recover_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:

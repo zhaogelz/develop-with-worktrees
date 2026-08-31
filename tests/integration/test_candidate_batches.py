@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 from conftest import git
 from solo_ai import candidate_batches as batch_module
-from solo_ai.candidate_batches import CandidateBatchStore, seal_batch
+from solo_ai.candidate_batches import (
+    CandidateBatchStore,
+    prepare_candidate_repair,
+    seal_batch,
+)
 from solo_ai.config import CommandSpec, load_verification_config
 from solo_ai.lifecycle import (
     approve,
@@ -131,5 +135,90 @@ def test_failed_combined_validation_preserves_base_and_generation_is_not_rerun(
     assert not (git_repo / "failure.txt").exists()
     failed = CandidateBatchStore(repo).summary()["batches"][0]
     assert failed["status"] == "failed"
+    assert failed["failure_kind"] == "validation_failed"
+    with pytest.raises(SoloAIError, match="Automatic repair is limited"):
+        prepare_candidate_repair(repo, candidate_id=candidate["candidate_id"])
     with pytest.raises(SoloAIError, match="will not be rerun automatically"):
         batch_module.recover_batch(repo, batch_id=failed["id"])
+
+
+def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo)
+    candidate = publish(repo, name="candidate conflict", relative="shared.txt")
+    (git_repo / "shared.txt").write_text("main change\n", encoding="utf-8")
+    git(git_repo, "add", "shared.txt")
+    git(git_repo, "commit", "-m", "test: advance conflicting base")
+    base_before = repo.head(git_repo)
+
+    with pytest.raises(SoloAIError, match="conflicts with the sealed batch"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    source = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+    assert source["last_failure_kind"] == "composition_conflict"
+    assert source["repair_eligible"] is True
+
+    repair = prepare_candidate_repair(
+        repo, candidate_id=candidate["candidate_id"]
+    )
+    repair_worktree = Path(repair["worktree"])
+    assert repair["outcome"] == "conflicted"
+    assert repair["repair_attempt"] == 1
+    assert repair["manual_notification_required"] is False
+    assert repair["conflict_paths"] == ["shared.txt"]
+    assert repo.head(git_repo) == base_before
+    reused = prepare_candidate_repair(
+        repo, candidate_id=candidate["candidate_id"]
+    )
+    assert reused["id"] == repair["id"]
+    assert reused["request_reused"] is True
+    assert reused["outcome"] == "conflicted"
+
+    (repair_worktree / "shared.txt").write_text(
+        "main change\ncandidate conflict\n", encoding="utf-8"
+    )
+    committed = commit_task(
+        repo,
+        task_id=repair["id"],
+        lease=repair["lease"],
+        message="test: resolve candidate conflict",
+        paths=["shared.txt"],
+    )
+    assert committed["supersedes"] == candidate["candidate_id"]
+    ready(repo, task_id=repair["id"], lease=repair["lease"])
+    replacement = finish(repo, task_id=repair["id"], lease=repair["lease"])
+
+    assert replacement["outcome"] == "candidate_published"
+    pool = CandidateBatchStore(repo)
+    assert pool.candidate(candidate["candidate_id"])["status"] == "superseded"
+    assert pool.candidate(replacement["candidate_id"])["repair_attempt"] == 1
+
+    integrated = seal_batch(repo, candidate_ids=[replacement["candidate_id"]])
+    assert integrated["status"] == "completed"
+    assert (git_repo / "shared.txt").read_text(encoding="utf-8") == (
+        "main change\ncandidate conflict\n"
+    )
+
+
+def test_candidate_repair_stops_after_bounded_attempts(git_repo: Path) -> None:
+    repo = initialized_batched(git_repo)
+    candidate = publish(repo, name="bounded conflict", relative="bounded.txt")
+    (git_repo / "bounded.txt").write_text("main\n", encoding="utf-8")
+    git(git_repo, "add", "bounded.txt")
+    git(git_repo, "commit", "-m", "test: create bounded conflict")
+    with pytest.raises(SoloAIError, match="conflicts with the sealed batch"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    store = CandidateBatchStore(repo)
+
+    def exhaust_attempts(value: dict[str, object]) -> None:
+        candidates = value["candidates"]
+        assert isinstance(candidates, dict)
+        source = candidates[candidate["candidate_id"]]
+        assert isinstance(source, dict)
+        source["repair_attempt"] = batch_module.AUTOMATIC_REPAIR_LIMIT
+
+    store.mutate(exhaust_attempts)
+    with pytest.raises(SoloAIError, match="manual product or implementation review"):
+        prepare_candidate_repair(repo, candidate_id=candidate["candidate_id"])

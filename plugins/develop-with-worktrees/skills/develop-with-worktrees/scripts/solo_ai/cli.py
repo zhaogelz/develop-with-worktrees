@@ -11,6 +11,7 @@ from typing import Any
 from . import VERSION
 from .candidate_batches import (
     CandidateBatchStore,
+    prepare_candidate_repair,
     recover_batch,
     seal_batch,
     withdraw_candidate,
@@ -359,6 +360,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     candidate_sub = candidate.add_subparsers(dest="candidate_command", required=True)
     candidate_sub.add_parser("status", help="show the local candidate pool")
+    candidate_repair = candidate_sub.add_parser(
+        "repair",
+        help="prepare one bounded managed repair task for a composition conflict",
+    )
+    candidate_repair.add_argument("--candidate", required=True)
     candidate_withdraw = candidate_sub.add_parser(
         "withdraw", help="withdraw one pending candidate that is not in an active batch"
     )
@@ -1286,6 +1292,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "candidate":
         if args.candidate_command == "status":
             return CandidateBatchStore(repo).summary()
+        if args.candidate_command == "repair":
+            return prepare_candidate_repair(repo, candidate_id=args.candidate)
         if args.candidate_command == "withdraw":
             return withdraw_candidate(repo, candidate_id=args.candidate)
         raise SoloAIError(f"Unknown candidate command: {args.candidate_command}")

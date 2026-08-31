@@ -38,6 +38,8 @@ integration = { mode = "direct", batch_size = 5, candidate_capacity = 10 }
 
 `integration.mode` is `direct` or `batched`. Direct is the generic default and makes Finish integrate immediately. Batched mode makes Finish publish an immutable verified candidate and release the slot; only an explicit `batch seal` promotes the exact listed generation. `batch_size` is 1–5 and defaults to 5. `candidate_capacity` must be at least the batch size, defaults to 10, and bounds pending candidate pressure rather than triggering an automatic seal.
 
+Candidate-pool records distinguish `composition_conflict`, `validation_failed`, and `promotion_blocked`. Only the exact candidate identified by a composition conflict may use `candidate repair`; the repair command is idempotent for the candidate and latest base and stops after two published repair generations. This bound is a fixed safety contract rather than a repository-tunable retry loop.
+
 `remote_policy = "local-only"` governs DWW itself: Start, Ready, Finish, candidate publication, batch integration, and recovery never contact or mutate a remote. It does not prohibit a separate ordinary push after successful integration when the user explicitly requests publishing. That push must come from the clean base worktree, use a dry-run first, and must not force-update a remote ref.
 
 ## `verification.toml` schema 3

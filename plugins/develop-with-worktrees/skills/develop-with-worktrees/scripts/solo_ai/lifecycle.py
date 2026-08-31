@@ -871,7 +871,33 @@ def commit_task(
             staged=True,
             allowlist=config.sensitive_allowlist,
         )
-        repo.git(["commit", "-m", message, "--", *paths], cwd=worktree)
+        merge_head = repo.git(
+            ["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+            cwd=worktree,
+            check=False,
+        )
+        if merge_head.returncode == 0:
+            preparation = task.get("repair_preparation") or {}
+            if (
+                not task.get("supersedes")
+                or merge_head.stdout.strip() != preparation.get("source_head")
+            ):
+                raise SoloAIError(
+                    "Only a recorded candidate repair may complete a prepared merge"
+                )
+            unresolved = repo.git(
+                ["diff", "--name-only", "--diff-filter=U"],
+                cwd=worktree,
+                check=False,
+            ).stdout.splitlines()
+            if unresolved:
+                raise SoloAIError(
+                    "Candidate repair still has unresolved paths:\n"
+                    + "\n".join(f"- {path}" for path in unresolved)
+                )
+            repo.git(["commit", "-m", message], cwd=worktree)
+        else:
+            repo.git(["commit", "-m", message, "--", *paths], cwd=worktree)
         changes: dict[str, Any] = {
             "candidate_head": repo.head(worktree),
             "ready_proof": None,
