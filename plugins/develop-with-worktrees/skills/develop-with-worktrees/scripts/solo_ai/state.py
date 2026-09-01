@@ -26,6 +26,16 @@ from .util import (
 STATE_SCHEMA = 6
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 IN_PLACE_MODE = "in-place"
+
+
+def candidate_admission_lock(repo: GitRepo) -> DirectoryLock:
+    """串行化候选生产者登记、终态发布与尾批冻结。"""
+
+    return DirectoryLock(
+        repo.local_dir / "locks" / "candidate-admission.lock", wait=True
+    )
+
+
 ISOLATED_MODE = "isolated"
 
 
@@ -146,23 +156,60 @@ class StateStore:
     def integration_policy(
         config: RepoConfig, *, legacy_explicit: bool = False
     ) -> dict[str, Any]:
-        seal_policy = (
-            "explicit" if legacy_explicit else config.integration.seal_policy
-        )
+        seal_policy = "explicit" if legacy_explicit else config.integration.seal_policy
         mode = config.integration.mode
         if mode == "direct":
             seal_policy = "explicit"
+        tail_policy = "explicit" if legacy_explicit else config.integration.tail_policy
+        if mode == "direct":
+            tail_policy = "explicit"
         identity = (
-            f"candidate-policy-v1:{mode}:{config.integration.batch_size}:"
-            f"{config.integration.candidate_capacity}:{seal_policy}"
+            f"candidate-policy-v2:{mode}:{config.integration.batch_size}:"
+            f"{config.integration.candidate_capacity}:{seal_policy}:"
+            f"{tail_policy}:{config.integration.tail_quiet_seconds:g}"
         )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "mode": mode,
             "batch_size": config.integration.batch_size,
             "candidate_capacity": config.integration.candidate_capacity,
             "seal_policy": seal_policy,
+            "tail_policy": tail_policy,
+            "tail_quiet_seconds": config.integration.tail_quiet_seconds,
             "activation_epoch": sha256_text(identity),
+        }
+
+    def candidate_producer_snapshot(
+        self, *, base_ref: str, activation_epoch: str
+    ) -> dict[str, Any]:
+        """从任务事实投影一个候选通道的生产者状态，不猜测宿主活动。"""
+
+        matching: list[dict[str, Any]] = []
+        active: list[dict[str, Any]] = []
+        for task in self.read()["tasks"].values():
+            policy = task.get("integration_policy") or {}
+            in_place_blocker = (
+                self.mode(task) == IN_PLACE_MODE and task.get("base_ref") == base_ref
+            )
+            if not in_place_blocker and (
+                self.mode(task) != ISOLATED_MODE
+                or task.get("base_ref") != base_ref
+                or policy.get("mode") != "batched"
+                or policy.get("activation_epoch") != activation_epoch
+            ):
+                continue
+            matching.append(task)
+            if task.get("status") not in FINAL_TASK_STATES:
+                active.append(task)
+        quiet_since = None
+        if matching and not active:
+            quiet_since = max(str(task.get("updated_at") or "") for task in matching)
+        return {
+            "base_ref": base_ref,
+            "activation_epoch": activation_epoch,
+            "active_count": len(active),
+            "active_task_ids": sorted(str(task["id"]) for task in active),
+            "quiet_since": quiet_since or None,
         }
 
     def ensure_task_integration_policy(
@@ -456,6 +503,8 @@ class StateStore:
                     "batch_size": 1,
                     "candidate_capacity": 1,
                     "seal_policy": "explicit",
+                    "tail_policy": "explicit",
+                    "tail_quiet_seconds": 90,
                     "activation_epoch": sha256_text(
                         "candidate-policy-v1:in-place-direct"
                     ),
@@ -1215,6 +1264,7 @@ class StateStore:
             task["lease"] = None
             task["lease_owner"] = None
             task["active_operation"] = None
+            task["updated_at"] = utc_timestamp()
             if self.mode(task) == ISOLATED_MODE:
                 slot = state["slots"][task["slot_id"]]
                 slot.update(

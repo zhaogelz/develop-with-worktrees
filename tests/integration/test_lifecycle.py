@@ -63,8 +63,8 @@ def initialized(path: Path) -> GitRepo:
     config = path / ".solo-ai" / "config.toml"
     config.write_text(
         config.read_text(encoding="utf-8").replace(
-            'integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full" }',
-            'integration = { mode = "direct", batch_size = 5, candidate_capacity = 10, seal_policy = "explicit" }',
+            'integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }',
+            'integration = { mode = "direct", batch_size = 5, candidate_capacity = 10, seal_policy = "explicit", tail_policy = "explicit", tail_quiet_seconds = 90 }',
         ),
         encoding="utf-8",
     )
@@ -129,7 +129,9 @@ commands = [{json.dumps(list(command.argv))}]
     finish(repo, task_id=task["id"], lease=task["lease"])
 
 
-def install_counting_verification_policy(repo: GitRepo, command: list[str]) -> None:
+def install_counting_verification_policy(
+    repo: GitRepo, command: list[str], *, input_closure: str = "declared"
+) -> None:
     verification = repo.root / ".solo-ai" / "verification.toml"
     verification.write_text(
         f"""schema_version = 3
@@ -142,6 +144,7 @@ cross_task_reuse = false
 external_state = "none"
 input_paths = ["candidate.txt"]
 environment = []
+input_closure = "{input_closure}"
 commands = [{json.dumps(command)}]
 """,
         encoding="utf-8",
@@ -168,6 +171,74 @@ def test_full_managed_lifecycle_and_exact_ready_proof_reuse(git_repo: Path) -> N
     assert result["proof_reused"] is True
     assert (git_repo / "hello.txt").read_text(encoding="utf-8") == "hello\n"
     assert StateStore(repo).task(task["id"])["status"] == "finished"
+
+
+def test_full_validation_reuses_the_exact_ready_profile_before_heavy_work(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    ready_counter = repo.local_dir / "ready-profile-counter.txt"
+    full_counter = repo.local_dir / "full-profile-counter.txt"
+
+    def counter_script(path: Path) -> str:
+        return (
+            "from pathlib import Path; "
+            f"counter=Path({str(path)!r}); "
+            "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')"
+        )
+
+    verification_path = repo.root / ".solo-ai" / "verification.toml"
+    verification_path.write_text(
+        f"""schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "quick-ready"
+level = "ready"
+paths = ["candidate.txt"]
+external_state = "none"
+input_paths = ["candidate.txt"]
+input_closure = "complete"
+commands = [{json.dumps([sys.executable, "-c", counter_script(ready_counter)])}]
+
+[[profiles]]
+id = "heavy-full"
+level = "full"
+paths = ["candidate.txt"]
+external_state = "none"
+input_paths = ["candidate.txt"]
+input_closure = "complete"
+resource_class = "heavy"
+commands = [{json.dumps([sys.executable, "-c", counter_script(full_counter)])}]
+""",
+        encoding="utf-8",
+    )
+    git(repo.root, "add", ".solo-ai/verification.toml")
+    git(repo.root, "commit", "-m", "test: split ready and full validation")
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name="reuse ready before full")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+    worktree = Path(task["worktree"])
+    verification = load_verification_config(repo, cwd=worktree)
+
+    full = proof_module.validate(
+        repo,
+        cwd=worktree,
+        base=task["base_ref"],
+        verification=verification,
+        task_id=task["id"],
+        level="full",
+        expected_base_head=prepared["base_head"],
+        expected_candidate_head=prepared["candidate_head"],
+    )
+
+    assert ready_counter.read_text(encoding="utf-8") == "1"
+    assert full_counter.read_text(encoding="utf-8") == "1"
+    assert [
+        (item["profile_id"], item["reused"]) for item in full["profile_proofs"]
+    ] == [("quick-ready", True), ("heavy-full", False)]
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
 def test_ready_rejects_candidate_committed_after_sensitive_gate(
@@ -2237,6 +2308,34 @@ def test_ready_keeps_a_real_validation_failure_as_a_hard_failure(
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
+def test_ready_does_not_blindly_rerun_an_unchanged_deterministic_failure(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    counter = repo.local_dir / "deterministic-failure-counter.txt"
+    script = (
+        "from pathlib import Path; "
+        f"counter=Path({str(counter)!r}); "
+        "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1'); "
+        "raise SystemExit(1)"
+    )
+    install_counting_verification_policy(
+        repo,
+        [sys.executable, "-c", script],
+        input_closure="complete",
+    )
+    task = start(repo, name="do not rerun deterministic failure")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+
+    with pytest.raises(SoloAIError, match="Validation failed"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+    with pytest.raises(SoloAIError, match="already failed"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert counter.read_text(encoding="utf-8") == "1"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
 def test_ready_stops_after_bounded_base_convergence_retries(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3172,7 +3271,7 @@ def test_ready_rejects_worktree_directory_change_before_it_can_integrate(
     ).read_text(encoding="utf-8")
 
 
-def test_ready_rejects_invalid_branch_prefix_before_it_can_integrate(
+def test_approval_rejects_invalid_branch_prefix_before_ready_or_integration(
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
@@ -3193,10 +3292,8 @@ def test_ready_rejects_invalid_branch_prefix_before_it_can_integrate(
         message="test: change branch prefix",
         paths=[".solo-ai/config.toml"],
     )
-    approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
-
     with pytest.raises(SoloAIError, match="branch_prefix"):
-        ready(repo, task_id=task["id"], lease=task["lease"])
+        approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
 
     assert StateStore(repo).task(task["id"])["status"] == "active"
     assert 'branch_prefix = "codex/"' in (

@@ -54,6 +54,9 @@ def test_managed_policy_separates_local_lifecycle_from_explicit_publish() -> Non
     assert "After a successful Finish, an explicit user request" in policy
     assert "ordinary non-force push" in policy
     assert "separate from DWW" in policy
+    assert "batch reconcile" in policy
+    assert "There is no candidate-age auto-seal" in policy
+    assert "Candidate publication is not delivery" in policy
 
 
 def test_rejects_schema_two_verification_policy(git_repo: Path) -> None:
@@ -105,7 +108,7 @@ input_paths = ["src/**", "uv.lock"]
 input_closure = "declared"
 timeout_seconds = 12.5
 resource_class = "heavy"
-level = "ready"
+level = "full"
 environment = ["CI"]
 commands = [["git", "status", "--short"]]
 """,
@@ -124,6 +127,27 @@ commands = [["git", "status", "--short"]]
     assert profile.timeout_seconds == 12.5
     assert profile.resource_class == "heavy"
     assert profile.input_closure == "complete"
+
+
+def test_rejects_heavy_ready_profiles(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "verification.toml").write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "too-heavy-for-ready"
+level = "ready"
+resource_class = "heavy"
+paths = ["**"]
+commands = [["git", "status"]]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SoloAIError, match="must run at level full"):
+        load_verification_config(GitRepo(git_repo))
 
 
 def test_rejects_unimplemented_command_readiness(git_repo: Path) -> None:
@@ -219,6 +243,64 @@ def test_new_integration_defaults_are_batched_auto_full_with_five_and_ten(
     assert loaded.integration.batch_size == 5
     assert loaded.integration.candidate_capacity == 10
     assert loaded.integration.seal_policy == "auto_full"
+    assert loaded.integration.tail_policy == "quiet_or_explicit"
+    assert loaded.integration.tail_quiet_seconds == 90
+    assert loaded.runtime_adapter.release is None
+    assert loaded.runtime_adapter.verify_effective is None
+    assert loaded.runtime_adapter.input_paths == ()
+    assert loaded.runtime_adapter.timeout_seconds == 300
+
+
+def test_loads_bounded_runtime_adapter_commands(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    rendered = render_repo_config().replace(
+        "\n[lifecycle]\n",
+        """
+[runtime_adapter]
+release = ["uv", "run", "scripts/runtime-adapter.py", "release"]
+verify_effective = ["uv", "run", "scripts/runtime-adapter.py", "verify"]
+input_paths = ["scripts/runtime-adapter.py", "deploy/**"]
+timeout_seconds = 120
+
+[lifecycle]
+""",
+    )
+    (config / "config.toml").write_text(rendered, encoding="utf-8")
+
+    loaded = load_repo_config(GitRepo(git_repo))
+
+    assert loaded.runtime_adapter.release is not None
+    assert loaded.runtime_adapter.release.argv[-1] == "release"
+    assert loaded.runtime_adapter.verify_effective is not None
+    assert loaded.runtime_adapter.verify_effective.argv[-1] == "verify"
+    assert loaded.runtime_adapter.input_paths == (
+        "scripts/runtime-adapter.py",
+        "deploy/**",
+    )
+    assert loaded.runtime_adapter.timeout_seconds == 120
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("release = []\n", "runtime_adapter.release"),
+        ("timeout_seconds = 0\n", "runtime_adapter.timeout_seconds"),
+        ('release = ["uv", "run", "adapter.py"]\n', "input_paths"),
+    ],
+)
+def test_rejects_unsafe_runtime_adapter_settings(
+    git_repo: Path, body: str, message: str
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    rendered = render_repo_config().replace(
+        "\n[lifecycle]\n", f"\n[runtime_adapter]\n{body}\n[lifecycle]\n"
+    )
+    (config / "config.toml").write_text(rendered, encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match=message):
+        load_repo_config(GitRepo(git_repo))
 
 
 def test_missing_integration_table_preserves_legacy_direct_policy(
@@ -236,6 +318,7 @@ def test_missing_integration_table_preserves_legacy_direct_policy(
 
     assert loaded.integration.mode == "direct"
     assert loaded.integration.seal_policy == "explicit"
+    assert loaded.integration.tail_policy == "explicit"
 
 
 def test_batched_table_without_seal_policy_preserves_legacy_explicit_mode(
@@ -243,13 +326,17 @@ def test_batched_table_without_seal_policy_preserves_legacy_explicit_mode(
 ) -> None:
     config = git_repo / ".solo-ai"
     config.mkdir()
-    rendered = render_repo_config().replace(', seal_policy = "auto_full"', "")
+    rendered = render_repo_config().replace(
+        ', seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90',
+        "",
+    )
     (config / "config.toml").write_text(rendered, encoding="utf-8")
 
     loaded = load_repo_config(GitRepo(git_repo))
 
     assert loaded.integration.mode == "batched"
     assert loaded.integration.seal_policy == "explicit"
+    assert loaded.integration.tail_policy == "explicit"
 
 
 @pytest.mark.parametrize(
@@ -259,6 +346,8 @@ def test_batched_table_without_seal_policy_preserves_legacy_explicit_mode(
         ("batch_size = 6", "batch_size"),
         ("candidate_capacity = 4", "candidate_capacity"),
         ('seal_policy = "idle"', "seal_policy"),
+        ('tail_policy = "idle"', "tail_policy"),
+        ("tail_quiet_seconds = 0", "tail_quiet_seconds"),
     ],
 )
 def test_rejects_unsafe_integration_settings(
@@ -273,8 +362,12 @@ def test_rejects_unsafe_integration_settings(
         rendered = rendered.replace("batch_size = 5", replacement)
     elif replacement.startswith("candidate_capacity"):
         rendered = rendered.replace("candidate_capacity = 10", replacement)
-    else:
+    elif replacement.startswith("seal_policy"):
         rendered = rendered.replace('seal_policy = "auto_full"', replacement)
+    elif replacement.startswith("tail_policy"):
+        rendered = rendered.replace('tail_policy = "quiet_or_explicit"', replacement)
+    else:
+        rendered = rendered.replace("tail_quiet_seconds = 90", replacement)
     (config / "config.toml").write_text(rendered, encoding="utf-8")
 
     with pytest.raises(SoloAIError, match=message):

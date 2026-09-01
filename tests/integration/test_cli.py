@@ -686,9 +686,7 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
         "finish", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
     )
     assert published["outcome"] == "candidate_published"
-    tail = call_json(
-        "batch", "seal", "--candidate", published["candidate_id"]
-    )
+    tail = call_json("batch", "seal", "--candidate", published["candidate_id"])
     assert tail["status"] == "completed"
     assert (git_repo / "cli.txt").exists()
 

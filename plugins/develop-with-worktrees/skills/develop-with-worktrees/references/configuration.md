@@ -31,14 +31,27 @@ sensitive_allowlist = []
 
 # Empty by default. Each item is one exact top-level directory or file name.
 cleanup = { owned_paths = [] }
-integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full" }
+integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }
+
+# Optional. DWW appends one JSON context-file path to each argv.
+[runtime_adapter]
+release = ["uv", "run", "scripts/dww-runtime-adapter.py", "release"]
+verify_effective = ["uv", "run", "scripts/dww-runtime-adapter.py", "verify-effective"]
+input_paths = ["scripts/dww-runtime-adapter.py", "deploy/**"]
+timeout_seconds = 300
 ```
 
 `slots` is 1–32. Existing extra slots drain when the configured count is reduced and are never allocated until re-enabled. The worktree root is immutable after adoption. `cleanup.owned_paths` does not cause automatic deletion: it only names potential manual `prune-slot` targets. Entries must be unique under case-insensitive comparison so one Windows path cannot be declared twice with different casing.
 
-Newly rendered policy uses batched candidate-first integration. Finish publishes an immutable verified candidate and releases the slot. With `seal_policy = "auto_full"`, publishing the fifth eligible candidate atomically freezes the oldest configured full batch; that Finish runs or waits for its persisted integration. A smaller final tail is sealed only through an exact `batch seal --candidate ...` call by the coordinating native task after it knows intended work is complete. `batch_size` is 1–5 and defaults to 5. `candidate_capacity` must be at least the batch size, defaults to 10, and counts pending or sealed nonterminal candidates.
+Newly rendered policy uses batched candidate-first integration. Finish first creates a durable immutable `held` candidate. If a runtime Adapter is configured, `release` must succeed without changing or contaminating the task worktree. DWW then releases the slot and activates the candidate as `pending`; only pending candidates are eligible for a batch. `candidate_capacity` counts held, pending, and sealed nonterminal candidates.
 
-`seal_policy = "explicit"` preserves the 0.4 manual-seal behavior. `integration.mode = "direct"` preserves immediate local promotion. A pre-0.5 repository with no `integration` table is interpreted as direct, and an existing batched table without `seal_policy` is interpreted as explicit. These compatibility defaults prevent an installed plugin update from changing active repository behavior. Each new task snapshots the resolved policy at Start; a migrated pre-upgrade task receives an explicit legacy snapshot before it can continue. Candidates published without the new auto-full policy epoch are never selected by automatic sealing.
+With `seal_policy = "auto_full"`, activating the fifth eligible candidate freezes the oldest configured full batch in one `base_ref + activation_epoch` lane, unless that base already has an active batch. `batch_size` is 1–5 and defaults to 5. `candidate_capacity` must be at least the batch size and defaults to 10.
+
+With `tail_policy = "quiet_or_explicit"`, `batch reconcile` freezes a 1–4 candidate tail only after DWW's persisted state shows zero modifying producers in the lane for the complete `tail_quiet_seconds` period. The default is 90 seconds. Start, candidate activation, Abandon, and tail freeze share the candidate admission lock, so a new Start either blocks the freeze or begins after the immutable snapshot. Activity controls timing only: the candidate list still contains only already activated, unsealed, same-lane candidates. `SessionEnd`, Hook delivery, host idleness, and UI task counts may wake reconcile but never supply completion facts.
+
+There is deliberately no maximum candidate age or longest-wait seal. While a producer remains nonterminal, the tail remains open until it is finished, recovered, or abandoned. Reconcile returns `next_reconcile_at` only after the lane becomes quiet; the host must provide a reliable heartbeat to claim automatic quiet-tail support. An explicit user, deployment, or dependency request may use `batch reconcile --force --cause user|deploy|dependency`. `batch seal --candidate ...` remains an exact-list compatibility interface. Seal intent is derived from the ordered candidate ids, base, and policy epoch rather than its trigger, so retries are idempotent.
+
+`tail_policy = "explicit"` and `seal_policy = "explicit"` preserve manual-seal compatibility. `integration.mode = "direct"` preserves immediate local promotion. A pre-0.5 repository with no `integration` table is interpreted as direct; an existing batched table without the new fields remains explicit for both full and tail behavior. These compatibility defaults prevent a plugin update from changing active repository behavior. Each new task snapshots the resolved policy at Start; candidates from another policy epoch are never mixed into an automatic batch.
 
 Candidate-pool records distinguish `composition_conflict`, `validation_failed`, and `promotion_blocked`. Only the exact candidate identified by a composition conflict may use `candidate repair`; the repair command is idempotent for the candidate and latest base and stops after two published repair generations. This bound is a fixed safety contract rather than a repository-tunable retry loop.
 
@@ -64,7 +77,15 @@ resource_class = "normal"       # normal or heavy
 commands = [["uv", "run", "pytest"]]
 ```
 
-All changed candidate paths must be covered by a Ready profile. `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 6. Existing execution identities are preserved, and a missing integration-policy snapshot is frozen as legacy explicit behavior before that task continues. Candidate-pool schema 1 remains readable; migrated candidates use a legacy explicit policy epoch and cannot be pulled into a new automatic batch.
+All changed candidate paths must be covered by a Ready profile. Ready should contain syntax/static checks, affected compilation, and light contract tests. `resource_class = "heavy"` is accepted only with `level = "full"`; database setup, complete builds, authentication, and browser flows belong there. Full validation selects Ready plus Full profiles so cheap checks fail before heavy work. A profile proof is reused only when its normalized commands, tool/platform facts, declared environment hashes, tracked input closure, and reuse scope are identical. A stored proof whose identity changed fails closed. A failed profile declared with `external_state = "none"` and `input_closure = "complete"` is not rerun unchanged; modify the candidate/policy or explicitly reclassify it.
+
+`static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 6. Candidate-pool schemas 1 and 2 remain readable and migrate to schema 3; legacy candidates remain in their explicit policy epoch.
+
+## Runtime Adapter contract
+
+`runtime_adapter` is optional and host-neutral. DWW appends one absolute JSON context path as the final argument; the project command owns every port, database, browser, authentication, deployment, and runtime-version decision. Both command argv and every tracked file matched by `input_paths` enter the machine approval fingerprint. Missing matches, approval drift, nonzero exit, timeout, or worktree changes fail closed.
+
+`release` runs after the immutable candidate ref exists but before candidate activation and slot release. Its successful receipt is content-addressed and reusable for interruption recovery. `verify_effective` never substitutes for Git delivery: `runtime verify --candidate <id>` is allowed only after that candidate's batch is contained in the current base, and each explicit check runs again because external runtime state may change. DWW records context, redacted log, digest, duration, and result under Git-common-dir state; it does not persist leases or environment values there.
 
 ## Machine-local validation capacity
 

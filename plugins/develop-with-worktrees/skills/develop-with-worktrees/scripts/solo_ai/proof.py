@@ -7,7 +7,12 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .config import CommandSpec, VerificationConfig, VerificationProfile
+from .config import (
+    CommandSpec,
+    VerificationConfig,
+    VerificationProfile,
+    load_repo_config,
+)
 from .repo import GitRepo
 from .util import (
     SoloAIError,
@@ -249,7 +254,24 @@ def _execution_environment(profile: VerificationProfile) -> dict[str, str]:
 def approval_plan(
     repo: GitRepo, *, cwd: Path, verification: VerificationConfig
 ) -> dict[str, Any]:
-    commands = list(verification.commands)
+    repo_config = load_repo_config(repo, cwd=cwd)
+    runtime_adapter = repo_config.runtime_adapter
+    adapter_commands = [
+        command
+        for command in (
+            runtime_adapter.release,
+            runtime_adapter.verify_effective,
+        )
+        if command is not None
+    ]
+    adapter_input_hashes = _matching_hashes(
+        cwd,
+        _tracked(repo, cwd),
+        runtime_adapter.input_paths,
+    )
+    if adapter_commands and not adapter_input_hashes:
+        raise SoloAIError("Runtime Adapter input_paths did not match any tracked file")
+    commands = [*verification.commands, *adapter_commands]
     shared = _shared_inputs(repo, cwd, commands, verification)
     return {
         "schema_version": PROOF_SCHEMA,
@@ -274,6 +296,19 @@ def approval_plan(
             }
             for profile in verification.profiles
         ],
+        "runtime_adapter": {
+            "release": runtime_adapter.release.redacted()
+            if runtime_adapter.release
+            else None,
+            "verify_effective": runtime_adapter.verify_effective.redacted()
+            if runtime_adapter.verify_effective
+            else None,
+            "command_digests": [command.fingerprint for command in adapter_commands],
+            "input_paths": list(runtime_adapter.input_paths),
+            "input_hashes": adapter_input_hashes,
+            "timeout_seconds": runtime_adapter.timeout_seconds,
+            "context_contract": "dww-runtime-adapter-v1",
+        },
         "static_only": verification.static_only,
     }
 
@@ -337,6 +372,30 @@ def _logs_exist(proof: dict[str, Any]) -> bool:
     )
 
 
+def _require_stored_proof_identity(
+    proof: dict[str, Any], *, fingerprint: str, inputs: dict[str, Any]
+) -> None:
+    if not proof:
+        return
+    if (
+        proof.get("schema_version") != PROOF_SCHEMA
+        or proof.get("fingerprint") != fingerprint
+        or proof.get("inputs") != inputs
+    ):
+        raise SoloAIError(
+            "Stored validation proof identity changed; inspect or prune proofs before rerunning"
+        )
+
+
+def _deterministic_failure(profile: VerificationProfile, proof: dict[str, Any]) -> bool:
+    return (
+        profile.external_state == "none"
+        and profile.input_closure == "complete"
+        and bool(proof.get("runs"))
+        and not any(bool(run.get("timed_out")) for run in proof.get("runs", []))
+    )
+
+
 def require_exact_passed_proof(
     proof: dict[str, Any], *, fingerprint: str, candidate_head: str, base_head: str
 ) -> None:
@@ -381,6 +440,7 @@ def _run_profile(
     from .util import read_json
 
     existing = read_json(proof_path, {})
+    _require_stored_proof_identity(existing, fingerprint=fingerprint, inputs=inputs)
     if existing.get("result") == "passed" and _logs_exist(existing):
         _require_expected_candidate_head(
             repo, cwd=cwd, expected_candidate_head=expected_candidate_head
@@ -388,6 +448,14 @@ def _run_profile(
         existing["reused_at"] = utc_timestamp()
         atomic_write_json(proof_path, existing)
         return {**existing, "reused": True}
+    if (
+        existing.get("result") == "failed"
+        and _logs_exist(existing)
+        and _deterministic_failure(profile, existing)
+    ):
+        raise SoloAIError(
+            f"Validation profile {profile.profile_id} already failed with the same complete deterministic inputs. Change the candidate or policy, or explicitly reclassify its external state before retrying."
+        )
     run_id = new_id(f"profile-{profile.profile_id}")
     temp_dir = repo.local_dir / "logs" / "pending" / run_id
     runs: list[dict[str, Any]] = []
@@ -519,6 +587,7 @@ def validate(
     fingerprint = sha256_text(stable_json(inputs))
     proof_path = repo.local_dir / "proofs" / f"{fingerprint}.json"
     existing = read_json(proof_path, {})
+    _require_stored_proof_identity(existing, fingerprint=fingerprint, inputs=inputs)
     if existing.get("result") == "passed" and _logs_exist(existing):
         _require_expected_candidate_head(
             repo, cwd=cwd, expected_candidate_head=expected_candidate_head

@@ -1,6 +1,6 @@
 ---
 name: develop-with-worktrees
-description: "Use for any Git-repository task that may modify files. Route lifecycle ownership, anchor and isolate the task, validate exact changes, publish an immutable candidate, auto-integrate each full batch, and explicitly close only the coordinated smaller tail. Do not use for read-only analysis."
+description: "Use for any Git-repository task that may modify files. Route lifecycle ownership, anchor and isolate the task, validate exact changes, publish an immutable candidate, auto-integrate full batches, and reconcile only exact proven tails. Do not use for read-only analysis."
 ---
 
 # Develop with Worktrees
@@ -15,7 +15,7 @@ uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
 
 ## Hooks are optional hardening
 
-The CLI lifecycle must remain correct with no Hook installed or trusted. A trusted `SessionStart` Hook may provide route context and a trusted `PreToolUse` Hook may hard-deny unsafe writes on supported Codex local-tool paths, but neither is a source of task completion, candidate sealing, cleanup, or recovery truth. Never use `SessionEnd`, idle time, or Hook delivery as a correctness condition.
+The CLI lifecycle must remain correct with no Hook installed or trusted. A trusted `SessionStart` Hook may provide route context and a trusted `PreToolUse` Hook may hard-deny unsafe writes on supported Codex local-tool paths, but neither is a source of task completion, candidate identity, cleanup, or recovery truth. `SessionEnd` or host-idle events may only wake `batch reconcile`; they never prove completion or expand its persisted candidate snapshot.
 
 Keep `hooks/hooks.json` stable during ordinary updates so existing trust is not needlessly invalidated. Only when Codex actually reports a new or changed Hook pending review should you explain the exact protection change and ask once. The plugin never edits trust storage, bypasses Hook trust, or claims an untrusted Hook is active.
 
@@ -94,15 +94,17 @@ Ready refuses a missing, linked, oversized, non-UTF-8, or identity-mismatched an
 
 ## Candidate-first integration
 
-New repositories use `integration.mode = "batched"`, `batch_size = 5`, `candidate_capacity = 10`, and `seal_policy = "auto_full"`:
+New repositories use `integration.mode = "batched"`, `batch_size = 5`, `candidate_capacity = 10`, `seal_policy = "auto_full"`, `tail_policy = "quiet_or_explicit"`, and `tail_quiet_seconds = 90`:
 
-- Finish validates and publishes one immutable candidate ref, releases its worktree slot, leaves the base unchanged, and keeps its anchor.
+- Finish validates and creates one immutable candidate ref. A configured project runtime Adapter must release project-owned resources before the candidate becomes eligible; only then does Finish release the worktree slot, leave the base unchanged, and keep the anchor.
 - Publishing the configured fifth eligible candidate atomically freezes the oldest five candidates in that base-and-policy lane. That Finish then runs or waits for the persisted integration generation; no Hook or resident process is required.
-- While one batch owns the integration turn, later Finish calls may keep publishing into the remaining bounded pool.
+- While one batch owns the integration turn, later Finish calls may keep publishing into the remaining bounded pool. A second batch does not freeze against the same stale base; `reconcile` resumes the existing batch first.
 - DWW composes the exact frozen tree differences in a dedicated integration worktree, runs combined Full validation, verifies the base snapshot again, then fast-forwards the clean base.
-- The coordinating native task explicitly runs `batch seal --candidate <id> ...` only for the exact smaller tail after it knows all intended work is complete. Workers publish and stop; users do not manually copy ids.
-- Never infer a tail from idle time, active-task counts, timers, Hook delivery, or SessionEnd.
-- A deterministic failed generation is retained and never blindly rerun. When composition identifies one conflicting candidate, run `candidate repair --candidate <id>` to prepare an idempotent managed repair on the latest base; continue without user interruption only when code, contracts, and tests determine one result, and stop after two repair generations.
+- `batch reconcile` may freeze a smaller tail only from pending candidates in one exact base-and-policy lane after that lane has zero persisted modifying producers for the full quiet period. A new Start and tail freeze share one admission lock; whichever wins defines the next immutable generation.
+- The coordinating native task schedules a host heartbeat for `next_reconcile_at`. A host without reliable scheduling cannot claim automatic quiet-tail support. `Finish`, `Abandon`, and `SessionEnd` may wake the same check but do not prove completion.
+- There is no candidate-age or maximum-wait auto-seal. An active producer keeps the tail open until it reaches a recorded terminal state. An explicit user, deployment, or downstream dependency request may run `batch reconcile --force --cause user|deploy|dependency` and freezes only the current exact pending snapshot.
+- `batch seal --candidate <id> ...` remains the exact-list compatibility/recovery interface. Both seal intent and batch execution are idempotent; repeated calls never create a duplicate generation.
+- A deterministic failed generation or complete deterministic profile failure is retained and never blindly rerun with unchanged inputs. When composition identifies one conflicting candidate, run `candidate repair --candidate <id>` to prepare an idempotent managed repair on the latest base; continue without user interruption only when code, contracts, and tests determine one result, and stop after two repair generations.
 - Use `start --supersedes <candidate-id>` for other reviewed repair work. Unchanged compatible retained candidates may be explicitly reused in a new generation.
 - `candidate withdraw` removes an unsealed pending or retained candidate. `batch recover` resumes only an interrupted nonfailed generation.
 
@@ -113,7 +115,7 @@ The task snapshots its integration policy at Start. Missing integration policy i
 The anchor remains until the Git result reaches its real terminal boundary:
 
 - direct integration succeeds;
-- the candidate's full or explicit-tail batch succeeds;
+- the candidate's full, quiet-tail, or explicit-tail batch succeeds;
 - the pending candidate is explicitly withdrawn; or
 - the task is explicitly abandoned.
 
@@ -130,7 +132,8 @@ DWW never publishes remotely. After a successful direct Finish or completed cand
 ## Validation, cleanup, and references
 
 - `verification.toml` schema 3 uses explicit argv arrays. All candidate paths require Ready coverage unless static-only policy is explicitly active.
-- Development, Ready, and Full evidence are separate. The machine-global weighted FIFO queue limits expensive validation.
+- Development, Ready, and Full evidence are separate. Heavy profiles are valid only at Full. Exact unchanged profile inputs reuse their content-addressed proof; a changed proof identity fails closed. The machine-global weighted FIFO queue limits expensive validation.
+- Optional `[runtime_adapter]` commands receive one final JSON-context path. Their exact argv and tracked `input_paths` are machine-approved. `release` gates candidate eligibility; `runtime verify --candidate <id>` checks project-defined runtime effectiveness only after Git delivery. DWW never interprets project ports, databases, browsers, authentication, or deployment semantics.
 - Finish never removes dependencies or caches. `prune-slot` requires a reviewed generation-bound plan; protected data, links, path drift, or unknown content stop deletion.
 - Existing mature workflows cross the delegated seam only through the tracked, locally approved bounded adapter contract.
 

@@ -18,9 +18,9 @@ The host's native task system still decides who does what and when. DWW owns onl
 2. The agent edits only there, commits exact paths, and runs `ready`.
 3. `Finish` publishes a verified candidate and releases the task worktree without moving the base.
 4. Every five candidates, DWW freezes the oldest eligible five, composes them in a dedicated integration worktree, runs Full validation, and then advances the base.
-5. When intended work is complete with fewer than five candidates, the coordinating task explicitly closes that exact tail. A single task is a one-candidate tail.
+5. With fewer than five candidates, DWW freezes the exact pending tail only after the lane has no modifying producer for a stable 90 seconds, or after an explicit user, deployment, or downstream-dependency request.
 
-Users do not need to copy candidate IDs. The coordinating agent collects worker results and closes the exact tail after it knows the intended work is complete.
+Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state; the host heartbeat merely wakes reconciliation at `next_reconcile_at`. A host without reliable scheduling cannot claim automatic quiet-tail support.
 
 ## Why five and ten
 
@@ -28,12 +28,15 @@ Five candidates amortise combined validation while keeping conflicts reviewable.
 
 ## What DWW never does
 
-- It never guesses a tail from idleness, active-task counts, Hooks, or session end.
+- It never guesses candidate identity from UI task counts, raw worktree counts, Hooks, or session end; those signals may only wake reconciliation.
+- It has no candidate-age or longest-wait auto-seal. Active modifying work keeps a tail open unless an explicit user, deployment, or dependency request forces the current exact snapshot.
 - It does not replace native task decomposition, dependencies, or worker scheduling.
 - It never fetches, pulls, pushes, opens PRs, deploys, rebases, squashes, amends, or rewrites history.
 - It does not absorb repository-specific ports, databases, browsers, test selection, or deployment rules.
 
-Hooks are optional early hardening. Routing, anchors, worktrees, validation, candidates, batching, and recovery must still work without them.
+Hooks are optional early hardening or wake-up sources. Routing, anchors, worktrees, validation, candidates, batching, and recovery must still work without them.
+
+Projects may configure a Runtime Adapter. After the immutable ref is durable, the Adapter releases project-owned ports, databases, browsers, or similar resources before DWW frees the worktree and activates the candidate. Publication is not delivery: only a completed batch contained in the current base is delivered, and explicit runtime-effectiveness checks remain project-defined Adapter work.
 
 A composition conflict tied to one candidate can prepare up to two managed repair generations on the latest base. The agent continues only when code, contracts, and tests determine one answer; product, permission, migration, deletion, and security choices still stop for a human. Final-validation failures are never disguised as merge conflicts and blindly retried.
 

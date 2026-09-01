@@ -13,7 +13,8 @@ Git safety and evidence
   exact Commit → Ready proof → Finish
                     ↓
 Integration policy
-  candidate-first → immutable pool → auto full batch / explicit exact tail
+  candidate-first → held → Adapter release → immutable pending pool
+                  → auto full batch / quiet-or-explicit exact tail
                   → combined Full proof → protected fast-forward
   legacy direct   → exact local fast-forward
 ```
@@ -30,9 +31,10 @@ solo-ai/task-anchors/              active execution contracts
 solo-ai/proofs/                    exact validation evidence
 solo-ai/candidate-batches.json     immutable candidates and sealed generations
 solo-ai/*-receipts/                rebuildable completion projections
+solo-ai/runtime-adapter/           content-addressed Adapter evidence
 ```
 
-New tracked `.solo-ai/config.toml` defaults to candidate-first integration: full batches of five and a pool capacity of ten. Publication and automatic selection share the pool lock, so exactly the oldest five eligible candidates in one base-and-policy lane freeze once. Smaller tails are never inferred. Legacy repositories without an integration table remain direct; old batched policy without `seal_policy` remains explicit.
+New tracked `.solo-ai/config.toml` defaults to candidate-first integration: full batches of five, a pool capacity of ten, and a 90-second `quiet_or_explicit` tail. Start, candidate activation, Abandon, and reconciliation share the admission lock. Exactly the oldest five eligible candidates in one base-and-policy lane freeze once; a smaller exact snapshot freezes only after the persisted lane is stably producer-free or an authorized explicit cause is supplied. There is no maximum-age auto-seal. Legacy repositories without an integration table remain direct; old batched policy without the new fields remains explicit.
 
 ## Task anchors
 
@@ -44,15 +46,17 @@ Before changing a base ref, Finish freezes task, slot, worktree path and file id
 
 ## Candidate publication
 
-Batched Finish records a publication transaction before Git cleanup. It creates one exact `refs/dww/candidates/<id>` ref, persists candidate identity and proof under a lock, detaches the worktree, deletes only the exact task branch, and releases the slot with its directory identity. Pool exhaustion leaves the task in a recoverable publishing state and does not touch the base.
+Batched Finish records a publication transaction before Git cleanup. It creates one exact `refs/dww/candidates/<id>` ref and persists a `held` candidate identity and proof. The optional project Runtime Adapter must release project-owned resources successfully without changing the task tree. DWW then detaches the worktree, deletes only the exact task branch, releases the slot with its directory identity, and activates the candidate as pending. Adapter failure or pool exhaustion leaves a recoverable publishing task and does not touch the base.
 
 ## Candidate batch transaction
 
-Automatic full sealing snapshots the oldest configured candidate count under the same pool lock as publication. `batch seal` accepts an exact ordered list of one through the configured batch size only for a coordinating task's final tail or legacy explicit policy. No worker count, timer, idle heuristic, Hook, or SessionEnd event can infer a smaller tail.
+Automatic full sealing snapshots the oldest configured pending candidate count. `batch reconcile` may snapshot a smaller tail only after the exact base-and-policy lane has zero persisted modifying producers continuously for its quiet period, or after `--force --cause user|deploy|dependency`. `next_reconcile_at` is a host heartbeat contract, not a completion fact. UI worker counts, raw worktree counts, Hook delivery, or SessionEnd never choose candidates. `batch seal` remains the exact-list compatibility and recovery interface. The ordered candidates, base, and policy epoch form an idempotent seal intent, so wake-up cause and retries cannot duplicate a generation.
 
-The batch uses a dedicated detached worktree. For each frozen candidate it applies the exact binary tree difference from that candidate's recorded base and commits the composed result. After composition it runs the repository's Ready plus Full profiles over the combined tree, checks the base still equals the sealed snapshot, and fast-forwards the one clean worktree that owns the target branch.
+The batch uses a dedicated detached worktree. For each frozen candidate it applies the exact binary tree difference from that candidate's recorded base and commits the composed result. After composition it runs the repository's Ready plus Full profiles over the combined tree, reusing only exact unchanged proofs, checks the base still equals the sealed snapshot, and fast-forwards the one clean worktree that owns the target branch. Heavy database, complete-build, authentication, and browser profiles are Full-only.
 
 Failure before promotion records a failed generation and preserves the base. Its candidates become retained and cannot be automatically selected again. A repair publishes a new candidate and the coordinating task may reuse unchanged exact candidates in a new generation. An interruption leaves a nonfailed recorded phase; `batch recover` resumes only that generation. Promotion is followed by idempotent worktree/ref cleanup, candidate completion, and anchor deletion.
+
+Publication and delivery are separate projections. A candidate is delivered only when its completed batch is contained in the current base. An explicit `runtime verify --candidate` may then ask the project Adapter whether that source is effective in its runtime; DWW records the evidence but never interprets project ports, databases, browsers, authentication, or deployment semantics.
 
 ## Delegation and Hooks
 

@@ -42,6 +42,16 @@ class IntegrationSpec:
     batch_size: int
     candidate_capacity: int
     seal_policy: str
+    tail_policy: str
+    tail_quiet_seconds: float
+
+
+@dataclass(frozen=True)
+class RuntimeAdapterSpec:
+    release: CommandSpec | None
+    verify_effective: CommandSpec | None
+    input_paths: tuple[str, ...]
+    timeout_seconds: float
 
 
 @dataclass(frozen=True)
@@ -61,6 +71,7 @@ class RepoConfig:
     readiness: ReadinessSpec | None
     cleanup_owned_paths: tuple[str, ...]
     integration: IntegrationSpec
+    runtime_adapter: RuntimeAdapterSpec
 
 
 @dataclass(frozen=True)
@@ -201,6 +212,25 @@ def _sensitive_allowlist(raw: Any) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _repository_patterns(raw: Any, *, field: str) -> tuple[str, ...]:
+    values = _strings(raw, field=field, allow_empty=True)
+    normalized: list[str] = []
+    for value in values:
+        path = value.replace("\\", "/")
+        candidate = PurePosixPath(path)
+        if (
+            path.startswith("/")
+            or (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/")
+            or candidate == PurePosixPath(".")
+            or ".." in candidate.parts
+        ):
+            raise SoloAIError(
+                f"{field} must contain repository-relative paths or patterns"
+            )
+        normalized.append(path)
+    return tuple(normalized)
+
+
 def _cleanup_paths(
     raw: Any, *, field: str, default: tuple[str, ...], allow_patterns: bool
 ) -> tuple[str, ...]:
@@ -330,12 +360,28 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         field="integration.seal_policy",
     )
     if seal_policy not in {"explicit", "auto_full"}:
-        raise SoloAIError(
-            'integration.seal_policy must be "explicit" or "auto_full"'
-        )
+        raise SoloAIError('integration.seal_policy must be "explicit" or "auto_full"')
     if integration_mode == "direct" and seal_policy != "explicit":
         raise SoloAIError(
             'integration.seal_policy = "auto_full" requires mode = "batched"'
+        )
+    tail_policy = _string(
+        integration_raw.get("tail_policy", "explicit"),
+        field="integration.tail_policy",
+    )
+    if tail_policy not in {"explicit", "quiet_or_explicit"}:
+        raise SoloAIError(
+            'integration.tail_policy must be "explicit" or "quiet_or_explicit"'
+        )
+    tail_quiet_seconds = _number(
+        integration_raw.get("tail_quiet_seconds", 90),
+        field="integration.tail_quiet_seconds",
+    )
+    if not 1 <= tail_quiet_seconds <= 3600:
+        raise SoloAIError("integration.tail_quiet_seconds must be between 1 and 3600")
+    if integration_mode == "direct" and tail_policy != "explicit":
+        raise SoloAIError(
+            'integration.tail_policy = "quiet_or_explicit" requires mode = "batched"'
         )
     # Repositories adopted before candidate-first integration often have no
     # integration table. Treat that absence as the old direct policy; only a
@@ -343,6 +389,37 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     if not integration_declared:
         integration_mode = "direct"
         seal_policy = "explicit"
+        tail_policy = "explicit"
+    runtime_adapter_raw = data.get("runtime_adapter", {})
+    if not isinstance(runtime_adapter_raw, dict):
+        raise SoloAIError("runtime_adapter must be a TOML table")
+    runtime_release = (
+        _command(runtime_adapter_raw["release"], field="runtime_adapter.release")
+        if "release" in runtime_adapter_raw
+        else None
+    )
+    runtime_verify_effective = (
+        _command(
+            runtime_adapter_raw["verify_effective"],
+            field="runtime_adapter.verify_effective",
+        )
+        if "verify_effective" in runtime_adapter_raw
+        else None
+    )
+    runtime_input_paths = _repository_patterns(
+        runtime_adapter_raw.get("input_paths", []),
+        field="runtime_adapter.input_paths",
+    )
+    if (runtime_release or runtime_verify_effective) and not runtime_input_paths:
+        raise SoloAIError(
+            "runtime_adapter.input_paths is required when Adapter commands are configured"
+        )
+    runtime_timeout_seconds = _number(
+        runtime_adapter_raw.get("timeout_seconds", 300),
+        field="runtime_adapter.timeout_seconds",
+    )
+    if not 1 <= runtime_timeout_seconds <= 3600:
+        raise SoloAIError("runtime_adapter.timeout_seconds must be between 1 and 3600")
     readiness_raw = lifecycle.get("readiness")
     if "dev_start" in lifecycle:
         dev_start = _command(lifecycle["dev_start"], field="lifecycle.dev_start")
@@ -399,6 +476,14 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
             batch_size=batch_size,
             candidate_capacity=candidate_capacity,
             seal_policy=seal_policy,
+            tail_policy=tail_policy,
+            tail_quiet_seconds=tail_quiet_seconds,
+        ),
+        runtime_adapter=RuntimeAdapterSpec(
+            release=runtime_release,
+            verify_effective=runtime_verify_effective,
+            input_paths=runtime_input_paths,
+            timeout_seconds=runtime_timeout_seconds,
         ),
     )
 
@@ -482,6 +567,10 @@ def load_verification_config(
         if level not in {"development", "ready", "full"}:
             raise SoloAIError(
                 f"Profile {profile_id!r} level must be development, ready, or full"
+            )
+        if resource_class == "heavy" and level != "full":
+            raise SoloAIError(
+                f"Profile {profile_id!r} is heavy and must run at level full"
             )
         profiles.append(
             VerificationProfile(
@@ -634,8 +723,15 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # Only exact top-level paths explicitly declared here may be removed by prune-slot.
 # An empty list means no dependencies or caches are ever removed automatically.
 cleanup = {{ owned_paths = [] }}
-# 默认每满 5 个候选自动封批；不足 5 个只由协调任务显式收尾。
-integration = {{ mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full" }}
+# 默认每满 5 个候选自动封批；尾批仅在生产者稳定归零或明确要求时封存。
+integration = {{ mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }}
+
+# 可选项目运行时 Adapter；DWW 只传递上下文文件，不解释端口、数据库或浏览器语义。
+# [runtime_adapter]
+# release = ["uv", "run", "scripts/dww-runtime-adapter.py", "release"]
+# verify_effective = ["uv", "run", "scripts/dww-runtime-adapter.py", "verify-effective"]
+# input_paths = ["scripts/dww-runtime-adapter.py", "deploy/**"]
+# timeout_seconds = 300
 
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{{port}}"]
@@ -685,7 +781,7 @@ def managed_block() -> str:
 ## Isolated coding tasks
 
 For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in the returned worktree, stage an exact reviewed path list with `commit`, then run `ready` and `finish`. Read-only analysis does not claim a slot. Do not bypass a failed gate. The DWW lifecycle is local-only and must not fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After a successful Finish, an explicit user request may be fulfilled with an ordinary non-force push of the current branch from the clean base worktree; that publishing step is separate from DWW.
-`Start` creates the local task anchor; keep it current and reread it after continuation or context loss. New repositories publish verified candidates, release the task worktree, and automatically freeze each full configured batch. The current coordinating task explicitly seals an exact smaller tail after it knows the intended work is complete. Never infer a tail from idle time, active-task counts, Hook delivery, or session end. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only. Explicit legacy direct policy remains upgrade compatibility only.
+`Start` creates the local task anchor; keep it current and reread it after continuation or context loss. New repositories publish verified candidates, release project resources through the configured Adapter, then release the task worktree. Each full batch freezes automatically; an exact smaller tail freezes only after its persisted lane is stably producer-free or after an explicit user, deployment, or dependency request. Host heartbeat only wakes `batch reconcile`; UI task counts, raw worktree counts, Hook delivery, and session end never prove completion or choose candidates. There is no candidate-age auto-seal. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only. Candidate publication is not delivery; only integration into the current base is delivery. Explicit legacy direct policy remains upgrade compatibility only.
 {MANAGED_END}
 """
 

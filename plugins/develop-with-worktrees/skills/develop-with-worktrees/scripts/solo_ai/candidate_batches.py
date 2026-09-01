@@ -5,6 +5,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from .integration import integration_turn
 from .proof import approval_plan, validate
 from .repo import GitRepo
 from .safety import require_safe
-from .state import StateStore
+from .state import StateStore, candidate_admission_lock
 from .task_context import delete_anchor, require_anchor
 from .util import (
     DirectoryLock,
@@ -27,7 +28,7 @@ from .util import (
     utc_timestamp,
 )
 
-POOL_SCHEMA = 2
+POOL_SCHEMA = 3
 ACTIVE_BATCH_STATES = {"sealed", "composing", "composed", "validated", "promoted"}
 LEGACY_EXPLICIT_POLICY = {
     "schema_version": 1,
@@ -35,6 +36,8 @@ LEGACY_EXPLICIT_POLICY = {
     "batch_size": 5,
     "candidate_capacity": 10,
     "seal_policy": "explicit",
+    "tail_policy": "explicit",
+    "tail_quiet_seconds": 90,
     "activation_epoch": "legacy-explicit",
 }
 AUTOMATIC_REPAIR_LIMIT = 2
@@ -70,7 +73,10 @@ class CandidateBatchStore:
                 candidate.setdefault(
                     "integration_policy", copy.deepcopy(LEGACY_EXPLICIT_POLICY)
                 )
-                if candidate.get("sealed_batch") and candidate.get("status") == "pending":
+                if (
+                    candidate.get("sealed_batch")
+                    and candidate.get("status") == "pending"
+                ):
                     candidate["status"] = "sealed"
                 sequence = max(
                     sequence + 1,
@@ -78,11 +84,29 @@ class CandidateBatchStore:
                 )
             value["next_publication_sequence"] = sequence
             value["schema_version"] = POOL_SCHEMA
+        elif value.get("schema_version") == 2:
+            value["schema_version"] = POOL_SCHEMA
         elif value.get("schema_version") != POOL_SCHEMA:
             raise SoloAIError("Unsupported candidate-pool state schema")
         value.setdefault("next_publication_sequence", 1)
         for candidate in value.get("candidates", {}).values():
             candidate.setdefault("repair_attempt", 0)
+            policy = candidate.setdefault(
+                "integration_policy", copy.deepcopy(LEGACY_EXPLICIT_POLICY)
+            )
+            policy.setdefault("tail_policy", "explicit")
+            policy.setdefault("tail_quiet_seconds", 90)
+        for batch in value.get("batches", {}).values():
+            if batch.get("seal_intent_id"):
+                continue
+            policy = batch.get("integration_policy") or LEGACY_EXPLICIT_POLICY
+            batch["seal_intent_id"] = self._seal_intent(
+                base_ref=str(batch.get("base_ref")),
+                activation_epoch=str(
+                    policy.get("activation_epoch") or "legacy-explicit"
+                ),
+                candidate_ids=[str(item) for item in batch.get("candidate_ids", [])],
+            )
         return value
 
     def mutate(self, callback: Callable[[dict[str, Any]], Any]) -> Any:
@@ -96,9 +120,26 @@ class CandidateBatchStore:
     def summary(self) -> dict[str, Any]:
         value = self.read()
         return {
-            "candidates": list(value["candidates"].values()),
+            "candidates": [
+                self._candidate_projection(item)
+                for item in value["candidates"].values()
+            ],
             "batches": list(value["batches"].values()),
         }
+
+    @staticmethod
+    def _candidate_projection(candidate: dict[str, Any]) -> dict[str, Any]:
+        projected = copy.deepcopy(candidate)
+        status = str(projected.get("status"))
+        projected["delivered"] = status == "integrated"
+        projected["delivery_status"] = (
+            "integrated"
+            if status == "integrated"
+            else "not-delivered"
+            if status in {"withdrawn", "superseded"}
+            else "awaiting-integration"
+        )
+        return projected
 
     def active(self) -> bool:
         value = self.read()
@@ -122,6 +163,24 @@ class CandidateBatchStore:
             raise SoloAIError(f"Unknown candidate: {candidate_id}")
         return copy.deepcopy(candidate)
 
+    @staticmethod
+    def _seal_intent(
+        *,
+        base_ref: str,
+        activation_epoch: str,
+        candidate_ids: list[str],
+    ) -> str:
+        return sha256_text(
+            stable_json(
+                {
+                    "schema_version": 1,
+                    "base_ref": base_ref,
+                    "activation_epoch": activation_epoch,
+                    "candidate_ids": candidate_ids,
+                }
+            )
+        )
+
     def _seal_in_value(
         self,
         value: dict[str, Any],
@@ -140,9 +199,42 @@ class CandidateBatchStore:
             raise SoloAIError("Seal candidates must be unique")
         candidates: list[dict[str, Any]] = []
         base_refs: set[str] = set()
+        activation_epochs: set[str] = set()
         for candidate_id in candidate_ids:
             candidate = value["candidates"].get(candidate_id)
-            if not candidate or candidate.get("status") not in {"pending", "retained"}:
+            if not candidate:
+                raise SoloAIError(f"Unknown candidate: {candidate_id}")
+            policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
+            candidates.append(copy.deepcopy(candidate))
+            base_refs.add(str(candidate["base_ref"]))
+            activation_epochs.add(
+                str(policy.get("activation_epoch") or "legacy-explicit")
+            )
+        if len(base_refs) != 1:
+            raise SoloAIError("One batch can target only one local base branch")
+        if len(activation_epochs) != 1:
+            raise SoloAIError("One batch can contain only one integration policy lane")
+        base_ref = next(iter(base_refs))
+        activation_epoch = next(iter(activation_epochs))
+        seal_intent_id = self._seal_intent(
+            base_ref=base_ref,
+            activation_epoch=activation_epoch,
+            candidate_ids=candidate_ids,
+        )
+        for existing in value["batches"].values():
+            if existing.get("seal_intent_id") == seal_intent_id:
+                return copy.deepcopy(existing)
+        if any(
+            existing.get("status") in ACTIVE_BATCH_STATES
+            and existing.get("base_ref") == base_ref
+            for existing in value["batches"].values()
+        ):
+            raise SoloAIError(
+                "An active integration batch already owns this base; reconcile or recover it before sealing another batch"
+            )
+        for candidate in candidates:
+            candidate_id = str(candidate["candidate_id"])
+            if candidate.get("status") not in {"pending", "retained"}:
                 raise SoloAIError(
                     f"Candidate is not available for sealing: {candidate_id}"
                 )
@@ -152,20 +244,13 @@ class CandidateBatchStore:
                 )
             if self.repo.ref_head(str(candidate["ref"])) != candidate.get("head"):
                 raise SoloAIError(f"Candidate ref changed: {candidate_id}")
-            candidates.append(copy.deepcopy(candidate))
-            base_refs.add(str(candidate["base_ref"]))
-        if len(base_refs) != 1:
-            raise SoloAIError("One batch can target only one local base branch")
-        base_ref = next(iter(base_refs))
         base_before = self.repo.ref_head(f"refs/heads/{base_ref}")
         if base_before is None:
             raise SoloAIError("Batch base branch no longer exists")
-        batch_id = (
-            f"batch-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-"
-            f"{uuid.uuid4().hex[:8]}"
-        )
+        batch_id = f"batch-{seal_intent_id[:24]}"
         batch = {
             "id": batch_id,
+            "seal_intent_id": seal_intent_id,
             "status": "sealed",
             "trigger": trigger,
             "base_ref": base_ref,
@@ -196,6 +281,7 @@ class CandidateBatchStore:
         capacity: int,
         batch_size: int,
         seal_policy: str,
+        activate: bool = True,
     ) -> dict[str, Any]:
         created_ref = False
 
@@ -218,8 +304,7 @@ class CandidateBatchStore:
                     "candidate": copy.deepcopy(existing),
                     "auto_batch": copy.deepcopy(value["batches"].get(batch_id))
                     if batch_id
-                    and value["batches"].get(batch_id, {}).get("trigger")
-                    == "auto_full"
+                    and value["batches"].get(batch_id, {}).get("trigger") == "auto_full"
                     else None,
                 }
             supersedes = candidate.get("supersedes")
@@ -233,7 +318,7 @@ class CandidateBatchStore:
             active = [
                 item
                 for item in value["candidates"].values()
-                if item.get("status") in {"pending", "sealed"}
+                if item.get("status") in {"held", "pending", "sealed"}
                 and item.get("candidate_id") != supersedes
             ]
             if len(active) >= capacity:
@@ -253,14 +338,13 @@ class CandidateBatchStore:
                 created_ref = True
             sequence = int(value.get("next_publication_sequence", 1))
             value["next_publication_sequence"] = sequence + 1
-            repair_attempt = (
-                int(source.get("repair_attempt", 0)) + 1 if source else 0
-            )
+            repair_attempt = int(source.get("repair_attempt", 0)) + 1 if source else 0
             record = {
                 **copy.deepcopy(candidate),
-                "status": "pending",
+                "status": "pending" if activate else "held",
                 "publication_sequence": sequence,
                 "repair_attempt": repair_attempt,
+                "published_at": utc_timestamp(),
             }
             value["candidates"][str(candidate["candidate_id"])] = record
             if source and source.get("status") in {"pending", "retained"}:
@@ -274,7 +358,14 @@ class CandidateBatchStore:
                 )
             auto_batch = None
             policy = record.get("integration_policy") or {}
-            if seal_policy == "auto_full":
+            active_lane_batch = any(
+                batch.get("status") in ACTIVE_BATCH_STATES
+                and batch.get("base_ref") == record.get("base_ref")
+                and (batch.get("integration_policy") or {}).get("activation_epoch")
+                == policy.get("activation_epoch")
+                for batch in value["batches"].values()
+            )
+            if activate and seal_policy == "auto_full" and not active_lane_batch:
                 eligible = sorted(
                     (
                         item
@@ -282,9 +373,7 @@ class CandidateBatchStore:
                         if item.get("status") == "pending"
                         and not item.get("sealed_batch")
                         and item.get("base_ref") == record.get("base_ref")
-                        and (item.get("integration_policy") or {}).get(
-                            "seal_policy"
-                        )
+                        and (item.get("integration_policy") or {}).get("seal_policy")
                         == "auto_full"
                         and (item.get("integration_policy") or {}).get(
                             "activation_epoch"
@@ -319,6 +408,73 @@ class CandidateBatchStore:
                 self.repo.delete_ref(ref, expected=head)
             raise
 
+    def activate(
+        self,
+        candidate_id: str,
+        *,
+        batch_size: int,
+        seal_policy: str,
+    ) -> dict[str, Any]:
+        def update(value: dict[str, Any]) -> dict[str, Any]:
+            candidate = value["candidates"].get(candidate_id)
+            if not candidate:
+                raise SoloAIError(f"Unknown candidate: {candidate_id}")
+            batch_id = candidate.get("sealed_batch")
+            if candidate.get("status") != "held":
+                return {
+                    "candidate": copy.deepcopy(candidate),
+                    "auto_batch": copy.deepcopy(value["batches"].get(batch_id))
+                    if batch_id
+                    and value["batches"].get(batch_id, {}).get("trigger") == "auto_full"
+                    else None,
+                }
+            if self.repo.ref_head(str(candidate["ref"])) != candidate.get("head"):
+                raise SoloAIError("Held candidate ref changed before activation")
+            candidate["status"] = "pending"
+            candidate["activated_at"] = utc_timestamp()
+            policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
+            active_lane_batch = any(
+                batch.get("status") in ACTIVE_BATCH_STATES
+                and batch.get("base_ref") == candidate.get("base_ref")
+                and (batch.get("integration_policy") or {}).get("activation_epoch")
+                == policy.get("activation_epoch")
+                for batch in value["batches"].values()
+            )
+            auto_batch = None
+            if seal_policy == "auto_full" and not active_lane_batch:
+                eligible = sorted(
+                    (
+                        item
+                        for item in value["candidates"].values()
+                        if item.get("status") == "pending"
+                        and not item.get("sealed_batch")
+                        and item.get("base_ref") == candidate.get("base_ref")
+                        and (item.get("integration_policy") or {}).get("seal_policy")
+                        == "auto_full"
+                        and (item.get("integration_policy") or {}).get(
+                            "activation_epoch"
+                        )
+                        == policy.get("activation_epoch")
+                    ),
+                    key=lambda item: (
+                        int(item.get("publication_sequence", 0)),
+                        str(item.get("candidate_id")),
+                    ),
+                )
+                if len(eligible) >= batch_size:
+                    auto_batch = self._seal_in_value(
+                        value,
+                        [str(item["candidate_id"]) for item in eligible[:batch_size]],
+                        batch_size=batch_size,
+                        trigger="auto_full",
+                    )
+            return {
+                "candidate": copy.deepcopy(candidate),
+                "auto_batch": auto_batch,
+            }
+
+        return self.mutate(update)
+
     def seal(self, candidate_ids: list[str], *, batch_size: int) -> dict[str, Any]:
         return self.mutate(
             lambda value: self._seal_in_value(
@@ -328,6 +484,185 @@ class CandidateBatchStore:
                 trigger="explicit_tail",
             )
         )
+
+    def pending_lanes(self) -> list[dict[str, Any]]:
+        candidates = sorted(
+            (
+                item
+                for item in self.read()["candidates"].values()
+                if item.get("status") == "pending" and not item.get("sealed_batch")
+            ),
+            key=lambda item: (
+                int(item.get("publication_sequence", 0)),
+                str(item.get("candidate_id")),
+            ),
+        )
+        lanes: dict[tuple[str, str], dict[str, Any]] = {}
+        for candidate in candidates:
+            policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
+            key = (
+                str(candidate["base_ref"]),
+                str(policy.get("activation_epoch") or "legacy-explicit"),
+            )
+            lane = lanes.setdefault(
+                key,
+                {
+                    "base_ref": key[0],
+                    "activation_epoch": key[1],
+                    "integration_policy": copy.deepcopy(policy),
+                    "candidate_ids": [],
+                    "first_publication_sequence": int(
+                        candidate.get("publication_sequence", 0)
+                    ),
+                },
+            )
+            lane["candidate_ids"].append(str(candidate["candidate_id"]))
+        return sorted(
+            lanes.values(), key=lambda lane: int(lane["first_publication_sequence"])
+        )
+
+    def reconcile(
+        self,
+        *,
+        producer_snapshots: dict[tuple[str, str], dict[str, Any]],
+        force: bool = False,
+        cause: str = "heartbeat",
+        now_epoch: float | None = None,
+    ) -> dict[str, Any]:
+        observed_now = time.time() if now_epoch is None else now_epoch
+
+        def timestamp_epoch(value: str | None) -> float | None:
+            if not value:
+                return None
+            try:
+                return (
+                    datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+                    .replace(tzinfo=timezone.utc)
+                    .timestamp()
+                )
+            except ValueError:
+                return None
+
+        def update(value: dict[str, Any]) -> dict[str, Any]:
+            waiting: list[dict[str, Any]] = []
+            active_batches = sorted(
+                (
+                    batch
+                    for batch in value["batches"].values()
+                    if batch.get("status") in ACTIVE_BATCH_STATES
+                ),
+                key=lambda batch: (
+                    str(batch.get("created_at") or ""),
+                    str(batch.get("id")),
+                ),
+            )
+            if active_batches:
+                return {
+                    "status": "active-batch",
+                    "batch": copy.deepcopy(active_batches[0]),
+                    "cause": cause,
+                    "idempotent": True,
+                }
+            candidates = sorted(
+                (
+                    item
+                    for item in value["candidates"].values()
+                    if item.get("status") == "pending" and not item.get("sealed_batch")
+                ),
+                key=lambda item: (
+                    int(item.get("publication_sequence", 0)),
+                    str(item.get("candidate_id")),
+                ),
+            )
+            lane_candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for candidate in candidates:
+                policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
+                key = (
+                    str(candidate["base_ref"]),
+                    str(policy.get("activation_epoch") or "legacy-explicit"),
+                )
+                lane_candidates.setdefault(key, []).append(candidate)
+            for key, eligible in lane_candidates.items():
+                policy = eligible[0].get("integration_policy") or LEGACY_EXPLICIT_POLICY
+                batch_size = int(policy.get("batch_size", 5))
+                candidate_ids = [str(item["candidate_id"]) for item in eligible]
+                if (
+                    policy.get("seal_policy") == "auto_full"
+                    and len(candidate_ids) >= batch_size
+                ):
+                    batch = self._seal_in_value(
+                        value,
+                        candidate_ids[:batch_size],
+                        batch_size=batch_size,
+                        trigger="auto_full",
+                    )
+                    return {"status": "sealed", "batch": batch, "cause": cause}
+                snapshot = producer_snapshots.get(
+                    key,
+                    {
+                        "active_count": 0,
+                        "active_task_ids": [],
+                        "quiet_since": None,
+                    },
+                )
+                active_count = int(snapshot.get("active_count", 0))
+                quiet_seconds = float(policy.get("tail_quiet_seconds", 90))
+                quiet_since = timestamp_epoch(snapshot.get("quiet_since"))
+                quiet_elapsed = (
+                    observed_now - quiet_since if quiet_since is not None else None
+                )
+                quiet_eligible = (
+                    policy.get("tail_policy") == "quiet_or_explicit"
+                    and active_count == 0
+                    and quiet_elapsed is not None
+                    and quiet_elapsed >= quiet_seconds
+                )
+                if force or quiet_eligible:
+                    batch = self._seal_in_value(
+                        value,
+                        candidate_ids,
+                        batch_size=batch_size,
+                        trigger="explicit_tail" if force else "quiet_tail",
+                    )
+                    return {"status": "sealed", "batch": batch, "cause": cause}
+                next_reconcile_at = None
+                if (
+                    policy.get("tail_policy") == "quiet_or_explicit"
+                    and active_count == 0
+                    and quiet_since is not None
+                ):
+                    next_reconcile_at = time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ",
+                        time.gmtime(quiet_since + quiet_seconds),
+                    )
+                waiting.append(
+                    {
+                        "base_ref": key[0],
+                        "activation_epoch": key[1],
+                        "candidate_ids": candidate_ids,
+                        "active_candidate_producers": active_count,
+                        "active_task_ids": list(snapshot.get("active_task_ids", [])),
+                        "quiet_since": snapshot.get("quiet_since"),
+                        "next_reconcile_at": next_reconcile_at,
+                    }
+                )
+            if not candidates:
+                held = sorted(
+                    str(item["candidate_id"])
+                    for item in value["candidates"].values()
+                    if item.get("status") == "held"
+                )
+                if held:
+                    return {
+                        "status": "publication-held",
+                        "cause": cause,
+                        "held_candidate_ids": held,
+                        "waiting": [],
+                    }
+                return {"status": "idle", "cause": cause, "waiting": []}
+            return {"status": "waiting", "cause": cause, "waiting": waiting}
+
+        return self.mutate(update)
 
     def batch(self, batch_id: str) -> dict[str, Any]:
         batch = self.read()["batches"].get(batch_id)
@@ -526,7 +861,7 @@ def _apply_candidate_diff(
         raise CandidateCompositionConflict(
             candidate_id,
             "Candidate conflicts with the sealed batch; base was preserved"
-            + (f": {detail}" if detail else "")
+            + (f": {detail}" if detail else ""),
         )
 
 
@@ -710,22 +1045,81 @@ def seal_batch(repo: GitRepo, *, candidate_ids: list[str]) -> dict[str, Any]:
             "This repository uses direct integration, not candidate batches"
         )
     store = CandidateBatchStore(repo)
-    batch = store.seal(candidate_ids, batch_size=config.integration.batch_size)
+    first = store.candidate(candidate_ids[0]) if candidate_ids else None
+    frozen_policy = (first or {}).get("integration_policy") or LEGACY_EXPLICIT_POLICY
+    with candidate_admission_lock(repo):
+        batch = store.seal(
+            candidate_ids,
+            batch_size=int(
+                frozen_policy.get("batch_size", config.integration.batch_size)
+            ),
+        )
     return run_batch(repo, batch_id=str(batch["id"]))
+
+
+def reconcile_batches(
+    repo: GitRepo,
+    *,
+    force: bool = False,
+    cause: str = "heartbeat",
+    now_epoch: float | None = None,
+) -> dict[str, Any]:
+    """仅用持久化候选与任务事实冻结一个可证明的批次。"""
+
+    from .lifecycle import _config_and_mode
+
+    config, _, _ = _config_and_mode(repo)
+    if config.integration.mode != "batched":
+        raise SoloAIError(
+            "This repository uses direct integration, not candidate batches"
+        )
+    if force and cause not in {"user", "deploy", "dependency"}:
+        raise SoloAIError(
+            "Forced tail reconciliation requires cause user, deploy, or dependency"
+        )
+    batch_store = CandidateBatchStore(repo)
+    state_store = StateStore(repo)
+    with candidate_admission_lock(repo):
+        snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+        for lane in batch_store.pending_lanes():
+            key = (str(lane["base_ref"]), str(lane["activation_epoch"]))
+            snapshots[key] = state_store.candidate_producer_snapshot(
+                base_ref=key[0], activation_epoch=key[1]
+            )
+        result = batch_store.reconcile(
+            producer_snapshots=snapshots,
+            force=force,
+            cause=cause,
+            now_epoch=now_epoch,
+        )
+    batch = result.get("batch")
+    if not batch:
+        return result
+    if result.get("status") == "active-batch" and cause in {"finish", "abandon"}:
+        return result
+    completed = run_batch(repo, batch_id=str(batch["id"]))
+    return {
+        **result,
+        "status": completed["status"],
+        "batch": completed,
+        "delivered": completed["status"] == "completed",
+    }
 
 
 def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
     """Run one already frozen generation without blocking candidate publication."""
 
     store = CandidateBatchStore(repo)
-    batch = store.batch(batch_id)
     try:
-        with integration_turn(repo, str(batch["id"])):
-            return _resume(repo, store, batch)
+        run_lock = repo.local_dir / "locks" / f"batch-{sha256_text(batch_id)[:24]}.lock"
+        with DirectoryLock(run_lock, wait=True):
+            with integration_turn(repo, batch_id):
+                batch = store.batch(batch_id)
+                return _resume(repo, store, batch)
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:
-        current = store.batch(str(batch["id"]))
+        current = store.batch(batch_id)
         if isinstance(exc, CandidateCompositionConflict):
             failure_kind = "composition_conflict"
             failed_candidate_id = exc.candidate_id
@@ -739,7 +1133,7 @@ def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
             failure_kind = "composition_failed"
             failed_candidate_id = None
         store.fail(
-            str(batch["id"]),
+            batch_id,
             str(exc),
             failure_kind=failure_kind,
             failed_candidate_id=failed_candidate_id,
@@ -747,9 +1141,7 @@ def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
         raise
 
 
-def prepare_candidate_repair(
-    repo: GitRepo, *, candidate_id: str
-) -> dict[str, Any]:
+def prepare_candidate_repair(repo: GitRepo, *, candidate_id: str) -> dict[str, Any]:
     """在最新基线上准备一次受管候选修复，保留可由代理解决的冲突现场。"""
 
     from .lifecycle import _config_and_mode, start
@@ -791,10 +1183,10 @@ def prepare_candidate_repair(
         anchor,
         f"""# Task anchor: repair {candidate_id}
 
-- Task ID: `{task['id']}`
+- Task ID: `{task["id"]}`
 - Original purpose: automatically repair candidate `{candidate_id}` after a deterministic composition conflict
-- Implementation target: replay candidate `{source['head']}` onto `{base_ref}` at `{base_head}` and preserve its verified intent
-- Reference baseline: source `{source['base_head']}` → `{source['head']}`; repair base `{base_ref}` at `{base_head}`
+- Implementation target: replay candidate `{source["head"]}` onto `{base_ref}` at `{base_head}` and preserve its verified intent
+- Reference baseline: source `{source["base_head"]}` → `{source["head"]}`; repair base `{base_ref}` at `{base_head}`
 - Scope boundary: change only the source candidate's intent and the minimum conflict resolution; do not choose between competing product, permission, migration, deletion, or security rules
 - Acceptance criteria: resolve every recorded conflict, review the exact path manifest, run Commit/Ready/Finish, then explicitly seal the replacement candidate and prove it is in the base
 - Current progress: repair attempt {attempt} prepared at {utc_timestamp()}

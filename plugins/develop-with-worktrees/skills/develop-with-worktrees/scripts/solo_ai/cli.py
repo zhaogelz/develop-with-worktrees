@@ -12,6 +12,7 @@ from . import VERSION
 from .candidate_batches import (
     CandidateBatchStore,
     prepare_candidate_repair,
+    reconcile_batches,
     recover_batch,
     seal_batch,
     withdraw_candidate,
@@ -59,6 +60,7 @@ from .orchestration.models import MAX_DEVELOPMENT_PARALLELISM
 from .proof import approval_plan, proof_inputs, validate
 from .repo import GitRepo
 from .routing import detect_existing_workflows
+from .runtime_adapter import verify_runtime_effective
 from .state import FINAL_TASK_STATES, STATE_SCHEMA, StateStore
 from .util import (
     SoloAIError,
@@ -382,11 +384,42 @@ def _parser() -> argparse.ArgumentParser:
         help="explicitly close and integrate the exact listed tail candidates",
     )
     batch_seal.add_argument("--candidate", action="append", required=True)
+    batch_reconcile = batch_sub.add_parser(
+        "reconcile",
+        help="freeze one full or proven quiet tail batch from persisted facts",
+    )
+    batch_reconcile.add_argument(
+        "--force",
+        action="store_true",
+        help="explicitly integrate the current exact pending tail",
+    )
+    batch_reconcile.add_argument(
+        "--cause",
+        choices=(
+            "heartbeat",
+            "finish",
+            "abandon",
+            "session-end",
+            "user",
+            "deploy",
+            "dependency",
+        ),
+        default="heartbeat",
+    )
     batch_recover = batch_sub.add_parser(
         "recover",
         help="resume an interrupted sealed generation from recorded Git facts",
     )
     batch_recover.add_argument("--batch", required=True)
+
+    runtime = sub.add_parser(
+        "runtime", help="ask the project Adapter to verify a delivered runtime"
+    )
+    runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_verify = runtime_sub.add_parser(
+        "verify", help="verify that one integrated candidate is effective at runtime"
+    )
+    runtime_verify.add_argument("--candidate", required=True)
 
     anchor = sub.add_parser(
         "anchor", help="explicitly reconstruct a reviewed pre-anchor task context"
@@ -1321,9 +1354,15 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return store.summary()
         if args.batch_command == "seal":
             return seal_batch(repo, candidate_ids=args.candidate)
+        if args.batch_command == "reconcile":
+            return reconcile_batches(repo, force=args.force, cause=args.cause)
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
         raise SoloAIError(f"Unknown batch command: {args.batch_command}")
+    if args.command == "runtime":
+        if args.runtime_command == "verify":
+            return verify_runtime_effective(repo, candidate_id=args.candidate)
+        raise SoloAIError(f"Unknown runtime command: {args.runtime_command}")
     if args.command == "anchor":
         if args.anchor_command == "adopt":
             return adopt_task_anchor(
@@ -1527,8 +1566,9 @@ def _human(command: str, result: dict[str, Any]) -> str:
             )
         if result.get("outcome") == "candidate_published":
             next_step = (
-                "It will join the next full automatic batch; the coordinating task "
-                "may explicitly close an exact smaller tail when all intended work is done."
+                "It will join the next full automatic batch. A smaller tail is eligible "
+                "only after its persisted producer lane stays quiet, or after an explicit "
+                "user, deployment, or dependency request."
                 if result.get("seal_policy") == "auto_full"
                 else "This legacy policy requires an explicit exact candidate batch."
             )

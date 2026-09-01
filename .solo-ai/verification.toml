@@ -2,7 +2,24 @@ schema_version = 3
 static_only = false
 
 [[profiles]]
-id = "default"
+id = "quick-ready"
+paths = ["**"]
+cross_task_reuse = true
+external_state = "none"
+input_paths = ["**"]
+environment = []
+input_closure = "complete"
+timeout_seconds = 300
+resource_class = "normal"
+level = "ready"
+commands = [
+  ["uvx", "ruff", "check", "."],
+  ["uvx", "ruff", "format", "--check", "."],
+  ["uv", "run", "pytest", "tests/unit", "-q"],
+]
+
+[[profiles]]
+id = "full-suite"
 paths = ["**"]
 cross_task_reuse = false
 external_state = "unknown"
@@ -10,8 +27,8 @@ input_paths = ["**"]
 environment = []
 input_closure = "declared"
 timeout_seconds = 3600
-resource_class = "normal"
-level = "ready"
+resource_class = "heavy"
+level = "full"
 commands = [
   ["uv", "run", "pytest"],
 ]

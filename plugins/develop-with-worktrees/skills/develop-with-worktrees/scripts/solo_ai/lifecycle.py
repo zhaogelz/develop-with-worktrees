@@ -53,7 +53,13 @@ from .proof import (
 from .repo import GitRepo
 from .routing import decide_route, detect_existing_workflows
 from .safety import require_safe
-from .state import FINAL_TASK_STATES, IN_PLACE_MODE, ISOLATED_MODE, StateStore
+from .state import (
+    FINAL_TASK_STATES,
+    IN_PLACE_MODE,
+    ISOLATED_MODE,
+    StateStore,
+    candidate_admission_lock,
+)
 from .task_context import (
     adopt_legacy_anchor,
     create_anchor,
@@ -659,29 +665,31 @@ def start(
                     raise SoloAIError(
                         "In-place Start requires a clean Git worktree; ignored test data may remain, but tracked or untracked changes must be preserved and handled first"
                     )
-                task = store.allocate_in_place(
-                    name=name,
-                    branch=branch,
-                    head=repo.head(repo.root),
-                    base_worktree=repo.root,
-                    session_id=session_id,
-                )
+                with candidate_admission_lock(repo):
+                    task = store.allocate_in_place(
+                        name=name,
+                        branch=branch,
+                        head=repo.head(repo.root),
+                        base_worktree=repo.root,
+                        session_id=session_id,
+                    )
                 anchor = create_anchor(repo, task)
                 return {**task, "anchor_path": str(anchor.resolve())}
         if supersedes and config.integration.mode != "batched":
             raise SoloAIError("--supersedes requires integration.mode = batched")
-        base_ref, base_head, base_worktree = _resolve_start_base(repo, store, base)
-        branch = f"{config.branch_prefix}{safe_slug(name)}-{uuid.uuid4().hex[:6]}"
-        task = store.allocate(
-            config,
-            name=name,
-            branch=branch,
-            base_head=base_head,
-            base_ref=base_ref,
-            base_worktree=base_worktree,
-            request_id=request_id,
-            supersedes=supersedes,
-        )
+        with candidate_admission_lock(repo):
+            base_ref, base_head, base_worktree = _resolve_start_base(repo, store, base)
+            branch = f"{config.branch_prefix}{safe_slug(name)}-{uuid.uuid4().hex[:6]}"
+            task = store.allocate(
+                config,
+                name=name,
+                branch=branch,
+                base_head=base_head,
+                base_ref=base_ref,
+                base_worktree=base_worktree,
+                request_id=request_id,
+                supersedes=supersedes,
+            )
         if task.get("request_reused"):
             anchor = require_anchor(repo, task)
             return {**task, "anchor_path": str(anchor.resolve())}
@@ -1381,7 +1389,8 @@ def _finish_in_place(
     receipt = read_json(_in_place_receipt_path(repo, task["id"]), {})
     if receipt:
         _validate_in_place_receipt(repo, task=task, receipt=receipt)
-        store.release(task["id"], final_status="finished")
+        with candidate_admission_lock(repo):
+            store.release(task["id"], final_status="finished")
         receipt["stage"] = "released"
         _write_in_place_receipt(repo, receipt)
         return {
@@ -1419,6 +1428,9 @@ def _finish_in_place(
         raise SoloAIError(
             "In-place validation left tracked or nonignored changes. They were preserved; commit exact paths and run Ready again before Finish."
         )
+    from .runtime_adapter import release_task_runtime
+
+    runtime_release = release_task_runtime(repo, task=task, reason="in-place-finish")
     receipt = {
         "schema_version": 1,
         "task_id": task["id"],
@@ -1433,7 +1445,8 @@ def _finish_in_place(
         "created_at": utc_timestamp(),
     }
     _write_in_place_receipt(repo, receipt)
-    store.release(task["id"], final_status="finished")
+    with candidate_admission_lock(repo):
+        store.release(task["id"], final_status="finished")
     receipt["stage"] = "released"
     _write_in_place_receipt(repo, receipt)
     return {
@@ -1443,6 +1456,7 @@ def _finish_in_place(
         "proof_kind": proof["kind"],
         "proof_reused": proof.get("reused", False),
         "mode": IN_PLACE_MODE,
+        "runtime_release": runtime_release,
     }
 
 
@@ -1572,13 +1586,32 @@ def _resume_candidate_publication(
     policy = publication.get("integration_policy") or {}
     if policy.get("mode") != "batched":
         raise SoloAIError("Candidate publication requires a batched task policy")
-    publication_result = CandidateBatchStore(repo).publish(
+    batch_store = CandidateBatchStore(repo)
+    publication_result = batch_store.publish(
         dict(publication),
         capacity=int(policy["candidate_capacity"]),
         batch_size=int(policy["batch_size"]),
         seal_policy=str(policy["seal_policy"]),
+        activate=False,
     )
     published = publication_result["candidate"]
+    from .runtime_adapter import release_task_runtime
+
+    runtime_release = release_task_runtime(
+        repo,
+        task=task,
+        reason="candidate-published",
+        candidate=published,
+    )
+    if (
+        not repo.is_clean(worktree)
+        or repo.head(worktree) != head
+        or repo.branch(worktree) not in {None, publication["branch"]}
+        or _unknown_ignored(repo, worktree)
+    ):
+        raise SoloAIError(
+            "Runtime Adapter changed or contaminated the candidate worktree; files were preserved"
+        )
     branch_head = repo.ref_head(branch_ref)
     if current_branch is not None:
         if branch_head != head:
@@ -1608,6 +1641,7 @@ def _resume_candidate_publication(
             not repo.is_clean(worktree)
             or repo.head(worktree) != head
             or repo.branch(worktree) is not None
+            or _unknown_ignored(repo, worktree)
         ):
             raise SoloAIError("Candidate worktree changed after slot release")
     except Exception as exc:
@@ -1615,6 +1649,12 @@ def _resume_candidate_publication(
             task["id"], f"Worktree changed at candidate release: {exc}"
         )
         raise
+    publication_result = batch_store.activate(
+        str(publication["candidate_id"]),
+        batch_size=int(policy["batch_size"]),
+        seal_policy=str(policy["seal_policy"]),
+    )
+    published = publication_result["candidate"]
     return {
         "task_id": completed["id"],
         "status": "candidate-published",
@@ -1625,6 +1665,7 @@ def _resume_candidate_publication(
         "base_ref": published["base_ref"],
         "anchor_path": published["anchor_path"],
         "proof": published["proof"],
+        "runtime_release": runtime_release,
         "auto_batch_id": (
             publication_result["auto_batch"]["id"]
             if publication_result.get("auto_batch")
@@ -1683,9 +1724,10 @@ def finish(
             store.require_lease(task, lease)
             _assert_no_in_place_integration_conflict(store, task)
             if task.get("candidate_publication"):
-                candidate_result = _resume_candidate_publication(
-                    repo, store=store, task=task
-                )
+                with candidate_admission_lock(repo):
+                    candidate_result = _resume_candidate_publication(
+                        repo, store=store, task=task
+                    )
             elif task.get("integration"):
                 result = resume_integration(
                     repo, store=store, task=task, allow_stale=False
@@ -1752,10 +1794,18 @@ def finish(
                     prepared = _prepare_candidate_publication(
                         repo, store=store, task=task, proof=proof
                     )
-                    candidate_result = _resume_candidate_publication(
-                        repo, store=store, task=prepared
-                    )
+                    with candidate_admission_lock(repo):
+                        candidate_result = _resume_candidate_publication(
+                            repo, store=store, task=prepared
+                        )
                 else:
+                    from .runtime_adapter import release_task_runtime
+
+                    runtime_release = release_task_runtime(
+                        repo,
+                        task=task,
+                        reason="direct-integration",
+                    )
                     prepared = prepare_integration(
                         repo, store=store, task=task, proof=proof
                     )
@@ -1763,7 +1813,7 @@ def finish(
                         repo, store=store, task=prepared, allow_stale=False
                     )
                     delete_anchor(repo, task_id)
-                    return result
+                    return {**result, "runtime_release": runtime_release}
     if candidate_result is None:
         raise SoloAIError("Candidate publication did not produce a durable result")
     auto_batch_id = candidate_result.get("auto_batch_id")
@@ -1778,6 +1828,21 @@ def finish(
                 "batch_status": batch["status"],
                 "integrated_head": batch.get("integrated_head"),
                 "candidate_count": len(batch["candidate_ids"]),
+                "delivered": batch["status"] == "completed",
+                "delivery_status": "integrated"
+                if batch["status"] == "completed"
+                else "awaiting-integration",
+            }
+        )
+    else:
+        from .candidate_batches import reconcile_batches
+
+        reconciliation = reconcile_batches(repo, cause="finish")
+        candidate_result.update(
+            {
+                "delivered": False,
+                "delivery_status": "awaiting-integration",
+                "reconciliation": reconciliation,
             }
         )
     return candidate_result
@@ -1790,16 +1855,47 @@ def recover(repo: GitRepo, *, task_id: str) -> dict[str, Any]:
     store.reconcile_operation_receipts()
     task = store.task(task_id)
     if task.get("status") == "candidate-published":
-        from .candidate_batches import CandidateBatchStore
+        from .candidate_batches import CandidateBatchStore, run_batch
 
         publication = task.get("candidate_publication") or {}
-        candidate = CandidateBatchStore(repo).candidate_for_task(task_id) or {}
+        batch_store = CandidateBatchStore(repo)
+        candidate = batch_store.candidate_for_task(task_id) or {}
+        if candidate.get("status") == "held":
+            slot = store.read()["slots"].get(str(task.get("slot_id"))) or {}
+            if slot.get("status") == "quarantined":
+                raise SoloAIError(
+                    "The released slot is quarantined; inspect it before activating the held candidate"
+                )
+            policy = publication.get("integration_policy") or {}
+            with candidate_admission_lock(repo):
+                activated = batch_store.activate(
+                    str(candidate["candidate_id"]),
+                    batch_size=int(policy["batch_size"]),
+                    seal_policy=str(policy["seal_policy"]),
+                )
+            candidate = activated["candidate"]
+            auto_batch = activated.get("auto_batch")
+            if auto_batch:
+                batch = run_batch(repo, batch_id=str(auto_batch["id"]))
+                return {
+                    "id": task_id,
+                    "status": "integrated",
+                    "candidate_id": candidate.get("candidate_id"),
+                    "batch_id": batch["id"],
+                    "delivered": batch.get("status") == "completed",
+                    "delivery_status": "integrated"
+                    if batch.get("status") == "completed"
+                    else "awaiting-integration",
+                }
         if candidate.get("status") in {"integrated", "withdrawn", "superseded"}:
+            delivered = candidate.get("status") == "integrated"
             return {
                 "id": task_id,
                 "status": candidate["status"],
                 "candidate_id": candidate.get("candidate_id"),
                 "batch_id": candidate.get("integrated_batch"),
+                "delivered": delivered,
+                "delivery_status": "integrated" if delivered else "not-delivered",
             }
         require_anchor(repo, task)
         return {
@@ -1808,6 +1904,8 @@ def recover(repo: GitRepo, *, task_id: str) -> dict[str, Any]:
             "candidate_id": publication.get("candidate_id"),
             "candidate_head": publication.get("head"),
             "anchor_path": publication.get("anchor_path"),
+            "delivered": False,
+            "delivery_status": "awaiting-integration",
         }
     if _is_in_place(task):
         receipt = read_json(_in_place_receipt_path(repo, task_id), {})
@@ -2001,6 +2099,7 @@ def abandon(
         raise SoloAIError("Abandon requires --confirm with the exact task id")
     config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
+    result: dict[str, Any] | None = None
     with store.operation(task_id, lease, "abandon") as task:
         if _is_in_place(task):
             _assert_in_place_binding(repo, store, task, session_id=session_id)
@@ -2009,35 +2108,59 @@ def abandon(
                 raise SoloAIError(
                     "In-place abandon never resets or cleans the current worktree. Commit exact paths and Finish, or preserve and handle the changes manually."
                 )
-            store.release(task_id, final_status="abandoned")
+            from .runtime_adapter import release_task_runtime
+
+            runtime_release = release_task_runtime(repo, task=task, reason="abandon")
+            with candidate_admission_lock(repo):
+                store.release(task_id, final_status="abandoned")
             delete_anchor(repo, task_id)
-            return {
+            result = {
                 "task_id": task_id,
                 "status": "abandoned",
                 "mode": IN_PLACE_MODE,
                 "preserved": True,
+                "runtime_release": runtime_release,
             }
-        with maintenance_lock(repo), integration_turn(repo, task_id):
-            task = store.task(task_id)
-            store.require_lease(task, lease)
-            if task.get("integration"):
-                raise SoloAIError(
-                    "An integration transaction exists; Recover must resolve it before Abandon"
-                )
-            if task.get("abandonment"):
-                result = resume_abandonment(repo, store=store, task=task)
+        else:
+            with maintenance_lock(repo), integration_turn(repo, task_id):
+                task = store.task(task_id)
+                store.require_lease(task, lease)
+                if task.get("integration"):
+                    raise SoloAIError(
+                        "An integration transaction exists; Recover must resolve it before Abandon"
+                    )
+                if task.get("abandonment"):
+                    from .runtime_adapter import release_task_runtime
+
+                    runtime_release = release_task_runtime(
+                        repo, task=task, reason="abandon"
+                    )
+                    with candidate_admission_lock(repo):
+                        result = resume_abandonment(repo, store=store, task=task)
+                else:
+                    ensure_within(
+                        Path(task["worktree"]),
+                        repo.primary_path / config.worktree_directory,
+                    )
+                    _stop_registered_processes(store, task)
+                    task = store.task(task_id)
+                    from .runtime_adapter import release_task_runtime
+
+                    runtime_release = release_task_runtime(
+                        repo, task=task, reason="abandon"
+                    )
+                    prepared = prepare_abandonment(repo, store=store, task=task)
+                    with candidate_admission_lock(repo):
+                        result = resume_abandonment(repo, store=store, task=prepared)
+                result["runtime_release"] = runtime_release
                 delete_anchor(repo, task_id)
-                return result
-            ensure_within(
-                Path(task["worktree"]),
-                repo.primary_path / config.worktree_directory,
-            )
-            _stop_registered_processes(store, task)
-            task = store.task(task_id)
-            prepared = prepare_abandonment(repo, store=store, task=task)
-            result = resume_abandonment(repo, store=store, task=prepared)
-            delete_anchor(repo, task_id)
-            return result
+    if result is None:
+        raise SoloAIError("Abandonment did not produce a durable result")
+    if config.integration.mode == "batched":
+        from .candidate_batches import reconcile_batches
+
+        result["reconciliation"] = reconcile_batches(repo, cause="abandon")
+    return result
 
 
 def _port_free(port: int) -> bool:
