@@ -259,6 +259,7 @@ def approval_plan(
     adapter_commands = [
         command
         for command in (
+            runtime_adapter.activate,
             runtime_adapter.release,
             runtime_adapter.verify_effective,
         )
@@ -297,6 +298,9 @@ def approval_plan(
             for profile in verification.profiles
         ],
         "runtime_adapter": {
+            "activate": runtime_adapter.activate.redacted()
+            if runtime_adapter.activate
+            else None,
             "release": runtime_adapter.release.redacted()
             if runtime_adapter.release
             else None,

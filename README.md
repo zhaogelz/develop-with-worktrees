@@ -14,7 +14,7 @@ The host's native task system still decides who does what and when. DWW owns onl
 
 ## Default flow
 
-1. `Start` creates the task anchor and returns an isolated worktree.
+1. `Start` creates the exact task anchor and isolated worktree, then lets an optional project Runtime Adapter establish project runtime identity before returning it as active.
 2. The agent edits only there, commits exact paths, and runs `ready`.
 3. `Finish` publishes a verified candidate and releases the task worktree without moving the base.
 4. Every five candidates, DWW freezes the oldest eligible five, composes them in a dedicated integration worktree, runs Full validation, and then advances the base.
@@ -36,7 +36,7 @@ Five candidates amortise combined validation while keeping conflicts reviewable.
 
 Hooks are optional early hardening or wake-up sources. Routing, anchors, worktrees, validation, candidates, batching, and recovery must still work without them.
 
-Projects may configure a Runtime Adapter. After the immutable ref is durable, the Adapter releases project-owned ports, databases, browsers, or similar resources before DWW frees the worktree and activates the candidate. Publication is not delivery: only a completed batch contained in the current base is delivered, and explicit runtime-effectiveness checks remain project-defined Adapter work.
+Projects may configure a Runtime Adapter. At Start it can establish ignored project runtime identity from DWW's exact task, slot, worktree, base, and deterministic port-block facts. After the immutable candidate ref is durable, it releases project-owned ports, databases, browsers, or similar resources before DWW frees the worktree and activates the candidate. DWW never interprets the project's concrete runtime rules. Publication is not delivery: only a completed batch contained in the current base is delivered, and explicit runtime-effectiveness checks remain project-defined Adapter work.
 
 A composition conflict tied to one candidate can prepare up to two managed repair generations on the latest base. The agent continues only when code, contracts, and tests determine one answer; product, permission, migration, deletion, and security choices still stop for a human. Final-validation failures are never disguised as merge conflicts and blindly retried.
 

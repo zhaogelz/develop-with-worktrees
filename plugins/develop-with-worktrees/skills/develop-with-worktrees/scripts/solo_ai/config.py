@@ -48,6 +48,7 @@ class IntegrationSpec:
 
 @dataclass(frozen=True)
 class RuntimeAdapterSpec:
+    activate: CommandSpec | None
     release: CommandSpec | None
     verify_effective: CommandSpec | None
     input_paths: tuple[str, ...]
@@ -321,7 +322,7 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     if mode != "managed":
         raise SoloAIError('Only mode = "managed" is valid in an adopted repository')
     port_base = _integer(data.get("port_base", 20000), field="port_base")
-    if not 1024 <= port_base <= 62436:
+    if not 1024 <= port_base <= 62336:
         raise SoloAIError("port_base must leave room for all 32 100-port slot blocks")
     remote_policy = _string(
         data.get("remote_policy", "local-only"), field="remote_policy"
@@ -393,6 +394,11 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     runtime_adapter_raw = data.get("runtime_adapter", {})
     if not isinstance(runtime_adapter_raw, dict):
         raise SoloAIError("runtime_adapter must be a TOML table")
+    runtime_activate = (
+        _command(runtime_adapter_raw["activate"], field="runtime_adapter.activate")
+        if "activate" in runtime_adapter_raw
+        else None
+    )
     runtime_release = (
         _command(runtime_adapter_raw["release"], field="runtime_adapter.release")
         if "release" in runtime_adapter_raw
@@ -410,7 +416,9 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         runtime_adapter_raw.get("input_paths", []),
         field="runtime_adapter.input_paths",
     )
-    if (runtime_release or runtime_verify_effective) and not runtime_input_paths:
+    if (
+        runtime_activate or runtime_release or runtime_verify_effective
+    ) and not runtime_input_paths:
         raise SoloAIError(
             "runtime_adapter.input_paths is required when Adapter commands are configured"
         )
@@ -480,6 +488,7 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
             tail_quiet_seconds=tail_quiet_seconds,
         ),
         runtime_adapter=RuntimeAdapterSpec(
+            activate=runtime_activate,
             release=runtime_release,
             verify_effective=runtime_verify_effective,
             input_paths=runtime_input_paths,
@@ -728,6 +737,7 @@ integration = {{ mode = "batched", batch_size = 5, candidate_capacity = 10, seal
 
 # 可选项目运行时 Adapter；DWW 只传递上下文文件，不解释端口、数据库或浏览器语义。
 # [runtime_adapter]
+# activate = ["uv", "run", "scripts/dww-runtime-adapter.py", "activate"]
 # release = ["uv", "run", "scripts/dww-runtime-adapter.py", "release"]
 # verify_effective = ["uv", "run", "scripts/dww-runtime-adapter.py", "verify-effective"]
 # input_paths = ["scripts/dww-runtime-adapter.py", "deploy/**"]
@@ -781,7 +791,7 @@ def managed_block() -> str:
 ## Isolated coding tasks
 
 For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in the returned worktree, stage an exact reviewed path list with `commit`, then run `ready` and `finish`. Read-only analysis does not claim a slot. Do not bypass a failed gate. The DWW lifecycle is local-only and must not fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After a successful Finish, an explicit user request may be fulfilled with an ordinary non-force push of the current branch from the clean base worktree; that publishing step is separate from DWW.
-`Start` creates the local task anchor; keep it current and reread it after continuation or context loss. New repositories publish verified candidates, release project resources through the configured Adapter, then release the task worktree. Each full batch freezes automatically; an exact smaller tail freezes only after its persisted lane is stably producer-free or after an explicit user, deployment, or dependency request. Host heartbeat only wakes `batch reconcile`; UI task counts, raw worktree counts, Hook delivery, and session end never prove completion or choose candidates. There is no candidate-age auto-seal. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only. Candidate publication is not delivery; only integration into the current base is delivery. Explicit legacy direct policy remains upgrade compatibility only.
+`Start` creates the local task anchor; keep it current and reread it after continuation or context loss. A configured project Adapter may establish project runtime identity only after the exact isolated task exists and before Start returns it as active. New repositories publish verified candidates, release project resources through the same Adapter, then release the task worktree. Each full batch freezes automatically; an exact smaller tail freezes only after its persisted lane is stably producer-free or after an explicit user, deployment, or dependency request. Host heartbeat only wakes `batch reconcile`; UI task counts, raw worktree counts, Hook delivery, and session end never prove completion or choose candidates. There is no candidate-age auto-seal. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only. Candidate publication is not delivery; only integration into the current base is delivery. Explicit legacy direct policy remains upgrade compatibility only.
 {MANAGED_END}
 """
 

@@ -35,6 +35,7 @@ integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_
 
 # Optional. DWW appends one JSON context-file path to each argv.
 [runtime_adapter]
+activate = ["uv", "run", "scripts/dww-runtime-adapter.py", "activate"]
 release = ["uv", "run", "scripts/dww-runtime-adapter.py", "release"]
 verify_effective = ["uv", "run", "scripts/dww-runtime-adapter.py", "verify-effective"]
 input_paths = ["scripts/dww-runtime-adapter.py", "deploy/**"]
@@ -84,6 +85,8 @@ All changed candidate paths must be covered by a Ready profile. Ready should con
 ## Runtime Adapter contract
 
 `runtime_adapter` is optional and host-neutral. DWW appends one absolute JSON context path as the final argument; the project command owns every port, database, browser, authentication, deployment, and runtime-version decision. Both command argv and every tracked file matched by `input_paths` enter the machine approval fingerprint. Missing matches, approval drift, nonzero exit, timeout, or worktree changes fail closed.
+
+`activate` applies only to isolated managed tasks. DWW invokes it after the exact task, branch, worktree, slot identity, and anchor exist, but before Start changes the task and slot from `starting` to `active`. Its immutable context includes the task and slot ids, absolute worktree, base ref/head, candidate head, and a deterministic inclusive 100-port block derived from `port_base + (slot - 1) * 100`. The project may use those facts to create ignored runtime metadata or start project resources; DWW does not interpret them. A nonzero result leaves the task and slot `starting`, so the same `request_id` or `recover` retries the exact activation. A successful content-addressed receipt is reused after an interruption. Tracked changes, ordinary untracked content, protected content, or unknown ignored content quarantine and preserve the worktree rather than activating it.
 
 `release` runs after the immutable candidate ref exists but before candidate activation and slot release. Its successful receipt is content-addressed and reusable for interruption recovery. `verify_effective` never substitutes for Git delivery: `runtime verify --candidate <id>` is allowed only after that candidate's batch is contained in the current base, and each explicit check runs again because external runtime state may change. DWW records context, redacted log, digest, duration, and result under Git-common-dir state; it does not persist leases or environment values there.
 

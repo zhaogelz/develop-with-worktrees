@@ -81,7 +81,7 @@ When modifying intent is clear, start proactively:
 uv run --script <DWW> --repo <repo> start --name <purpose> [--request-id <stable-caller-id>]
 ```
 
-`Start` returns the worktree, private lease, immutable base identity, and task-anchor path. A repeated `request_id` returns the same managed task instead of consuming another slot. Never expose the lease to another worker.
+`Start` returns the worktree, private lease, immutable base identity, and task-anchor path. When a project Runtime Adapter configures `activate`, DWW first creates the exact isolated task, branch, worktree, and anchor, then asks the project to establish its runtime identity before Start returns the task as active. A failed activation remains retryable through the same `request_id` or `recover`; it never silently reallocates the task. Never expose the lease to another worker.
 
 1. Work only in the returned worktree.
 2. Read and update the generated anchor before editing. It lives at `<git-common-dir>/solo-ai/task-anchors/<task-id>.md`, is never committed, and records objective, target, baseline, scope, acceptance, and progress.
@@ -96,6 +96,7 @@ Ready refuses a missing, linked, oversized, non-UTF-8, or identity-mismatched an
 
 New repositories use `integration.mode = "batched"`, `batch_size = 5`, `candidate_capacity = 10`, `seal_policy = "auto_full"`, `tail_policy = "quiet_or_explicit"`, and `tail_quiet_seconds = 90`:
 
+- An optional project Runtime Adapter may activate project-owned runtime identity after the isolated worktree is exact and before Start returns. DWW supplies the task, slot, base, worktree, and deterministic slot port block; the project still owns every concrete port, database, browser, and service decision.
 - Finish validates and creates one immutable candidate ref. A configured project runtime Adapter must release project-owned resources before the candidate becomes eligible; only then does Finish release the worktree slot, leave the base unchanged, and keep the anchor.
 - Publishing the configured fifth eligible candidate atomically freezes the oldest five candidates in that base-and-policy lane. That Finish then runs or waits for the persisted integration generation; no Hook or resident process is required.
 - While one batch owns the integration turn, later Finish calls may keep publishing into the remaining bounded pool. A second batch does not freeze against the same stale base; `reconcile` resumes the existing batch first.

@@ -619,6 +619,60 @@ def _resolve_start_base(
     )
 
 
+def _assert_starting_task_identity(repo: GitRepo, task: dict[str, Any]) -> None:
+    worktree = Path(str(task["worktree"]))
+    managed_root = worktree.absolute().parent
+    require_managed_directory_identity(
+        worktree,
+        managed_root=managed_root,
+        expected_resolved=str(task["slot_worktree_resolved"]),
+        expected_root_resolved=str(task["slot_managed_root_resolved"]),
+        expected_identity=dict(task["slot_worktree_identity"]),
+        expected_root_identity=dict(task["slot_managed_root_identity"]),
+    )
+    if (
+        task.get("status") != "starting"
+        or not repo.is_clean(worktree)
+        or repo.head(worktree) != task.get("candidate_head")
+        or repo.branch(worktree) != task.get("branch")
+        or _unknown_ignored(repo, worktree)
+    ):
+        raise SoloAIError(
+            "Task worktree changed while the runtime Adapter was activating it"
+        )
+
+
+def _complete_runtime_activation(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any]:
+    request_reused = bool(task.get("request_reused"))
+    task = store.task(str(task["id"]))
+    try:
+        _assert_starting_task_identity(repo, task)
+    except Exception as exc:
+        store.quarantine(str(task["id"]), str(exc))
+        raise
+    from .runtime_adapter import activate_task_runtime
+
+    runtime_activation = activate_task_runtime(repo, task=task)
+    refreshed = store.task(str(task["id"]))
+    try:
+        _assert_starting_task_identity(repo, refreshed)
+    except Exception as exc:
+        store.quarantine(str(task["id"]), str(exc))
+        raise
+    activated = store.activate_started_task(
+        str(task["id"]), runtime_activation=runtime_activation
+    )
+    anchor = require_anchor(repo, activated)
+    return {
+        **activated,
+        "anchor_path": str(anchor.resolve()),
+        "runtime_activation": runtime_activation,
+        "request_reused": request_reused,
+    }
+
+
 def start(
     repo: GitRepo,
     *,
@@ -692,6 +746,10 @@ def start(
             )
         if task.get("request_reused"):
             anchor = require_anchor(repo, task)
+            if task.get("status") == "starting" and task.get(
+                "runtime_activation_pending"
+            ):
+                return _complete_runtime_activation(repo, store=store, task=task)
             return {**task, "anchor_path": str(anchor.resolve())}
         worktree = ensure_within(
             Path(task["worktree"]), repo.primary_path / config.worktree_directory
@@ -748,21 +806,21 @@ def start(
                     "Slot received protected or unknown ignored content during Start:\n"
                     + "\n".join(f"- {item}" for item in unknown[:20])
                 )
-            activated = store.update_task(
+            prepared = store.update_task(
                 task["id"],
-                status="active",
                 candidate_head=repo.head(worktree),
                 baseline_paths=repo.changed_paths(worktree),
                 slot_worktree_identity=activation_worktree_identity,
                 slot_managed_root_identity=activation_root_identity,
                 slot_worktree_resolved=str(resolved),
                 slot_managed_root_resolved=str(managed_root.resolve()),
+                runtime_activation_pending=True,
             )
-            anchor = create_anchor(repo, activated)
-            return {**activated, "anchor_path": str(anchor.resolve())}
+            create_anchor(repo, prepared)
         except Exception as exc:
             store.quarantine(task["id"], str(exc))
             raise
+        return _complete_runtime_activation(repo, store=store, task=prepared)
 
 
 def _path_is_safe(path: str) -> bool:
@@ -862,6 +920,10 @@ def commit_task(
             if task.get("status") not in {"active", "ready"}:
                 raise SoloAIError("In-place Commit requires an active or ready task")
             _assert_in_place_binding(repo, store, task, session_id=session_id)
+        elif task.get("status") not in {"active", "ready"}:
+            raise SoloAIError(
+                "Commit requires a task whose runtime activation has completed"
+            )
         if repo.branch(worktree) != task["branch"]:
             raise SoloAIError(
                 "Task branch identity no longer matches its recorded task"
@@ -1921,6 +1983,12 @@ def recover(repo: GitRepo, *, task_id: str) -> dict[str, Any]:
         raise SoloAIError(
             "In-place tasks require resume-in-place; ordinary recovery cannot change their binding"
         )
+    if task.get("status") == "starting" and task.get("runtime_activation_pending"):
+        active = task.get("active_operation") or {}
+        if active and process_matches(active.get("owner", {})):
+            raise SoloAIError("Task still has a live operation; recovery is unsafe")
+        with maintenance_lock(repo):
+            return _complete_runtime_activation(repo, store=store, task=task)
     active = task.get("active_operation") or {}
     if active and process_matches(active.get("owner", {})):
         raise SoloAIError("Task still has a live operation; recovery is unsafe")

@@ -30,6 +30,7 @@ from solo_ai.lifecycle import (
     start,
 )
 from solo_ai.repo import GitRepo
+from solo_ai.proof import approval_plan
 from solo_ai.runtime_adapter import verify_runtime_effective
 from solo_ai.state import StateStore
 from solo_ai.task_context import anchor_path
@@ -57,14 +58,23 @@ def initialized_batched(path: Path, *, auto_full: bool = True) -> GitRepo:
 
 
 def install_runtime_adapter(
-    repo: GitRepo, *, release_script: str, verify_script: str
+    repo: GitRepo,
+    *,
+    release_script: str,
+    verify_script: str,
+    activate_script: str = "pass",
 ) -> None:
     config = repo.root / ".solo-ai" / "config.toml"
+    gitignore = repo.root / ".gitignore"
+    ignored = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if ".tmp/" not in ignored.splitlines():
+        gitignore.write_text(ignored + ".tmp/\n", encoding="utf-8")
     config.write_text(
         config.read_text(encoding="utf-8")
         + f"""
 
 [runtime_adapter]
+activate = {json.dumps([sys.executable, "-c", activate_script])}
 release = {json.dumps([sys.executable, "-c", release_script])}
 verify_effective = {json.dumps([sys.executable, "-c", verify_script])}
 input_paths = [".solo-ai/config.toml"]
@@ -72,7 +82,7 @@ timeout_seconds = 30
 """,
         encoding="utf-8",
     )
-    git(repo.root, "add", ".solo-ai/config.toml")
+    git(repo.root, "add", ".solo-ai/config.toml", ".gitignore")
     git(repo.root, "commit", "-m", "test: install project runtime adapter")
     approve(repo, load_verification_config(repo))
 
@@ -108,6 +118,177 @@ def test_start_request_is_idempotent_and_anchor_is_first_class(git_repo: Path) -
         if item["status"] not in {"finished", "abandoned", "candidate-published"}
     ]
     assert len(active) == 1
+    assert StateStore(repo).read()["slots"][first["slot_id"]]["status"] == "active"
+
+
+def test_runtime_adapter_activate_prepares_the_exact_slot_before_start_returns(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    context_marker = repo.local_dir / "runtime-activate-context.json"
+    activate_script = (
+        "from pathlib import Path; import sys; "
+        f"marker=Path({str(context_marker)!r}); "
+        "context=Path(sys.argv[-1]).read_text(encoding='utf-8'); "
+        "marker.write_text(context, encoding='utf-8'); "
+        "runtime=Path('.tmp/project-runtime/active.txt'); "
+        "runtime.parent.mkdir(parents=True, exist_ok=True); "
+        "runtime.write_text('active\\n', encoding='utf-8')"
+    )
+    install_runtime_adapter(
+        repo,
+        activate_script=activate_script,
+        release_script="pass",
+        verify_script="pass",
+    )
+
+    task = start(repo, name="activate exact runtime")
+
+    context = json.loads(context_marker.read_text(encoding="utf-8"))
+    plan = approval_plan(
+        repo, cwd=repo.root, verification=load_verification_config(repo)
+    )
+    assert task["status"] == "active"
+    assert plan["runtime_adapter"]["activate"][-1] == activate_script
+    assert plan["runtime_adapter"]["input_hashes"]
+    assert task["runtime_activation"]["operation"] == "activate"
+    assert context["operation"] == "activate"
+    assert context["task_id"] == task["id"]
+    assert context["slot_id"] == task["slot_id"]
+    assert context["worktree"] == str(Path(task["worktree"]).resolve())
+    assert context["port_block_end"] - context["port_block_start"] == 99
+    assert (Path(task["worktree"]) / ".tmp/project-runtime/active.txt").is_file()
+
+
+def test_runtime_adapter_activate_failure_is_retryable_with_the_same_request(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    gate = repo.local_dir / "runtime-activate-allowed"
+    activate_script = (
+        "from pathlib import Path; "
+        f"raise SystemExit(0 if Path({str(gate)!r}).exists() else 1)"
+    )
+    install_runtime_adapter(
+        repo,
+        activate_script=activate_script,
+        release_script="pass",
+        verify_script="pass",
+    )
+
+    with pytest.raises(SoloAIError, match="Runtime Adapter activate failed"):
+        start(repo, name="retry runtime activation", request_id="activate-retry")
+
+    pending = next(
+        task
+        for task in StateStore(repo).read()["tasks"].values()
+        if task.get("request_id") == "activate-retry"
+    )
+    assert pending["status"] == "starting"
+    assert StateStore(repo).read()["slots"][pending["slot_id"]]["status"] == (
+        "starting"
+    )
+    gate.write_text("allowed\n", encoding="utf-8")
+
+    retried = start(repo, name="retry runtime activation", request_id="activate-retry")
+
+    assert retried["id"] == pending["id"]
+    assert retried["status"] == "active"
+    assert retried["request_reused"] is True
+
+
+def test_runtime_adapter_activate_failure_is_retryable_by_recover(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    gate = repo.local_dir / "runtime-recover-allowed"
+    activate_script = (
+        "from pathlib import Path; "
+        f"raise SystemExit(0 if Path({str(gate)!r}).exists() else 1)"
+    )
+    install_runtime_adapter(
+        repo,
+        activate_script=activate_script,
+        release_script="pass",
+        verify_script="pass",
+    )
+
+    with pytest.raises(SoloAIError, match="Runtime Adapter activate failed"):
+        start(repo, name="recover runtime activation")
+    pending = max(
+        StateStore(repo).read()["tasks"].values(),
+        key=lambda item: item["created_at"],
+    )
+    gate.write_text("allowed\n", encoding="utf-8")
+
+    recovered = recover(repo, task_id=pending["id"])
+
+    assert recovered["id"] == pending["id"]
+    assert recovered["status"] == "active"
+    assert StateStore(repo).read()["slots"][pending["slot_id"]]["status"] == ("active")
+
+
+def test_runtime_adapter_activate_success_receipt_is_reused_after_interruption(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    counter = repo.local_dir / "runtime-activate-count.txt"
+    activate_script = (
+        "from pathlib import Path; "
+        f"counter=Path({str(counter)!r}); "
+        "value=int(counter.read_text(encoding='utf-8')) if counter.exists() else 0; "
+        "counter.write_text(str(value + 1), encoding='utf-8')"
+    )
+    install_runtime_adapter(
+        repo,
+        activate_script=activate_script,
+        release_script="pass",
+        verify_script="pass",
+    )
+    original_activate = StateStore.activate_started_task
+
+    def interrupt_projection(*args: object, **kwargs: object) -> dict[str, object]:
+        raise KeyboardInterrupt("synthetic interruption after Adapter success")
+
+    monkeypatch.setattr(StateStore, "activate_started_task", interrupt_projection)
+    with pytest.raises(KeyboardInterrupt, match="synthetic interruption"):
+        start(repo, name="reuse activate receipt", request_id="activate-interrupt")
+    monkeypatch.setattr(StateStore, "activate_started_task", original_activate)
+
+    retried = start(
+        repo, name="reuse activate receipt", request_id="activate-interrupt"
+    )
+
+    assert retried["status"] == "active"
+    assert retried["runtime_activation"]["reused"] is True
+    assert counter.read_text(encoding="utf-8") == "1"
+
+
+def test_runtime_adapter_activate_contamination_quarantines_and_preserves(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    install_runtime_adapter(
+        repo,
+        activate_script=(
+            "from pathlib import Path; "
+            "Path('adapter-pollution.txt').write_text('preserve\\n', encoding='utf-8')"
+        ),
+        release_script="pass",
+        verify_script="pass",
+    )
+
+    with pytest.raises(SoloAIError, match="changed while the runtime Adapter"):
+        start(repo, name="quarantine activate contamination")
+
+    task = max(
+        StateStore(repo).read()["tasks"].values(),
+        key=lambda item: item["created_at"],
+    )
+    assert task["status"] == "quarantined"
+    assert (Path(task["worktree"]) / "adapter-pollution.txt").read_text(
+        encoding="utf-8"
+    ) == "preserve\n"
 
 
 def test_ready_requires_the_managed_task_anchor(git_repo: Path) -> None:

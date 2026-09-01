@@ -156,6 +156,50 @@ def _invoke(
     return {**receipt, "reused": False}
 
 
+def activate_task_runtime(
+    repo: GitRepo,
+    *,
+    task: dict[str, Any],
+) -> dict[str, Any]:
+    worktree = Path(str(task["worktree"]))
+    config = load_repo_config(repo, cwd=worktree)
+    command = config.runtime_adapter.activate
+    if command is None:
+        return {"configured": False, "operation": "activate"}
+    if task.get("slot_id") is None:
+        raise SoloAIError(
+            "runtime_adapter.activate requires an isolated task with a managed slot"
+        )
+    _require_approval(repo, cwd=worktree)
+    adapter_inputs = _adapter_input_hashes(
+        repo, cwd=worktree, patterns=config.runtime_adapter.input_paths
+    )
+    slot_number = int(str(task["slot_id"]))
+    slot_port_base = config.port_base + (slot_number - 1) * 100
+    receipt = _invoke(
+        repo,
+        cwd=worktree,
+        operation="activate",
+        command=command,
+        timeout_seconds=config.runtime_adapter.timeout_seconds,
+        context={
+            "reason": "task-started",
+            "task_id": task["id"],
+            "task_mode": task.get("mode"),
+            "slot_id": task["slot_id"],
+            "worktree": str(worktree.resolve()),
+            "base_ref": task.get("base_ref"),
+            "base_head": task.get("base_head"),
+            "candidate_head": task.get("candidate_head"),
+            "port_block_start": slot_port_base,
+            "port_block_end": slot_port_base + 99,
+            "adapter_inputs": adapter_inputs,
+        },
+        reusable_success=True,
+    )
+    return {"configured": True, **receipt}
+
+
 def release_task_runtime(
     repo: GitRepo,
     *,

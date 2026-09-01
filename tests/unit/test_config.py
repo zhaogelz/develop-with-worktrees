@@ -33,6 +33,24 @@ def test_renders_safe_default_reuse_policy() -> None:
     assert "cleanup = { owned_paths = [] }" in render_repo_config()
 
 
+@pytest.mark.parametrize(("port_base", "valid"), [(62336, True), (62337, False)])
+def test_port_base_leaves_room_for_the_32nd_hundred_port_block(
+    git_repo: Path, port_base: int, valid: bool
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "config.toml").write_text(
+        render_repo_config().replace("port_base = 20000", f"port_base = {port_base}"),
+        encoding="utf-8",
+    )
+
+    if valid:
+        assert load_repo_config(GitRepo(git_repo)).port_base == port_base
+    else:
+        with pytest.raises(SoloAIError, match="leave room"):
+            load_repo_config(GitRepo(git_repo))
+
+
 def test_rejects_casefold_duplicate_cleanup_paths(git_repo: Path) -> None:
     config = git_repo / ".solo-ai"
     config.mkdir()
@@ -245,6 +263,7 @@ def test_new_integration_defaults_are_batched_auto_full_with_five_and_ten(
     assert loaded.integration.seal_policy == "auto_full"
     assert loaded.integration.tail_policy == "quiet_or_explicit"
     assert loaded.integration.tail_quiet_seconds == 90
+    assert loaded.runtime_adapter.activate is None
     assert loaded.runtime_adapter.release is None
     assert loaded.runtime_adapter.verify_effective is None
     assert loaded.runtime_adapter.input_paths == ()
@@ -258,6 +277,7 @@ def test_loads_bounded_runtime_adapter_commands(git_repo: Path) -> None:
         "\n[lifecycle]\n",
         """
 [runtime_adapter]
+activate = ["uv", "run", "scripts/runtime-adapter.py", "activate"]
 release = ["uv", "run", "scripts/runtime-adapter.py", "release"]
 verify_effective = ["uv", "run", "scripts/runtime-adapter.py", "verify"]
 input_paths = ["scripts/runtime-adapter.py", "deploy/**"]
@@ -270,6 +290,8 @@ timeout_seconds = 120
 
     loaded = load_repo_config(GitRepo(git_repo))
 
+    assert loaded.runtime_adapter.activate is not None
+    assert loaded.runtime_adapter.activate.argv[-1] == "activate"
     assert loaded.runtime_adapter.release is not None
     assert loaded.runtime_adapter.release.argv[-1] == "release"
     assert loaded.runtime_adapter.verify_effective is not None
@@ -284,6 +306,7 @@ timeout_seconds = 120
 @pytest.mark.parametrize(
     ("body", "message"),
     [
+        ("activate = []\n", "runtime_adapter.activate"),
         ("release = []\n", "runtime_adapter.release"),
         ("timeout_seconds = 0\n", "runtime_adapter.timeout_seconds"),
         ('release = ["uv", "run", "adapter.py"]\n', "input_paths"),

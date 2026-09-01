@@ -573,6 +573,33 @@ class StateStore:
 
         return self.mutate(update)
 
+    def activate_started_task(
+        self, task_id: str, *, runtime_activation: dict[str, Any]
+    ) -> dict[str, Any]:
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            if not task or task.get("status") != "starting":
+                raise SoloAIError("Only an exact starting task can become active")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "starting"
+            ):
+                raise SoloAIError("Starting task lost its exact managed slot")
+            task.update(
+                {
+                    "status": "active",
+                    "runtime_activation": copy.deepcopy(runtime_activation),
+                    "runtime_activation_pending": False,
+                    "updated_at": utc_timestamp(),
+                }
+            )
+            slot["status"] = "active"
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     def prepare_integration(
         self,
         task_id: str,
