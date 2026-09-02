@@ -2168,8 +2168,18 @@ commands = [["git", "diff", "--check"]]
         message="chore: change validation",
         paths=[".solo-ai/verification.toml"],
     )
-    with pytest.raises(SoloAIError, match="not approved"):
+    with pytest.raises(SoloAIError, match="not approved") as approval_error:
         ready(repo, task_id=task["id"], lease=task["lease"])
+    reports = list((repo.local_dir / "approval-mismatches").glob("*.json"))
+    assert len(reports) == 1
+    report = json.loads(reports[0].read_text(encoding="utf-8"))
+    assert report["difference_count"] == len(report["differences"])
+    assert report["difference_count"] > 0
+    assert any(
+        difference["path"].endswith(".solo-ai/verification.toml")
+        for difference in report["differences"]
+    )
+    assert str(reports[0]) in str(approval_error.value)
     approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
     assert ready(repo, task_id=task["id"], lease=task["lease"])["status"] == "ready"
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])

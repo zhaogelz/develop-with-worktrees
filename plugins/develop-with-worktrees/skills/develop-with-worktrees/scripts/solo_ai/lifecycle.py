@@ -47,6 +47,7 @@ from .integration import resume_prepared as resume_integration
 from .proof import (
     ValidationBaseChanged,
     approval_plan,
+    require_approved_plan,
     require_exact_passed_proof,
     validate,
 )
@@ -319,13 +320,12 @@ def require_approval(
     repo: GitRepo, verification: VerificationConfig, *, cwd: Path | None = None
 ) -> None:
     policy = cwd or repo.policy_path()
-    fingerprint, _ = _approval_fingerprint(repo, verification, cwd=policy)
-    if fingerprint not in read_json(_approval_path(repo), {"accepted": {}}).get(
-        "accepted", {}
-    ):
-        raise SoloAIError(
-            "This machine has not approved the full normalized validation plan. Review `doctor` then run `approve --accept`."
-        )
+    require_approved_plan(
+        repo,
+        cwd=policy,
+        verification=verification,
+        message=("This machine has not approved the full normalized validation plan."),
+    )
 
 
 def _init_lock(repo: GitRepo) -> DirectoryLock:

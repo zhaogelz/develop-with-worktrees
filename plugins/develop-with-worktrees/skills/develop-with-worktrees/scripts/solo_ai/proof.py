@@ -18,6 +18,7 @@ from .util import (
     SoloAIError,
     atomic_write_json,
     new_id,
+    read_json,
     redact_text,
     run,
     run_logged,
@@ -261,6 +262,8 @@ def approval_plan(
         for command in (
             runtime_adapter.activate,
             runtime_adapter.release,
+            runtime_adapter.batch_activate,
+            runtime_adapter.batch_release,
             runtime_adapter.verify_effective,
         )
         if command is not None
@@ -304,6 +307,12 @@ def approval_plan(
             "release": runtime_adapter.release.redacted()
             if runtime_adapter.release
             else None,
+            "batch_activate": runtime_adapter.batch_activate.redacted()
+            if runtime_adapter.batch_activate
+            else None,
+            "batch_release": runtime_adapter.batch_release.redacted()
+            if runtime_adapter.batch_release
+            else None,
             "verify_effective": runtime_adapter.verify_effective.redacted()
             if runtime_adapter.verify_effective
             else None,
@@ -315,6 +324,124 @@ def approval_plan(
         },
         "static_only": verification.static_only,
     }
+
+
+def _approval_plan_differences(
+    approved: Any, current: Any, *, path: str = "$"
+) -> list[dict[str, Any]]:
+    """Return exact JSON-field differences without guessing which drift is safe."""
+    if isinstance(approved, dict) and isinstance(current, dict):
+        differences: list[dict[str, Any]] = []
+        for key in sorted(set(approved) | set(current)):
+            child = f"{path}.{key}"
+            if key not in approved:
+                differences.append(
+                    {
+                        "path": child,
+                        "approved": {"missing": True},
+                        "current": current[key],
+                    }
+                )
+            elif key not in current:
+                differences.append(
+                    {
+                        "path": child,
+                        "approved": approved[key],
+                        "current": {"missing": True},
+                    }
+                )
+            else:
+                differences.extend(
+                    _approval_plan_differences(approved[key], current[key], path=child)
+                )
+        return differences
+    if isinstance(approved, list) and isinstance(current, list):
+        differences = []
+        for index in range(max(len(approved), len(current))):
+            child = f"{path}[{index}]"
+            if index >= len(approved):
+                differences.append(
+                    {
+                        "path": child,
+                        "approved": {"missing": True},
+                        "current": current[index],
+                    }
+                )
+            elif index >= len(current):
+                differences.append(
+                    {
+                        "path": child,
+                        "approved": approved[index],
+                        "current": {"missing": True},
+                    }
+                )
+            else:
+                differences.extend(
+                    _approval_plan_differences(
+                        approved[index], current[index], path=child
+                    )
+                )
+        return differences
+    if approved == current:
+        return []
+    return [{"path": path, "approved": approved, "current": current}]
+
+
+def require_approved_plan(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    verification: VerificationConfig,
+    message: str,
+) -> str:
+    """Require an exact approval and persist a field-level drift report on failure."""
+    plan = approval_plan(repo, cwd=cwd, verification=verification)
+    fingerprint = sha256_text(stable_json(plan))
+    approvals = read_json(repo.local_dir / "approvals.json", {"accepted": {}})
+    accepted = approvals.get("accepted", {})
+    if fingerprint in accepted:
+        return fingerprint
+
+    comparisons: list[tuple[int, str, str, list[dict[str, Any]]]] = []
+    for approved_fingerprint, record in accepted.items():
+        approved_plan = record.get("plan") if isinstance(record, dict) else None
+        if not isinstance(approved_plan, dict):
+            continue
+        differences = _approval_plan_differences(approved_plan, plan)
+        comparisons.append(
+            (
+                len(differences),
+                str(record.get("accepted_at") or ""),
+                str(approved_fingerprint),
+                differences,
+            )
+        )
+    nearest = None
+    if comparisons:
+        minimum_difference_count = min(item[0] for item in comparisons)
+        nearest = max(
+            (item for item in comparisons if item[0] == minimum_difference_count),
+            key=lambda item: (item[1], item[2]),
+        )
+    report = {
+        "schema_version": 1,
+        "current_fingerprint": fingerprint,
+        "nearest_approved_fingerprint": nearest[2] if nearest else None,
+        "nearest_approved_at": nearest[1] if nearest else None,
+        "difference_count": nearest[0] if nearest else None,
+        "differences": nearest[3] if nearest else [],
+    }
+    report_path = repo.local_dir / "approval-mismatches" / f"{fingerprint}.json"
+    atomic_write_json(report_path, report)
+    detail = (
+        f"{nearest[0]} normalized field(s) differ from the nearest accepted plan"
+        if nearest
+        else "no accepted plan exists"
+    )
+    raise SoloAIError(
+        f"{message} {detail}. Local report: {report_path}. "
+        "Review `doctor` then run `approve --accept`."
+    )
 
 
 def proof_inputs(

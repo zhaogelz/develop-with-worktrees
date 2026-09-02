@@ -265,6 +265,8 @@ def test_new_integration_defaults_are_batched_auto_full_with_five_and_ten(
     assert loaded.integration.tail_quiet_seconds == 90
     assert loaded.runtime_adapter.activate is None
     assert loaded.runtime_adapter.release is None
+    assert loaded.runtime_adapter.batch_activate is None
+    assert loaded.runtime_adapter.batch_release is None
     assert loaded.runtime_adapter.verify_effective is None
     assert loaded.runtime_adapter.input_paths == ()
     assert loaded.runtime_adapter.timeout_seconds == 300
@@ -279,6 +281,8 @@ def test_loads_bounded_runtime_adapter_commands(git_repo: Path) -> None:
 [runtime_adapter]
 activate = ["uv", "run", "scripts/runtime-adapter.py", "activate"]
 release = ["uv", "run", "scripts/runtime-adapter.py", "release"]
+batch_activate = ["uv", "run", "scripts/runtime-adapter.py", "batch-activate"]
+batch_release = ["uv", "run", "scripts/runtime-adapter.py", "batch-release"]
 verify_effective = ["uv", "run", "scripts/runtime-adapter.py", "verify"]
 input_paths = ["scripts/runtime-adapter.py", "deploy/**"]
 timeout_seconds = 120
@@ -294,6 +298,10 @@ timeout_seconds = 120
     assert loaded.runtime_adapter.activate.argv[-1] == "activate"
     assert loaded.runtime_adapter.release is not None
     assert loaded.runtime_adapter.release.argv[-1] == "release"
+    assert loaded.runtime_adapter.batch_activate is not None
+    assert loaded.runtime_adapter.batch_activate.argv[-1] == "batch-activate"
+    assert loaded.runtime_adapter.batch_release is not None
+    assert loaded.runtime_adapter.batch_release.argv[-1] == "batch-release"
     assert loaded.runtime_adapter.verify_effective is not None
     assert loaded.runtime_adapter.verify_effective.argv[-1] == "verify"
     assert loaded.runtime_adapter.input_paths == (
@@ -310,6 +318,10 @@ timeout_seconds = 120
         ("release = []\n", "runtime_adapter.release"),
         ("timeout_seconds = 0\n", "runtime_adapter.timeout_seconds"),
         ('release = ["uv", "run", "adapter.py"]\n', "input_paths"),
+        (
+            'batch_activate = ["uv", "run", "adapter.py"]\ninput_paths = ["adapter.py"]\n',
+            "batch_activate and batch_release",
+        ),
     ],
 )
 def test_rejects_unsafe_runtime_adapter_settings(
@@ -323,6 +335,29 @@ def test_rejects_unsafe_runtime_adapter_settings(
     (config / "config.toml").write_text(rendered, encoding="utf-8")
 
     with pytest.raises(SoloAIError, match=message):
+        load_repo_config(GitRepo(git_repo))
+
+
+def test_batch_runtime_adapter_requires_space_after_all_task_port_blocks(
+    git_repo: Path,
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    rendered = render_repo_config().replace("port_base = 20000", "port_base = 62336")
+    rendered = rendered.replace(
+        "\n[lifecycle]\n",
+        """
+[runtime_adapter]
+batch_activate = ["uv", "run", "adapter.py", "batch-activate"]
+batch_release = ["uv", "run", "adapter.py", "batch-release"]
+input_paths = ["adapter.py"]
+
+[lifecycle]
+""",
+    )
+    (config / "config.toml").write_text(rendered, encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="dedicated batch Adapter port block"):
         load_repo_config(GitRepo(git_repo))
 
 

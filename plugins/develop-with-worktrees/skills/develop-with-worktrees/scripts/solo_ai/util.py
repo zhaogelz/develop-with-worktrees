@@ -301,7 +301,7 @@ def stable_json(value: Any) -> str:
 def atomic_write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # 不把长目标文件名再次拼进临时文件，避免 Windows 深层工作树超过路径限制。
-    temporary = path.parent / f".{uuid.uuid4().hex}.tmp"
+    temporary = path.parent / f".w-{uuid.uuid4().hex[:16]}"
     temporary.write_text(value, encoding="utf-8", newline="\n")
     os.replace(temporary, path)
 
@@ -433,10 +433,11 @@ class DirectoryLock:
     def __enter__(self) -> Self:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         last_report = time.monotonic()
+        transient_access_deadline = time.monotonic() + 2.0
         while True:
-            prepared = self.path.with_name(
-                f".{self.path.name}.{uuid.uuid4().hex}.pending"
-            )
+            # 临时锁名不能再次包含目标锁名；深层 Windows 工作树很容易因此越过
+            # 传统 MAX_PATH，而目标锁本身仍在可用范围内。
+            prepared = self.path.parent / f".dww-p-{uuid.uuid4().hex[:16]}"
             try:
                 prepared.mkdir()
                 atomic_write_json(prepared / "owner.json", process_snapshot())
@@ -444,6 +445,14 @@ class DirectoryLock:
                 self.acquired = True
                 return self
             except OSError as error:
+                if error.errno == errno.EACCES and not self.path.exists():
+                    # Windows 防病毒或索引器可能在准备目录刚写完后短暂占用它；
+                    # 目标锁尚不存在时，这不是另一位所有者，也不能直接失败。
+                    shutil.rmtree(prepared, ignore_errors=True)
+                    if time.monotonic() >= transient_access_deadline:
+                        raise
+                    time.sleep(0.05)
+                    continue
                 if error.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
                     shutil.rmtree(prepared, ignore_errors=True)
                     raise
@@ -470,8 +479,8 @@ class DirectoryLock:
         traceback: TracebackType | None,
     ) -> None:
         if self.acquired:
-            releasing: Path | None = self.path.with_name(
-                f".{self.path.name}.{uuid.uuid4().hex}.releasing"
+            releasing: Path | None = (
+                self.path.parent / f".dww-r-{uuid.uuid4().hex[:16]}"
             )
             deadline = time.monotonic() + 2.0
             while True:

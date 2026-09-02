@@ -37,6 +37,8 @@ integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_
 [runtime_adapter]
 activate = ["uv", "run", "scripts/dww-runtime-adapter.py", "activate"]
 release = ["uv", "run", "scripts/dww-runtime-adapter.py", "release"]
+batch_activate = ["uv", "run", "scripts/dww-runtime-adapter.py", "batch-activate"]
+batch_release = ["uv", "run", "scripts/dww-runtime-adapter.py", "batch-release"]
 verify_effective = ["uv", "run", "scripts/dww-runtime-adapter.py", "verify-effective"]
 input_paths = ["scripts/dww-runtime-adapter.py", "deploy/**"]
 timeout_seconds = 300
@@ -88,7 +90,13 @@ All changed candidate paths must be covered by a Ready profile. Ready should con
 
 `activate` applies only to isolated managed tasks. DWW invokes it after the exact task, branch, worktree, slot identity, and anchor exist, but before Start changes the task and slot from `starting` to `active`. Its immutable context includes the task and slot ids, absolute worktree, base ref/head, candidate head, and a deterministic inclusive 100-port block derived from `port_base + (slot - 1) * 100`. The project may use those facts to create ignored runtime metadata or start project resources; DWW does not interpret them. A nonzero result leaves the task and slot `starting`, so the same `request_id` or `recover` retries the exact activation. A successful content-addressed receipt is reused after an interruption. Tracked changes, ordinary untracked content, protected content, or unknown ignored content quarantine and preserve the worktree rather than activating it.
 
-`release` runs after the immutable candidate ref exists but before candidate activation and slot release. Its successful receipt is content-addressed and reusable for interruption recovery. `verify_effective` never substitutes for Git delivery: `runtime verify --candidate <id>` is allowed only after that candidate's batch is contained in the current base, and each explicit check runs again because external runtime state may change. DWW records context, redacted log, digest, duration, and result under Git-common-dir state; it does not persist leases or environment values there.
+`release` runs after the immutable candidate ref exists but before candidate activation and slot release. Its successful receipt is content-addressed and reusable for interruption recovery.
+
+`batch_activate` and `batch_release` are an optional pair around combined Full validation in the dedicated integration worktree. Their immutable contexts include the exact batch and ordered candidate ids, a positive persisted `runtime_cycle`, absolute worktree, frozen base ref/head, composed integration head, Adapter input hashes, and one inclusive 100-port block at `port_base + 3200`; this block is disjoint from all 32 task-slot blocks. `batch_release` receives the same cycle plus `validation_outcome = passed|failed|interrupted` and the recorded error when present. Full never starts before activation succeeds. Promotion never starts before release succeeds and the composed Git identity is rechecked. Activation or release uncertainty keeps the sealed generation active and recoverable; `batch recover` reuses only a successful receipt with identical command, inputs, context, and cycle. If validation was interrupted after resources were released, recovery increments `runtime_cycle` and invokes activation again before rerunning Full, so a stale successful activation receipt cannot stand in for released resources. Validation failure and interruption still run release before the generation is failed or retried. Projects may create ignored runtime metadata, databases, services, or browser state, but concrete resource semantics remain entirely project-owned.
+
+When the current normalized validation or Adapter plan is not approved, DWW fails before execution and writes an exact field-level comparison with the nearest accepted plan under `<git-common-dir>/solo-ai/approval-mismatches/`. The report is diagnostic evidence only; it never broadens or renews approval automatically.
+
+`verify_effective` never substitutes for Git delivery: `runtime verify --candidate <id>` is allowed only after that candidate's batch is contained in the current base, and each explicit check runs again because external runtime state may change. DWW records context, redacted log, digest, duration, and result under Git-common-dir state; it does not persist leases or environment values there.
 
 ## Machine-local validation capacity
 

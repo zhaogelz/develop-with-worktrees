@@ -37,7 +37,7 @@ def test_directory_lock_normalizes_nonempty_destination_error(
     original_rename = Path.rename
 
     def raise_nonempty_for_pending(self: Path, target: Path) -> Path:
-        if self.name.endswith(".pending"):
+        if self.name.startswith(".dww-p-"):
             raise OSError(errno.ENOTEMPTY, "Directory not empty")
         return original_rename(self, target)
 
@@ -88,6 +88,28 @@ def test_directory_lock_retries_transient_owner_read_failure(
     assert acquired.is_set()
 
 
+def test_directory_lock_retries_transient_acquire_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "lock"
+    original_rename = Path.rename
+    acquire_attempts = 0
+
+    def transient_acquire(self: Path, target: Path) -> Path:
+        nonlocal acquire_attempts
+        if self.name.startswith(".dww-p-") and target == path and acquire_attempts == 0:
+            acquire_attempts += 1
+            raise PermissionError(errno.EACCES, "Windows transient acquire failure")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", transient_acquire)
+    with DirectoryLock(path):
+        assert path.is_dir()
+
+    assert acquire_attempts == 1
+    assert not path.exists()
+
+
 def test_directory_lock_retries_transient_release_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -97,11 +119,7 @@ def test_directory_lock_retries_transient_release_failure(
 
     def transient_release(self: Path, target: Path) -> Path:
         nonlocal release_attempts
-        if (
-            self == path
-            and target.name.endswith(".releasing")
-            and release_attempts == 0
-        ):
+        if self == path and target.name.startswith(".dww-r-") and release_attempts == 0:
             release_attempts += 1
             raise PermissionError(errno.EACCES, "Windows transient release failure")
         return original_rename(self, target)
@@ -111,7 +129,24 @@ def test_directory_lock_retries_transient_release_failure(
 
     assert release_attempts == 1
     assert not path.exists()
-    assert not list(tmp_path.glob("*.releasing"))
+    assert not list(tmp_path.glob(".dww-r-*"))
+
+
+def test_directory_lock_uses_bounded_internal_names_in_a_deep_path(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path
+    while len(str(parent)) < 205:
+        parent /= "deep-segment"
+    parent.mkdir(parents=True)
+    path = parent / "batch-123456789012345678901234.lock"
+
+    with DirectoryLock(path):
+        assert path.is_dir()
+        assert (path / "owner.json").is_file()
+
+    assert not path.exists()
+    assert not list(parent.glob(".dww-*-*"))
 
 
 def test_unix_process_group_stops_with_term_before_waiting(
@@ -202,12 +237,14 @@ def test_logged_run_finishes_when_output_is_silent(tmp_path: Path) -> None:
         [sys.executable, "-c", "import time; time.sleep(0.15)"],
         cwd=tmp_path,
         log_path=tmp_path / "silent.log",
-        timeout_seconds=1,
+        timeout_seconds=10,
         heartbeat_seconds=0.05,
     )
     assert result.returncode == 0
     assert result.timed_out is False
-    assert time.monotonic() - started < 1
+    # Windows 进程创建和身份采集在杀毒扫描或高负载下可能超过一秒；这里验证的
+    # 契约是静默且已退出的进程不会一直等到十秒超时，而不是调度器的亚秒性能。
+    assert time.monotonic() - started < 5
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM ignore is POSIX-specific")

@@ -63,12 +63,24 @@ def install_runtime_adapter(
     release_script: str,
     verify_script: str,
     activate_script: str = "pass",
+    batch_activate_script: str | None = None,
+    batch_release_script: str | None = None,
 ) -> None:
     config = repo.root / ".solo-ai" / "config.toml"
     gitignore = repo.root / ".gitignore"
     ignored = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     if ".tmp/" not in ignored.splitlines():
         gitignore.write_text(ignored + ".tmp/\n", encoding="utf-8")
+    batch_activate_line = (
+        "batch_activate = " + json.dumps([sys.executable, "-c", batch_activate_script])
+        if batch_activate_script is not None
+        else ""
+    )
+    batch_release_line = (
+        "batch_release = " + json.dumps([sys.executable, "-c", batch_release_script])
+        if batch_release_script is not None
+        else ""
+    )
     config.write_text(
         config.read_text(encoding="utf-8")
         + f"""
@@ -76,6 +88,8 @@ def install_runtime_adapter(
 [runtime_adapter]
 activate = {json.dumps([sys.executable, "-c", activate_script])}
 release = {json.dumps([sys.executable, "-c", release_script])}
+{batch_activate_line}
+{batch_release_line}
 verify_effective = {json.dumps([sys.executable, "-c", verify_script])}
 input_paths = [".solo-ai/config.toml"]
 timeout_seconds = 30
@@ -731,7 +745,15 @@ def test_enabling_auto_full_does_not_capture_legacy_explicit_candidates(
     first_new = publish(repo, name="new 1", relative="new-1.txt")
 
     assert first_new["outcome"] == "candidate_published"
-    assert CandidateBatchStore(repo).summary()["batches"] == []
+    after_first = CandidateBatchStore(repo).summary()
+    legacy_ids = {item["candidate_id"] for item in legacy}
+    assert all(
+        first_new["candidate_id"] not in batch["candidate_ids"]
+        for batch in after_first["batches"]
+    )
+    assert all(
+        set(batch["candidate_ids"]) <= legacy_ids for batch in after_first["batches"]
+    )
 
     remaining_new = [
         publish(repo, name=f"new {index}", relative=f"new-{index}.txt")
@@ -740,17 +762,18 @@ def test_enabling_auto_full_does_not_capture_legacy_explicit_candidates(
 
     assert remaining_new[-1]["outcome"] == "batch_integrated"
     pool = CandidateBatchStore(repo).summary()
-    integrated = {
-        item["candidate_id"]
-        for item in pool["candidates"]
-        if item["status"] == "integrated"
+    new_ids = {
+        first_new["candidate_id"],
+        *(item["candidate_id"] for item in remaining_new),
     }
-    assert integrated.isdisjoint({item["candidate_id"] for item in legacy})
+    assert any(
+        batch["trigger"] == "auto_full" and set(batch["candidate_ids"]) == new_ids
+        for batch in pool["batches"]
+    )
     assert all(
-        item["status"] == "pending"
-        for item in pool["candidates"]
-        if item["candidate_id"]
-        in {legacy_item["candidate_id"] for legacy_item in legacy}
+        not (set(batch["candidate_ids"]) & legacy_ids)
+        or not (set(batch["candidate_ids"]) & new_ids)
+        for batch in pool["batches"]
     )
 
 
@@ -827,6 +850,333 @@ def test_failed_combined_validation_preserves_base_and_generation_is_not_rerun(
         prepare_candidate_repair(repo, candidate_id=candidate["candidate_id"])
     with pytest.raises(SoloAIError, match="will not be rerun automatically"):
         batch_module.recover_batch(repo, batch_id=failed["id"])
+
+
+def test_batch_runtime_adapter_wraps_full_validation_and_uses_dedicated_ports(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    activate_marker = repo.local_dir / "batch-activate-context.json"
+    release_marker = repo.local_dir / "batch-release-context.json"
+    active_marker = repo.local_dir / "batch-runtime-active"
+    activate_script = (
+        "from pathlib import Path; import sys; "
+        f"Path({str(activate_marker)!r}).write_text(Path(sys.argv[-1]).read_text(encoding='utf-8'), encoding='utf-8'); "
+        f"Path({str(active_marker)!r}).write_text('active\\n', encoding='utf-8')"
+    )
+    release_script = (
+        "from pathlib import Path; import sys; "
+        f"active=Path({str(active_marker)!r}); "
+        "assert active.is_file(); active.unlink(); "
+        f"Path({str(release_marker)!r}).write_text(Path(sys.argv[-1]).read_text(encoding='utf-8'), encoding='utf-8')"
+    )
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script=activate_script,
+        batch_release_script=release_script,
+    )
+    candidate = publish(repo, name="batch runtime", relative="batch-runtime.txt")
+
+    completed = seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    activation = json.loads(activate_marker.read_text(encoding="utf-8"))
+    release = json.loads(release_marker.read_text(encoding="utf-8"))
+    assert completed["status"] == "completed"
+    assert activation["operation"] == "batch-activate"
+    assert release["operation"] == "batch-release"
+    assert activation["runtime_cycle"] == 1
+    assert release["runtime_cycle"] == 1
+    assert completed["runtime_cycle"] == 1
+    assert release["validation_outcome"] == "passed"
+    assert activation["batch_id"] == completed["id"]
+    assert activation["candidate_ids"] == [candidate["candidate_id"]]
+    assert activation["integration_head"] == completed["integrated_head"]
+    assert activation["port_block_start"] == 23200
+    assert activation["port_block_end"] == 23299
+    assert activation["port_block_start"] > 20000 + 31 * 100 + 99
+    assert not active_marker.exists()
+    assert completed["runtime_activation"]["result"] == "passed"
+    assert completed["runtime_release"]["result"] == "passed"
+
+
+def test_batch_runtime_activation_failure_is_recoverable_without_unsealing(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    gate = repo.local_dir / "allow-batch-activate"
+    activate_script = (
+        "from pathlib import Path; "
+        f"raise SystemExit(0 if Path({str(gate)!r}).exists() else 1)"
+    )
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script=activate_script,
+        batch_release_script="pass",
+    )
+    candidate = publish(repo, name="activation retry", relative="activation.txt")
+    base_before = repo.head(git_repo)
+    validation_calls = 0
+
+    def count_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal validation_calls
+        validation_calls += 1
+        return {"fingerprint": "unexpected"}
+
+    monkeypatch.setattr(batch_module, "validate", count_validation)
+
+    with pytest.raises(batch_module.BatchRuntimePending, match="activation is pending"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    retained = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+    assert pending["status"] == "runtime_activation_pending"
+    assert pending["runtime_cycle"] == 1
+    assert retained["status"] == "sealed"
+    assert repo.head(git_repo) == base_before
+    assert validation_calls == 0
+    gate.write_text("allowed\n", encoding="utf-8")
+    monkeypatch.undo()
+
+    completed = batch_module.recover_batch(repo, batch_id=pending["id"])
+
+    assert completed["status"] == "completed"
+    assert completed["runtime_cycle"] == 1
+
+
+def test_batch_validation_failure_releases_runtime_before_failed_closed(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    active = repo.local_dir / "validation-failure-runtime"
+    release_context = repo.local_dir / "validation-failure-release.json"
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script=(
+            "from pathlib import Path; "
+            f"Path({str(active)!r}).write_text('active\\n', encoding='utf-8')"
+        ),
+        batch_release_script=(
+            "from pathlib import Path; import sys; "
+            f"active=Path({str(active)!r}); assert active.is_file(); active.unlink(); "
+            f"Path({str(release_context)!r}).write_text(Path(sys.argv[-1]).read_text(encoding='utf-8'), encoding='utf-8')"
+        ),
+    )
+    candidate = publish(repo, name="validation release", relative="validation.txt")
+    base_before = repo.head(git_repo)
+
+    def fail_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        raise SoloAIError("synthetic combined failure")
+
+    monkeypatch.setattr(batch_module, "validate", fail_validation)
+    with pytest.raises(SoloAIError, match="synthetic combined failure"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    context = json.loads(release_context.read_text(encoding="utf-8"))
+    failed = CandidateBatchStore(repo).summary()["batches"][0]
+    assert context["validation_outcome"] == "failed"
+    assert failed["status"] == "failed"
+    assert failed["failure_kind"] == "validation_failed"
+    assert repo.head(git_repo) == base_before
+    assert not active.exists()
+
+
+def test_batch_runtime_release_failure_blocks_promotion_and_recovery_reuses_full(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    gate = repo.local_dir / "allow-batch-release"
+    release_script = (
+        "from pathlib import Path; "
+        f"raise SystemExit(0 if Path({str(gate)!r}).exists() else 1)"
+    )
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script="pass",
+        batch_release_script=release_script,
+    )
+    candidate = publish(repo, name="release retry", relative="release.txt")
+    base_before = repo.head(git_repo)
+    original_validate = batch_module.validate
+    validation_calls = 0
+
+    def count_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(batch_module, "validate", count_validation)
+    with pytest.raises(batch_module.BatchRuntimePending, match="release is pending"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    assert pending["status"] == "runtime_release_pending"
+    assert pending["runtime_cycle"] == 1
+    assert repo.head(git_repo) == base_before
+    gate.write_text("allowed\n", encoding="utf-8")
+
+    completed = batch_module.recover_batch(repo, batch_id=pending["id"])
+
+    assert completed["status"] == "completed"
+    assert completed["runtime_cycle"] == 1
+    assert validation_calls == 1
+
+
+def test_interrupted_batch_validation_releases_then_starts_a_new_runtime_cycle(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    activate_count = repo.local_dir / "batch-activate-count.txt"
+    release_context = repo.local_dir / "batch-interrupt-release.json"
+    activate_script = (
+        "from pathlib import Path; "
+        f"counter=Path({str(activate_count)!r}); "
+        "value=int(counter.read_text(encoding='utf-8')) if counter.exists() else 0; "
+        "counter.write_text(str(value + 1), encoding='utf-8')"
+    )
+    release_script = (
+        "from pathlib import Path; import sys; "
+        f"Path({str(release_context)!r}).write_text(Path(sys.argv[-1]).read_text(encoding='utf-8'), encoding='utf-8')"
+    )
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script=activate_script,
+        batch_release_script=release_script,
+    )
+    candidate = publish(repo, name="interrupt full", relative="interrupt.txt")
+    original_validate = batch_module.validate
+    interrupted = False
+
+    def interrupt_once(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("synthetic Full interruption")
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(batch_module, "validate", interrupt_once)
+    with pytest.raises(KeyboardInterrupt, match="synthetic Full interruption"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    interrupted_context = json.loads(release_context.read_text(encoding="utf-8"))
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    assert interrupted_context["validation_outcome"] == "interrupted"
+    assert interrupted_context["runtime_cycle"] == 1
+    assert pending["status"] == "composed"
+    assert pending["runtime_cycle"] == 1
+
+    completed = batch_module.recover_batch(repo, batch_id=pending["id"])
+    completed_release = json.loads(release_context.read_text(encoding="utf-8"))
+
+    assert completed["status"] == "completed"
+    assert completed["runtime_cycle"] == 2
+    assert completed_release["runtime_cycle"] == 2
+    assert completed_release["validation_outcome"] == "passed"
+    assert activate_count.read_text(encoding="utf-8") == "2"
+
+
+def test_interruption_after_batch_activation_reuses_same_cycle_receipt(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    activate_count = repo.local_dir / "batch-activation-projection-count.txt"
+    activate_script = (
+        "from pathlib import Path; "
+        f"counter=Path({str(activate_count)!r}); "
+        "value=int(counter.read_text(encoding='utf-8')) if counter.exists() else 0; "
+        "counter.write_text(str(value + 1), encoding='utf-8')"
+    )
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script=activate_script,
+        batch_release_script="pass",
+    )
+    candidate = publish(
+        repo, name="activation projection", relative="activation-projection.txt"
+    )
+    original_update = CandidateBatchStore.update_batch
+    interrupted = False
+
+    def interrupt_runtime_active(
+        self: CandidateBatchStore, batch_id: str, **changes: object
+    ) -> dict[str, object]:
+        nonlocal interrupted
+        if changes.get("status") == "runtime_active" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("synthetic activation projection interruption")
+        return original_update(self, batch_id, **changes)
+
+    monkeypatch.setattr(CandidateBatchStore, "update_batch", interrupt_runtime_active)
+    with pytest.raises(KeyboardInterrupt, match="activation projection interruption"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    monkeypatch.setattr(CandidateBatchStore, "update_batch", original_update)
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    assert pending["status"] == "runtime_activating"
+    assert pending["runtime_cycle"] == 1
+    completed = batch_module.recover_batch(repo, batch_id=pending["id"])
+
+    assert completed["status"] == "completed"
+    assert completed["runtime_cycle"] == 1
+    assert completed["runtime_activation"]["reused"] is True
+    assert activate_count.read_text(encoding="utf-8") == "1"
+
+
+def test_interruption_after_batch_release_reuses_exact_release_receipt(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    release_count = repo.local_dir / "batch-release-count.txt"
+    release_script = (
+        "from pathlib import Path; "
+        f"counter=Path({str(release_count)!r}); "
+        "value=int(counter.read_text(encoding='utf-8')) if counter.exists() else 0; "
+        "counter.write_text(str(value + 1), encoding='utf-8')"
+    )
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script="pass",
+        batch_release_script=release_script,
+    )
+    candidate = publish(repo, name="release projection", relative="projection.txt")
+    original_update = CandidateBatchStore.update_batch
+    interrupted = False
+
+    def interrupt_validated(
+        self: CandidateBatchStore, batch_id: str, **changes: object
+    ) -> dict[str, object]:
+        nonlocal interrupted
+        if changes.get("status") == "validated" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("synthetic release projection interruption")
+        return original_update(self, batch_id, **changes)
+
+    monkeypatch.setattr(CandidateBatchStore, "update_batch", interrupt_validated)
+    with pytest.raises(KeyboardInterrupt, match="release projection interruption"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    monkeypatch.setattr(CandidateBatchStore, "update_batch", original_update)
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    assert pending["status"] == "runtime_releasing"
+    assert pending["runtime_cycle"] == 1
+    completed = batch_module.recover_batch(repo, batch_id=pending["id"])
+
+    assert completed["status"] == "completed"
+    assert completed["runtime_cycle"] == 1
+    assert release_count.read_text(encoding="utf-8") == "1"
 
 
 def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(

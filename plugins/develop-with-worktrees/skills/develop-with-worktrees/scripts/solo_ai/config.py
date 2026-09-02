@@ -50,6 +50,8 @@ class IntegrationSpec:
 class RuntimeAdapterSpec:
     activate: CommandSpec | None
     release: CommandSpec | None
+    batch_activate: CommandSpec | None
+    batch_release: CommandSpec | None
     verify_effective: CommandSpec | None
     input_paths: tuple[str, ...]
     timeout_seconds: float
@@ -404,6 +406,22 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         if "release" in runtime_adapter_raw
         else None
     )
+    runtime_batch_activate = (
+        _command(
+            runtime_adapter_raw["batch_activate"],
+            field="runtime_adapter.batch_activate",
+        )
+        if "batch_activate" in runtime_adapter_raw
+        else None
+    )
+    runtime_batch_release = (
+        _command(
+            runtime_adapter_raw["batch_release"],
+            field="runtime_adapter.batch_release",
+        )
+        if "batch_release" in runtime_adapter_raw
+        else None
+    )
     runtime_verify_effective = (
         _command(
             runtime_adapter_raw["verify_effective"],
@@ -417,10 +435,22 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         field="runtime_adapter.input_paths",
     )
     if (
-        runtime_activate or runtime_release or runtime_verify_effective
+        runtime_activate
+        or runtime_release
+        or runtime_batch_activate
+        or runtime_batch_release
+        or runtime_verify_effective
     ) and not runtime_input_paths:
         raise SoloAIError(
             "runtime_adapter.input_paths is required when Adapter commands are configured"
+        )
+    if bool(runtime_batch_activate) != bool(runtime_batch_release):
+        raise SoloAIError(
+            "runtime_adapter.batch_activate and batch_release must be configured together"
+        )
+    if runtime_batch_activate and port_base + 3299 > 65535:
+        raise SoloAIError(
+            "port_base must leave room for the dedicated batch Adapter port block"
         )
     runtime_timeout_seconds = _number(
         runtime_adapter_raw.get("timeout_seconds", 300),
@@ -490,6 +520,8 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         runtime_adapter=RuntimeAdapterSpec(
             activate=runtime_activate,
             release=runtime_release,
+            batch_activate=runtime_batch_activate,
+            batch_release=runtime_batch_release,
             verify_effective=runtime_verify_effective,
             input_paths=runtime_input_paths,
             timeout_seconds=runtime_timeout_seconds,
@@ -739,6 +771,8 @@ integration = {{ mode = "batched", batch_size = 5, candidate_capacity = 10, seal
 # [runtime_adapter]
 # activate = ["uv", "run", "scripts/dww-runtime-adapter.py", "activate"]
 # release = ["uv", "run", "scripts/dww-runtime-adapter.py", "release"]
+# batch_activate = ["uv", "run", "scripts/dww-runtime-adapter.py", "batch-activate"]
+# batch_release = ["uv", "run", "scripts/dww-runtime-adapter.py", "batch-release"]
 # verify_effective = ["uv", "run", "scripts/dww-runtime-adapter.py", "verify-effective"]
 # input_paths = ["scripts/dww-runtime-adapter.py", "deploy/**"]
 # timeout_seconds = 300

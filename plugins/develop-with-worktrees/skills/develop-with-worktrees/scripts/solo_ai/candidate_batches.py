@@ -11,8 +11,9 @@ from typing import Any
 
 from .config import CommandSpec, load_repo_config, load_verification_config
 from .integration import integration_turn
-from .proof import approval_plan, validate
+from .proof import require_approved_plan, validate
 from .repo import GitRepo
+from .runtime_adapter import activate_batch_runtime, release_batch_runtime
 from .safety import require_safe
 from .state import StateStore, candidate_admission_lock
 from .task_context import delete_anchor, require_anchor
@@ -29,7 +30,18 @@ from .util import (
 )
 
 POOL_SCHEMA = 3
-ACTIVE_BATCH_STATES = {"sealed", "composing", "composed", "validated", "promoted"}
+ACTIVE_BATCH_STATES = {
+    "sealed",
+    "composing",
+    "composed",
+    "runtime_activating",
+    "runtime_activation_pending",
+    "runtime_active",
+    "runtime_releasing",
+    "runtime_release_pending",
+    "validated",
+    "promoted",
+}
 LEGACY_EXPLICIT_POLICY = {
     "schema_version": 1,
     "mode": "batched",
@@ -47,6 +59,10 @@ class CandidateCompositionConflict(SoloAIError):
     def __init__(self, candidate_id: str, detail: str):
         super().__init__(detail)
         self.candidate_id = candidate_id
+
+
+class BatchRuntimePending(SoloAIError):
+    """批次运行时结果不确定；保留批次所有权并等待显式恢复。"""
 
 
 class CandidateBatchStore:
@@ -97,6 +113,7 @@ class CandidateBatchStore:
             policy.setdefault("tail_policy", "explicit")
             policy.setdefault("tail_quiet_seconds", 90)
         for batch in value.get("batches", {}).values():
+            batch.setdefault("runtime_cycle", 0)
             if batch.get("seal_intent_id"):
                 continue
             policy = batch.get("integration_policy") or LEGACY_EXPLICIT_POLICY
@@ -263,6 +280,7 @@ class CandidateBatchStore:
             "applied_candidate_ids": [],
             "integration_head": base_before,
             "proof": None,
+            "runtime_cycle": 0,
             "worktree": None,
             "created_at": utc_timestamp(),
             "updated_at": utc_timestamp(),
@@ -813,14 +831,12 @@ def _run_secret_scanner(
 
 def _require_approval(repo: GitRepo, *, cwd: Path) -> None:
     verification = load_verification_config(repo, cwd=cwd)
-    fingerprint = sha256_text(
-        stable_json(approval_plan(repo, cwd=cwd, verification=verification))
+    require_approved_plan(
+        repo,
+        cwd=cwd,
+        verification=verification,
+        message="This machine has not approved the combined validation plan.",
     )
-    approvals = read_json(repo.local_dir / "approvals.json", {"accepted": {}})
-    if fingerprint not in approvals.get("accepted", {}):
-        raise SoloAIError(
-            "This machine has not approved the combined validation plan. Review `doctor` then run `approve --accept`."
-        )
 
 
 def _apply_candidate_diff(
@@ -924,38 +940,180 @@ def _validate_batch(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
     worktree = Path(str(batch["worktree"]))
-    if not repo.is_clean(worktree) or repo.head(worktree) != batch["integration_head"]:
-        raise SoloAIError("Composed batch changed before final validation")
-    config = load_repo_config(repo, cwd=worktree)
-    policy = batch.get("integration_policy") or {}
-    if policy.get("mode") != "batched":
-        raise SoloAIError("The sealed generation has no batched integration policy")
-    verification = load_verification_config(repo, cwd=worktree)
-    _require_approval(repo, cwd=worktree)
-    _run_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
-    require_safe(
-        repo,
-        cwd=worktree,
-        base=str(batch["base_ref"]),
-        allowlist=config.sensitive_allowlist,
-    )
-    proof = validate(
-        repo,
-        cwd=worktree,
-        base=str(batch["base_ref"]),
-        verification=verification,
-        task_id=str(batch["id"]),
-        level="full",
-        expected_base_head=str(batch["base_before"]),
-        expected_candidate_head=str(batch["integration_head"]),
-    )
-    if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["base_before"]:
-        raise SoloAIError(
-            "Batch base advanced during final validation; seal a fresh batch"
+    proof_fingerprint: str | None = None
+    try:
+        if (
+            not any(item.path == worktree for item in repo.worktrees())
+            or not repo.is_clean(worktree)
+            or repo.head(worktree) != batch["integration_head"]
+        ):
+            raise SoloAIError("Composed batch changed before final validation")
+        config = load_repo_config(repo, cwd=worktree)
+        policy = batch.get("integration_policy") or {}
+        if policy.get("mode") != "batched":
+            raise SoloAIError("The sealed generation has no batched integration policy")
+        verification = load_verification_config(repo, cwd=worktree)
+        _require_approval(repo, cwd=worktree)
+        _run_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
+        require_safe(
+            repo,
+            cwd=worktree,
+            base=str(batch["base_ref"]),
+            allowlist=config.sensitive_allowlist,
         )
-    return store.update_batch(
-        batch["id"], status="validated", proof=proof["fingerprint"]
+        proof = validate(
+            repo,
+            cwd=worktree,
+            base=str(batch["base_ref"]),
+            verification=verification,
+            task_id=str(batch["id"]),
+            level="full",
+            expected_base_head=str(batch["base_before"]),
+            expected_candidate_head=str(batch["integration_head"]),
+        )
+        proof_fingerprint = str(proof["fingerprint"])
+        if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["base_before"]:
+            raise SoloAIError(
+                "Batch base advanced during final validation; seal a fresh batch"
+            )
+    except (KeyboardInterrupt, SystemExit):
+        releasing = store.update_batch(
+            batch["id"],
+            status="runtime_releasing",
+            validation_outcome="interrupted",
+            validation_error="Combined Full validation was interrupted",
+            proof=proof_fingerprint,
+        )
+        _release_batch_runtime(repo, store, releasing)
+        raise
+    except Exception as exc:
+        releasing = store.update_batch(
+            batch["id"],
+            status="runtime_releasing",
+            validation_outcome="failed",
+            validation_error=str(exc),
+            proof=proof_fingerprint,
+        )
+        _release_batch_runtime(repo, store, releasing)
+        raise
+    releasing = store.update_batch(
+        batch["id"],
+        status="runtime_releasing",
+        validation_outcome="passed",
+        validation_error=None,
+        proof=proof_fingerprint,
     )
+    return _release_batch_runtime(repo, store, releasing)
+
+
+def _activate_batch_runtime(
+    repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
+) -> dict[str, Any]:
+    worktree = Path(str(batch["worktree"]))
+    if (
+        not any(item.path == worktree for item in repo.worktrees())
+        or not repo.is_clean(worktree)
+        or repo.head(worktree) != batch["integration_head"]
+    ):
+        raise SoloAIError("Composed batch changed before runtime activation")
+    if batch["status"] == "composed":
+        runtime_cycle = int(batch.get("runtime_cycle", 0)) + 1
+        activating = store.update_batch(
+            batch["id"],
+            status="runtime_activating",
+            runtime_cycle=runtime_cycle,
+            runtime_activation=None,
+            runtime_activation_error=None,
+            runtime_release=None,
+            runtime_release_error=None,
+            validation_outcome=None,
+            validation_error=None,
+            proof=None,
+        )
+    else:
+        runtime_cycle = int(batch.get("runtime_cycle", 0))
+        if runtime_cycle < 1:
+            raise SoloAIError("Pending batch runtime activation has no valid cycle")
+        activating = store.update_batch(batch["id"], status="runtime_activating")
+    try:
+        receipt = activate_batch_runtime(repo, batch=activating)
+    except (KeyboardInterrupt, SystemExit):
+        store.update_batch(
+            batch["id"],
+            status="runtime_activation_pending",
+            runtime_activation_error="Runtime activation was interrupted",
+        )
+        raise
+    except Exception as exc:
+        store.update_batch(
+            batch["id"],
+            status="runtime_activation_pending",
+            runtime_activation_error=str(exc),
+        )
+        raise BatchRuntimePending(
+            "Batch runtime activation is pending; fix the Adapter and run batch recover"
+        ) from exc
+    return store.update_batch(
+        batch["id"],
+        status="runtime_active",
+        runtime_activation=receipt,
+        runtime_activation_error=None,
+    )
+
+
+def _release_batch_runtime(
+    repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        receipt = release_batch_runtime(
+            repo,
+            batch=batch,
+            validation_outcome=str(batch["validation_outcome"]),
+            validation_error=batch.get("validation_error"),
+        )
+    except (KeyboardInterrupt, SystemExit):
+        store.update_batch(
+            batch["id"],
+            status="runtime_release_pending",
+            runtime_release_error="Runtime release was interrupted",
+        )
+        raise
+    except Exception as exc:
+        store.update_batch(
+            batch["id"],
+            status="runtime_release_pending",
+            runtime_release_error=str(exc),
+        )
+        raise BatchRuntimePending(
+            "Batch runtime release is pending; main was preserved and batch recover must retry release"
+        ) from exc
+    outcome = str(batch["validation_outcome"])
+    worktree = Path(str(batch["worktree"]))
+    exact = (
+        any(item.path == worktree for item in repo.worktrees())
+        and repo.is_clean(worktree)
+        and repo.head(worktree) == batch["integration_head"]
+    )
+    if outcome == "passed" and exact:
+        return store.update_batch(
+            batch["id"],
+            status="validated",
+            runtime_release=receipt,
+            runtime_release_error=None,
+        )
+    resumed = store.update_batch(
+        batch["id"],
+        status="composed",
+        runtime_release=receipt,
+        runtime_release_error=None,
+    )
+    if outcome == "failed":
+        raise SoloAIError(
+            str(batch.get("validation_error") or "Combined validation failed")
+        )
+    if outcome == "passed":
+        raise SoloAIError("Batch runtime or validation changed the composed worktree")
+    return resumed
 
 
 def _promote(
@@ -1025,10 +1183,21 @@ def _resume(
         raise SoloAIError(
             "This generation failed and will not be rerun automatically; publish a repair candidate and seal a new explicit batch"
         )
-    if status in {"sealed", "composing", "composed"}:
+    if status in {"sealed", "composing"}:
         batch = _compose(repo, store, batch)
-    if batch["status"] == "composed":
+    if batch["status"] in {
+        "composed",
+        "runtime_activating",
+        "runtime_activation_pending",
+    }:
+        batch = _activate_batch_runtime(repo, store, batch)
+    if batch["status"] == "runtime_active":
         batch = _validate_batch(repo, store, batch)
+    if batch["status"] in {"runtime_releasing", "runtime_release_pending"}:
+        batch = _release_batch_runtime(repo, store, batch)
+        if batch["status"] == "composed":
+            batch = _activate_batch_runtime(repo, store, batch)
+            batch = _validate_batch(repo, store, batch)
     if batch["status"] == "validated":
         batch = _promote(repo, store, batch)
     if batch["status"] == "promoted":
@@ -1116,7 +1285,7 @@ def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
             with integration_turn(repo, batch_id):
                 batch = store.batch(batch_id)
                 return _resume(repo, store, batch)
-    except (KeyboardInterrupt, SystemExit):
+    except (KeyboardInterrupt, SystemExit, BatchRuntimePending):
         raise
     except Exception as exc:
         current = store.batch(batch_id)

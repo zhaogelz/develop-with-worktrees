@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import CommandSpec, load_repo_config, load_verification_config
-from .proof import approval_plan
+from .proof import require_approved_plan
 from .repo import GitRepo
 from .util import (
     SoloAIError,
@@ -22,6 +22,7 @@ from .util import (
 
 ADAPTER_CONTEXT_SCHEMA = 1
 ADAPTER_RECEIPT_SCHEMA = 1
+BATCH_PORT_BLOCK_OFFSET = 3200
 
 
 def _adapter_input_hashes(
@@ -45,14 +46,12 @@ def _adapter_input_hashes(
 
 def _require_approval(repo: GitRepo, *, cwd: Path) -> None:
     verification = load_verification_config(repo, cwd=cwd)
-    fingerprint = sha256_text(
-        stable_json(approval_plan(repo, cwd=cwd, verification=verification))
+    require_approved_plan(
+        repo,
+        cwd=cwd,
+        verification=verification,
+        message="This machine has not approved the runtime Adapter plan.",
     )
-    approvals = read_json(repo.local_dir / "approvals.json", {"accepted": {}})
-    if fingerprint not in approvals.get("accepted", {}):
-        raise SoloAIError(
-            "This machine has not approved the runtime Adapter plan. Review doctor then run approve --accept."
-        )
 
 
 def _logs_exist(receipt: dict[str, Any]) -> bool:
@@ -235,6 +234,93 @@ def release_task_runtime(
             or task.get("candidate_head"),
             "registered_processes": copy.deepcopy(task.get("processes", [])),
             "adapter_inputs": adapter_inputs,
+        },
+        reusable_success=True,
+    )
+    return {"configured": True, **receipt}
+
+
+def _batch_context(
+    repo: GitRepo,
+    *,
+    batch: dict[str, Any],
+    worktree: Path,
+) -> tuple[Any, dict[str, Any]]:
+    config = load_repo_config(repo, cwd=worktree)
+    adapter_inputs = _adapter_input_hashes(
+        repo, cwd=worktree, patterns=config.runtime_adapter.input_paths
+    )
+    runtime_cycle = batch.get("runtime_cycle")
+    if (
+        isinstance(runtime_cycle, bool)
+        or not isinstance(runtime_cycle, int)
+        or runtime_cycle < 1
+    ):
+        raise SoloAIError("Batch Runtime Adapter requires a positive runtime_cycle")
+    port_block_start = config.port_base + BATCH_PORT_BLOCK_OFFSET
+    return config, {
+        "batch_id": batch["id"],
+        "runtime_cycle": runtime_cycle,
+        "candidate_ids": list(batch["candidate_ids"]),
+        "worktree": str(worktree.resolve()),
+        "base_ref": batch["base_ref"],
+        "base_head": batch["base_before"],
+        "integration_head": batch["integration_head"],
+        "port_block_start": port_block_start,
+        "port_block_end": port_block_start + 99,
+        "adapter_inputs": adapter_inputs,
+    }
+
+
+def activate_batch_runtime(
+    repo: GitRepo,
+    *,
+    batch: dict[str, Any],
+) -> dict[str, Any]:
+    worktree = Path(str(batch["worktree"]))
+    config = load_repo_config(repo, cwd=worktree)
+    command = config.runtime_adapter.batch_activate
+    if command is None:
+        return {"configured": False, "operation": "batch-activate"}
+    _require_approval(repo, cwd=worktree)
+    config, context = _batch_context(repo, batch=batch, worktree=worktree)
+    receipt = _invoke(
+        repo,
+        cwd=worktree,
+        operation="batch-activate",
+        command=command,
+        timeout_seconds=config.runtime_adapter.timeout_seconds,
+        context={"reason": "combined-full-validation", **context},
+        reusable_success=True,
+    )
+    return {"configured": True, **receipt}
+
+
+def release_batch_runtime(
+    repo: GitRepo,
+    *,
+    batch: dict[str, Any],
+    validation_outcome: str,
+    validation_error: str | None = None,
+) -> dict[str, Any]:
+    worktree = Path(str(batch["worktree"]))
+    config = load_repo_config(repo, cwd=worktree)
+    command = config.runtime_adapter.batch_release
+    if command is None:
+        return {"configured": False, "operation": "batch-release"}
+    _require_approval(repo, cwd=worktree)
+    config, context = _batch_context(repo, batch=batch, worktree=worktree)
+    receipt = _invoke(
+        repo,
+        cwd=worktree,
+        operation="batch-release",
+        command=command,
+        timeout_seconds=config.runtime_adapter.timeout_seconds,
+        context={
+            "reason": "combined-full-validation-finished",
+            **context,
+            "validation_outcome": validation_outcome,
+            "validation_error": validation_error,
         },
         reusable_success=True,
     )
