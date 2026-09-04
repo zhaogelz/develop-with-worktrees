@@ -48,6 +48,8 @@ _EXECUTION_BASELINE = (
     "TMP",
     "HOME",
     "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
     "LANG",
     "LC_ALL",
     "TERM",
