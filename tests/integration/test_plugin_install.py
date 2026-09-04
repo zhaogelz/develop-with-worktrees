@@ -11,11 +11,13 @@ import pytest
 
 
 def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
-    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """Exercise Codex's real local marketplace install/remove flow, never the user's home."""
     if os.environ.get("DWW_SKIP_CODEX_CLI_INTEGRATION") == "1":
         pytest.skip("Codex CLI install integration is exercised on a local Codex host")
+    # 缩短缓存根目录，避免仍受 MAX_PATH 约束的 Windows Python 无法导入深层模块。
+    tmp_path = tmp_path_factory.mktemp("plugin")
     repository_root = Path(__file__).parents[2]
     source = repository_root / "plugins" / "develop-with-worktrees"
     marketplace_source = repository_root / ".agents" / "plugins" / "marketplace.json"
@@ -136,10 +138,11 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     expected_version = json.loads(
         (source / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
     )["version"]
-    assert f'"version": "{expected_version}"' in version.stdout
-    assert f'"plugin_version": "{expected_version}"' in version.stdout
-    assert '"verification_schema": 3' in version.stdout
-    assert '"state_schema": 6' in version.stdout
+    version_payload = json.loads(version.stdout)["result"]
+    assert version_payload["version"] == expected_version.partition("+codex.")[0]
+    assert version_payload["plugin_version"] == expected_version
+    assert version_payload["verification_schema"] == 3
+    assert version_payload["state_schema"] == 6
     started = run_runner("start", "--name", "installed artifact smoke")
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())

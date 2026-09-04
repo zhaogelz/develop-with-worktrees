@@ -101,7 +101,12 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
     assert payload["version"] == "0.5.0-beta.1"
-    assert payload["version"] == payload["plugin_version"] == manifest["version"]
+    plugin_version = payload["plugin_version"]
+    assert plugin_version == manifest["version"]
+    if plugin_version != payload["version"]:
+        cachebuster_prefix = f"{payload['version']}+codex."
+        assert plugin_version.startswith(cachebuster_prefix)
+        assert plugin_version.removeprefix(cachebuster_prefix)
     assert payload["version"] == pyproject["project"]["version"]
     assert payload["version"] == __version__
     assert f"## {payload['version']}" in (repository_root / "CHANGELOG.md").read_text(
