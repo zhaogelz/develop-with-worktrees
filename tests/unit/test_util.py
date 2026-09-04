@@ -149,6 +149,19 @@ def test_directory_lock_uses_bounded_internal_names_in_a_deep_path(
     assert not list(parent.glob(".dww-*-*"))
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows path stat and handle fstat modes differ"
+)
+def test_conditional_delete_accepts_same_windows_file_identity(tmp_path: Path) -> None:
+    path = tmp_path / "generated.bat"
+    path.write_text("@echo off\r\n", encoding="utf-8")
+    expected = util.snapshot_plain_path(path)
+
+    util.delete_plain_path_if_unchanged(path, expected)
+
+    assert not path.exists()
+
+
 def test_unix_process_group_stops_with_term_before_waiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

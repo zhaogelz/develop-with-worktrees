@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -655,10 +656,13 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
         fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
         handle = None
         observed_stat = os.fstat(fd)
+        expected_mode = int(expected.get("mode", 0))
+        # Windows 的 Path.stat 与 CRT fstat 会为同一文件给出不同的权限位；
+        # 文件类型仍须一致，而冻结的 mode 用于保持后续结构等值比较。
+        if stat.S_IFMT(observed_stat.st_mode) != stat.S_IFMT(expected_mode):
+            raise SoloAIError(f"Cleanup content changed before deletion: {path}")
         observed = {
-            **_windows_handle_identity(
-                msvcrt.get_osfhandle(fd), mode=int(observed_stat.st_mode)
-            ),
+            **_windows_handle_identity(msvcrt.get_osfhandle(fd), mode=expected_mode),
             "kind": expected.get("kind"),
         }
         if expected.get("kind") == "file":
