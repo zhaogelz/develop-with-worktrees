@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .cleanup import (
+    inspect_untracked,
+    remove_recreatable_ignored,
+    require_managed_directory_identity,
+)
 from .config import CommandSpec, load_repo_config, load_verification_config
 from .integration import integration_turn
 from .proof import require_approved_plan, validate
@@ -22,6 +27,7 @@ from .util import (
     SoloAIError,
     atomic_write_json,
     atomic_write_text,
+    path_identity,
     read_json,
     run_logged,
     sha256_text,
@@ -63,6 +69,10 @@ class CandidateCompositionConflict(SoloAIError):
 
 class BatchRuntimePending(SoloAIError):
     """批次运行时结果不确定；保留批次所有权并等待显式恢复。"""
+
+
+class BatchCleanupPending(SoloAIError):
+    """批次清理事实不安全或不确定；保持当前阶段等待精确恢复。"""
 
 
 class CandidateBatchStore:
@@ -888,6 +898,54 @@ def _integration_worktree(repo: GitRepo, batch: dict[str, Any]) -> Path:
     ).resolve()
 
 
+def _batch_worktree_identity(repo: GitRepo, batch: dict[str, Any]) -> tuple[Path, Path]:
+    """复核批次目录仍是 DWW 登记的原目录对象。"""
+
+    expected = _integration_worktree(repo, batch)
+    recorded = Path(str(batch.get("worktree") or "")).absolute()
+    if recorded != expected.absolute():
+        raise BatchCleanupPending("Recorded batch worktree identity changed")
+    managed_root = expected.parent
+    resolved = require_managed_directory_identity(
+        expected,
+        managed_root=managed_root,
+        expected_resolved=batch.get("worktree_resolved"),
+        expected_root_resolved=batch.get("managed_root_resolved"),
+        expected_identity=batch.get("worktree_identity"),
+        expected_root_identity=batch.get("managed_root_identity"),
+    )
+    if not any(item.path == resolved for item in repo.worktrees()):
+        raise BatchCleanupPending("Batch integration worktree is not registered")
+    return expected, managed_root
+
+
+def _assert_batch_cleanup_safe(repo: GitRepo, batch: dict[str, Any]) -> Path:
+    """只允许批次树携带可再生的已知忽略产物进入终态清理。"""
+
+    worktree, _managed_root = _batch_worktree_identity(repo, batch)
+    if (
+        not repo.is_clean(worktree)
+        or repo.head(worktree) != batch["integration_head"]
+        or repo.branch(worktree) is not None
+    ):
+        raise BatchCleanupPending("Batch worktree changed before cleanup")
+    inventory = inspect_untracked(repo, cwd=worktree)
+    blocked = sorted(
+        {
+            *inventory["keep"],
+            *inventory["protected"],
+            *inventory["ordinary"],
+            *inventory["unknown_ignored"],
+        }
+    )
+    if blocked:
+        raise BatchCleanupPending(
+            "Protected or unknown content blocks batch worktree cleanup:\n"
+            + "\n".join(f"- {item}" for item in blocked[:20])
+        )
+    return worktree
+
+
 def _compose(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
@@ -898,7 +956,24 @@ def _compose(
         repo.git(["worktree", "add", "--detach", str(worktree), batch["base_before"]])
     if not any(item.path == worktree for item in repo.worktrees()):
         raise SoloAIError("Batch integration worktree is not registered")
-    batch = store.update_batch(batch["id"], status="composing", worktree=str(worktree))
+    managed_root = worktree.parent
+    resolved = require_managed_directory_identity(
+        worktree,
+        managed_root=managed_root,
+        expected_resolved=batch.get("worktree_resolved"),
+        expected_root_resolved=batch.get("managed_root_resolved"),
+        expected_identity=batch.get("worktree_identity"),
+        expected_root_identity=batch.get("managed_root_identity"),
+    )
+    batch = store.update_batch(
+        batch["id"],
+        status="composing",
+        worktree=str(worktree),
+        worktree_resolved=str(resolved),
+        managed_root_resolved=str(managed_root.resolve()),
+        worktree_identity=path_identity(worktree),
+        managed_root_identity=path_identity(managed_root),
+    )
     applied_ids = list(batch.get("applied_candidate_ids", []))
     if not repo.is_clean(worktree) or repo.head(worktree) != batch["integration_head"]:
         raise SoloAIError(
@@ -1119,6 +1194,7 @@ def _release_batch_runtime(
 def _promote(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
+    _assert_batch_cleanup_safe(repo, batch)
     base_ref = str(batch["base_ref"])
     matching = [
         item.path
@@ -1153,13 +1229,24 @@ def _cleanup(
     if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["integration_head"]:
         raise SoloAIError("Promoted batch is no longer the exact base head")
     worktree = Path(str(batch["worktree"]))
+    registered = any(item.path == worktree.resolve() for item in repo.worktrees())
     if worktree.exists():
-        if (
-            not repo.is_clean(worktree)
-            or repo.head(worktree) != batch["integration_head"]
-        ):
-            raise SoloAIError("Batch worktree changed after promotion")
-        repo.git(["worktree", "remove", str(worktree)])
+        worktree = _assert_batch_cleanup_safe(repo, batch)
+        try:
+            remove_recreatable_ignored(repo, cwd=worktree)
+            repo.git(["worktree", "remove", str(worktree)])
+        except Exception as exc:
+            raise BatchCleanupPending(
+                "Batch worktree removal is pending exact recovery"
+            ) from exc
+    elif registered:
+        raise BatchCleanupPending("Missing batch worktree remains registered")
+    if worktree.exists() or any(
+        item.path == worktree.resolve() for item in repo.worktrees()
+    ):
+        raise BatchCleanupPending(
+            "Batch worktree removal did not reach a terminal state"
+        )
     for candidate in batch["candidates"]:
         ref = str(candidate["ref"])
         head = str(candidate["head"])
@@ -1285,7 +1372,7 @@ def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
             with integration_turn(repo, batch_id):
                 batch = store.batch(batch_id)
                 return _resume(repo, store, batch)
-    except (KeyboardInterrupt, SystemExit, BatchRuntimePending):
+    except (KeyboardInterrupt, SystemExit, BatchRuntimePending, BatchCleanupPending):
         raise
     except Exception as exc:
         current = store.batch(batch_id)

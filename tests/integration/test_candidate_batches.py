@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from conftest import git
 from solo_ai import candidate_batches as batch_module
+from solo_ai import cleanup as cleanup_module
 from solo_ai.candidate_batches import (
     CandidateBatchStore,
     prepare_candidate_repair,
@@ -383,6 +384,125 @@ def test_finish_publishes_then_explicit_seal_integrates_exact_candidates(
     assert recovered["batch_id"] == result["id"]
     pool = CandidateBatchStore(repo).summary()
     assert {item["status"] for item in pool["candidates"]} == {"integrated"}
+
+
+def test_batch_cleanup_removes_known_recreatable_ignored_content(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore reproducible dependencies")
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="ignored dependency", relative="candidate.txt")
+    original_promote = batch_module._promote
+    observed_worktree: Path | None = None
+
+    def promote_with_dependency(repo, store, batch):
+        nonlocal observed_worktree
+        observed_worktree = Path(batch["worktree"])
+        dependency = observed_worktree / "node_modules" / "package" / "index.js"
+        dependency.parent.mkdir(parents=True)
+        dependency.write_text("generated\n", encoding="utf-8")
+        return original_promote(repo, store, batch)
+
+    monkeypatch.setattr(batch_module, "_promote", promote_with_dependency)
+    completed = seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    assert completed["status"] == "completed"
+    assert observed_worktree is not None
+    assert not observed_worktree.exists()
+    assert all(item.path != observed_worktree for item in repo.worktrees())
+
+
+def test_protected_ignored_content_blocks_promotion_until_exact_recovery(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text(".tmp/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore temporary output")
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="protected output", relative="candidate.txt")
+    base_before = repo.head(git_repo)
+    original_promote = batch_module._promote
+    protected_path: Path | None = None
+
+    def promote_with_protected_output(repo, store, batch):
+        nonlocal protected_path
+        protected_path = Path(batch["worktree"]) / ".tmp" / "validation.db"
+        protected_path.parent.mkdir(parents=True)
+        protected_path.write_text("must survive\n", encoding="utf-8")
+        return original_promote(repo, store, batch)
+
+    monkeypatch.setattr(batch_module, "_promote", promote_with_protected_output)
+    with pytest.raises(SoloAIError, match="blocks batch worktree cleanup"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    assert repo.head(git_repo) == base_before
+    assert protected_path is not None and protected_path.is_file()
+    batch = CandidateBatchStore(repo).summary()["batches"][0]
+    assert batch["status"] == "validated"
+
+    monkeypatch.setattr(batch_module, "_promote", original_promote)
+    protected_path.unlink()
+    protected_path.parent.rmdir()
+    completed = batch_module.recover_batch(repo, batch_id=batch["id"])
+
+    assert completed["status"] == "completed"
+    assert repo.head(git_repo) == completed["integrated_head"]
+
+
+def test_batch_cleanup_preserves_protected_content_arriving_during_cleanup(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text("node_modules/\n.tmp/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore validation output")
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="late protected output", relative="candidate.txt")
+    original_promote = batch_module._promote
+    original_delete = cleanup_module.delete_plain_path_if_unchanged
+    observed_worktree: Path | None = None
+    protected_path: Path | None = None
+
+    def promote_with_dependency(repo, store, batch):
+        nonlocal observed_worktree
+        observed_worktree = Path(batch["worktree"])
+        dependency = observed_worktree / "node_modules" / "package" / "index.js"
+        dependency.parent.mkdir(parents=True)
+        dependency.write_text("generated\n", encoding="utf-8")
+        return original_promote(repo, store, batch)
+
+    def add_protected_output_then_delete(path, expected):
+        nonlocal protected_path
+        if protected_path is None and "node_modules" in path.parts:
+            assert observed_worktree is not None
+            protected_path = observed_worktree / ".tmp" / "validation.db"
+            protected_path.parent.mkdir(parents=True)
+            protected_path.write_text("late and protected\n", encoding="utf-8")
+        return original_delete(path, expected)
+
+    monkeypatch.setattr(batch_module, "_promote", promote_with_dependency)
+    monkeypatch.setattr(
+        cleanup_module,
+        "delete_plain_path_if_unchanged",
+        add_protected_output_then_delete,
+    )
+    with pytest.raises(SoloAIError, match="pending exact recovery"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    assert protected_path is not None and protected_path.is_file()
+    batch = CandidateBatchStore(repo).summary()["batches"][0]
+    assert batch["status"] == "promoted"
+
+    monkeypatch.setattr(
+        cleanup_module, "delete_plain_path_if_unchanged", original_delete
+    )
+    protected_path.unlink()
+    protected_path.parent.rmdir()
+    completed = batch_module.recover_batch(repo, batch_id=batch["id"])
+
+    assert completed["status"] == "completed"
+    assert observed_worktree is not None and not observed_worktree.exists()
 
 
 def test_four_candidates_wait_and_fifth_finish_auto_integrates_oldest_five(

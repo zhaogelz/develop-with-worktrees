@@ -134,6 +134,64 @@ def inspect_untracked(
     return result
 
 
+def remove_recreatable_ignored(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    policy: CleanupPolicy = CleanupPolicy(),
+) -> None:
+    """按对象身份逐项删除已知可再生忽略文件，保留任何晚到内容。"""
+
+    inventory = inspect_untracked(repo, cwd=cwd, policy=policy)
+    blocked = [
+        *inventory["keep"],
+        *inventory["protected"],
+        *inventory["ordinary"],
+        *inventory["unknown_ignored"],
+    ]
+    if blocked:
+        raise SoloAIError(
+            "Protected or unknown content blocks recreatable cleanup:\n"
+            + "\n".join(f"- {item}" for item in blocked[:20])
+        )
+
+    expected_files: dict[str, dict[str, object]] = {}
+    directories: set[Path] = set()
+    for relative in inventory["retained"]:
+        candidate = _require_plain_path(cwd / relative, cwd)
+        if candidate.is_dir():
+            raise SoloAIError(
+                f"Recreatable cleanup inventory unexpectedly contains a directory: {relative}"
+            )
+        expected_files[relative] = snapshot_plain_path(candidate)
+        parent = candidate.parent
+        while parent != cwd:
+            directories.add(parent)
+            parent = parent.parent
+
+    if inspect_untracked(repo, cwd=cwd, policy=policy) != inventory:
+        raise SoloAIError(
+            "Untracked content changed before recreatable cleanup; files were preserved"
+        )
+
+    for relative, expected in expected_files.items():
+        candidate = _require_plain_path(cwd / relative, cwd)
+        delete_plain_path_if_unchanged(candidate, expected)
+
+    for directory in sorted(
+        directories, key=lambda item: len(item.parts), reverse=True
+    ):
+        _require_plain_path(directory, cwd)
+        if directory.exists() and not any(directory.iterdir()):
+            delete_plain_path_if_unchanged(directory, snapshot_plain_path(directory))
+
+    remaining = inspect_untracked(repo, cwd=cwd, policy=policy)
+    if any(remaining.values()):
+        raise SoloAIError(
+            "Untracked content changed during recreatable cleanup; files were preserved"
+        )
+
+
 def remove_abandoned_untracked(
     repo: GitRepo,
     *,
