@@ -673,6 +673,109 @@ def _complete_runtime_activation(
     }
 
 
+def _resume_quarantined_start(
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    operation_id: str | None,
+    request_reused: bool,
+) -> dict[str, Any]:
+    """只按原始 task/slot/base 身份续接尚未激活的 Start。"""
+
+    if (
+        _is_in_place(task)
+        or task.get("status") != "quarantined"
+        or task.get("candidate_publication")
+        or task.get("integration")
+        or task.get("abandonment")
+        or task.get("runtime_activation") is not None
+        or task.get("runtime_activation_pending") is False
+    ):
+        raise SoloAIError(
+            "Only a quarantined pre-activation Start can use this recovery path"
+        )
+    worktree = Path(str(task["worktree"]))
+    managed_root = worktree.absolute().parent
+    identity_fields = (
+        task.get("slot_worktree_identity"),
+        task.get("slot_managed_root_identity"),
+        task.get("slot_worktree_resolved"),
+        task.get("slot_managed_root_resolved"),
+    )
+    if all(identity_fields):
+        resolved = require_managed_directory_identity(
+            worktree,
+            managed_root=managed_root,
+            expected_resolved=str(task["slot_worktree_resolved"]),
+            expected_root_resolved=str(task["slot_managed_root_resolved"]),
+            expected_identity=dict(task["slot_worktree_identity"]),
+            expected_root_identity=dict(task["slot_managed_root_identity"]),
+        )
+    elif any(identity_fields):
+        raise SoloAIError("Quarantined Start has incomplete directory identity")
+    else:
+        if not worktree.is_dir():
+            raise SoloAIError(
+                "Quarantined Start worktree is missing; preserve state for inspection"
+            )
+        resolved = require_managed_directory_identity(
+            worktree, managed_root=managed_root
+        )
+    if not any(item.path == resolved for item in repo.worktrees()):
+        raise SoloAIError("Quarantined Start worktree is no longer registered")
+    if not repo.is_clean(worktree):
+        raise SoloAIError("Dirty task worktree blocks quarantined Start recovery")
+    if unknown := _unknown_ignored(repo, worktree):
+        raise SoloAIError(
+            "Quarantined Start still contains protected or unknown ignored content:\n"
+            + "\n".join(f"- {item}" for item in unknown[:20])
+        )
+
+    branch = str(task["branch"])
+    branch_head = repo.ref_head(f"refs/heads/{branch}")
+    if branch_head is None:
+        if (
+            task.get("candidate_head")
+            or task.get("runtime_activation_pending")
+            or (repo.local_dir / "task-anchors" / f"{task['id']}.md").exists()
+            or repo.branch(worktree) is not None
+        ):
+            raise SoloAIError(
+                "Quarantined Start has ambiguous partial activation facts"
+            )
+        repo.git(["reset", "--hard", str(task["base_head"])], cwd=worktree)
+        repo.git(["switch", "-c", branch, str(task["base_head"])], cwd=worktree)
+        branch_head = repo.head(worktree)
+    elif (
+        repo.branch(worktree) != branch
+        or repo.head(worktree) != branch_head
+        or task.get("candidate_head") not in {None, branch_head}
+    ):
+        raise SoloAIError("Quarantined Start branch or worktree identity is ambiguous")
+
+    if not repo.is_clean(worktree) or repo.head(worktree) != branch_head:
+        raise SoloAIError("Quarantined Start worktree changed during recovery")
+    if unknown := _unknown_ignored(repo, worktree):
+        raise SoloAIError(
+            "Quarantined Start received protected or unknown ignored content:\n"
+            + "\n".join(f"- {item}" for item in unknown[:20])
+        )
+    prepared = store.resume_quarantined_start(
+        str(task["id"]),
+        operation_id=operation_id,
+        candidate_head=branch_head,
+        baseline_paths=repo.changed_paths(worktree),
+        worktree_identity=path_identity(worktree),
+        managed_root_identity=path_identity(managed_root),
+        worktree_resolved=str(resolved),
+        managed_root_resolved=str(managed_root.resolve()),
+    )
+    prepared["request_reused"] = request_reused
+    create_anchor(repo, prepared)
+    return _complete_runtime_activation(repo, store=store, task=prepared)
+
+
 def start(
     repo: GitRepo,
     *,
@@ -745,11 +848,20 @@ def start(
                 supersedes=supersedes,
             )
         if task.get("request_reused"):
-            anchor = require_anchor(repo, task)
+            if task.get("status") == "quarantined":
+                return _resume_quarantined_start(
+                    repo,
+                    store=store,
+                    task=task,
+                    operation_id=None,
+                    request_reused=True,
+                )
             if task.get("status") == "starting" and task.get(
                 "runtime_activation_pending"
             ):
+                create_anchor(repo, task)
                 return _complete_runtime_activation(repo, store=store, task=task)
+            anchor = require_anchor(repo, task)
             return {**task, "anchor_path": str(anchor.resolve())}
         worktree = ensure_within(
             Path(task["worktree"]), repo.primary_path / config.worktree_directory
@@ -790,6 +902,13 @@ def start(
                 activation_worktree_identity = path_identity(worktree)
                 activation_root_identity = path_identity(managed_root)
                 repo.git(["reset", "--hard", base_ref], cwd=worktree)
+            task = store.update_task(
+                task["id"],
+                slot_worktree_identity=activation_worktree_identity,
+                slot_managed_root_identity=activation_root_identity,
+                slot_worktree_resolved=str(worktree.resolve()),
+                slot_managed_root_resolved=str(managed_root.resolve()),
+            )
             repo.git(["switch", "-c", branch, base_ref], cwd=worktree)
             resolved = require_managed_directory_identity(
                 worktree,
@@ -1988,7 +2107,19 @@ def recover(repo: GitRepo, *, task_id: str) -> dict[str, Any]:
         if active and process_matches(active.get("owner", {})):
             raise SoloAIError("Task still has a live operation; recovery is unsafe")
         with maintenance_lock(repo):
+            create_anchor(repo, task)
             return _complete_runtime_activation(repo, store=store, task=task)
+    if task.get("status") == "quarantined" and not _is_in_place(task):
+        with store.recovery_operation(task_id) as recovery_task:
+            operation_id = str(recovery_task["active_operation"]["id"])
+            with maintenance_lock(repo):
+                return _resume_quarantined_start(
+                    repo,
+                    store=store,
+                    task=store.task(task_id),
+                    operation_id=operation_id,
+                    request_reused=False,
+                )
     active = task.get("active_operation") or {}
     if active and process_matches(active.get("owner", {})):
         raise SoloAIError("Task still has a live operation; recovery is unsafe")

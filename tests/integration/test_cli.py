@@ -9,6 +9,28 @@ from pathlib import Path
 
 from conftest import declare_delegated_adapter, git
 from solo_ai import __version__
+from solo_ai.cli import _human
+
+
+def test_human_batch_output_accepts_direct_and_reconcile_results() -> None:
+    batch = {
+        "id": "batch-one",
+        "status": "completed",
+        "integrated_head": "a" * 40,
+        "candidate_ids": ["candidate-one"],
+        "trigger": "quiet_tail",
+    }
+
+    direct = _human("batch", batch)
+    reconciled = _human(
+        "batch",
+        {"status": "completed", "batch": batch, "delivered": True},
+    )
+
+    assert direct == reconciled
+    assert direct == (
+        f"Integrated batch batch-one at {'a' * 40} from 1 candidate(s) (quiet_tail)."
+    )
 
 
 def test_release_version_contract_matches_manifest_metadata_and_cli(

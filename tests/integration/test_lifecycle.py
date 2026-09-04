@@ -444,6 +444,118 @@ def test_resume_in_place_rejects_a_live_validation_process(git_repo: Path) -> No
         )
 
 
+def test_recover_resumes_quarantined_start_only_after_blocker_is_removed(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    config = git_repo / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("slots = 3", "slots = 1"),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: use one reusable slot")
+    approve(repo, load_verification_config(repo))
+    previous = start(repo, name="prepare reusable slot")
+    abandon(
+        repo,
+        task_id=previous["id"],
+        lease=previous["lease"],
+        confirm=previous["id"],
+    )
+    original = lifecycle._unknown_ignored
+
+    def blocked(_repo: GitRepo, _worktree: Path) -> list[str]:
+        raise SoloAIError("simulated retained link")
+
+    monkeypatch.setattr(lifecycle, "_unknown_ignored", blocked)
+    with pytest.raises(SoloAIError, match="simulated retained link"):
+        start(
+            repo,
+            name="recover exact start",
+            request_id="recover-exact-start",
+        )
+    task = next(
+        item
+        for item in StateStore(repo).read()["tasks"].values()
+        if item.get("request_id") == "recover-exact-start"
+    )
+    worktree = Path(task["worktree"])
+    assert task["status"] == "quarantined"
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+    assert not (repo.local_dir / "task-anchors" / f"{task['id']}.md").exists()
+
+    with pytest.raises(SoloAIError, match="simulated retained link"):
+        recover(repo, task_id=task["id"])
+    assert StateStore(repo).task(task["id"])["status"] == "quarantined"
+    assert repo.branch(worktree) is None
+
+    monkeypatch.setattr(lifecycle, "_unknown_ignored", original)
+    recovered = recover(repo, task_id=task["id"])
+
+    assert recovered["id"] == task["id"]
+    assert recovered["status"] == "active"
+    assert recovered["lease"] != task["lease"]
+    assert repo.branch(worktree) == task["branch"]
+    assert repo.head(worktree) == task["base_head"]
+    assert Path(recovered["anchor_path"]).is_file()
+
+
+def test_recover_resumes_quarantined_start_after_branch_creation(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    original = lifecycle._unknown_ignored
+    calls = 0
+
+    def block_second_inspection(_repo: GitRepo, _worktree: Path) -> list[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SoloAIError("simulated linked content after branch creation")
+        return []
+
+    monkeypatch.setattr(lifecycle, "_unknown_ignored", block_second_inspection)
+    with pytest.raises(SoloAIError, match="after branch creation"):
+        start(
+            repo,
+            name="recover partial branch",
+            request_id="recover-partial-branch",
+        )
+    task = next(
+        item
+        for item in StateStore(repo).read()["tasks"].values()
+        if item.get("request_id") == "recover-partial-branch"
+    )
+    worktree = Path(task["worktree"])
+    assert task["status"] == "quarantined"
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == task["base_head"]
+    assert repo.branch(worktree) == task["branch"]
+
+    monkeypatch.setattr(lifecycle, "_unknown_ignored", original)
+    recovered = start(
+        repo,
+        name="recover partial branch",
+        request_id="recover-partial-branch",
+    )
+
+    assert recovered["id"] == task["id"]
+    assert recovered["status"] == "active"
+    assert recovered["request_reused"] is True
+    assert repo.branch(worktree) == task["branch"]
+
+
+def test_recover_rejects_a_task_that_was_already_active(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="do not reinterpret active task")
+    StateStore(repo).quarantine(task["id"], "simulated later lifecycle quarantine")
+
+    with pytest.raises(SoloAIError, match="pre-activation Start"):
+        recover(repo, task_id=task["id"])
+
+    assert StateStore(repo).task(task["id"])["status"] == "quarantined"
+
+
 def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
     git_repo: Path,
 ) -> None:

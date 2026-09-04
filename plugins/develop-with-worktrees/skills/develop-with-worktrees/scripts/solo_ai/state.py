@@ -600,6 +600,71 @@ class StateStore:
 
         return self.mutate(update)
 
+    def resume_quarantined_start(
+        self,
+        task_id: str,
+        *,
+        operation_id: str | None,
+        candidate_head: str,
+        baseline_paths: list[str],
+        worktree_identity: dict[str, object],
+        managed_root_identity: dict[str, object],
+        worktree_resolved: str,
+        managed_root_resolved: str,
+    ) -> dict[str, Any]:
+        """在 Git 现场完成复核后，原子续接尚未激活的隔离 Start。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            if (
+                not task
+                or self.mode(task) != ISOLATED_MODE
+                or task.get("status") != "quarantined"
+                or task.get("candidate_publication")
+                or task.get("integration")
+                or task.get("abandonment")
+                or task.get("runtime_activation") is not None
+                or task.get("runtime_activation_pending") is False
+            ):
+                raise SoloAIError(
+                    "Only a quarantined pre-activation Start can be resumed"
+                )
+            active = task.get("active_operation") or {}
+            if operation_id is not None:
+                if active.get("id") != operation_id or active.get("kind") != "recover":
+                    raise SoloAIError(
+                        "Quarantined Start recovery lost its exact operation"
+                    )
+            elif active and process_matches(active.get("owner", {})):
+                raise SoloAIError("A live operation blocks Start recovery")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "quarantined"
+            ):
+                raise SoloAIError("Quarantined Start lost its exact managed slot")
+            task.update(
+                {
+                    "status": "starting",
+                    "lease": uuid.uuid4().hex,
+                    "lease_owner": process_snapshot(),
+                    "candidate_head": candidate_head,
+                    "baseline_paths": list(baseline_paths),
+                    "slot_worktree_identity": copy.deepcopy(worktree_identity),
+                    "slot_managed_root_identity": copy.deepcopy(managed_root_identity),
+                    "slot_worktree_resolved": worktree_resolved,
+                    "slot_managed_root_resolved": managed_root_resolved,
+                    "runtime_activation_pending": True,
+                    "quarantine_reason": None,
+                    "updated_at": utc_timestamp(),
+                }
+            )
+            slot.update({"status": "starting", "quarantine_reason": None})
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     def prepare_integration(
         self,
         task_id: str,

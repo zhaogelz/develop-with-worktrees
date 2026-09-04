@@ -1585,11 +1585,14 @@ def _human(command: str, result: dict[str, Any]) -> str:
             "Completed in place" if result.get("mode") == "in-place" else "Integrated"
         )
         return f"{verb} {result['task_id']} at {result['integrated_head']} ({label})."
-    if command == "batch" and result.get("status") == "completed":
+    batch = result.get("batch") if command == "batch" else None
+    if command == "batch" and not isinstance(batch, dict):
+        batch = result
+    if command == "batch" and batch.get("status") == "completed":
         return (
-            f"Integrated batch {result['id']} at {result['integrated_head']} "
-            f"from {len(result['candidate_ids'])} candidate(s) "
-            f"({result.get('trigger', 'explicit_tail')})."
+            f"Integrated batch {batch['id']} at {batch['integrated_head']} "
+            f"from {len(batch['candidate_ids'])} candidate(s) "
+            f"({batch.get('trigger', 'explicit_tail')})."
         )
     if command in {"recover", "resume-in-place"}:
         if result.get("status") == "completed":
