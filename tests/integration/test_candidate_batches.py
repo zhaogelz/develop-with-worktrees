@@ -549,6 +549,42 @@ def test_batch_cleanup_removes_known_recreatable_ignored_content(
     assert all(item.path != observed_worktree for item in repo.worktrees())
 
 
+def test_batch_cleanup_treats_protected_names_inside_dependencies_as_recreatable(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore reproducible dependencies")
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="dependency storage types", relative="candidate.txt")
+    original_promote = batch_module._promote
+    observed_worktree: Path | None = None
+
+    def promote_with_dependency_storage(repo, store, batch):
+        nonlocal observed_worktree
+        observed_worktree = Path(batch["worktree"])
+        dependency = (
+            observed_worktree
+            / "node_modules"
+            / "@vendor"
+            / "package"
+            / "types"
+            / "storage"
+            / "cache-manager.d.ts"
+        )
+        dependency.parent.mkdir(parents=True)
+        dependency.write_text("export {};\n", encoding="utf-8")
+        return original_promote(repo, store, batch)
+
+    monkeypatch.setattr(batch_module, "_promote", promote_with_dependency_storage)
+    completed = seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    assert completed["status"] == "completed"
+    assert observed_worktree is not None
+    assert not observed_worktree.exists()
+    assert all(item.path != observed_worktree for item in repo.worktrees())
+
+
 def test_protected_ignored_content_blocks_promotion_until_exact_recovery(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -24,6 +24,11 @@ KNOWN_RETAINED_ROOTS = {
     ".ruff_cache",
 }
 
+# 这些根目录完全由依赖锁或工具输出生成。依赖内容可以合法包含
+# ``storage`` 或 ``*.db`` 等名称，这些名称不会把生成依赖变成项目数据。
+# 开放式缓存根不在此集合中，其受保护后代仍会阻止自动清理。
+OPAQUE_RECREATABLE_ROOTS = KNOWN_RETAINED_ROOTS - {".tmp", ".cache"}
+
 
 @dataclass(frozen=True)
 class CleanupPolicy:
@@ -117,11 +122,16 @@ def inspect_untracked(
     paths = sorted(set(repo.untracked(cwd)) | ignored)
     for relative in paths:
         _require_plain_path(cwd / relative, cwd)
+        parts = tuple(part.casefold() for part in Path(relative).parts)
+        if relative in ignored and any(
+            part in OPAQUE_RECREATABLE_ROOTS for part in parts
+        ):
+            result["retained"].append(relative)
+            continue
         classification = classify_cleanup_path(relative, policy)
         if classification in {"keep", "protected"}:
             result[classification].append(relative)
         elif relative in ignored:
-            parts = tuple(part.casefold() for part in Path(relative).parts)
             if (
                 any(part in KNOWN_RETAINED_ROOTS for part in parts)
                 or Path(relative).name.casefold() == "uv.toml"
