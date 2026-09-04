@@ -33,6 +33,38 @@ def test_human_batch_output_accepts_direct_and_reconcile_results() -> None:
     )
 
 
+def test_runtime_adapter_repair_cli_requires_an_exact_path(git_repo: Path) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "recover",
+            "--task",
+            "task-missing",
+            "--repair-runtime-adapter",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "requires at least one exact --path" in completed.stderr
+
+
 def test_release_version_contract_matches_manifest_metadata_and_cli(
     git_repo: Path,
 ) -> None:

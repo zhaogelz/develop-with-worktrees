@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .config import CommandSpec, load_repo_config, load_verification_config
+from .config import CommandSpec, RepoConfig, load_repo_config, load_verification_config
 from .proof import require_approved_plan
 from .repo import GitRepo
 from .util import (
@@ -23,6 +23,15 @@ from .util import (
 ADAPTER_CONTEXT_SCHEMA = 1
 ADAPTER_RECEIPT_SCHEMA = 1
 BATCH_PORT_BLOCK_OFFSET = 3200
+
+
+def _context_record(operation: str, context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": ADAPTER_CONTEXT_SCHEMA,
+        "contract": "dww-runtime-adapter-v1",
+        "operation": operation,
+        **copy.deepcopy(context),
+    }
 
 
 def _adapter_input_hashes(
@@ -84,12 +93,7 @@ def _invoke(
     context: dict[str, Any],
     reusable_success: bool,
 ) -> dict[str, Any]:
-    context_record = {
-        "schema_version": ADAPTER_CONTEXT_SCHEMA,
-        "contract": "dww-runtime-adapter-v1",
-        "operation": operation,
-        **copy.deepcopy(context),
-    }
+    context_record = _context_record(operation, context)
     context_digest = sha256_text(stable_json(context_record))
     invocation_id = (
         f"adapter-{context_digest[:32]}"
@@ -155,16 +159,16 @@ def _invoke(
     return {**receipt, "reused": False}
 
 
-def activate_task_runtime(
+def _task_activation_request(
     repo: GitRepo,
     *,
     task: dict[str, Any],
-) -> dict[str, Any]:
+) -> tuple[RepoConfig, CommandSpec | None, dict[str, Any]]:
     worktree = Path(str(task["worktree"]))
     config = load_repo_config(repo, cwd=worktree)
     command = config.runtime_adapter.activate
     if command is None:
-        return {"configured": False, "operation": "activate"}
+        return config, None, {}
     if task.get("slot_id") is None:
         raise SoloAIError(
             "runtime_adapter.activate requires an isolated task with a managed slot"
@@ -175,13 +179,10 @@ def activate_task_runtime(
     )
     slot_number = int(str(task["slot_id"]))
     slot_port_base = config.port_base + (slot_number - 1) * 100
-    receipt = _invoke(
-        repo,
-        cwd=worktree,
-        operation="activate",
-        command=command,
-        timeout_seconds=config.runtime_adapter.timeout_seconds,
-        context={
+    return (
+        config,
+        command,
+        {
             "reason": "task-started",
             "task_id": task["id"],
             "task_mode": task.get("mode"),
@@ -194,6 +195,52 @@ def activate_task_runtime(
             "port_block_end": slot_port_base + 99,
             "adapter_inputs": adapter_inputs,
         },
+    )
+
+
+def require_failed_task_runtime_activation(
+    repo: GitRepo, *, task: dict[str, Any]
+) -> RepoConfig:
+    config, command, context = _task_activation_request(repo, task=task)
+    if command is None or config.runtime_adapter.release is None:
+        raise SoloAIError(
+            "Runtime Adapter repair requires both activate and release commands"
+        )
+    context_digest = sha256_text(stable_json(_context_record("activate", context)))
+    invocation_id = f"adapter-{context_digest[:32]}"
+    receipt = read_json(
+        repo.local_dir / "runtime-adapter" / "receipts" / f"{invocation_id}.json",
+        {},
+    )
+    if (
+        receipt.get("schema_version") != ADAPTER_RECEIPT_SCHEMA
+        or receipt.get("context_digest") != context_digest
+        or receipt.get("command_digest") != command.fingerprint
+        or receipt.get("result") != "failed"
+        or not _logs_exist(receipt)
+    ):
+        raise SoloAIError(
+            "Runtime Adapter repair requires the exact persisted failed activation receipt"
+        )
+    return config
+
+
+def activate_task_runtime(
+    repo: GitRepo,
+    *,
+    task: dict[str, Any],
+) -> dict[str, Any]:
+    worktree = Path(str(task["worktree"]))
+    config, command, context = _task_activation_request(repo, task=task)
+    if command is None:
+        return {"configured": False, "operation": "activate"}
+    receipt = _invoke(
+        repo,
+        cwd=worktree,
+        operation="activate",
+        command=command,
+        timeout_seconds=config.runtime_adapter.timeout_seconds,
+        context=context,
         reusable_success=True,
     )
     return {"configured": True, **receipt}
@@ -209,6 +256,9 @@ def release_task_runtime(
     worktree = Path(str(task["worktree"]))
     config = load_repo_config(repo, cwd=worktree)
     command = config.runtime_adapter.release
+    repair = task.get("runtime_adapter_repair") or {}
+    if repair.get("release_required") and command is None:
+        raise SoloAIError("Runtime Adapter repair removed its required release command")
     if command is None:
         return {"configured": False, "operation": "release"}
     _require_approval(repo, cwd=worktree)
@@ -216,25 +266,27 @@ def release_task_runtime(
     adapter_inputs = _adapter_input_hashes(
         repo, cwd=worktree, patterns=config.runtime_adapter.input_paths
     )
+    context = {
+        "reason": "runtime-adapter-repair" if repair else reason,
+        "task_id": task["id"],
+        "task_mode": task.get("mode"),
+        "worktree": str(worktree.resolve()),
+        "base_ref": task.get("base_ref"),
+        "base_head": task.get("base_head"),
+        "candidate_id": selected_candidate.get("candidate_id"),
+        "candidate_head": selected_candidate.get("head") or task.get("candidate_head"),
+        "registered_processes": copy.deepcopy(task.get("processes", [])),
+        "adapter_inputs": adapter_inputs,
+    }
+    if repair:
+        context["repair_mode"] = True
     receipt = _invoke(
         repo,
         cwd=worktree,
         operation="release",
         command=command,
         timeout_seconds=config.runtime_adapter.timeout_seconds,
-        context={
-            "reason": reason,
-            "task_id": task["id"],
-            "task_mode": task.get("mode"),
-            "worktree": str(worktree.resolve()),
-            "base_ref": task.get("base_ref"),
-            "base_head": task.get("base_head"),
-            "candidate_id": selected_candidate.get("candidate_id"),
-            "candidate_head": selected_candidate.get("head")
-            or task.get("candidate_head"),
-            "registered_processes": copy.deepcopy(task.get("processes", [])),
-            "adapter_inputs": adapter_inputs,
-        },
+        context=context,
         reusable_success=True,
     )
     return {"configured": True, **receipt}

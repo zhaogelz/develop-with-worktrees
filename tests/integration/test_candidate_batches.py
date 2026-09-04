@@ -171,6 +171,7 @@ def test_runtime_adapter_activate_prepares_the_exact_slot_before_start_returns(
     assert context["task_id"] == task["id"]
     assert context["slot_id"] == task["slot_id"]
     assert context["worktree"] == str(Path(task["worktree"]).resolve())
+    assert context["candidate_head"] == task["base_head"]
     assert context["port_block_end"] - context["port_block_start"] == 99
     assert (Path(task["worktree"]) / ".tmp/project-runtime/active.txt").is_file()
 
@@ -241,6 +242,140 @@ def test_runtime_adapter_activate_failure_is_retryable_by_recover(
     assert recovered["id"] == pending["id"]
     assert recovered["status"] == "active"
     assert StateStore(repo).read()["slots"][pending["slot_id"]]["status"] == ("active")
+
+
+def test_failed_activation_can_become_a_restricted_adapter_repair(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    release_context = repo.local_dir / "adapter-repair-release.json"
+    failing_activate = "raise SystemExit(1)"
+    repaired_activate = "pass"
+    release_script = (
+        "from pathlib import Path; import json, sys; "
+        "context=json.loads(Path(sys.argv[-1]).read_text(encoding='utf-8')); "
+        "assert context['reason'] == 'runtime-adapter-repair'; "
+        "assert context['repair_mode'] is True; "
+        f"Path({str(release_context)!r}).write_text(json.dumps(context), encoding='utf-8')"
+    )
+    install_runtime_adapter(
+        repo,
+        activate_script=failing_activate,
+        release_script=release_script,
+        verify_script="pass",
+    )
+
+    with pytest.raises(SoloAIError, match="Runtime Adapter activate failed"):
+        start(repo, name="repair broken adapter")
+    pending = max(
+        StateStore(repo).read()["tasks"].values(),
+        key=lambda item: item["created_at"],
+    )
+
+    repaired = recover(
+        repo,
+        task_id=pending["id"],
+        repair_runtime_adapter_paths=[".solo-ai/config.toml"],
+    )
+    worktree = Path(repaired["worktree"])
+    config = worktree / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            json.dumps([sys.executable, "-c", failing_activate]),
+            json.dumps([sys.executable, "-c", repaired_activate]),
+        ),
+        encoding="utf-8",
+    )
+    committed = commit_task(
+        repo,
+        task_id=repaired["id"],
+        lease=repaired["lease"],
+        message="test: repair runtime adapter",
+        paths=[".solo-ai/config.toml"],
+    )
+    approve(
+        repo,
+        load_verification_config(repo, cwd=worktree),
+        cwd=worktree,
+    )
+    ready(repo, task_id=repaired["id"], lease=repaired["lease"])
+
+    finished = finish(repo, task_id=repaired["id"], lease=repaired["lease"])
+
+    release = json.loads(release_context.read_text(encoding="utf-8"))
+    assert committed["runtime_adapter_repair"]["release_required"] is True
+    assert repaired["runtime_activation"]["skipped"] is True
+    assert finished["status"] == "candidate-published"
+    assert release["candidate_head"] == finished["candidate_head"]
+    assert StateStore(repo).read()["slots"][repaired["slot_id"]]["status"] == "idle"
+
+
+def test_adapter_repair_refuses_changes_outside_approved_inputs(git_repo: Path) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    install_runtime_adapter(
+        repo,
+        activate_script="raise SystemExit(1)",
+        release_script="pass",
+        verify_script="pass",
+    )
+    with pytest.raises(SoloAIError, match="Runtime Adapter activate failed"):
+        start(repo, name="restrict adapter repair")
+    pending = max(
+        StateStore(repo).read()["tasks"].values(),
+        key=lambda item: item["created_at"],
+    )
+    with pytest.raises(SoloAIError, match="tracked and covered"):
+        recover(
+            repo,
+            task_id=pending["id"],
+            repair_runtime_adapter_paths=["outside.txt"],
+        )
+    repaired = recover(
+        repo,
+        task_id=pending["id"],
+        repair_runtime_adapter_paths=[".solo-ai/config.toml"],
+    )
+    (Path(repaired["worktree"]) / "outside.txt").write_text(
+        "not an adapter input\n", encoding="utf-8"
+    )
+
+    with pytest.raises(SoloAIError, match="approved config and input_paths"):
+        commit_task(
+            repo,
+            task_id=repaired["id"],
+            lease=repaired["lease"],
+            message="test: reject adapter repair scope escape",
+            paths=["outside.txt"],
+        )
+
+
+def test_adapter_repair_requires_the_exact_failed_activation_receipt(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    install_runtime_adapter(
+        repo,
+        activate_script="raise SystemExit(1)",
+        release_script="pass",
+        verify_script="pass",
+    )
+    with pytest.raises(SoloAIError, match="Runtime Adapter activate failed"):
+        start(repo, name="require failed activation receipt")
+    pending = max(
+        StateStore(repo).read()["tasks"].values(),
+        key=lambda item: item["created_at"],
+    )
+    for receipt in (repo.local_dir / "runtime-adapter" / "receipts").glob("*.json"):
+        receipt.unlink()
+
+    with pytest.raises(SoloAIError, match="exact persisted failed activation receipt"):
+        recover(
+            repo,
+            task_id=pending["id"],
+            repair_runtime_adapter_paths=[".solo-ai/config.toml"],
+        )
+
+    assert StateStore(repo).task(pending["id"])["status"] == "starting"
 
 
 def test_runtime_adapter_activate_success_receipt_is_reused_after_interruption(

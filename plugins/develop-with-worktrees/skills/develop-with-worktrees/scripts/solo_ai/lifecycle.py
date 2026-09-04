@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import fnmatch
 import json
 import os
 import platform
@@ -1064,6 +1065,15 @@ def commit_task(
         )
         changed = set(repo.changed_paths(worktree))
         requested = set(paths)
+        repair = task.get("runtime_adapter_repair") or {}
+        if repair:
+            allowed_paths = set(repair.get("allowed_paths") or ())
+            disallowed = sorted(requested - allowed_paths)
+            if disallowed:
+                raise SoloAIError(
+                    "Runtime Adapter repair may only commit its approved config and input_paths:\n"
+                    + "\n".join(f"- {path}" for path in disallowed)
+                )
         if changed != requested:
             missing = sorted(changed - requested)
             extra = sorted(requested - changed)
@@ -2029,12 +2039,103 @@ def finish(
     return candidate_result
 
 
-def recover(repo: GitRepo, *, task_id: str) -> dict[str, Any]:
+def _recover_runtime_adapter_repair(
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    paths: list[str],
+) -> dict[str, Any]:
+    if (
+        _is_in_place(task)
+        or task.get("status") != "starting"
+        or task.get("runtime_activation_pending") is not True
+        or task.get("runtime_activation") is not None
+        or task.get("candidate_publication")
+        or task.get("integration")
+        or task.get("abandonment")
+    ):
+        raise SoloAIError(
+            "Runtime Adapter repair only applies to a failed pre-activation isolated task"
+        )
+    active = task.get("active_operation") or {}
+    if active and process_matches(active.get("owner", {})):
+        raise SoloAIError("Task still has a live operation; recovery is unsafe")
+    _assert_starting_task_identity(repo, task)
+    worktree = Path(str(task["worktree"]))
+    from .runtime_adapter import require_failed_task_runtime_activation
+
+    config = require_failed_task_runtime_activation(repo, task=task)
+    if (
+        not paths
+        or len(paths) != len(set(paths))
+        or any(not _path_is_safe(path) for path in paths)
+    ):
+        raise SoloAIError(
+            "Runtime Adapter repair requires unique repository-relative exact --path values"
+        )
+    tracked = set(
+        item
+        for item in repo.git(["ls-files", "-z"], cwd=worktree).stdout.split("\0")
+        if item
+    )
+    allowed_inputs = set(config.runtime_adapter.input_paths)
+    invalid = sorted(
+        path
+        for path in paths
+        if path not in tracked
+        or (
+            path != ".solo-ai/config.toml"
+            and not any(
+                fnmatch.fnmatchcase(path, pattern) for pattern in allowed_inputs
+            )
+        )
+    )
+    if invalid:
+        raise SoloAIError(
+            "Runtime Adapter repair paths must be tracked and covered by the approved input_paths:\n"
+            + "\n".join(f"- {path}" for path in invalid)
+        )
+    allowed_paths = tuple(paths)
+    repair = {
+        "schema_version": 1,
+        "allowed_paths": list(allowed_paths),
+        "release_required": True,
+        "recovered_at": utc_timestamp(),
+    }
+    activated = store.activate_started_task(
+        str(task["id"]),
+        runtime_activation={
+            "configured": True,
+            "operation": "activate",
+            "skipped": True,
+            "reason": "runtime-adapter-repair",
+        },
+        runtime_adapter_repair=repair,
+    )
+    anchor = require_anchor(repo, activated)
+    return {**activated, "anchor_path": str(anchor.resolve())}
+
+
+def recover(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    repair_runtime_adapter_paths: list[str] | None = None,
+) -> dict[str, Any]:
     """根据持久化事务和 Git 事实恢复；失败时不轮换租约或改变现场。"""
     _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     store.reconcile_operation_receipts()
     task = store.task(task_id)
+    if repair_runtime_adapter_paths is not None:
+        with maintenance_lock(repo):
+            return _recover_runtime_adapter_repair(
+                repo,
+                store=store,
+                task=task,
+                paths=repair_runtime_adapter_paths,
+            )
     if task.get("status") == "candidate-published":
         from .candidate_batches import CandidateBatchStore, run_batch
 

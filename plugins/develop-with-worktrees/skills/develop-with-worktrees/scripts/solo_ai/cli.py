@@ -484,6 +484,17 @@ def _parser() -> argparse.ArgumentParser:
         help="recover an interrupted task from persisted identity and Git facts",
     )
     recover.add_argument("--task", required=True)
+    recover.add_argument(
+        "--repair-runtime-adapter",
+        action="store_true",
+        help="convert one failed pre-activation task into a path-restricted Runtime Adapter repair",
+    )
+    recover.add_argument(
+        "--path",
+        action="append",
+        dest="repair_path",
+        help="exact approved Adapter input path allowed for this repair; repeat for multiple paths",
+    )
 
     abandoned = sub.add_parser(
         "abandon", help="explicitly discard one task after exact confirmation"
@@ -1484,7 +1495,19 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "status":
         return _status(repo, detailed=args.detailed)
     if args.command == "recover":
-        return recover(repo, task_id=args.task)
+        if args.repair_path and not args.repair_runtime_adapter:
+            raise SoloAIError("recover --path requires --repair-runtime-adapter")
+        if args.repair_runtime_adapter and not args.repair_path:
+            raise SoloAIError(
+                "recover --repair-runtime-adapter requires at least one exact --path"
+            )
+        return recover(
+            repo,
+            task_id=args.task,
+            repair_runtime_adapter_paths=(
+                args.repair_path if args.repair_runtime_adapter else None
+            ),
+        )
     if args.command == "resume-in-place":
         return resume_in_place(
             repo,

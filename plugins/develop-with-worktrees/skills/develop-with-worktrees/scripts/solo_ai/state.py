@@ -574,7 +574,11 @@ class StateStore:
         return self.mutate(update)
 
     def activate_started_task(
-        self, task_id: str, *, runtime_activation: dict[str, Any]
+        self,
+        task_id: str,
+        *,
+        runtime_activation: dict[str, Any],
+        runtime_adapter_repair: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
@@ -592,6 +596,7 @@ class StateStore:
                     "status": "active",
                     "runtime_activation": copy.deepcopy(runtime_activation),
                     "runtime_activation_pending": False,
+                    "runtime_adapter_repair": copy.deepcopy(runtime_adapter_repair),
                     "updated_at": utc_timestamp(),
                 }
             )
