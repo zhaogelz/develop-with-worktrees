@@ -135,6 +135,11 @@ class CandidateBatchStore:
                     policy.get("activation_epoch") or "legacy-explicit"
                 ),
                 candidate_ids=[str(item) for item in batch.get("candidate_ids", [])],
+                after_failed_batch_id=(
+                    str(batch["after_failed_batch"])
+                    if batch.get("after_failed_batch")
+                    else None
+                ),
             )
         return value
 
@@ -198,17 +203,22 @@ class CandidateBatchStore:
         base_ref: str,
         activation_epoch: str,
         candidate_ids: list[str],
+        after_failed_batch_id: str | None = None,
     ) -> str:
-        return sha256_text(
-            stable_json(
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "base_ref": base_ref,
+            "activation_epoch": activation_epoch,
+            "candidate_ids": candidate_ids,
+        }
+        if after_failed_batch_id:
+            payload.update(
                 {
-                    "schema_version": 1,
-                    "base_ref": base_ref,
-                    "activation_epoch": activation_epoch,
-                    "candidate_ids": candidate_ids,
+                    "schema_version": 2,
+                    "after_failed_batch": after_failed_batch_id,
                 }
             )
-        )
+        return sha256_text(stable_json(payload))
 
     def _seal_in_value(
         self,
@@ -217,6 +227,7 @@ class CandidateBatchStore:
         *,
         batch_size: int,
         trigger: str,
+        after_failed_batch_id: str | None = None,
     ) -> dict[str, Any]:
         if not candidate_ids or len(candidate_ids) > batch_size:
             raise SoloAIError(
@@ -243,12 +254,29 @@ class CandidateBatchStore:
             raise SoloAIError("One batch can target only one local base branch")
         if len(activation_epochs) != 1:
             raise SoloAIError("One batch can contain only one integration policy lane")
+        if after_failed_batch_id:
+            previous = value["batches"].get(after_failed_batch_id)
+            if not previous:
+                raise SoloAIError(
+                    f"Unknown previous failed batch: {after_failed_batch_id}"
+                )
+            if previous.get("status") != "failed":
+                raise SoloAIError(
+                    "A reviewed reseal must name a durably failed previous batch"
+                )
+            if [
+                str(item) for item in previous.get("candidate_ids", [])
+            ] != candidate_ids:
+                raise SoloAIError(
+                    "A reviewed reseal must use the previous failed batch's exact ordered candidates"
+                )
         base_ref = next(iter(base_refs))
         activation_epoch = next(iter(activation_epochs))
         seal_intent_id = self._seal_intent(
             base_ref=base_ref,
             activation_epoch=activation_epoch,
             candidate_ids=candidate_ids,
+            after_failed_batch_id=after_failed_batch_id,
         )
         for existing in value["batches"].values():
             if existing.get("seal_intent_id") == seal_intent_id:
@@ -285,6 +313,7 @@ class CandidateBatchStore:
             "base_ref": base_ref,
             "base_before": base_before,
             "candidate_ids": list(candidate_ids),
+            "after_failed_batch": after_failed_batch_id,
             "candidates": candidates,
             "integration_policy": copy.deepcopy(
                 candidates[0].get("integration_policy") or LEGACY_EXPLICIT_POLICY
@@ -505,13 +534,20 @@ class CandidateBatchStore:
 
         return self.mutate(update)
 
-    def seal(self, candidate_ids: list[str], *, batch_size: int) -> dict[str, Any]:
+    def seal(
+        self,
+        candidate_ids: list[str],
+        *,
+        batch_size: int,
+        after_failed_batch_id: str | None = None,
+    ) -> dict[str, Any]:
         return self.mutate(
             lambda value: self._seal_in_value(
                 value,
                 candidate_ids,
                 batch_size=batch_size,
                 trigger="explicit_tail",
+                after_failed_batch_id=after_failed_batch_id,
             )
         )
 
@@ -1404,7 +1440,12 @@ def _resume(
     return batch
 
 
-def seal_batch(repo: GitRepo, *, candidate_ids: list[str]) -> dict[str, Any]:
+def seal_batch(
+    repo: GitRepo,
+    *,
+    candidate_ids: list[str],
+    after_failed_batch_id: str | None = None,
+) -> dict[str, Any]:
     from .lifecycle import _config_and_mode
 
     config, _, _ = _config_and_mode(repo)
@@ -1421,6 +1462,7 @@ def seal_batch(repo: GitRepo, *, candidate_ids: list[str]) -> dict[str, Any]:
             batch_size=int(
                 frozen_policy.get("batch_size", config.integration.batch_size)
             ),
+            after_failed_batch_id=after_failed_batch_id,
         )
     return run_batch(repo, batch_id=str(batch["id"]))
 

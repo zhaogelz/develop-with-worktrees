@@ -385,6 +385,10 @@ def _parser() -> argparse.ArgumentParser:
         help="explicitly close and integrate the exact listed tail candidates",
     )
     batch_seal.add_argument("--candidate", action="append", required=True)
+    batch_seal.add_argument(
+        "--after-failed-batch",
+        help="create one reviewed idempotent generation after this exact failed batch",
+    )
     batch_reconcile = batch_sub.add_parser(
         "reconcile",
         help="freeze one full or proven quiet tail batch from persisted facts",
@@ -1374,7 +1378,11 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 return {"batches": [store.batch(args.batch)]}
             return store.summary()
         if args.batch_command == "seal":
-            return seal_batch(repo, candidate_ids=args.candidate)
+            return seal_batch(
+                repo,
+                candidate_ids=args.candidate,
+                after_failed_batch_id=args.after_failed_batch,
+            )
         if args.batch_command == "reconcile":
             return reconcile_batches(repo, force=args.force, cause=args.cause)
         if args.batch_command == "recover":

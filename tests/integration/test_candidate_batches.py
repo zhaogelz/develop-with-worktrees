@@ -1170,6 +1170,76 @@ def test_failed_combined_validation_preserves_base_and_generation_is_not_rerun(
         batch_module.recover_batch(repo, batch_id=failed["id"])
 
 
+def test_reviewed_reseal_of_exact_failed_generation_is_new_and_idempotent(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="reviewed reseal", relative="reseal.txt")
+    base_before = repo.head(git_repo)
+    original_validate = batch_module.validate
+
+    monkeypatch.setattr(
+        batch_module,
+        "validate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            SoloAIError("reviewed external failure")
+        ),
+    )
+    with pytest.raises(SoloAIError, match="reviewed external failure"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    failed = CandidateBatchStore(repo).summary()["batches"][0]
+    monkeypatch.setattr(batch_module, "validate", original_validate)
+    completed = seal_batch(
+        repo,
+        candidate_ids=[candidate["candidate_id"]],
+        after_failed_batch_id=failed["id"],
+    )
+    repeated = seal_batch(
+        repo,
+        candidate_ids=[candidate["candidate_id"]],
+        after_failed_batch_id=failed["id"],
+    )
+
+    assert failed["status"] == "failed"
+    assert completed["status"] == "completed"
+    assert completed["id"] != failed["id"]
+    assert completed["after_failed_batch"] == failed["id"]
+    assert repeated["id"] == completed["id"]
+    assert repo.head(git_repo) != base_before
+
+
+def test_reviewed_reseal_requires_exact_failed_predecessor_and_candidates(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    first = publish(repo, name="first reseal candidate", relative="first.txt")
+    second = publish(repo, name="second reseal candidate", relative="second.txt")
+    monkeypatch.setattr(
+        batch_module,
+        "validate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            SoloAIError("reviewed external failure")
+        ),
+    )
+    with pytest.raises(SoloAIError, match="reviewed external failure"):
+        seal_batch(repo, candidate_ids=[first["candidate_id"]])
+    failed = CandidateBatchStore(repo).summary()["batches"][0]
+
+    with pytest.raises(SoloAIError, match="Unknown previous failed batch"):
+        CandidateBatchStore(repo).seal(
+            [second["candidate_id"]],
+            batch_size=5,
+            after_failed_batch_id="batch-missing",
+        )
+    with pytest.raises(SoloAIError, match="exact ordered candidates"):
+        CandidateBatchStore(repo).seal(
+            [second["candidate_id"]],
+            batch_size=5,
+            after_failed_batch_id=failed["id"],
+        )
+
+
 def test_batch_runtime_adapter_wraps_full_validation_and_uses_dedicated_ports(
     git_repo: Path,
 ) -> None:
