@@ -26,6 +26,7 @@ SETTINGS_SCHEMA = 1
 QUEUE_SCHEMA = 1
 MAX_CAPACITY = 4
 SLOW_VALIDATION_SECONDS = 10 * 60
+INHERITED_CLAIM_ENV = "DWW_VALIDATION_PARENT_CLAIM"
 
 
 def _machine_root() -> Path:
@@ -182,6 +183,48 @@ def _active_units(active: dict[str, Any]) -> int:
     return sum(int(item.get("units", 0)) for item in active.values())
 
 
+def inherited_claim_environment(claim: dict[str, Any]) -> dict[str, str]:
+    """把当前活动票据显式传给其受控子进程。"""
+
+    return {INHERITED_CLAIM_ENV: str(claim["id"])}
+
+
+def _is_current_process_descendant(owner: dict[str, Any]) -> bool:
+    """仅凭活的 OS 进程祖先链确认票据继承关系。"""
+
+    if not process_matches(owner):
+        return False
+    try:
+        current = psutil.Process()
+        lineage = [current, *current.parents()]
+    except (psutil.Error, OSError):
+        return False
+    owner_pid = owner.get("pid")
+    return any(process.pid == owner_pid for process in lineage)
+
+
+def _inherited_claim(
+    state: dict[str, Any], *, resource_class: str
+) -> dict[str, Any] | None:
+    claim_id = os.environ.get(INHERITED_CLAIM_ENV)
+    if not claim_id:
+        return None
+    claim = state.setdefault("active", {}).get(claim_id)
+    if not claim or not _is_current_process_descendant(claim.get("owner", {})):
+        return None
+    if claim.get("resource_class") == "normal" and resource_class == "heavy":
+        raise SoloAIError(
+            "Nested heavy validation cannot inherit a normal parent claim; declare the outer validation heavy"
+        )
+    return {
+        **claim,
+        "units": 0,
+        "wait_seconds": 0.0,
+        "inherited": True,
+        "inherited_from": claim_id,
+    }
+
+
 def queue_status() -> dict[str, Any]:
     """读取全机队列，不会占用任何仓库的生命周期锁。"""
     with DirectoryLock(_queue_lock(), wait=True):
@@ -221,6 +264,16 @@ def claim_validation_slot(resource_class: str) -> Iterator[dict[str, Any]]:
     """按全机 FIFO 领取验证资源；等待期间不持有仓库状态锁。"""
     if resource_class not in {"normal", "heavy"}:
         raise SoloAIError("Validation resource_class must be normal or heavy")
+    with DirectoryLock(_queue_lock(), wait=True):
+        state = read_json(_queue_state_path(), _default_queue_state())
+        if state.get("schema_version") != QUEUE_SCHEMA:
+            raise SoloAIError("Unsupported machine validation queue schema")
+        _cleanup_stale_locked(state)
+        inherited = _inherited_claim(state, resource_class=resource_class)
+        atomic_write_json(_queue_state_path(), state)
+    if inherited is not None:
+        yield inherited
+        return
     ticket_id = new_id("validation")
     ticket = {
         "schema_version": QUEUE_SCHEMA,

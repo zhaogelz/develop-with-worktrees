@@ -22,12 +22,21 @@ KNOWN_RETAINED_ROOTS = {
     "__pycache__",
     ".pytest_cache",
     ".ruff_cache",
+    "dist",
+    ".swc",
 }
+KNOWN_RECREATABLE_FILE_SUFFIXES = (".tsbuildinfo",)
 
 # 这些根目录完全由依赖锁或工具输出生成。依赖内容可以合法包含
 # ``storage`` 或 ``*.db`` 等名称，这些名称不会把生成依赖变成项目数据。
 # 开放式缓存根不在此集合中，其受保护后代仍会阻止自动清理。
-OPAQUE_RECREATABLE_ROOTS = KNOWN_RETAINED_ROOTS - {".tmp", ".cache"}
+OPAQUE_RECREATABLE_ROOTS = {
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+}
 
 
 @dataclass(frozen=True)
@@ -134,6 +143,10 @@ def inspect_untracked(
         elif relative in ignored:
             if (
                 any(part in KNOWN_RETAINED_ROOTS for part in parts)
+                or any(
+                    Path(relative).name.casefold().endswith(suffix)
+                    for suffix in KNOWN_RECREATABLE_FILE_SUFFIXES
+                )
                 or Path(relative).name.casefold() == "uv.toml"
             ):
                 result["retained"].append(relative)

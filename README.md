@@ -40,6 +40,8 @@ Projects may configure a Runtime Adapter. At Start it can establish ignored proj
 
 A composition conflict tied to one candidate can prepare up to two managed repair generations on the latest base. The agent continues only when code, contracts, and tests determine one answer; product, permission, migration, deletion, and security choices still stop for a human. Final-validation failures are never disguised as merge conflicts and blindly retried.
 
+After a generation is durably failed, `batch retire --batch <id>` can remove only its exact clean detached worktree while preserving candidate refs and audit facts; retries are idempotent. `batch metrics` reads existing lifecycle and proof facts to report full/tail rates, candidate wait time, and executed Full cost before changing batch-size policy.
+
 Legacy repositories may keep explicit direct or explicit-seal policies during migration. New repositories use the candidate-first flow.
 
 ## Installation

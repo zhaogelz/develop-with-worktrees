@@ -15,6 +15,10 @@
 - 修复 `batch reconcile` 已成功推进基线后人类可读输出仍报错，以及 Start 在分支与锚点建立前被隔离后无法按原任务身份恢复的问题；恢复仍保留链接和受保护内容并拒绝歧义现场。
 - 修复 Windows 对同一普通文件的路径 stat 与句柄 fstat 权限 mode 位不同、导致已通过对象身份与内容复核的可再生文件仍无法条件删除的问题；文件类型、文件索引、大小、哈希及链接保护保持失败关闭。
 - 新增 `recover --repair-runtime-adapter --path <exact-path>`：仅在精确失败回执证明项目 Adapter 自身阻塞首次激活时，把原任务转换为受限修复；可提交范围冻结为调用方逐项声明且已获批准的 Adapter 输入，Ready、批次 Full 和修复后 release 仍失败关闭，避免通过手工改主线解除自举死锁。
+- Windows 验证环境补充保留 `PROGRAMDATA`，使 OpenSSH、Docker 等系统级配置可被项目 Adapter 正常发现；未声明环境变量仍不会进入验证子进程。
+- 机器级验证队列支持经过活动票据和 OS 祖先链双重核验的后代重入，Full 内部发起的嵌套验证不再排队等待自己；normal 父票据请求 nested heavy 会直接失败，不会绕过容量。
+- 已知可再生清理增加现场验证过的 `dist/`、`.swc/` 和 `*.tsbuildinfo`，但这些前端输出根不视为 opaque，内部的数据库、上传或 storage 内容仍失败关闭。
+- 新增 `batch retire --batch <id>`，只幂等退休 failed 批次的精确 detached 工作树，保留候选 ref 和完整审计；新增只读 `batch metrics`，从现有事实汇总满批率、尾批率、候选等待和实际 Full 成本，为调整默认批量提供数据。
 
 ## 0.4.0-beta.1 — 2026-08-31
 

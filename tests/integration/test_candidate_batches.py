@@ -16,6 +16,7 @@ from solo_ai.candidate_batches import (
     CandidateBatchStore,
     prepare_candidate_repair,
     reconcile_batches,
+    retire_failed_batch,
     seal_batch,
 )
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
@@ -524,7 +525,9 @@ def test_finish_publishes_then_explicit_seal_integrates_exact_candidates(
 def test_batch_cleanup_removes_known_recreatable_ignored_content(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (git_repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    (git_repo / ".gitignore").write_text(
+        "node_modules/\ndist/\n.swc/\n*.tsbuildinfo\n", encoding="utf-8"
+    )
     git(git_repo, "add", ".gitignore")
     git(git_repo, "commit", "-m", "test: ignore reproducible dependencies")
     repo = initialized_batched(git_repo, auto_full=False)
@@ -538,6 +541,15 @@ def test_batch_cleanup_removes_known_recreatable_ignored_content(
         dependency = observed_worktree / "node_modules" / "package" / "index.js"
         dependency.parent.mkdir(parents=True)
         dependency.write_text("generated\n", encoding="utf-8")
+        (observed_worktree / "dist").mkdir()
+        (observed_worktree / "dist" / "bundle.js").write_text(
+            "generated\n", encoding="utf-8"
+        )
+        (observed_worktree / ".swc").mkdir()
+        (observed_worktree / ".swc" / "cache.bin").write_bytes(b"generated")
+        (observed_worktree / "tsconfig.tsbuildinfo").write_text(
+            "generated\n", encoding="utf-8"
+        )
         return original_promote(repo, store, batch)
 
     monkeypatch.setattr(batch_module, "_promote", promote_with_dependency)
@@ -547,6 +559,21 @@ def test_batch_cleanup_removes_known_recreatable_ignored_content(
     assert observed_worktree is not None
     assert not observed_worktree.exists()
     assert all(item.path != observed_worktree for item in repo.worktrees())
+
+
+def test_frontend_output_roots_do_not_hide_protected_content(git_repo: Path) -> None:
+    (git_repo / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore frontend output")
+    repo = GitRepo(git_repo)
+    protected = git_repo / "dist" / "storage" / "runtime.db"
+    protected.parent.mkdir(parents=True)
+    protected.write_text("must survive\n", encoding="utf-8")
+
+    inventory = cleanup_module.inspect_untracked(repo, cwd=git_repo)
+
+    assert inventory["protected"] == ["dist/storage/runtime.db"]
+    assert inventory["retained"] == []
 
 
 def test_batch_cleanup_treats_protected_names_inside_dependencies_as_recreatable(
@@ -1275,6 +1302,196 @@ def test_batch_validation_failure_releases_runtime_before_failed_closed(
     assert failed["failure_kind"] == "validation_failed"
     assert repo.head(git_repo) == base_before
     assert not active.exists()
+
+
+def test_failed_batch_retirement_is_exact_idempotent_and_preserves_candidate(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="retire failed", relative="retire.txt")
+
+    def fail_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        raise SoloAIError("synthetic retirement failure")
+
+    monkeypatch.setattr(batch_module, "validate", fail_validation)
+    with pytest.raises(SoloAIError, match="synthetic retirement failure"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    store = CandidateBatchStore(repo)
+    failed = store.summary()["batches"][0]
+    worktree = Path(failed["worktree"])
+    candidate_record = store.candidate(candidate["candidate_id"])
+
+    retired = retire_failed_batch(repo, batch_id=failed["id"])
+    repeated = retire_failed_batch(repo, batch_id=failed["id"])
+
+    assert retired["status"] == "failed"
+    assert retired["worktree_retirement_started_at"]
+    assert retired["worktree_retired_at"]
+    assert repeated["worktree_retired_at"] == retired["worktree_retired_at"]
+    assert not worktree.exists()
+    assert all(item.path != worktree for item in repo.worktrees())
+    assert repo.ref_head(candidate_record["ref"]) == candidate_record["head"]
+    assert (
+        CandidateBatchStore(repo).candidate(candidate["candidate_id"])["status"]
+        == "retained"
+    )
+
+
+def test_failed_batch_retirement_recovers_after_removal_before_final_projection(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="resume retirement", relative="resume-retire.txt")
+
+    def fail_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        raise SoloAIError("synthetic interrupted retirement")
+
+    monkeypatch.setattr(batch_module, "validate", fail_validation)
+    with pytest.raises(SoloAIError, match="synthetic interrupted retirement"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    store = CandidateBatchStore(repo)
+    failed = store.summary()["batches"][0]
+    worktree = Path(failed["worktree"])
+    store.update_batch(
+        failed["id"], worktree_retirement_started_at="2026-09-05T00:00:00Z"
+    )
+    repo.git(["worktree", "remove", str(worktree)])
+
+    retired = retire_failed_batch(repo, batch_id=failed["id"])
+
+    assert retired["worktree_retired_at"]
+    assert not worktree.exists()
+
+
+def test_failed_batch_retirement_preserves_unknown_ignored_output(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text("output/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore unknown output")
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="unknown output", relative="unknown.txt")
+
+    def fail_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        raise SoloAIError("synthetic unknown-output failure")
+
+    monkeypatch.setattr(batch_module, "validate", fail_validation)
+    with pytest.raises(SoloAIError, match="synthetic unknown-output failure"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    failed = CandidateBatchStore(repo).summary()["batches"][0]
+    worktree = Path(failed["worktree"])
+    unknown = worktree / "output" / "result.bin"
+    unknown.parent.mkdir(parents=True)
+    unknown.write_bytes(b"preserve")
+
+    with pytest.raises(SoloAIError, match="unknown content"):
+        retire_failed_batch(repo, batch_id=failed["id"])
+
+    assert unknown.read_bytes() == b"preserve"
+    assert any(item.path == worktree for item in repo.worktrees())
+
+
+def test_batch_retirement_rejects_a_nonfailed_generation(git_repo: Path) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="active generation", relative="active.txt")
+    batch = CandidateBatchStore(repo).seal([candidate["candidate_id"]], batch_size=5)
+
+    with pytest.raises(SoloAIError, match="Only a failed integration batch"):
+        retire_failed_batch(repo, batch_id=batch["id"])
+
+    assert batch["status"] == "sealed"
+
+
+def test_batch_metrics_are_derived_without_mutating_lifecycle_state(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    store = CandidateBatchStore(repo)
+    atomic_write_json(
+        store.path,
+        {
+            "schema_version": 3,
+            "next_publication_sequence": 4,
+            "updated_at": "2026-09-05T00:00:00Z",
+            "candidates": {
+                "candidate-a": {
+                    "candidate_id": "candidate-a",
+                    "status": "integrated",
+                    "published_at": "2026-09-05T00:00:00Z",
+                    "integrated_at": "2026-09-05T00:02:00Z",
+                    "integration_policy": {"batch_size": 2},
+                },
+                "candidate-b": {
+                    "candidate_id": "candidate-b",
+                    "status": "integrated",
+                    "published_at": "2026-09-05T00:01:00Z",
+                    "integrated_at": "2026-09-05T00:04:00Z",
+                    "integration_policy": {"batch_size": 2},
+                },
+                "candidate-c": {
+                    "candidate_id": "candidate-c",
+                    "status": "retained",
+                    "published_at": "2026-09-05T00:05:00Z",
+                    "integration_policy": {"batch_size": 2},
+                },
+            },
+            "batches": {
+                "batch-full": {
+                    "id": "batch-full",
+                    "status": "completed",
+                    "candidate_ids": ["candidate-a", "candidate-b"],
+                    "integration_policy": {"batch_size": 2},
+                    "proof": "aggregate-proof",
+                },
+                "batch-tail": {
+                    "id": "batch-tail",
+                    "status": "failed",
+                    "candidate_ids": ["candidate-c"],
+                    "integration_policy": {"batch_size": 2},
+                },
+            },
+        },
+    )
+    atomic_write_json(
+        repo.local_dir / "proofs" / "aggregate-proof.json",
+        {
+            "profile_proofs": [
+                {
+                    "fingerprint": "full-proof",
+                    "profile_id": "full",
+                    "reused": False,
+                }
+            ]
+        },
+    )
+    atomic_write_json(
+        repo.local_dir / "profile-proofs" / "full-proof.json",
+        {
+            "inputs": {"level": "full"},
+            "runs": [{"duration_seconds": 12.5}],
+        },
+    )
+    before = store.path.read_bytes()
+
+    metrics = store.metrics()
+
+    assert metrics["terminal_batches"] == 2
+    assert metrics["completed_batches"] == 1
+    assert metrics["failed_batches"] == 1
+    assert metrics["full_batch_rate"] == 0.5
+    assert metrics["tail_batch_rate"] == 0.5
+    assert metrics["candidate_wait_seconds"] == {
+        "count": 2,
+        "minimum": 120.0,
+        "median": 150.0,
+        "p95": 180.0,
+        "maximum": 180.0,
+        "mean": 150.0,
+    }
+    assert metrics["executed_full_validation_seconds"]["median"] == 12.5
+    assert metrics["reused_full_profiles"] == 0
+    assert metrics["missing_full_proofs"] == 0
+    assert store.path.read_bytes() == before
 
 
 def test_batch_runtime_release_failure_blocks_promotion_and_recovery_reuses_full(

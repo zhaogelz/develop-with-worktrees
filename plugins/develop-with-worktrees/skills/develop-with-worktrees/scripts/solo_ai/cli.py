@@ -14,6 +14,7 @@ from .candidate_batches import (
     prepare_candidate_repair,
     reconcile_batches,
     recover_batch,
+    retire_failed_batch,
     seal_batch,
     withdraw_candidate,
 )
@@ -411,6 +412,15 @@ def _parser() -> argparse.ArgumentParser:
         help="resume an interrupted sealed generation from recorded Git facts",
     )
     batch_recover.add_argument("--batch", required=True)
+    batch_retire = batch_sub.add_parser(
+        "retire",
+        help="idempotently remove one exact failed batch worktree while preserving candidates",
+    )
+    batch_retire.add_argument("--batch", required=True)
+    batch_sub.add_parser(
+        "metrics",
+        help="derive batch-size and validation-cost metrics from existing facts",
+    )
 
     runtime = sub.add_parser(
         "runtime", help="ask the project Adapter to verify a delivered runtime"
@@ -1369,6 +1379,10 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return reconcile_batches(repo, force=args.force, cause=args.cause)
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
+        if args.batch_command == "retire":
+            return retire_failed_batch(repo, batch_id=args.batch)
+        if args.batch_command == "metrics":
+            return CandidateBatchStore(repo).metrics()
         raise SoloAIError(f"Unknown batch command: {args.batch_command}")
     if args.command == "runtime":
         if args.runtime_command == "verify":

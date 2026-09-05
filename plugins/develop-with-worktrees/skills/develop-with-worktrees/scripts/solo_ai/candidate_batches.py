@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import math
 import subprocess
 import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from .cleanup import (
@@ -709,6 +711,85 @@ class CandidateBatchStore:
 
         return self.mutate(update)
 
+    def metrics(self) -> dict[str, Any]:
+        """只从现有候选、批次与证明事实派生调优指标。"""
+
+        value = self.read()
+        terminal = [
+            batch
+            for batch in value["batches"].values()
+            if batch.get("status") in {"completed", "failed"}
+        ]
+        full = [
+            batch
+            for batch in terminal
+            if len(batch.get("candidate_ids", []))
+            >= int(
+                (batch.get("integration_policy") or LEGACY_EXPLICIT_POLICY).get(
+                    "batch_size", 5
+                )
+            )
+        ]
+        tail = [batch for batch in terminal if batch not in full]
+        waits: list[float] = []
+        for candidate in value["candidates"].values():
+            published = _parse_timestamp(candidate.get("published_at"))
+            integrated = _parse_timestamp(candidate.get("integrated_at"))
+            if published is not None and integrated is not None:
+                waits.append((integrated - published).total_seconds())
+
+        full_costs: list[float] = []
+        reused_full_profiles = 0
+        missing_full_proofs = 0
+        for batch in terminal:
+            if batch.get("status") != "completed" or not batch.get("proof"):
+                continue
+            proof = read_json(
+                self.repo.local_dir / "proofs" / f"{batch['proof']}.json", {}
+            )
+            matched = False
+            for item in proof.get("profile_proofs", []):
+                profile = read_json(
+                    self.repo.local_dir
+                    / "profile-proofs"
+                    / f"{item.get('fingerprint')}.json",
+                    {},
+                )
+                if (profile.get("inputs") or {}).get("level") != "full":
+                    continue
+                matched = True
+                if item.get("reused"):
+                    reused_full_profiles += 1
+                    continue
+                full_costs.append(
+                    sum(
+                        float(run.get("duration_seconds", 0))
+                        for run in profile.get("runs", [])
+                    )
+                )
+            if not matched:
+                missing_full_proofs += 1
+
+        count = len(terminal)
+        return {
+            "schema_version": 1,
+            "terminal_batches": count,
+            "completed_batches": sum(
+                batch.get("status") == "completed" for batch in terminal
+            ),
+            "failed_batches": sum(
+                batch.get("status") == "failed" for batch in terminal
+            ),
+            "full_batches": len(full),
+            "tail_batches": len(tail),
+            "full_batch_rate": round(len(full) / count, 4) if count else None,
+            "tail_batch_rate": round(len(tail) / count, 4) if count else None,
+            "candidate_wait_seconds": _numeric_summary(waits),
+            "executed_full_validation_seconds": _numeric_summary(full_costs),
+            "reused_full_profiles": reused_full_profiles,
+            "missing_full_proofs": missing_full_proofs,
+        }
+
     def fail(
         self,
         batch_id: str,
@@ -824,6 +905,37 @@ class CandidateBatchStore:
             return copy.deepcopy(candidate)
 
         return self.mutate(update)
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _numeric_summary(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {
+            "count": 0,
+            "minimum": None,
+            "median": None,
+            "p95": None,
+            "maximum": None,
+            "mean": None,
+        }
+    ordered = sorted(values)
+    p95_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
+    return {
+        "count": len(ordered),
+        "minimum": round(ordered[0], 3),
+        "median": round(float(median(ordered)), 3),
+        "p95": round(ordered[p95_index], 3),
+        "maximum": round(ordered[-1], 3),
+        "mean": round(sum(ordered) / len(ordered), 3),
+    }
 
 
 def _run_secret_scanner(
@@ -1514,6 +1626,61 @@ def recover_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
 
     _config_and_mode(repo)
     return run_batch(repo, batch_id=batch_id)
+
+
+def retire_failed_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
+    """幂等退休一个已失败批次的隔离工作树，保留候选与审计事实。"""
+
+    from .lifecycle import _config_and_mode
+
+    _config_and_mode(repo)
+    store = CandidateBatchStore(repo)
+    run_lock = repo.local_dir / "locks" / f"batch-{sha256_text(batch_id)[:24]}.lock"
+    with DirectoryLock(run_lock, wait=True):
+        with integration_turn(repo, batch_id):
+            batch = store.batch(batch_id)
+            if batch.get("status") != "failed":
+                raise SoloAIError("Only a failed integration batch can be retired")
+            expected = _integration_worktree(repo, batch)
+            registered = any(item.path == expected for item in repo.worktrees())
+            exists = expected.exists()
+            if batch.get("worktree_retired_at"):
+                if exists or registered:
+                    raise SoloAIError(
+                        "Retired batch worktree unexpectedly reappeared; no deletion was attempted"
+                    )
+                return batch
+
+            started_at = batch.get("worktree_retirement_started_at")
+            if not exists:
+                if registered:
+                    raise SoloAIError(
+                        "Missing failed batch worktree remains registered"
+                    )
+                if batch.get("worktree") and not started_at:
+                    raise SoloAIError(
+                        "Failed batch worktree disappeared before a retirement intent was recorded"
+                    )
+                return store.update_batch(
+                    batch_id,
+                    worktree_retirement_started_at=started_at or utc_timestamp(),
+                    worktree_retired_at=utc_timestamp(),
+                )
+
+            worktree = _assert_batch_cleanup_safe(repo, batch)
+            if not started_at:
+                store.update_batch(
+                    batch_id, worktree_retirement_started_at=utc_timestamp()
+                )
+            remove_recreatable_ignored(repo, cwd=worktree)
+            repo.git(["worktree", "remove", str(worktree)])
+            if worktree.exists() or any(
+                item.path == worktree for item in repo.worktrees()
+            ):
+                raise BatchCleanupPending(
+                    "Failed batch worktree retirement did not reach an absent state"
+                )
+            return store.update_batch(batch_id, worktree_retired_at=utc_timestamp())
 
 
 def withdraw_candidate(repo: GitRepo, *, candidate_id: str) -> dict[str, Any]:

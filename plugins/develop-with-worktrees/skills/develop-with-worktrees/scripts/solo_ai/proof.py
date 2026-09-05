@@ -27,7 +27,11 @@ from .util import (
     stable_json,
     utc_timestamp,
 )
-from .validation_queue import claim_validation_slot, record_profile_duration
+from .validation_queue import (
+    claim_validation_slot,
+    inherited_claim_environment,
+    record_profile_duration,
+)
 
 LOCKFILES = (
     "uv.lock",
@@ -50,6 +54,7 @@ _EXECUTION_BASELINE = (
     "USERPROFILE",
     "APPDATA",
     "LOCALAPPDATA",
+    "PROGRAMDATA",
     "LANG",
     "LC_ALL",
     "TERM",
@@ -607,12 +612,14 @@ def _run_profile(
             receipt_path = (
                 repo.local_dir / "validation-runs" / run_id / f"{index:02d}.json"
             )
+            environment = _execution_environment(profile)
+            environment.update(inherited_claim_environment(queue_claim))
             result = run_logged(
                 command.argv,
                 cwd=cwd,
                 log_path=pending,
                 timeout_seconds=profile.timeout_seconds,
-                environment=_execution_environment(profile),
+                environment=environment,
                 receipt_path=receipt_path,
                 receipt_metadata={
                     "task_id": task_id,
