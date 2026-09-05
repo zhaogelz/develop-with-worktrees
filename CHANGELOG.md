@@ -20,6 +20,7 @@
 - 已知可再生清理增加现场验证过的 `dist/`、`.swc/` 和 `*.tsbuildinfo`，但这些前端输出根不视为 opaque，内部的数据库、上传或 storage 内容仍失败关闭。
 - 新增 `batch retire --batch <id>`，只幂等退休 failed 批次的精确 detached 工作树，保留候选 ref 和完整审计；新增只读 `batch metrics`，从现有事实汇总满批率、尾批率、候选等待和实际 Full 成本，为调整默认批量提供数据。
 - 新增 `batch seal --after-failed-batch <id>`：仅当已诊断的外部阻塞变化但候选未变时，允许以完全相同的有序候选清单创建一个显式、幂等的后继代次；未点名前序仍拒绝重跑，同一失败代次也不能重复派生多个验证代次。
+- `Start` 的 Runtime Adapter 上下文不再把冻结基线重复标作 `candidate_head`；候选尚未产生时只传 `base_head`，DWW 仍在 Adapter 调用前后自行核对精确工作树身份。Ready/Finish/Release 与批次上下文继续携带真实候选或组合提交，兼容仍按“Start 不得携带候选”失败关闭的既有项目 Adapter。
 
 ## 0.4.0-beta.1 — 2026-08-31
 

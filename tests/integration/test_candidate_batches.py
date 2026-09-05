@@ -172,7 +172,8 @@ def test_runtime_adapter_activate_prepares_the_exact_slot_before_start_returns(
     assert context["task_id"] == task["id"]
     assert context["slot_id"] == task["slot_id"]
     assert context["worktree"] == str(Path(task["worktree"]).resolve())
-    assert context["candidate_head"] == task["base_head"]
+    assert context["base_head"] == task["base_head"]
+    assert "candidate_head" not in context
     assert context["port_block_end"] - context["port_block_start"] == 99
     assert (Path(task["worktree"]) / ".tmp/project-runtime/active.txt").is_file()
 

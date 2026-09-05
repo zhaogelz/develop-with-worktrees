@@ -190,7 +190,6 @@ def _task_activation_request(
             "worktree": str(worktree.resolve()),
             "base_ref": task.get("base_ref"),
             "base_head": task.get("base_head"),
-            "candidate_head": task.get("candidate_head"),
             "port_block_start": slot_port_base,
             "port_block_end": slot_port_base + 99,
             "adapter_inputs": adapter_inputs,
