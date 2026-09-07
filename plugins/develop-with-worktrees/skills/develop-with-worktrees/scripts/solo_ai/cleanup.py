@@ -7,11 +7,13 @@ from pathlib import Path
 from .repo import GitRepo
 from .util import (
     SoloAIError,
+    delete_link_path_if_unchanged,
     delete_plain_path_if_unchanged,
     ensure_within,
     is_link_or_junction,
     path_identity,
     snapshot_plain_path,
+    snapshot_link_path,
 )
 
 KNOWN_RETAINED_ROOTS = {
@@ -117,8 +119,60 @@ def require_managed_directory_identity(
     return resolved
 
 
+def _opaque_root(relative: str) -> str | None:
+    parts = Path(relative).parts
+    for index, part in enumerate(parts):
+        if part.casefold() in OPAQUE_RECREATABLE_ROOTS:
+            return Path(*parts[: index + 1]).as_posix()
+    return None
+
+
+def _require_inventory_path(path: Path, cwd: Path, *, ignored: bool) -> Path:
+    relative = path.absolute().relative_to(cwd.resolve()).as_posix()
+    opaque = _opaque_root(relative)
+    if ignored and opaque is not None and relative != opaque:
+        # 只允许真实依赖根之内的叶链接；根或任一祖先链接仍被拒绝。
+        _require_plain_path(path.parent, cwd)
+        if is_link_or_junction(path):
+            snapshot_link_path(path)
+            return path.absolute()
+    return _require_plain_path(path, cwd)
+
+
+def _ignored_inventory(
+    repo: GitRepo, *, cwd: Path, expand_dependencies: bool
+) -> set[str]:
+    # Git for Windows 会递归 junction；先折叠全忽略目录，再自行不跟随链接遍历。
+    pending = [
+        cwd / value.rstrip("/")
+        for value in repo.ignored_untracked(cwd, directories=True)
+    ]
+    result: set[str] = set()
+    while pending:
+        path = _require_inventory_path(pending.pop(), cwd, ignored=True)
+        relative = path.relative_to(cwd).as_posix()
+        if is_link_or_junction(path):
+            result.add(relative)
+        elif path.is_dir():
+            if _opaque_root(relative) is not None and not expand_dependencies:
+                result.add(relative)
+                continue
+            children = list(path.iterdir())
+            if children:
+                pending.extend(children)
+            else:
+                result.add(relative)
+        else:
+            result.add(relative)
+    return result
+
+
 def inspect_untracked(
-    repo: GitRepo, *, cwd: Path, policy: CleanupPolicy = CleanupPolicy()
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    policy: CleanupPolicy = CleanupPolicy(),
+    expand_dependencies: bool = False,
 ) -> dict[str, list[str]]:
     result = {
         "keep": [],
@@ -127,14 +181,17 @@ def inspect_untracked(
         "retained": [],
         "unknown_ignored": [],
     }
-    ignored = set(repo.ignored_untracked(cwd))
+    ignored = _ignored_inventory(repo, cwd=cwd, expand_dependencies=expand_dependencies)
     paths = sorted(set(repo.untracked(cwd)) | ignored)
     for relative in paths:
-        _require_plain_path(cwd / relative, cwd)
+        _require_inventory_path(cwd / relative, cwd, ignored=relative in ignored)
         parts = tuple(part.casefold() for part in Path(relative).parts)
-        if relative in ignored and any(
-            part in OPAQUE_RECREATABLE_ROOTS for part in parts
-        ):
+        opaque = _opaque_root(relative) if relative in ignored else None
+        # 依赖根内的生成名称可不透明；根外的 uploads/storage 不能被遮蔽。
+        outer_classification = (
+            classify_cleanup_path(opaque, policy) if opaque else "ordinary"
+        )
+        if opaque is not None and outer_classification == "ordinary":
             result["retained"].append(relative)
             continue
         classification = classify_cleanup_path(relative, policy)
@@ -165,7 +222,9 @@ def remove_recreatable_ignored(
 ) -> None:
     """按对象身份逐项删除已知可再生忽略文件，保留任何晚到内容。"""
 
-    inventory = inspect_untracked(repo, cwd=cwd, policy=policy)
+    inventory = inspect_untracked(
+        repo, cwd=cwd, policy=policy, expand_dependencies=True
+    )
     blocked = [
         *inventory["keep"],
         *inventory["protected"],
@@ -181,25 +240,33 @@ def remove_recreatable_ignored(
     expected_files: dict[str, dict[str, object]] = {}
     directories: set[Path] = set()
     for relative in inventory["retained"]:
-        candidate = _require_plain_path(cwd / relative, cwd)
-        if candidate.is_dir():
-            raise SoloAIError(
-                f"Recreatable cleanup inventory unexpectedly contains a directory: {relative}"
-            )
-        expected_files[relative] = snapshot_plain_path(candidate)
+        candidate = _require_inventory_path(cwd / relative, cwd, ignored=True)
+        if is_link_or_junction(candidate):
+            expected_files[relative] = snapshot_link_path(candidate)
+        elif candidate.is_dir():
+            directories.add(candidate)
+        else:
+            expected_files[relative] = snapshot_plain_path(candidate)
         parent = candidate.parent
         while parent != cwd:
             directories.add(parent)
             parent = parent.parent
 
-    if inspect_untracked(repo, cwd=cwd, policy=policy) != inventory:
+    if (
+        inspect_untracked(repo, cwd=cwd, policy=policy, expand_dependencies=True)
+        != inventory
+    ):
         raise SoloAIError(
             "Untracked content changed before recreatable cleanup; files were preserved"
         )
 
     for relative, expected in expected_files.items():
-        candidate = _require_plain_path(cwd / relative, cwd)
-        delete_plain_path_if_unchanged(candidate, expected)
+        candidate = _require_inventory_path(cwd / relative, cwd, ignored=True)
+        if expected["kind"] == "link":
+            delete_link_path_if_unchanged(candidate, expected)
+        else:
+            _require_plain_path(candidate, cwd)
+            delete_plain_path_if_unchanged(candidate, expected)
 
     for directory in sorted(
         directories, key=lambda item: len(item.parts), reverse=True
@@ -208,7 +275,9 @@ def remove_recreatable_ignored(
         if directory.exists() and not any(directory.iterdir()):
             delete_plain_path_if_unchanged(directory, snapshot_plain_path(directory))
 
-    remaining = inspect_untracked(repo, cwd=cwd, policy=policy)
+    remaining = inspect_untracked(
+        repo, cwd=cwd, policy=policy, expand_dependencies=True
+    )
     if any(remaining.values()):
         raise SoloAIError(
             "Untracked content changed during recreatable cleanup; files were preserved"

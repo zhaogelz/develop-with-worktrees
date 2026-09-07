@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -20,6 +21,37 @@ sys.path.insert(0, str(SCRIPT_ROOT))
 
 from solo_ai.delegated import approve_delegated, inspect_delegated
 from solo_ai.repo import GitRepo
+
+
+@pytest.fixture
+def directory_link():
+    """Windows 用真实 junction；其他平台使用目录 symlink。"""
+
+    def create(link: Path, target: Path) -> None:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            subprocess.run(
+                [
+                    "pwsh",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "New-Item -ItemType Junction -Path $env:DWW_TEST_LINK "
+                    "-Target $env:DWW_TEST_TARGET | Out-Null",
+                ],
+                env={
+                    **os.environ,
+                    "DWW_TEST_LINK": str(link),
+                    "DWW_TEST_TARGET": str(target),
+                },
+                capture_output=True,
+                check=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            link.symlink_to(target, target_is_directory=True)
+
+    return create
 
 
 def git(repo: Path, *args: str) -> str:

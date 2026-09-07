@@ -22,6 +22,8 @@ The host's native task system still decides who does what and when. DWW owns onl
 
 Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state; the host heartbeat merely wakes reconciliation at `next_reconcile_at`. A host without reliable scheduling cannot claim automatic quiet-tail support.
 
+Releasing a task keeps its dependency caches, including normal package links. Batch cleanup never follows those links or deletes their targets; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
+
 ## Why five and ten
 
 Five candidates amortise combined validation while keeping conflicts reviewable. The pool holds ten nonterminal candidates by default, so one batch can integrate while the next accumulates. A full pool preserves the publishing task and asks it to retry; it never drops work.

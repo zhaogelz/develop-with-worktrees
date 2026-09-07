@@ -261,9 +261,11 @@ class GitRepo:
                     handle.write("\n")
                 handle.write(pattern + "\n")
 
-    def ignored_untracked(self, cwd: Path) -> list[str]:
+    def ignored_untracked(self, cwd: Path, *, directories: bool = False) -> list[str]:
         output = self.git(
-            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], cwd=cwd
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]
+            + (["--directory"] if directories else []),
+            cwd=cwd,
         ).stdout
         return sorted(item for item in output.split("\0") if item)
 

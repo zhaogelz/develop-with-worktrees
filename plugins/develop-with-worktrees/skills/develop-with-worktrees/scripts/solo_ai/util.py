@@ -549,7 +549,8 @@ def path_identity(path: Path) -> dict[str, Any]:
             0x00000001 | 0x00000002 | 0x00000004,
             None,
             3,
-            0x00200000 | (0x02000000 if path.is_dir() else 0),
+            0x00200000
+            | (0x02000000 if getattr(details, "st_file_attributes", 0) & 0x0010 else 0),
             None,
         )
         if handle == invalid:
@@ -597,7 +598,7 @@ def _windows_handle_identity(handle: int, *, mode: int) -> dict[str, Any]:
 
 
 def snapshot_plain_path(path: Path) -> dict[str, Any]:
-    if path.is_symlink():
+    if is_link_or_junction(path):
         raise SoloAIError(f"Refusing to snapshot a link: {path}")
     identity = path_identity(path)
     if path.is_file():
@@ -610,6 +611,115 @@ def snapshot_plain_path(path: Path) -> dict[str, Any]:
     if path.is_dir():
         return {**identity, "kind": "directory"}
     raise SoloAIError(f"Unsupported cleanup path type: {path}")
+
+
+def _open_windows_link(path: Path, *, deleting: bool = False) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    create_file = ctypes.windll.kernel32.CreateFileW
+    create_file.restype = wintypes.HANDLE
+    # 删除期间不共享写入和重命名；始终打开 reparse 对象，不打开目标。
+    handle = create_file(
+        str(path),
+        0x0080 | (0x00010000 if deleting else 0),
+        0x00000001 if deleting else 0x00000001 | 0x00000002 | 0x00000004,
+        None,
+        3,
+        0x00200000 | 0x02000000,
+        None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        raise SoloAIError(f"Dependency link is busy or changed: {path}")
+    return handle
+
+
+def _windows_link_snapshot(handle: int, *, mode: int) -> dict[str, Any]:
+    import ctypes
+    from ctypes import wintypes
+
+    raw = ctypes.create_string_buffer(16384)
+    length = wintypes.DWORD()
+    if not ctypes.windll.kernel32.DeviceIoControl(
+        wintypes.HANDLE(handle),
+        0x000900A8,
+        None,
+        0,
+        raw,
+        len(raw),
+        ctypes.byref(length),
+        None,
+    ):
+        raise SoloAIError("Cannot inspect dependency reparse object")
+    data = raw.raw[: length.value]
+    if len(data) < 8 or int.from_bytes(data[:4], "little") not in {
+        0xA0000003,  # junction
+        0xA000000C,  # symbolic link
+    }:
+        raise SoloAIError("Unknown dependency reparse type; content was preserved")
+    return {
+        **_windows_handle_identity(wintypes.HANDLE(handle), mode=mode),
+        "kind": "link",
+        "reparse_sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def snapshot_link_path(path: Path) -> dict[str, Any]:
+    """冻结链接对象及其指向文本，不打开或读取目标。"""
+    details = path.lstat()
+    if os.name != "nt":
+        if not stat.S_ISLNK(details.st_mode):
+            raise SoloAIError(f"Expected a dependency link: {path}")
+        return {
+            "device": int(details.st_dev),
+            "inode": int(details.st_ino),
+            "mode": int(details.st_mode),
+            "kind": "link",
+            "target": os.readlink(path),
+        }
+    import ctypes
+    from ctypes import wintypes
+
+    handle = _open_windows_link(path)
+    try:
+        return _windows_link_snapshot(handle, mode=int(details.st_mode))
+    finally:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
+
+
+def delete_link_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None:
+    """只删除已核准的链接对象；Windows 使用同一对象句柄条件删除。"""
+    if expected.get("kind") != "link":
+        raise SoloAIError("Dependency link deletion requires a link snapshot")
+    if os.name != "nt":
+        if snapshot_link_path(path) != expected:
+            raise SoloAIError(f"Dependency link changed before deletion: {path}")
+        path.unlink()
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    handle = _open_windows_link(path, deleting=True)
+    try:
+        if _windows_link_snapshot(handle, mode=int(expected["mode"])) != expected:
+            raise SoloAIError(f"Dependency link changed before deletion: {path}")
+        _mark_windows_handle_for_deletion(wintypes.HANDLE(handle))
+    finally:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
+
+
+def _mark_windows_handle_for_deletion(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", wintypes.BOOL)]
+
+    disposition = FileDispositionInfo(True)
+    if not ctypes.windll.kernel32.SetFileInformationByHandle(
+        handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)
+    ):
+        raise SoloAIError("Cleanup object could not be conditionally deleted")
 
 
 def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None:
@@ -675,20 +785,8 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
         if observed != expected:
             raise SoloAIError(f"Cleanup content changed before deletion: {path}")
 
-        class FileDispositionInfo(ctypes.Structure):
-            _fields_ = [("DeleteFile", wintypes.BOOL)]
-
-        disposition = FileDispositionInfo(True)
         raw_handle = msvcrt.get_osfhandle(fd)
-        if not ctypes.windll.kernel32.SetFileInformationByHandle(
-            raw_handle,
-            4,
-            ctypes.byref(disposition),
-            ctypes.sizeof(disposition),
-        ):
-            raise SoloAIError(
-                f"Cleanup path could not be conditionally deleted: {path}"
-            )
+        _mark_windows_handle_for_deletion(wintypes.HANDLE(raw_handle))
     finally:
         if fd is not None:
             os.close(fd)

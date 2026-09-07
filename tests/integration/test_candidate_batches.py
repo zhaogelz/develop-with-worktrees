@@ -562,6 +562,71 @@ def test_batch_cleanup_removes_known_recreatable_ignored_content(
     assert all(item.path != observed_worktree for item in repo.worktrees())
 
 
+def test_finish_preserves_dependency_link_and_reuses_the_slot(
+    git_repo: Path, directory_link
+) -> None:
+    (git_repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore generated dependencies")
+    repo = initialized_batched(git_repo, auto_full=False)
+    task = start(repo, name="linked dependency")
+    worktree = Path(task["worktree"])
+    target = git_repo / "README.md"
+    link = worktree / "node_modules" / "local-package"
+    directory_link(link, git_repo)
+    before = target.read_bytes()
+    (worktree / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: candidate",
+        paths=["candidate.txt"],
+    )
+    ready(repo, task_id=task["id"], lease=task["lease"])
+
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+
+    assert result["outcome"] == "candidate_published"
+    assert link.lstat()
+    assert target.read_bytes() == before
+    # 占用其他两个空槽，第三个新任务必须复用带链接的原槽位。
+    start(repo, name="other slot a")
+    start(repo, name="other slot b")
+    reused = start(repo, name="reuse generated dependencies")
+    assert reused["worktree"] == task["worktree"]
+    assert link.lstat()
+    assert target.read_bytes() == before
+
+
+def test_batch_cleanup_unlinks_dependency_without_touching_its_target(
+    git_repo: Path, tmp_path: Path, directory_link, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore generated dependencies")
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="linked batch", relative="candidate.txt")
+    target = tmp_path / "external-source"
+    target.mkdir()
+    marker = target / ".env.local"
+    marker.write_text("must survive\n", encoding="utf-8")
+    original_promote = batch_module._promote
+    observed = []
+
+    def promote_with_link(repo, store, batch):
+        worktree = Path(batch["worktree"])
+        directory_link(worktree / "node_modules" / "package", target)
+        observed.append(worktree)
+        return original_promote(repo, store, batch)
+
+    monkeypatch.setattr(batch_module, "_promote", promote_with_link)
+    result = seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    assert result["status"] == "completed"
+    assert not observed[0].exists()
+    assert marker.read_text(encoding="utf-8") == "must survive\n"
+
+
 def test_frontend_output_roots_do_not_hide_protected_content(git_repo: Path) -> None:
     (git_repo / ".gitignore").write_text("dist/\n", encoding="utf-8")
     git(git_repo, "add", ".gitignore")
@@ -1376,8 +1441,11 @@ def test_batch_validation_failure_releases_runtime_before_failed_closed(
 
 
 def test_failed_batch_retirement_is_exact_idempotent_and_preserves_candidate(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    git_repo: Path, tmp_path: Path, directory_link, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (git_repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore generated dependencies")
     repo = initialized_batched(git_repo, auto_full=False)
     candidate = publish(repo, name="retire failed", relative="retire.txt")
 
@@ -1391,6 +1459,11 @@ def test_failed_batch_retirement_is_exact_idempotent_and_preserves_candidate(
     failed = store.summary()["batches"][0]
     worktree = Path(failed["worktree"])
     candidate_record = store.candidate(candidate["candidate_id"])
+    target = tmp_path / "retained-source"
+    target.mkdir()
+    marker = target / "source.txt"
+    marker.write_text("preserved", encoding="utf-8")
+    directory_link(worktree / "node_modules" / "package", target)
 
     retired = retire_failed_batch(repo, batch_id=failed["id"])
     repeated = retire_failed_batch(repo, batch_id=failed["id"])
@@ -1400,6 +1473,7 @@ def test_failed_batch_retirement_is_exact_idempotent_and_preserves_candidate(
     assert retired["worktree_retired_at"]
     assert repeated["worktree_retired_at"] == retired["worktree_retired_at"]
     assert not worktree.exists()
+    assert marker.read_text(encoding="utf-8") == "preserved"
     assert all(item.path != worktree for item in repo.worktrees())
     assert repo.ref_head(candidate_record["ref"]) == candidate_record["head"]
     assert (

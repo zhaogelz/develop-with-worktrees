@@ -1360,31 +1360,10 @@ def ready(
 
 
 def _unknown_ignored(repo: GitRepo, worktree: Path) -> list[str]:
-    known_roots = {
-        ".venv",
-        "node_modules",
-        ".tmp",
-        ".cache",
-        "__pycache__",
-        ".pytest_cache",
-        ".ruff_cache",
-    }
-    unknown: list[str] = []
     inventory = inspect_untracked(repo, cwd=worktree)
-    protected = set(inventory["protected"])
-    for item in repo.ignored_untracked(worktree):
-        parts = Path(item).parts
-        if (
-            item in protected
-            or Path(item).name.casefold() == ".env"
-            or Path(item).name.casefold().startswith(".env.")
-            or (
-                not any(part in known_roots for part in parts)
-                and Path(item).name != "uv.toml"
-            )
-        ):
-            unknown.append(item)
-    return unknown
+    return sorted(
+        {*inventory["keep"], *inventory["protected"], *inventory["unknown_ignored"]}
+    )
 
 
 def _assert_removable_managed_slot(repo: GitRepo, path: Path) -> bool:

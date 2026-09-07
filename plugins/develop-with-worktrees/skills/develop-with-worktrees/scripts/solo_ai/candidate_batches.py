@@ -1077,7 +1077,7 @@ def _assert_batch_cleanup_safe(repo: GitRepo, batch: dict[str, Any]) -> Path:
         or repo.branch(worktree) is not None
     ):
         raise BatchCleanupPending("Batch worktree changed before cleanup")
-    inventory = inspect_untracked(repo, cwd=worktree)
+    inventory = inspect_untracked(repo, cwd=worktree, expand_dependencies=True)
     blocked = sorted(
         {
             *inventory["keep"],
