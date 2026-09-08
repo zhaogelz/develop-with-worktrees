@@ -12,6 +12,277 @@ from solo_ai import lifecycle, util
 from solo_ai.util import DirectoryLock, SoloAIError, redact_text, run_logged
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 共享删除语义")
+def test_atomic_write_survives_a_short_windows_reader(tmp_path: Path) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    target = tmp_path / "receipt.json"
+    util.atomic_write_json(target, {"generation": 1})
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    close = kernel32.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+    # 与普通只读观察者相同：允许读写，但暂不允许替换该目录项。
+    reader = create(str(target), 0x80000000, 0x3, None, 3, 0x80, None)
+    assert reader != wintypes.HANDLE(-1).value
+    released = threading.Event()
+
+    def release_reader() -> None:
+        time.sleep(0.15)
+        close(reader)
+        released.set()
+
+    thread = threading.Thread(target=release_reader)
+    thread.start()
+    try:
+        util.atomic_write_json(target, {"generation": 2})
+    finally:
+        thread.join(timeout=2)
+    assert released.is_set()
+    assert json.loads(target.read_text(encoding="utf-8")) == {"generation": 2}
+    assert not list(tmp_path.glob(".w-*"))
+
+
+def test_atomic_write_keeps_old_value_when_windows_denial_persists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "receipt.json"
+    util.atomic_write_json(target, {"generation": 1})
+    attempts = []
+
+    def deny_replace(source: Path, destination: Path) -> None:
+        attempts.append(source)
+        error = PermissionError(errno.EACCES, "persistent-denial")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(util.sys, "platform", "win32")
+    monkeypatch.setattr(util.os, "replace", deny_replace)
+    started = time.monotonic()
+    with pytest.raises(PermissionError, match="persistent-denial"):
+        util.atomic_write_json(target, {"generation": 2})
+    assert time.monotonic() - started < 3
+    assert len(attempts) > 1
+    assert len(set(attempts)) == 1
+    assert json.loads(target.read_text(encoding="utf-8")) == {"generation": 1}
+    assert not list(tmp_path.glob(".w-*"))
+
+
+def test_atomic_write_does_not_retry_unrelated_io_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "receipt.json"
+    util.atomic_write_json(target, {"generation": 1})
+    attempts = []
+
+    def disk_full(source: Path, destination: Path) -> None:
+        attempts.append(source)
+        raise OSError(errno.ENOSPC, "fixture-disk-full")
+
+    monkeypatch.setattr(util.os, "replace", disk_full)
+    with pytest.raises(OSError, match="fixture-disk-full"):
+        util.atomic_write_json(target, {"generation": 2})
+    assert len(attempts) == 1
+    assert json.loads(target.read_text(encoding="utf-8")) == {"generation": 1}
+    assert not list(tmp_path.glob(".w-*"))
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "initial-receipt",
+        "heartbeat",
+        "callback",
+        "process-snapshot",
+        "final-receipt",
+        "log",
+    ],
+)
+def test_logged_run_does_not_orphan_its_process_on_observation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    created = []
+    original_popen = util.subprocess.Popen
+    original_write = util.atomic_write_json
+    original_open = Path.open
+
+    def capture_process(*args: object, **kwargs: object):
+        process = original_popen(*args, **kwargs)
+        created.append(process)
+        return process
+
+    def fail_receipt(path: Path, receipt: object) -> None:
+        is_heartbeat = "last_heartbeat_at" in receipt
+        if (
+            failure_stage == "initial-receipt"
+            or (failure_stage == "heartbeat" and is_heartbeat)
+            or (
+                failure_stage == "final-receipt" and receipt.get("status") == "finished"
+            )
+        ):
+            raise PermissionError("fixture-observation-denied")
+        original_write(path, receipt)
+
+    def fail_callback(_heartbeat: object) -> None:
+        if failure_stage == "callback":
+            raise PermissionError("fixture-observation-denied")
+
+    monkeypatch.setattr(util.subprocess, "Popen", capture_process)
+    monkeypatch.setattr(util, "atomic_write_json", fail_receipt)
+    if failure_stage == "process-snapshot":
+
+        def denied_snapshot(_pid: int) -> None:
+            raise PermissionError("fixture-observation-denied")
+
+        monkeypatch.setattr(util, "process_snapshot", denied_snapshot)
+    if failure_stage == "log":
+
+        class FailedLog:
+            def __init__(self, handle):
+                self.handle = handle
+                self.writes = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.handle.close()
+
+            def write(self, value):
+                self.writes += 1
+                if self.writes > 1:
+                    raise PermissionError("fixture-observation-denied")
+                return self.handle.write(value)
+
+            def flush(self):
+                self.handle.flush()
+
+        def open_log(path, *args, **kwargs):
+            handle = original_open(path, *args, **kwargs)
+            return FailedLog(handle) if path == tmp_path / "run.log" else handle
+
+        monkeypatch.setattr(Path, "open", open_log)
+    try:
+        with pytest.raises(PermissionError, match="fixture-observation-denied"):
+            run_logged(
+                [
+                    sys.executable,
+                    "-c",
+                    "pass"
+                    if failure_stage == "final-receipt"
+                    else "import time; time.sleep(30)",
+                ],
+                cwd=tmp_path,
+                log_path=tmp_path / "run.log",
+                receipt_path=tmp_path / "receipt.json",
+                heartbeat_seconds=0.05,
+                on_heartbeat=fail_callback,
+            )
+        assert len(created) == 1
+        assert created[0].poll() is not None, "观察失败后遗留了本次验证进程"
+    finally:
+        # 失败的旧实现也不能让测试夹具泄漏进程；只收束本测试持有的 Popen。
+        for process in created:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
+def test_observation_failure_escalates_when_graceful_stop_does_not_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = []
+    stops = []
+    original_popen = util.subprocess.Popen
+    original_stop = util._stop_process_tree
+
+    def capture_process(*args: object, **kwargs: object):
+        process = original_popen(*args, **kwargs)
+        created.append(process)
+        return process
+
+    def ignore_graceful_stop(pid: int, *, force: bool) -> bool:
+        stops.append(force)
+        return original_stop(pid, force=True) if force else True
+
+    def fail_callback(_heartbeat: object) -> None:
+        raise PermissionError("fixture-escalation-denied")
+
+    monkeypatch.setattr(util.subprocess, "Popen", capture_process)
+    monkeypatch.setattr(util, "_stop_process_tree", ignore_graceful_stop)
+    try:
+        with pytest.raises(PermissionError, match="fixture-escalation-denied"):
+            run_logged(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                log_path=tmp_path / "run.log",
+                heartbeat_seconds=0.05,
+                termination_grace_seconds=0.1,
+                on_heartbeat=fail_callback,
+            )
+        assert stops == [False, True]
+        assert len(created) == 1
+        assert created[0].poll() is not None
+    finally:
+        for process in created:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
+def test_observation_failure_stops_the_owned_descendant_too(tmp_path: Path) -> None:
+    child_marker = tmp_path / "child.txt"
+    children = []
+
+    def fail_after_child_started(_heartbeat: object) -> None:
+        if child_marker.exists():
+            children.append(util.psutil.Process(int(child_marker.read_text())))
+            raise PermissionError("fixture-child-observation-denied")
+
+    command = (
+        "import subprocess, sys, time; from pathlib import Path; "
+        "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(30)"
+    )
+    try:
+        with pytest.raises(PermissionError, match="fixture-child-observation-denied"):
+            run_logged(
+                [sys.executable, "-c", command, str(child_marker)],
+                cwd=tmp_path,
+                log_path=tmp_path / "run.log",
+                heartbeat_seconds=0.1,
+                timeout_seconds=5,
+                on_heartbeat=fail_after_child_started,
+            )
+        assert len(children) == 1
+        assert (
+            not children[0].is_running()
+            or children[0].status() == util.psutil.STATUS_ZOMBIE
+        )
+    finally:
+        for child in children:
+            if child.is_running() and child.status() != util.psutil.STATUS_ZOMBIE:
+                child.kill()
+                child.wait(timeout=5)
+
+
 def test_redacts_common_secret_shapes() -> None:
     raw = "token=super-secret sk-proj-abcdefghijklmnopqrstuvwxyz123456"
     result = redact_text(raw)

@@ -96,7 +96,8 @@ def _stop_process_tree(pid: int, *, force: bool) -> bool:
                     process.kill()
                 except psutil.Error:
                     continue
-        return True
+        _, alive = psutil.wait_procs(processes, timeout=5)
+        return not alive
     except (OSError, psutil.Error):
         return False
 
@@ -153,88 +154,124 @@ def run_logged(
             start_new_session=os.name != "nt",
             creationflags=creation_flags,
         )
-        assert process.stdout is not None
-        snapshot = process_snapshot(process.pid)
-        receipt: dict[str, Any] = {
-            "schema_version": 1,
-            "command": [redact_text(item) for item in command],
-            "cwd": str(cwd),
-            "status": "running",
-            "started_at": started_at,
-            "process": snapshot,
-            "timeout_seconds": timeout_seconds,
-        }
-        if receipt_metadata:
-            receipt["metadata"] = receipt_metadata
-        if receipt_path:
-            atomic_write_json(receipt_path, receipt)
-        output: Queue[str | None] = Queue()
-        reader = threading.Thread(
-            target=_stream_reader, args=(process.stdout, output), daemon=True
-        )
-        reader.start()
-        reader_finished = False
-        timed_out = False
-        force_deadline: float | None = None
-        next_heartbeat = started + heartbeat_seconds
-        while not reader_finished or process.poll() is None:
-            now = time.monotonic()
-            if timeout_seconds is not None and now - started >= timeout_seconds:
-                timed_out = True
-                # 当前 Popen 是本调用刚创建且仍持有的对象；不能再依赖
-                # 用于跨调用恢复的快照比对，否则 macOS 上的进程元数据差异会
-                # 让超时命令自然跑完。
-                if process.poll() is None:
-                    _stop_process_tree(process.pid, force=False)
-                receipt["status"] = "terminating"
-                receipt["timeout_requested_at"] = utc_timestamp()
-                if receipt_path:
-                    atomic_write_json(receipt_path, receipt)
-                handle.write("\n[timeout: owned process tree termination requested]\n")
-                handle.flush()
-                timeout_seconds = None
-                force_deadline = now + termination_grace_seconds
-            if force_deadline is not None and now >= force_deadline:
-                if process.poll() is None:
-                    _stop_process_tree(process.pid, force=True)
-                handle.write(
-                    "[timeout: owned process tree force termination requested]\n"
-                )
-                handle.flush()
-                # 某些子进程会延迟关闭输出管道；根进程退出前持续复核，避免
-                # 忽略 SIGTERM 的进程永久卡住 Ready/verify。
-                force_deadline = now + 1.0 if process.poll() is None else None
-            if now >= next_heartbeat:
-                heartbeat = {
-                    "status": "running",
-                    "elapsed_seconds": round(now - started, 3),
-                    "process": snapshot,
-                }
-                receipt["last_heartbeat_at"] = utc_timestamp()
-                receipt["elapsed_seconds"] = heartbeat["elapsed_seconds"]
-                if receipt_path:
-                    atomic_write_json(receipt_path, receipt)
-                handle.write(
-                    f"[heartbeat elapsed={heartbeat['elapsed_seconds']:.3f}s]\n"
-                )
-                handle.flush()
-                if on_heartbeat:
-                    on_heartbeat(heartbeat)
-                next_heartbeat = now + heartbeat_seconds
+        reader: threading.Thread | None = None
+        try:
+            assert process.stdout is not None
+            snapshot = process_snapshot(process.pid)
+            receipt: dict[str, Any] = {
+                "schema_version": 1,
+                "command": [redact_text(item) for item in command],
+                "cwd": str(cwd),
+                "status": "running",
+                "started_at": started_at,
+                "process": snapshot,
+                "timeout_seconds": timeout_seconds,
+            }
+            if receipt_metadata:
+                receipt["metadata"] = receipt_metadata
+            if receipt_path:
+                atomic_write_json(receipt_path, receipt)
+            output: Queue[str | None] = Queue()
+            reader = threading.Thread(
+                target=_stream_reader, args=(process.stdout, output), daemon=True
+            )
+            reader.start()
+            reader_finished = False
+            timed_out = False
+            force_deadline: float | None = None
+            next_heartbeat = started + heartbeat_seconds
+            while not reader_finished or process.poll() is None:
+                now = time.monotonic()
+                if timeout_seconds is not None and now - started >= timeout_seconds:
+                    timed_out = True
+                    # 当前 Popen 是本调用刚创建且仍持有的对象；不能再依赖
+                    # 用于跨调用恢复的快照比对，否则 macOS 上的进程元数据差异会
+                    # 让超时命令自然跑完。
+                    if process.poll() is None:
+                        _stop_process_tree(process.pid, force=False)
+                    receipt["status"] = "terminating"
+                    receipt["timeout_requested_at"] = utc_timestamp()
+                    if receipt_path:
+                        atomic_write_json(receipt_path, receipt)
+                    handle.write(
+                        "\n[timeout: owned process tree termination requested]\n"
+                    )
+                    handle.flush()
+                    timeout_seconds = None
+                    force_deadline = now + termination_grace_seconds
+                if force_deadline is not None and now >= force_deadline:
+                    if process.poll() is None:
+                        _stop_process_tree(process.pid, force=True)
+                    handle.write(
+                        "[timeout: owned process tree force termination requested]\n"
+                    )
+                    handle.flush()
+                    # 某些子进程会延迟关闭输出管道；根进程退出前持续复核，避免
+                    # 忽略 SIGTERM 的进程永久卡住 Ready/verify。
+                    force_deadline = now + 1.0 if process.poll() is None else None
+                if now >= next_heartbeat:
+                    heartbeat = {
+                        "status": "running",
+                        "elapsed_seconds": round(now - started, 3),
+                        "process": snapshot,
+                    }
+                    receipt["last_heartbeat_at"] = utc_timestamp()
+                    receipt["elapsed_seconds"] = heartbeat["elapsed_seconds"]
+                    if receipt_path:
+                        atomic_write_json(receipt_path, receipt)
+                    handle.write(
+                        f"[heartbeat elapsed={heartbeat['elapsed_seconds']:.3f}s]\n"
+                    )
+                    handle.flush()
+                    if on_heartbeat:
+                        on_heartbeat(heartbeat)
+                    next_heartbeat = now + heartbeat_seconds
+                try:
+                    line = output.get(timeout=0.2)
+                except Empty:
+                    continue
+                if line is None:
+                    reader_finished = True
+                else:
+                    handle.write(redact_text(line))
+                    handle.flush()
+            returncode = process.wait()
+            duration = time.monotonic() - started
+            handle.write(
+                f"\n[exit={returncode} duration={duration:.3f}s timed_out={str(timed_out).lower()}]\n"
+            )
+        except BaseException as error:
+            # 观察失败不等于命令结束；先收束本次持有的 Popen，再把原错误交给上层。
             try:
-                line = output.get(timeout=0.2)
-            except Empty:
-                continue
-            if line is None:
-                reader_finished = True
-            else:
-                handle.write(redact_text(line))
-                handle.flush()
-        returncode = process.wait()
-        duration = time.monotonic() - started
-        handle.write(
-            f"\n[exit={returncode} duration={duration:.3f}s timed_out={str(timed_out).lower()}]\n"
-        )
+                if process.poll() is None:
+                    stopped = _stop_process_tree(process.pid, force=False)
+                    try:
+                        process.wait(timeout=termination_grace_seconds)
+                    except subprocess.TimeoutExpired:
+                        # 温和终止只是请求；仍活着的自建进程必须经过强制收束。
+                        stopped = _stop_process_tree(process.pid, force=True)
+                        process.wait(timeout=termination_grace_seconds)
+                    if not stopped:
+                        error.add_note(
+                            "Owned command process-tree termination was not confirmed"
+                        )
+                if reader is not None:
+                    reader.join(timeout=termination_grace_seconds)
+                    if reader.is_alive():
+                        error.add_note(
+                            "Owned command output reader did not finish during cleanup"
+                        )
+            except BaseException as cleanup_error:
+                error.add_note(
+                    "Owned command cleanup failed: " + redact_text(str(cleanup_error))
+                )
+            raise
+        finally:
+            if process.poll() is not None and reader is not None:
+                reader.join(timeout=0.2)
+            if process.poll() is not None and (reader is None or not reader.is_alive()):
+                if process.stdout is not None:
+                    process.stdout.close()
     result = LoggedRunResult(returncode, duration, timed_out, snapshot)
     if receipt_path:
         receipt.update(
@@ -303,8 +340,35 @@ def atomic_write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # 不把长目标文件名再次拼进临时文件，避免 Windows 深层工作树超过路径限制。
     temporary = path.parent / f".w-{uuid.uuid4().hex[:16]}"
-    temporary.write_text(value, encoding="utf-8", newline="\n")
-    os.replace(temporary, path)
+    try:
+        temporary.write_text(value, encoding="utf-8", newline="\n")
+        deadline = time.monotonic() + 1.0
+        delay = 0.01
+        while True:
+            try:
+                os.replace(temporary, path)
+                return
+            except OSError as error:
+                # 只重试 Windows 暂时禁止替换的共享/锁定错误；不改权限、不降级为覆盖写。
+                if sys.platform != "win32" or getattr(error, "winerror", None) not in {
+                    5,
+                    32,
+                    33,
+                }:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 0.1)
+    except BaseException as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            error.add_note(
+                "Temporary atomic-write cleanup failed: " + str(cleanup_error)
+            )
+        raise
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
