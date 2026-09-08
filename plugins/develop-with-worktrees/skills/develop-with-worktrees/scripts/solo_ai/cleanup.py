@@ -10,6 +10,7 @@ from .util import (
     delete_link_path_if_unchanged,
     delete_plain_path_if_unchanged,
     ensure_within,
+    filesystem_path,
     is_link_or_junction,
     path_identity,
     snapshot_plain_path,
@@ -153,11 +154,12 @@ def _ignored_inventory(
         relative = path.relative_to(cwd).as_posix()
         if is_link_or_junction(path):
             result.add(relative)
-        elif path.is_dir():
+        elif filesystem_path(path).is_dir():
             if _opaque_root(relative) is not None and not expand_dependencies:
                 result.add(relative)
                 continue
-            children = list(path.iterdir())
+            # 枚举使用扩展路径，库存仍保留原逻辑路径，不能把前缀写入持久身份。
+            children = [path / child.name for child in filesystem_path(path).iterdir()]
             if children:
                 pending.extend(children)
             else:
@@ -243,7 +245,7 @@ def remove_recreatable_ignored(
         candidate = _require_inventory_path(cwd / relative, cwd, ignored=True)
         if is_link_or_junction(candidate):
             expected_files[relative] = snapshot_link_path(candidate)
-        elif candidate.is_dir():
+        elif filesystem_path(candidate).is_dir():
             directories.add(candidate)
         else:
             expected_files[relative] = snapshot_plain_path(candidate)
@@ -272,7 +274,8 @@ def remove_recreatable_ignored(
         directories, key=lambda item: len(item.parts), reverse=True
     ):
         _require_plain_path(directory, cwd)
-        if directory.exists() and not any(directory.iterdir()):
+        access_path = filesystem_path(directory)
+        if access_path.exists() and not any(access_path.iterdir()):
             delete_plain_path_if_unchanged(directory, snapshot_plain_path(directory))
 
     remaining = inspect_untracked(

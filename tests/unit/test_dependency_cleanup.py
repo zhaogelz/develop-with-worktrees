@@ -21,6 +21,89 @@ def ignore(root: Path, pattern: str) -> GitRepo:
     return GitRepo(root)
 
 
+def extended_test_path(path: Path) -> Path:
+    # 测试准备独立使用 Windows API 路径，不能用待测实现生成反例。
+    return Path("\\\\?\\" + str(path.absolute()))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH 真实回归")
+def test_long_dependency_paths_are_fully_inspected_and_safely_removed(
+    git_repo: Path,
+) -> None:
+    repo = ignore(git_repo, "node_modules/")
+    directory = git_repo / "node_modules"
+    while len(str(directory)) < 310:
+        directory /= "nested-dependency-0123456789"
+    native = extended_test_path(directory)
+    native.mkdir(parents=True)
+    file = directory / "generated.js"
+    extended_test_path(file).write_bytes(b"generated")
+    assert snapshot_plain_path(file)["kind"] == "file"
+    inventory = cleanup.inspect_untracked(repo, cwd=git_repo, expand_dependencies=True)
+    assert inventory["retained"] == [file.relative_to(git_repo).as_posix()]
+    cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+    assert not (git_repo / "node_modules").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 深路径 junction 真实回归")
+def test_long_dependency_junction_is_only_removed_as_a_link(
+    git_repo: Path,
+    tmp_path: Path,
+    directory_link,
+) -> None:
+    repo = ignore(git_repo, "node_modules/")
+    directory = git_repo / "node_modules"
+    while len(str(directory)) < 310:
+        directory /= "nested-dependency-0123456789"
+    target = tmp_path / "preserved-source"
+    target.mkdir()
+    marker = target / "state.db"
+    marker.write_bytes(b"preserve")
+    link = directory / "package"
+    directory_link(extended_test_path(link), target)
+    assert is_link_or_junction(link)
+    inventory = cleanup.inspect_untracked(repo, cwd=git_repo, expand_dependencies=True)
+    assert inventory["retained"] == [link.relative_to(git_repo).as_posix()]
+    cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+    assert not (git_repo / "node_modules").exists()
+    assert marker.read_bytes() == b"preserve"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 长路径保护边界")
+def test_long_protected_output_is_not_deleted(git_repo: Path) -> None:
+    repo = ignore(git_repo, ".tmp/")
+    directory = git_repo / ".tmp"
+    while len(str(directory)) < 310:
+        directory /= "nested-output-0123456789"
+    native = extended_test_path(directory)
+    native.mkdir(parents=True)
+    marker = native / ".env"
+    marker.write_bytes(b"preserve")
+    with pytest.raises(SoloAIError, match="Protected or unknown"):
+        cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+    assert marker.read_bytes() == b"preserve"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 长路径对象身份")
+def test_long_file_replacement_keeps_both_objects(tmp_path: Path) -> None:
+    directory = tmp_path
+    while len(str(directory)) < 310:
+        directory /= "nested-output-0123456789"
+    native = extended_test_path(directory)
+    native.mkdir(parents=True)
+    file = directory / "generated.js"
+    access = extended_test_path(file)
+    access.write_bytes(b"original")
+    expected = snapshot_plain_path(file)
+    preserved = access.with_suffix(".original")
+    access.rename(preserved)
+    access.write_bytes(b"replacement")
+    with pytest.raises(SoloAIError, match="changed before deletion"):
+        util.delete_plain_path_if_unchanged(file, expected)
+    assert access.read_bytes() == b"replacement"
+    assert preserved.read_bytes() == b"original"
+
+
 def test_retaining_dependency_root_does_not_walk_it(
     git_repo: Path, directory_link, monkeypatch: pytest.MonkeyPatch
 ) -> None:

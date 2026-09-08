@@ -289,7 +289,7 @@ def sha256_text(value: str) -> str:
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with filesystem_path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -340,13 +340,25 @@ def ensure_within(path: Path, parent: Path) -> Path:
     return resolved
 
 
+def filesystem_path(path: Path) -> Path:
+    """只在文件系统访问边界使用扩展路径，不改变逻辑身份或解析链接。"""
+    if os.name != "nt":
+        return path
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
 def is_link_or_junction(path: Path) -> bool:
     """不跟随链接或 Windows junction；清理时宁可保留也不能跨边界。"""
     try:
-        status = path.lstat()
+        status = filesystem_path(path).lstat()
     except OSError:
         return False
-    if path.is_symlink():
+    if stat.S_ISLNK(status.st_mode):
         return True
     return bool(getattr(status, "st_file_attributes", 0) & 0x0400)
 
@@ -535,7 +547,8 @@ def format_bytes(value: int) -> str:
 
 def path_identity(path: Path) -> dict[str, Any]:
     """冻结目录项对象身份；同路径替换后 inode/file-index 必须变化。"""
-    details = path.stat(follow_symlinks=False)
+    access_path = filesystem_path(path)
+    details = access_path.stat(follow_symlinks=False)
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -544,7 +557,7 @@ def path_identity(path: Path) -> dict[str, Any]:
         create_file.restype = wintypes.HANDLE
         invalid = wintypes.HANDLE(-1).value
         handle = create_file(
-            str(path),
+            str(access_path),
             0x0080,
             0x00000001 | 0x00000002 | 0x00000004,
             None,
@@ -601,14 +614,15 @@ def snapshot_plain_path(path: Path) -> dict[str, Any]:
     if is_link_or_junction(path):
         raise SoloAIError(f"Refusing to snapshot a link: {path}")
     identity = path_identity(path)
-    if path.is_file():
+    access_path = filesystem_path(path)
+    if access_path.is_file():
         return {
             **identity,
-            "size": int(path.stat(follow_symlinks=False).st_size),
+            "size": int(access_path.stat(follow_symlinks=False).st_size),
             "kind": "file",
             "sha256": sha256_file(path),
         }
-    if path.is_dir():
+    if access_path.is_dir():
         return {**identity, "kind": "directory"}
     raise SoloAIError(f"Unsupported cleanup path type: {path}")
 
@@ -621,7 +635,7 @@ def _open_windows_link(path: Path, *, deleting: bool = False) -> int:
     create_file.restype = wintypes.HANDLE
     # 删除期间不共享写入和重命名；始终打开 reparse 对象，不打开目标。
     handle = create_file(
-        str(path),
+        str(filesystem_path(path)),
         0x0080 | (0x00010000 if deleting else 0),
         0x00000001 if deleting else 0x00000001 | 0x00000002 | 0x00000004,
         None,
@@ -666,7 +680,7 @@ def _windows_link_snapshot(handle: int, *, mode: int) -> dict[str, Any]:
 
 def snapshot_link_path(path: Path) -> dict[str, Any]:
     """冻结链接对象及其指向文本，不打开或读取目标。"""
-    details = path.lstat()
+    details = filesystem_path(path).lstat()
     if os.name != "nt":
         if not stat.S_ISLNK(details.st_mode):
             raise SoloAIError(f"Expected a dependency link: {path}")
@@ -751,7 +765,7 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
         backup_semantics if expected.get("kind") == "directory" else 0
     )
     handle = create_file(
-        str(path),
+        str(filesystem_path(path)),
         generic_read | delete_access,
         share_read | share_delete,
         None,
