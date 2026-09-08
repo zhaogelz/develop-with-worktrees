@@ -86,6 +86,10 @@ All changed candidate paths must be covered by a Ready profile. Ready should con
 
 ## Runtime Adapter contract
 
+For fresh Full reuse, required outputs, and project onboarding, follow
+[verification-reuse.md](verification-reuse.md). These rules use existing profile
+fields; they do not add a second cache or orchestration contract.
+
 `runtime_adapter` is optional and host-neutral. DWW appends one absolute JSON context path as the final argument; the project command owns every port, database, browser, authentication, deployment, and runtime-version decision. Both command argv and every tracked file matched by `input_paths` enter the machine approval fingerprint. Missing matches, approval drift, nonzero exit, timeout, or worktree changes fail closed.
 
 `activate` applies only to isolated managed tasks. DWW invokes it after the exact task, branch, worktree, slot identity, and anchor exist, but before Start changes the task and slot from `starting` to `active`. Its immutable context includes the task and slot ids, absolute worktree, base ref/head, and a deterministic inclusive 100-port block derived from `port_base + (slot - 1) * 100`. `candidate_head` is deliberately absent because Start has not produced a candidate; DWW itself checks that the clean worktree still equals the frozen base immediately before and after the Adapter call. Candidate identity first enters Adapter context for release after Ready/Finish has fixed it. The project may use those facts to create ignored runtime metadata or start project resources; DWW does not interpret them. A nonzero result leaves the task and slot `starting`, so the same `request_id` or `recover` retries the exact activation. A successful content-addressed receipt is reused after an interruption. Tracked changes, ordinary untracked content, protected content, or unknown ignored content quarantine and preserve the worktree rather than activating it.

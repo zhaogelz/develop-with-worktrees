@@ -627,6 +627,32 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
     assert [item["profile_id"] for item in development_proof["profile_proofs"]] == [
         "development"
     ]
+    planned = {profile["id"]: profile for profile in plan["profiles"]}
+    assert len(planned) == len(plan["profiles"])
+    assert (
+        planned["development"]["fingerprint"]
+        == development_proof["profile_proofs"][0]["fingerprint"]
+    )
+    ready = call_json(
+        "verify",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--level",
+        "ready",
+        repo_path=worktree,
+    )
+    ready_proof = json.loads(
+        (git_repo / ".git" / "solo-ai" / "proofs" / f"{ready['proof']}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [item["profile_id"] for item in ready_proof["profile_proofs"]] == ["ready"]
+    assert (
+        planned["ready"]["fingerprint"]
+        == ready_proof["profile_proofs"][0]["fingerprint"]
+    )
     full = call_json(
         "verify",
         "--task",
@@ -646,6 +672,10 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         "ready",
         "full",
     ]
+    # 新Full仍须为外部状态未知的检查产生独立执行身份。
+    assert (
+        planned["full"]["fingerprint"] != full_proof["profile_proofs"][1]["fingerprint"]
+    )
     call_json(
         "abandon",
         "--task",

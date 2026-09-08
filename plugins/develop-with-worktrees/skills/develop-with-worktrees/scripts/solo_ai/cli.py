@@ -1437,7 +1437,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         verification = load_verification_config(repo, cwd=worktree)
         verification_base = str(task.get("start_head") or task["base_ref"])
         force_task_scope = task.get("mode") == "in-place"
-        inputs, _ = proof_inputs(
+        inputs, ready_records = proof_inputs(
             repo,
             cwd=worktree,
             base=verification_base,
@@ -1446,15 +1446,31 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             levels=("ready",),
             force_task_scope=force_task_scope,
         )
-        _, records = proof_inputs(
-            repo,
-            cwd=worktree,
-            base=verification_base,
-            verification=verification,
-            task_id=task["id"],
-            levels=("development", "ready", "full"),
-            force_task_scope=force_task_scope,
-        )
+        records_by_id = {record[0].profile_id: record for record in ready_records}
+        # 计划按各检查的实际执行阶段计算，避免Full身份污染Ready或开发证明。
+        for level, levels in (
+            ("development", ("development",)),
+            ("full", ("ready", "full")),
+        ):
+            _, phase_records = proof_inputs(
+                repo,
+                cwd=worktree,
+                base=verification_base,
+                verification=verification,
+                task_id=task["id"],
+                levels=levels,
+                force_task_scope=force_task_scope,
+            )
+            records_by_id.update(
+                (record[0].profile_id, record)
+                for record in phase_records
+                if record[0].level == level
+            )
+        records = [
+            records_by_id[profile.profile_id]
+            for profile in verification.profiles
+            if profile.profile_id in records_by_id
+        ]
         estimate = estimate_validation(
             [
                 (

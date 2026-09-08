@@ -30,5 +30,5 @@ timeout_seconds = 43200
 resource_class = "heavy"
 level = "full"
 commands = [
-  ["uv", "run", "pytest", "-vv"],
+  ["uv", "run", "pytest", "-vv", "-x"],
 ]

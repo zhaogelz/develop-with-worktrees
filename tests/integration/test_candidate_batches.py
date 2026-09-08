@@ -1737,6 +1737,73 @@ def test_interrupted_batch_validation_releases_then_starts_a_new_runtime_cycle(
     assert activate_count.read_text(encoding="utf-8") == "2"
 
 
+def test_new_runtime_cycle_reuses_pure_check_but_repeats_external_check(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实批次恢复不能把上次环境的分项成功当作新环境已通过。"""
+    from solo_ai import proof as proof_module
+    from solo_ai import validation_queue
+
+    monkeypatch.setattr(
+        validation_queue, "_machine_root", lambda: git_repo.parent / "machine"
+    )
+    repo = initialized_batched(git_repo, auto_full=False)
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script="pass",
+        batch_release_script="pass",
+    )
+    policy = repo.root / ".solo-ai/verification.toml"
+    text = policy.read_text(encoding="utf-8")
+    for name, external in (("pure", "none"), ("external", "unknown"), ("last", "none")):
+        counter = repo.local_dir / f"{name}-executions.txt"
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                f"p=Path({str(counter)!r}); "
+                "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1))"
+            ),
+        ]
+        text += f'''
+[[profiles]]
+id = "{name}"
+level = "full"
+paths = ["**"]
+input_paths = ["**"]
+input_closure = "complete"
+external_state = "{external}"
+commands = [{json.dumps(command)}]
+'''
+    policy.write_text(text, encoding="utf-8")
+    git(repo.root, "add", ".solo-ai/verification.toml")
+    git(repo.root, "commit", "-m", "test: declare independent validation checks")
+    approve(repo, load_verification_config(repo))
+    candidate = publish(repo, name="partial Full", relative="change.txt")
+    original_run = proof_module._run_profile
+    interrupted = False
+
+    def interrupt_last(*args, **kwargs):
+        nonlocal interrupted
+        if kwargs["profile"].profile_id == "last" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("stop after external check")
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(proof_module, "_run_profile", interrupt_last)
+    with pytest.raises(KeyboardInterrupt, match="stop after external"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    batch = CandidateBatchStore(repo).summary()["batches"][0]
+    completed = batch_module.recover_batch(repo, batch_id=batch["id"])
+    assert completed["runtime_cycle"] == 2
+    assert (repo.local_dir / "pure-executions.txt").read_text() == "1"
+    assert (repo.local_dir / "external-executions.txt").read_text() == "2"
+    assert (repo.local_dir / "last-executions.txt").read_text() == "1"
+
+
 def test_interruption_after_batch_activation_reuses_same_cycle_receipt(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

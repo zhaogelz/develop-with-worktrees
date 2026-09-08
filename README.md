@@ -9,6 +9,7 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 - Exact-path commits and immutable verified candidates.
 - Automatic integration whenever five eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
+- Completed checks are saved individually. A fresh Full reuses only checks with complete, pure inputs; mutable environments and required build artifacts are not replaced by old success reports.
 
 The host's native task system still decides who does what and when. DWW owns only the Git safety lifecycle that carries completed work into the base branch.
 

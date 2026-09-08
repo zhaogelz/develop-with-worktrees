@@ -1172,10 +1172,15 @@ finish(repo, task_id=sys.argv[3], lease=sys.argv[4])
     assert not StateStore(repo).read()["pending_operation_outcomes"]
 
 
+@pytest.mark.parametrize("static_only", [False, True])
 def test_recover_repairs_in_place_receipt_after_release(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, static_only: bool
 ) -> None:
-    repo = initialized(git_repo)
+    if static_only:
+        repo = GitRepo(git_repo)
+        initialize(repo, slots=1, commands=[], accept=True, accept_static_only=True)
+    else:
+        repo = initialized(git_repo)
     task = start(
         repo, name="in-place receipt crash", in_place=True, session_id="session-a"
     )
@@ -1188,12 +1193,20 @@ def test_recover_repairs_in_place_receipt_after_release(
         message="test: in-place receipt",
         paths=["in-place-receipt.txt"],
     )
-    ready(
+    prepared = ready(
         repo,
         task_id=task["id"],
         lease=task["lease"],
         session_id="session-a",
     )
+    gate = read_json(repo.local_dir / "proofs" / f"{prepared['ready_proof']}.json", {})
+    if static_only:
+        assert gate["kind"] == "static-only"
+        assert gate["inputs"]["profiles"] == []
+        assert gate["inputs"]["command_manifest"] == []
+        assert len(gate["runs"]) == 1, "静态门禁有真实内置日志，不能用空回执模拟"
+        assert gate["runs"][0]["command_digest"] is None
+        assert proof_module._logs_exist(gate)
     original = lifecycle._write_in_place_receipt
     calls = 0
 

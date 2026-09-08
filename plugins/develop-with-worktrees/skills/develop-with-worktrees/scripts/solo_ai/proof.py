@@ -4,6 +4,7 @@ import fnmatch
 import os
 import platform
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -188,12 +189,37 @@ def _shared_inputs(
     cwd: Path,
     commands: list[CommandSpec],
     verification: VerificationConfig,
+    tool_cache: dict[tuple[Any, ...], dict[str, str | None]] | None = None,
 ) -> dict[str, Any]:
     tracked = _tracked(repo, cwd)
     tool_specs = [CommandSpec(("git",)), CommandSpec(("uv",)), *commands]
     unique: dict[str, CommandSpec] = {}
     for command in tool_specs:
         unique.setdefault(command.argv[0], command)
+
+    def tool_facts(command: CommandSpec) -> dict[str, str | None]:
+        if tool_cache is None:
+            return _tool(command, cwd)
+        resolved = shutil.which(command.argv[0]) or command.argv[0]
+        try:
+            path = Path(resolved).resolve()
+            stat = path.stat()
+            identity = (
+                str(path),
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_ctime_ns,
+            )
+        except OSError:
+            # 无法确认文件身份时，不缓存版本探测。
+            return _tool(command, cwd)
+        key = (command.fingerprint, identity)
+        if key not in tool_cache:
+            tool_cache[key] = _tool(command, cwd)
+        return tool_cache[key]
+
     return {
         "config_hashes": {
             # A policy's meaning cannot depend on a platform checkout changing
@@ -217,7 +243,7 @@ def _shared_inputs(
             for relative in tracked
             if Path(relative).name in LOCKFILES and (cwd / relative).is_file()
         },
-        "tools": [_tool(command, cwd) for command in unique.values()],
+        "tools": [tool_facts(command) for command in unique.values()],
         "platform": {
             "system": platform.system(),
             "release": platform.release(),
@@ -236,6 +262,8 @@ def _profile_inputs(
 ) -> dict[str, Any]:
     return {
         **shared,
+        # 旧证明未执行单元输入前后复核，不能作为新复用契约的成功证明。
+        "reuse_contract": 1,
         "profile_id": profile.profile_id,
         "paths": list(profile.paths),
         "command_digests": [command.fingerprint for command in profile.commands],
@@ -461,6 +489,8 @@ def proof_inputs(
     levels: tuple[str, ...] = ("ready",),
     force_task_scope: bool = False,
     expected_candidate_head: str | None = None,
+    full_execution_id: str | None = None,
+    tool_cache: dict[tuple[Any, ...], dict[str, str | None]] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[VerificationProfile, dict[str, Any], str]]]:
     _require_expected_candidate_head(
         repo, cwd=cwd, expected_candidate_head=expected_candidate_head
@@ -470,7 +500,7 @@ def proof_inputs(
     missing = unmapped_files(verification, files, levels=levels)
     commands = [command for profile in profiles for command in profile.commands]
     tracked = _tracked(repo, cwd)
-    shared = _shared_inputs(repo, cwd, commands, verification)
+    shared = _shared_inputs(repo, cwd, commands, verification, tool_cache)
     candidate_head = repo.head(cwd)
     candidate_tree = repo.tree(cwd=cwd)
     records: list[tuple[VerificationProfile, dict[str, Any], str]] = []
@@ -486,6 +516,12 @@ def proof_inputs(
         else:
             scope = f"candidate:{candidate_head}"
         inputs["reuse_scope"] = scope
+        if "full" in levels and not (
+            profile.external_state == "none" and profile.input_closure == "complete"
+        ):
+            # 新Full不是旧事务收尾：未知环境及产物生产检查不能跨执行复用。
+            # 已通过Full后的释放/推进恢复由批次事务处理，不重新进入validate。
+            inputs["full_execution"] = full_execution_id or "plan-only"
         records.append((profile, inputs, sha256_text(stable_json(inputs))))
     candidate = {
         "schema_version": PROOF_SCHEMA,
@@ -498,16 +534,76 @@ def proof_inputs(
         "levels": list(levels),
         "profiles": [profile.profile_id for profile in profiles],
         "profile_fingerprints": [item[2] for item in records],
+        "command_manifest": [
+            {"profile_id": profile.profile_id, "command_digest": command.fingerprint}
+            for profile in profiles
+            for command in profile.commands
+        ],
     }
     return candidate, records
 
 
 def _logs_exist(proof: dict[str, Any]) -> bool:
-    return all(
-        Path(item["log"]).is_file()
-        and sha256_file(Path(item["log"])) == item.get("log_sha256")
-        for item in proof.get("runs", [])
+    runs = proof.get("runs")
+    if not isinstance(runs, list) or not runs:
+        return False
+    try:
+        if proof.get("result") == "passed":
+            inputs = proof.get("inputs") or {}
+            if (
+                "command_digests" in inputs
+                and [item.get("command_digest") for item in runs]
+                != inputs["command_digests"]
+            ):
+                return False
+            if (
+                inputs.get("command_manifest")
+                and [
+                    {
+                        "profile_id": item.get("profile_id"),
+                        "command_digest": item.get("command_digest"),
+                    }
+                    for item in runs
+                ]
+                != inputs["command_manifest"]
+            ):
+                return False
+        return all(
+            isinstance(item, dict)
+            and (
+                proof.get("result") != "passed"
+                or (item.get("exit_code") == 0 and not item.get("timed_out"))
+            )
+            and Path(item["log"]).is_file()
+            and sha256_file(Path(item["log"])) == item.get("log_sha256")
+            for item in runs
+        )
+    except (OSError, KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
+def _require_profile_inputs(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    profile: VerificationProfile,
+    inputs: dict[str, Any],
+    verification: VerificationConfig,
+    commands: list[CommandSpec],
+    tool_cache: dict[tuple[Any, ...], dict[str, str | None]],
+) -> None:
+    """HEAD未变不足以证明输入稳定；同时复核文件、配置、工具和环境。"""
+    current = _profile_inputs(
+        profile,
+        cwd=cwd,
+        tracked=_tracked(repo, cwd),
+        shared=_shared_inputs(repo, cwd, commands, verification, tool_cache),
     )
+    if any(inputs.get(key) != value for key, value in current.items()):
+        raise SoloAIError(
+            f"Validation inputs changed for profile {profile.profile_id}; "
+            "no successful proof may certify this execution"
+        )
 
 
 def _require_stored_proof_identity(
@@ -555,9 +651,10 @@ def _content_address_log(repo: GitRepo, temporary: Path) -> tuple[Path, str]:
     digest = sha256_file(temporary)
     target = repo.local_dir / "logs" / "content" / f"{digest}.log"
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
+    if target.is_file() and sha256_file(target) == digest:
         temporary.unlink(missing_ok=True)
     else:
+        # 同名缓存日志损坏时，用本次真实执行得到的同摘要日志恢复它。
         temporary.replace(target)
     return target, digest
 
@@ -573,10 +670,12 @@ def _run_profile(
     base: str,
     expected_base_head: str | None,
     expected_candidate_head: str | None,
+    check_inputs: Callable[[], None],
 ) -> dict[str, Any]:
     proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
     from .util import read_json
 
+    check_inputs()
     existing = read_json(proof_path, {})
     _require_stored_proof_identity(existing, fingerprint=fingerprint, inputs=inputs)
     if existing.get("result") == "passed" and _logs_exist(existing):
@@ -608,6 +707,7 @@ def _run_profile(
                 base=base,
                 expected_base_head=expected_base_head,
             )
+            check_inputs()
             pending = temp_dir / f"{index:02d}.log"
             receipt_path = (
                 repo.local_dir / "validation-runs" / run_id / f"{index:02d}.json"
@@ -631,6 +731,7 @@ def _run_profile(
             _require_expected_candidate_head(
                 repo, cwd=cwd, expected_candidate_head=expected_candidate_head
             )
+            check_inputs()
             log_path, log_digest = _content_address_log(repo, pending)
             runs.append(
                 {
@@ -705,6 +806,8 @@ def validate(
     from .util import read_json
 
     levels = ("ready", "full") if level == "full" else (level,)
+    # 仅本次调用内复用版本探测；每次读取均复核解析路径与文件身份。
+    tool_cache: dict[tuple[Any, ...], dict[str, str | None]] = {}
     inputs, records = proof_inputs(
         repo,
         cwd=cwd,
@@ -714,6 +817,8 @@ def validate(
         levels=levels,
         force_task_scope=force_task_scope,
         expected_candidate_head=expected_candidate_head,
+        full_execution_id=new_id("full-validation") if level == "full" else None,
+        tool_cache=tool_cache,
     )
     if inputs["unmapped_files"] and not verification.static_only:
         raise SoloAIError(
@@ -728,10 +833,21 @@ def validate(
     proof_path = repo.local_dir / "proofs" / f"{fingerprint}.json"
     existing = read_json(proof_path, {})
     _require_stored_proof_identity(existing, fingerprint=fingerprint, inputs=inputs)
+    commands = [command for profile, _, _ in records for command in profile.commands]
     if existing.get("result") == "passed" and _logs_exist(existing):
         _require_expected_candidate_head(
             repo, cwd=cwd, expected_candidate_head=expected_candidate_head
         )
+        for profile, profile_inputs, _ in records:
+            _require_profile_inputs(
+                repo,
+                cwd=cwd,
+                profile=profile,
+                inputs=profile_inputs,
+                verification=verification,
+                commands=commands,
+                tool_cache=tool_cache,
+            )
         existing["reused_at"] = utc_timestamp()
         atomic_write_json(proof_path, existing)
         return {**existing, "reused": True}
@@ -739,6 +855,18 @@ def validate(
     runs: list[dict[str, Any]] = []
     profile_proofs: list[dict[str, Any]] = []
     for profile, profile_inputs, profile_fingerprint in records:
+
+        def check_inputs(profile=profile, profile_inputs=profile_inputs):
+            _require_profile_inputs(
+                repo,
+                cwd=cwd,
+                profile=profile,
+                inputs=profile_inputs,
+                verification=verification,
+                commands=commands,
+                tool_cache=tool_cache,
+            )
+
         result = _run_profile(
             repo,
             cwd=cwd,
@@ -749,6 +877,7 @@ def validate(
             base=base,
             expected_base_head=expected_base_head,
             expected_candidate_head=expected_candidate_head,
+            check_inputs=check_inputs,
         )
         profile_proofs.append(
             {
@@ -785,6 +914,16 @@ def validate(
     _require_expected_candidate_head(
         repo, cwd=cwd, expected_candidate_head=expected_candidate_head
     )
+    for profile, profile_inputs, _ in records:
+        _require_profile_inputs(
+            repo,
+            cwd=cwd,
+            profile=profile,
+            inputs=profile_inputs,
+            verification=verification,
+            commands=commands,
+            tool_cache=tool_cache,
+        )
     proof = {
         "schema_version": PROOF_SCHEMA,
         "fingerprint": fingerprint,
