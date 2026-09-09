@@ -31,7 +31,7 @@ sensitive_allowlist = []
 
 # Empty by default. Each item is one exact top-level directory or file name.
 cleanup = { owned_paths = [] }
-integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }
+integration = { mode = "batched", worktree_mode = "reusable", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }
 
 # Optional. DWW appends one JSON context-file path to each argv.
 [runtime_adapter]
@@ -47,6 +47,10 @@ timeout_seconds = 300
 `slots` is 1–32. Existing extra slots drain when the configured count is reduced and are never allocated until re-enabled. The worktree root is immutable after adoption. `cleanup.owned_paths` does not cause automatic deletion: it only names potential manual `prune-slot` targets. Entries must be unique under case-insensitive comparison so one Windows path cannot be declared twice with different casing.
 
 Newly rendered policy uses batched candidate-first integration. Finish first creates a durable immutable `held` candidate. If a runtime Adapter is configured, `release` must succeed without changing or contaminating the task worktree. DWW then releases the slot and activates the candidate as `pending`; only pending candidates are eligible for a batch. `candidate_capacity` counts held, pending, and sealed nonterminal candidates.
+
+`integration.worktree_mode` accepts `reusable` (new repository default, batched only) or `dedicated` (compatibility default when absent). Reusable batches share `<worktree_directory>/solo-ai-integration` serially and retain dependencies on return. Mode is frozen at Start and changes the candidate policy lane; enabling it does not rewrite old candidates or batch locations. The existing candidate-pool schema is 4 and remains able to read schemas 1–3; do not downgrade to an engine that cannot read the new state. No second workspace registry is created.
+
+Reusable batch Adapter contexts add `worktree_binding`: `mode`, `owner` (batch ID), positive integer `generation`, `worktree`, `worktree_resolved`, `worktree_identity`, `managed_root_resolved`, and `managed_root_identity`. Identity objects carry integer `device`, `inode`, and `mode`; preserve integer precision. DWW validates the live directory before/after operations. An Adapter may read the existing `integration_workspace` entry in Git-common-dir `solo-ai/candidate-batches.json` to compare current owner/generation/location before side effects; it must not mutate that state or invent its own owner registry. `runtime_cycle` remains the distinct resource-activation cycle within that workspace generation. Legacy dedicated contexts do not carry the binding.
 
 With `seal_policy = "auto_full"`, activating the fifth eligible candidate freezes the oldest configured full batch in one `base_ref + activation_epoch` lane, unless that base already has an active batch. `batch_size` is 1–5 and defaults to 5. `candidate_capacity` must be at least the batch size and defaults to 10.
 
@@ -82,7 +86,7 @@ commands = [["uv", "run", "pytest"]]
 
 All changed candidate paths must be covered by a Ready profile. Ready should contain syntax/static checks, affected compilation, and light contract tests. `resource_class = "heavy"` is accepted only with `level = "full"`; database setup, complete builds, authentication, and browser flows belong there. Full validation selects Ready plus Full profiles so cheap checks fail before heavy work. A profile proof is reused only when its normalized commands, tool/platform facts, declared environment hashes, tracked input closure, and reuse scope are identical. A stored proof whose identity changed fails closed. A failed profile declared with `external_state = "none"` and `input_closure = "complete"` is not rerun unchanged; modify the candidate/policy or explicitly reclassify it.
 
-`static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 6. Candidate-pool schemas 1 and 2 remain readable and migrate to schema 3; legacy candidates remain in their explicit policy epoch.
+`static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 6. Candidate-pool schemas 1–3 remain readable and migrate to schema 4; legacy candidates remain in their explicit policy epoch.
 
 ## Runtime Adapter contract
 

@@ -11,9 +11,9 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
+from . import batch_workspace, worktree_retirement
 from .cleanup import (
     inspect_untracked,
-    remove_recreatable_ignored,
     require_managed_directory_identity,
 )
 from .config import CommandSpec, load_repo_config, load_verification_config
@@ -37,7 +37,7 @@ from .util import (
     utc_timestamp,
 )
 
-POOL_SCHEMA = 3
+POOL_SCHEMA = 4
 ACTIVE_BATCH_STATES = {
     "sealed",
     "composing",
@@ -112,7 +112,7 @@ class CandidateBatchStore:
                 )
             value["next_publication_sequence"] = sequence
             value["schema_version"] = POOL_SCHEMA
-        elif value.get("schema_version") == 2:
+        elif value.get("schema_version") in {2, 3}:
             value["schema_version"] = POOL_SCHEMA
         elif value.get("schema_version") != POOL_SCHEMA:
             raise SoloAIError("Unsupported candidate-pool state schema")
@@ -155,20 +155,42 @@ class CandidateBatchStore:
         value = self.read()
         return {
             "candidates": [
-                self._candidate_projection(item)
+                self._candidate_projection(item, value["batches"])
                 for item in value["candidates"].values()
             ],
             "batches": list(value["batches"].values()),
         }
 
-    @staticmethod
-    def _candidate_projection(candidate: dict[str, Any]) -> dict[str, Any]:
+    def _candidate_projection(
+        self, candidate: dict[str, Any], batches: dict[str, Any]
+    ) -> dict[str, Any]:
         projected = copy.deepcopy(candidate)
         status = str(projected.get("status"))
-        projected["delivered"] = status == "integrated"
+        batch_id = candidate.get("integrated_batch") or candidate.get("sealed_batch")
+        batch = batches.get(str(batch_id), {})
+        release = batch.get("runtime_release") or {}
+        released = release.get("configured") is False or (
+            release.get("result") == "passed" and release.get("exit_code") == 0
+        )
+        delivered = False
+        if (
+            batch.get("status") in {"validated", "promoted", "completed"}
+            and batch.get("proof")
+            and batch.get("validation_outcome") == "passed"
+            and released
+        ):
+            current_base = self.repo.ref_head(f"refs/heads/{batch['base_ref']}")
+            delivered = bool(
+                current_base
+                and self.repo.is_ancestor(str(batch["integration_head"]), current_base)
+            )
+        projected["delivered"] = delivered
+        projected["finalization_pending"] = (
+            delivered and batch.get("status") != "completed"
+        )
         projected["delivery_status"] = (
             "integrated"
-            if status == "integrated"
+            if delivered
             else "not-delivered"
             if status in {"withdrawn", "superseded"}
             else "awaiting-integration"
@@ -323,6 +345,9 @@ class CandidateBatchStore:
             "proof": None,
             "runtime_cycle": 0,
             "worktree": None,
+            "worktree_mode": candidates[0]
+            .get("integration_policy", {})
+            .get("worktree_mode", "dedicated"),
             "created_at": utc_timestamp(),
             "updated_at": utc_timestamp(),
         }
@@ -1041,9 +1066,13 @@ def _apply_candidate_diff(
 
 def _integration_worktree(repo: GitRepo, batch: dict[str, Any]) -> Path:
     config = load_repo_config(repo, cwd=repo.policy_path())
-    return (
-        repo.primary_path / config.worktree_directory / f"solo-ai-batch-{batch['id']}"
-    ).resolve()
+    mode = batch.get("worktree_mode", "dedicated")
+    if mode not in {"dedicated", "reusable"}:
+        raise SoloAIError("Unsupported batch worktree mode")
+    name = (
+        "solo-ai-integration" if mode == "reusable" else f"solo-ai-batch-{batch['id']}"
+    )
+    return (repo.primary_path / config.worktree_directory / name).absolute()
 
 
 def _batch_worktree_identity(repo: GitRepo, batch: dict[str, Any]) -> tuple[Path, Path]:
@@ -1069,6 +1098,8 @@ def _batch_worktree_identity(repo: GitRepo, batch: dict[str, Any]) -> tuple[Path
 
 def _assert_batch_worktree_unchanged(repo: GitRepo, batch: dict[str, Any]) -> Path:
     """核对批次目录及 Git 身份；内容清点由后续实际操作负责。"""
+    if batch.get("worktree_mode") == "reusable":
+        batch_workspace.require_owner(repo, CandidateBatchStore(repo), batch)
     worktree, _managed_root = _batch_worktree_identity(repo, batch)
     if (
         not repo.is_clean(worktree)
@@ -1103,6 +1134,8 @@ def _compose(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
     worktree = _integration_worktree(repo, batch)
+    if batch.get("worktree_mode") == "reusable":
+        batch = batch_workspace.acquire(repo, store, batch, worktree)
     if batch.get("worktree") and Path(str(batch["worktree"])).resolve() != worktree:
         raise SoloAIError("Recorded batch worktree identity changed")
     if not worktree.exists():
@@ -1156,10 +1189,17 @@ def _compose(
                 cwd=worktree,
             )
         applied_ids.append(candidate_id)
+        composed_head = repo.head(worktree)
+        saved = {}
+        if batch.get("worktree_mode") == "reusable":
+            saved["integration_ref"] = batch_workspace.remember_head(
+                repo, batch, composed_head
+            )
         batch = store.update_batch(
             batch["id"],
             applied_candidate_ids=applied_ids,
-            integration_head=repo.head(worktree),
+            integration_head=composed_head,
+            **saved,
         )
     return store.update_batch(batch["id"], status="composed")
 
@@ -1167,6 +1207,8 @@ def _compose(
 def _validate_batch(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
+    if batch.get("worktree_mode") == "reusable":
+        batch_workspace.require_owner(repo, store, batch)
     worktree = Path(str(batch["worktree"]))
     proof_fingerprint: str | None = None
     try:
@@ -1200,6 +1242,8 @@ def _validate_batch(
             expected_candidate_head=str(batch["integration_head"]),
         )
         proof_fingerprint = str(proof["fingerprint"])
+        if batch.get("worktree_mode") == "reusable":
+            batch_workspace.require_owner(repo, store, batch)
         if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["base_before"]:
             raise SoloAIError(
                 "Batch base advanced during final validation; seal a fresh batch"
@@ -1237,6 +1281,8 @@ def _validate_batch(
 def _activate_batch_runtime(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
+    if batch.get("worktree_mode") == "reusable":
+        batch_workspace.require_owner(repo, store, batch)
     worktree = Path(str(batch["worktree"]))
     if (
         not any(item.path == worktree for item in repo.worktrees())
@@ -1292,6 +1338,8 @@ def _activate_batch_runtime(
 def _release_batch_runtime(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
+    if batch.get("worktree_mode") == "reusable":
+        batch_workspace.require_owner(repo, store, batch)
     try:
         receipt = release_batch_runtime(
             repo,
@@ -1347,7 +1395,11 @@ def _release_batch_runtime(
 def _promote(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
-    _assert_batch_cleanup_safe(repo, batch)
+    if batch.get("worktree_mode") == "reusable":
+        worktree = _assert_batch_worktree_unchanged(repo, batch)
+        batch_workspace.require_retained_contents(repo, worktree)
+    else:
+        _assert_batch_cleanup_safe(repo, batch)
     base_ref = str(batch["base_ref"])
     matching = [
         item.path
@@ -1359,6 +1411,16 @@ def _promote(
             "Batch base branch must be checked out in one stable worktree"
         )
     base_worktree = matching[0]
+    observed = repo.head(base_worktree)
+    # Git已推进而记录中断，或此后主线再次前进：不重复Full或要求回退主线。
+    if (
+        repo.is_clean(base_worktree)
+        and repo.ref_head(f"refs/heads/{base_ref}") == observed
+        and repo.is_ancestor(str(batch["integration_head"]), observed)
+    ):
+        return store.update_batch(
+            batch["id"], status="promoted", promoted_at=utc_timestamp()
+        )
     if (
         not repo.is_clean(base_worktree)
         or repo.head(base_worktree) != batch["base_before"]
@@ -1379,15 +1441,19 @@ def _promote(
 def _cleanup(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
-    if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["integration_head"]:
-        raise SoloAIError("Promoted batch is no longer the exact base head")
+    current_base = repo.ref_head(f"refs/heads/{batch['base_ref']}")
+    if not current_base or not repo.is_ancestor(
+        str(batch["integration_head"]), current_base
+    ):
+        raise SoloAIError("Promoted batch is no longer contained in its base")
+    if batch.get("worktree_mode") == "reusable":
+        batch = batch_workspace.return_workspace(repo, store, batch)
+        return _complete_batch(repo, store, batch)
     worktree = Path(str(batch["worktree"]))
     registered = any(item.path == worktree.resolve() for item in repo.worktrees())
-    if worktree.exists():
-        worktree = _assert_batch_cleanup_safe(repo, batch)
+    if worktree.exists() or batch.get("worktree_removal_manifest_sha256"):
         try:
-            remove_recreatable_ignored(repo, cwd=worktree)
-            repo.git(["worktree", "remove", str(worktree)])
+            batch = worktree_retirement.retire(repo, store, batch)
         except Exception as exc:
             raise BatchCleanupPending(
                 "Batch worktree removal is pending exact recovery"
@@ -1400,10 +1466,16 @@ def _cleanup(
         raise BatchCleanupPending(
             "Batch worktree removal did not reach a terminal state"
         )
+    return _complete_batch(repo, store, batch)
+
+
+def _complete_batch(
+    repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
+) -> dict[str, Any]:
     for candidate in batch["candidates"]:
         ref = str(candidate["ref"])
         head = str(candidate["head"])
-        if repo.ref_head(ref) == head:
+        if batch.get("worktree_mode") != "reusable" and repo.ref_head(ref) == head:
             repo.delete_ref(ref, expected=head)
     completed = store.complete(
         batch["id"], integrated_head=str(batch["integration_head"])
@@ -1525,13 +1597,26 @@ def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
     """Run one already frozen generation without blocking candidate publication."""
 
     store = CandidateBatchStore(repo)
+    run_lock = repo.local_dir / "locks" / f"batch-{sha256_text(batch_id)[:24]}.lock"
+    with DirectoryLock(run_lock, wait=True):
+        with integration_turn(repo, batch_id):
+            return _run_owned_batch(repo, store, batch_id)
+
+
+def _run_owned_batch(
+    repo: GitRepo, store: CandidateBatchStore, batch_id: str
+) -> dict[str, Any]:
+    # 失败记录及归还仍在原集成锁内，不能先释放锁再碰共享位置。
     try:
-        run_lock = repo.local_dir / "locks" / f"batch-{sha256_text(batch_id)[:24]}.lock"
-        with DirectoryLock(run_lock, wait=True):
-            with integration_turn(repo, batch_id):
-                batch = store.batch(batch_id)
-                return _resume(repo, store, batch)
-    except (KeyboardInterrupt, SystemExit, BatchRuntimePending, BatchCleanupPending):
+        batch = store.batch(batch_id)
+        return _resume(repo, store, batch)
+    except (
+        KeyboardInterrupt,
+        SystemExit,
+        BatchRuntimePending,
+        BatchCleanupPending,
+        batch_workspace.BatchWorkspacePending,
+    ):
         raise
     except Exception as exc:
         current = store.batch(batch_id)
@@ -1547,12 +1632,21 @@ def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
         else:
             failure_kind = "composition_failed"
             failed_candidate_id = None
-        store.fail(
+        failed = store.fail(
             batch_id,
             str(exc),
             failure_kind=failure_kind,
             failed_candidate_id=failed_candidate_id,
         )
+        if (
+            failed.get("status") == "failed"
+            and failed.get("worktree_mode") == "reusable"
+            and failed.get("worktree_generation")
+        ):
+            try:
+                batch_workspace.return_workspace(repo, store, failed)
+            except SoloAIError as return_error:
+                store.update_batch(batch_id, worktree_return_error=str(return_error))
         raise
 
 
@@ -1688,6 +1782,9 @@ def retire_failed_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
             batch = store.batch(batch_id)
             if batch.get("status") != "failed":
                 raise SoloAIError("Only a failed integration batch can be retired")
+            if batch.get("worktree_mode") == "reusable":
+                # 退役旧批次只终结其持有权；不得因路径相同删掉下个持有者的目录。
+                return batch_workspace.return_workspace(repo, store, batch)
             expected = _integration_worktree(repo, batch)
             registered = any(item.path == expected for item in repo.worktrees())
             exists = expected.exists()
@@ -1699,6 +1796,9 @@ def retire_failed_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
                 return batch
 
             started_at = batch.get("worktree_retirement_started_at")
+            if batch.get("worktree_removal_manifest_sha256"):
+                worktree_retirement.retire(repo, store, batch)
+                return store.update_batch(batch_id, worktree_retired_at=utc_timestamp())
             if not exists:
                 if registered:
                     raise SoloAIError(
@@ -1715,19 +1815,12 @@ def retire_failed_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
                 )
 
             # 删除器本身会完整清点和拒绝受保护内容；这里不重复预扫依赖。
-            worktree = _assert_batch_worktree_unchanged(repo, batch)
+            _assert_batch_worktree_unchanged(repo, batch)
             if not started_at:
                 store.update_batch(
                     batch_id, worktree_retirement_started_at=utc_timestamp()
                 )
-            remove_recreatable_ignored(repo, cwd=worktree)
-            repo.git(["worktree", "remove", str(worktree)])
-            if worktree.exists() or any(
-                item.path == worktree for item in repo.worktrees()
-            ):
-                raise BatchCleanupPending(
-                    "Failed batch worktree retirement did not reach an absent state"
-                )
+            worktree_retirement.retire(repo, store, batch)
             return store.update_batch(batch_id, worktree_retired_at=utc_timestamp())
 
 

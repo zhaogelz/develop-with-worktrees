@@ -309,7 +309,7 @@ def _batch_context(
     ):
         raise SoloAIError("Batch Runtime Adapter requires a positive runtime_cycle")
     port_block_start = config.port_base + BATCH_PORT_BLOCK_OFFSET
-    return config, {
+    context = {
         "batch_id": batch["id"],
         "runtime_cycle": runtime_cycle,
         "candidate_ids": list(batch["candidate_ids"]),
@@ -321,6 +321,14 @@ def _batch_context(
         "port_block_end": port_block_start + 99,
         "adapter_inputs": adapter_inputs,
     }
+    if batch.get("worktree_mode") == "reusable":
+        from .batch_workspace import context_binding
+        from .candidate_batches import CandidateBatchStore
+
+        context["worktree_binding"] = context_binding(
+            repo, CandidateBatchStore(repo), batch
+        )
+    return config, context
 
 
 def activate_batch_runtime(

@@ -23,7 +23,7 @@ The host's native task system still decides who does what and when. DWW owns onl
 
 Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state; the host heartbeat merely wakes reconciliation at `next_reconcile_at`. A host without reliable scheduling cannot claim automatic quiet-tail support.
 
-Releasing a task keeps its dependency caches, including normal package links. Batch cleanup never follows those links or deletes their targets; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
+Releasing a task keeps its dependency caches, including normal package links. New repositories also reuse one integration workspace: ordinary successful or failed batches return it without deleting or hashing the entire dependency tree. Each fresh Full still recreates required runtime effects. Physical disk cleanup is separate maintenance; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
 
 ## Why five and ten
 
@@ -43,7 +43,7 @@ Projects may configure a Runtime Adapter. At Start it can establish ignored proj
 
 A composition conflict tied to one candidate can prepare up to two managed repair generations on the latest base. The agent continues only when code, contracts, and tests determine one answer; product, permission, migration, deletion, and security choices still stop for a human. Final-validation failures are never disguised as merge conflicts and blindly retried. If a diagnosed external blocker changes while the candidates do not, `batch seal --after-failed-batch <id>` explicitly and idempotently creates one reviewed successor of that exact failed generation.
 
-After a generation is durably failed, `batch retire --batch <id>` can remove only its exact clean detached worktree while preserving candidate refs and audit facts; retries are idempotent. `batch metrics` reads existing lifecycle and proof facts to report full/tail rates, candidate wait time, and executed Full cost before changing batch-size policy.
+After a reusable generation fails, `batch retire --batch <id>` can finish its safe workspace return; it never deletes a later batch's workspace. Older dedicated batches retain exact, non-force physical retirement. Candidate refs and audit facts are preserved. `batch metrics` reads existing lifecycle and proof facts to report full/tail rates, candidate wait time, and executed Full cost before changing batch-size policy.
 
 Legacy repositories may keep explicit direct or explicit-seal policies during migration. New repositories use the candidate-first flow.
 

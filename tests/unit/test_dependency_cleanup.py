@@ -47,6 +47,55 @@ def test_dependency_inventory_bounds_repeated_path_resolution(
     assert resolutions <= 4 * len(files) + 40, resolutions
 
 
+def test_physical_dependency_cleanup_does_not_hash_file_contents(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已知可重建依赖按对象/变更元数据删除，开放输出仍保留内容证明。"""
+    repo = ignore(git_repo, "node_modules/\n.tmp/")
+    dependency = git_repo / "node_modules" / "package" / "large.js"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_bytes(b"generated" * 1024 * 256)
+    output = git_repo / ".tmp" / "result.log"
+    output.parent.mkdir()
+    output.write_text("known output", encoding="utf-8")
+    hashed = []
+    original = util.sha256_file
+
+    def reject_dependency_hash(path):
+        assert not Path(path).is_relative_to(git_repo / "node_modules")
+        hashed.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(util, "sha256_file", reject_dependency_hash)
+    cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+    assert output in hashed
+    assert not dependency.exists()
+    assert not output.exists()
+
+
+def test_physical_cleanup_expands_dependencies_once(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """身份冻结后按精确条目条件删除，不再重复全树清点。"""
+    repo = ignore(git_repo, "node_modules/")
+    root = git_repo / "node_modules" / "package"
+    root.mkdir(parents=True)
+    for index in range(40):
+        (root / f"generated-{index}.js").write_text("generated", encoding="utf-8")
+    original = cleanup.inspect_untracked
+    expanded = 0
+
+    def counted(*args, **kwargs):
+        nonlocal expanded
+        expanded += int(kwargs.get("expand_dependencies", False))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cleanup, "inspect_untracked", counted)
+    cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+    assert expanded == 1
+    assert not root.exists()
+
+
 def extended_test_path(path: Path) -> Path:
     # 测试准备独立使用 Windows API 路径，不能用待测实现生成反例。
     return Path("\\\\?\\" + str(path.absolute()))
@@ -318,7 +367,7 @@ def test_dependency_root_replacement_stops_deletion(
     target.mkdir()
     marker = target / "original.js"
     marker.write_text("preserved", encoding="utf-8")
-    original_snapshot = cleanup.snapshot_plain_path
+    original_snapshot = cleanup.snapshot_recreatable_file
     replaced = False
 
     def replace_after_snapshot(path):
@@ -330,8 +379,8 @@ def test_dependency_root_replacement_stops_deletion(
             directory_link(root, target)
         return snapshot
 
-    monkeypatch.setattr(cleanup, "snapshot_plain_path", replace_after_snapshot)
-    with pytest.raises(SoloAIError, match="link or junction"):
+    monkeypatch.setattr(cleanup, "snapshot_recreatable_file", replace_after_snapshot)
+    with pytest.raises(SoloAIError, match="changed before deletion|link or junction"):
         cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
     assert marker.read_text(encoding="utf-8") == "preserved"
     assert (git_repo / "preserved-original-dependencies" / "original.js").is_file()
@@ -388,3 +437,106 @@ def test_inventory_rejects_linked_ancestor_before_inspecting_leaf(
     with pytest.raises(SoloAIError, match="link or junction"):
         cleanup._require_inventory_path(leaf, git_repo, ignored=True)
     assert marker.read_bytes() == b"preserved"
+
+
+@pytest.mark.parametrize("change", ["same-size-write", "replacement"])
+def test_metadata_cleanup_preserves_changed_dependency(
+    tmp_path: Path, change: str
+) -> None:
+    """恢复原mtime或同大小也不能掩盖对象替换/写入；无需读取内容做SHA。"""
+    file = tmp_path / "dependency.js"
+    file.write_bytes(b"original")
+    before = file.stat()
+    expected = util.snapshot_recreatable_file(file)
+    assert "sha256" not in expected
+    if change == "replacement":
+        file.rename(tmp_path / "original-preserved.js")
+    file.write_bytes(b"replaced")
+    os.utime(file, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with pytest.raises(SoloAIError, match="changed before deletion"):
+        util.delete_plain_path_if_unchanged(file, expected)
+    assert file.read_bytes() == b"replaced"
+    if change == "replacement":
+        assert (tmp_path / "original-preserved.js").read_bytes() == b"original"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows真实目录与文件占用保护")
+def test_cleanup_holds_ancestors_and_file_against_rename(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = ignore(git_repo, "node_modules/")
+    root = git_repo / "node_modules"
+    file = root / "package" / "generated.js"
+    file.parent.mkdir(parents=True)
+    file.write_bytes(b"generated")
+    mark = util._mark_windows_handle_for_deletion
+    checked = False
+
+    def check_then_mark(handle):
+        nonlocal checked
+        if not checked:
+            checked = True
+            for path in (git_repo, root, file.parent, file):
+                with pytest.raises(PermissionError):
+                    path.rename(path.with_name(path.name + "-moved"))
+        return mark(handle)
+
+    monkeypatch.setattr(util, "_mark_windows_handle_for_deletion", check_then_mark)
+    cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+    assert checked
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows已打开文件必须失败关闭")
+def test_cleanup_preserves_occupied_dependency(git_repo: Path) -> None:
+    repo = ignore(git_repo, "node_modules/")
+    file = git_repo / "node_modules" / "generated.js"
+    file.parent.mkdir()
+    file.write_bytes(b"generated")
+    with file.open("rb") as held:
+        with pytest.raises(SoloAIError, match="busy|changed"):
+            cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+        assert held.read() == b"generated"
+    assert file.read_bytes() == b"generated"
+    cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+    assert not file.exists()
+
+
+def test_replacement_empty_directory_is_not_adopted_for_deletion(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = ignore(git_repo, "node_modules/")
+    root = git_repo / "node_modules"
+    root.mkdir()
+    original_snapshot = cleanup.snapshot_plain_path
+    replaced = False
+
+    def replace_empty_directory(path):
+        nonlocal replaced
+        expected = original_snapshot(path)
+        if path == root and not replaced:
+            replaced = True
+            root.rename(git_repo / "original-dependencies")
+            root.mkdir()
+        return expected
+
+    monkeypatch.setattr(cleanup, "snapshot_plain_path", replace_empty_directory)
+    with pytest.raises(SoloAIError, match="changed before deletion"):
+        cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+    assert root.exists()
+    assert (git_repo / "original-dependencies").exists()
+
+
+def test_recreatable_file_snapshot_and_delete_do_not_construct_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = tmp_path / "dependency.js"
+    file.write_bytes(b"generated data")
+
+    def reject_hash(*args, **kwargs):
+        pytest.fail("依赖对象快照和条件删除不得读取内容做SHA")
+
+    monkeypatch.setattr(util.hashlib, "sha256", reject_hash)
+    expected = util.snapshot_recreatable_file(file)
+    util.delete_plain_path_if_unchanged(file, expected)
+    assert not file.exists()

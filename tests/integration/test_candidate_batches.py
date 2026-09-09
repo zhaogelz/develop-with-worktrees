@@ -42,19 +42,27 @@ from solo_ai.util import atomic_write_json, read_json
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
 
 
-def initialized_batched(path: Path, *, auto_full: bool = True) -> GitRepo:
+def initialized_batched(
+    path: Path, *, auto_full: bool = True, reusable: bool = False
+) -> GitRepo:
     repo = GitRepo(path)
     initialize(repo, slots=3, commands=[VERIFY], accept=True, accept_static_only=False)
-    if not auto_full:
-        config = path / ".solo-ai" / "config.toml"
-        config.write_text(
-            config.read_text(encoding="utf-8").replace(
-                'seal_policy = "auto_full"', 'seal_policy = "explicit"'
-            ),
-            encoding="utf-8",
+    config = path / ".solo-ai" / "config.toml"
+    original = config.read_text(encoding="utf-8")
+    contents = original
+    if not reusable:
+        # 这里保留历史专用目录的完整删除/恢复测试；复用行为有独立实际流程测试。
+        contents = contents.replace(
+            'worktree_mode = "reusable"', 'worktree_mode = "dedicated"'
         )
+    if not auto_full:
+        contents = contents.replace(
+            'seal_policy = "auto_full"', 'seal_policy = "explicit"'
+        )
+    if contents != original:
+        config.write_text(contents, encoding="utf-8")
         git(path, "add", ".solo-ai/config.toml")
-        git(path, "commit", "-m", "test: require explicit candidate batches")
+        git(path, "commit", "-m", "test: choose the exercised batch compatibility mode")
     approve(repo, load_verification_config(repo))
     return repo
 
@@ -769,6 +777,166 @@ def test_batch_cleanup_preserves_protected_content_arriving_during_cleanup(
     assert observed_worktree is not None and not observed_worktree.exists()
 
 
+def test_git_registration_removal_never_receives_a_populated_worktree(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Git非强制remove仍会删忽略文件，DWW只能把已消失目录的登记交给它。"""
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(
+        repo, name="exact physical retirement", relative="candidate.txt"
+    )
+    command = repo.git
+    observed = []
+
+    def checked_command(args, **kwargs):
+        if args[:2] == ["worktree", "remove"]:
+            worktree = Path(args[2])
+            observed.append(worktree)
+            assert not worktree.exists(), "仍有内容的工作树不得交给Git递归删除"
+        return command(args, **kwargs)
+
+    monkeypatch.setattr(repo, "git", checked_command)
+    result = seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    assert result["status"] == "completed"
+    assert len(observed) == 1
+    assert result["worktree_removal_manifest_sha256"]
+    assert repo.ref_head(result["integration_ref"]) == result["integration_head"]
+
+
+@pytest.mark.parametrize("interruption", ["exception", "late-file", "changed-file"])
+def test_exact_retirement_recovers_partial_source_removal_without_full(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, interruption: str
+) -> None:
+    from solo_ai import worktree_retirement as retirement
+
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="partial source removal", relative="candidate.txt")
+    delete = retirement.delete_plain_path_if_unchanged
+    affected = []
+
+    def interrupt_delete(path, expected):
+        if path.name == "candidate.txt" and not affected:
+            affected.append(path)
+            if interruption == "exception":
+                delete(path, expected)
+                raise KeyboardInterrupt("interrupted after exact source deletion")
+            if interruption == "late-file":
+                late = path.parent / ".tmp" / "late.db"
+                late.parent.mkdir()
+                late.write_bytes(b"preserve late data")
+            else:
+                # 实际写入改变必须保留，不得在恢复时重新认领成可删内容。
+                path.write_bytes(b"changed source")
+        return delete(path, expected)
+
+    monkeypatch.setattr(retirement, "delete_plain_path_if_unchanged", interrupt_delete)
+    error = KeyboardInterrupt if interruption == "exception" else SoloAIError
+    with pytest.raises(error):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    batch = CandidateBatchStore(repo).summary()["batches"][0]
+    assert batch["status"] == "promoted"
+    assert batch["worktree_removal_manifest_sha256"]
+    assert repo.head(git_repo) == batch["integration_head"]
+    assert repo.ref_head(batch["integration_ref"]) == batch["integration_head"]
+    assert affected
+    worktree = affected[0].parent
+
+    def no_validation(*args, **kwargs):
+        pytest.fail("物理清理恢复不得重跑已通过的Full")
+
+    monkeypatch.setattr(batch_module, "validate", no_validation)
+    monkeypatch.setattr(retirement, "delete_plain_path_if_unchanged", delete)
+    if interruption == "late-file":
+        late = worktree / ".tmp" / "late.db"
+        assert late.read_bytes() == b"preserve late data"
+        with pytest.raises(SoloAIError, match="pending exact recovery"):
+            batch_module.recover_batch(repo, batch_id=batch["id"])
+        assert late.read_bytes() == b"preserve late data"
+        # 模拟人工保留到夹具外，再从原冻结清单恢复；不删除晚到数据。
+        late.rename(git_repo / "preserved-late.db")
+        late.parent.rmdir()
+    elif interruption == "changed-file":
+        with pytest.raises(SoloAIError, match="pending exact recovery"):
+            batch_module.recover_batch(repo, batch_id=batch["id"])
+        assert affected[0].read_bytes() == b"changed source"
+        affected[0].rename(git_repo / "preserved-changed-source.txt")
+    result = batch_module.recover_batch(repo, batch_id=batch["id"])
+    assert result["status"] == "completed"
+    assert not worktree.exists()
+    assert all(item.path != worktree for item in repo.worktrees())
+
+
+@pytest.mark.parametrize("drift", ["manifest", "control", "registration"])
+def test_retirement_recovery_rejects_changed_receipt_or_git_facts(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, drift: str
+) -> None:
+    from solo_ai import worktree_retirement as retirement
+
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(
+        repo, name="retirement evidence drift", relative="candidate.txt"
+    )
+    apply = retirement._apply
+
+    def interrupt_before_deleting(*args):
+        raise KeyboardInterrupt("inventory saved before deletion")
+
+    monkeypatch.setattr(retirement, "_apply", interrupt_before_deleting)
+    with pytest.raises(KeyboardInterrupt, match="inventory saved"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    batch = CandidateBatchStore(repo).summary()["batches"][0]
+    worktree = Path(batch["worktree"])
+    source = worktree / "candidate.txt"
+    before = source.read_bytes()
+    manifest = retirement._manifest_path(repo, batch)
+    if drift == "manifest":
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+    elif drift == "control":
+        # 语义相同但对象内容已变的控制指针，也不能在恢复时自动认领。
+        control = worktree / ".git"
+        with control.open("r+b") as pointer:
+            pointer.seek(0, 2)
+            pointer.write(b"\n")
+    else:
+        repo.git(["checkout", "-b", "changed-owner"], cwd=worktree)
+    monkeypatch.setattr(retirement, "_apply", apply)
+    with pytest.raises(SoloAIError, match="pending exact recovery"):
+        batch_module.recover_batch(repo, batch_id=batch["id"])
+    assert source.read_bytes() == before
+    assert repo.ref_head(batch["integration_ref"]) == batch["integration_head"]
+
+
+def test_late_recreated_path_is_preserved_by_registration_removal(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="late root replacement", relative="candidate.txt")
+    command = repo.git
+    observed = []
+
+    def recreate_before_command(args, **kwargs):
+        if args[:2] == ["worktree", "remove"] and not observed:
+            worktree = Path(args[2])
+            assert not worktree.exists()
+            worktree.mkdir()
+            marker = worktree / "late.db"
+            marker.write_bytes(b"new unknown data")
+            observed.append(marker)
+        return command(args, **kwargs)
+
+    monkeypatch.setattr(repo, "git", recreate_before_command)
+    with pytest.raises(SoloAIError, match="pending exact recovery"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    assert observed and observed[0].read_bytes() == b"new unknown data"
+    batch = CandidateBatchStore(repo).summary()["batches"][0]
+    assert batch["status"] == "promoted"
+    assert repo.head(git_repo) == batch["integration_head"]
+    monkeypatch.setattr(repo, "git", command)
+    with pytest.raises(SoloAIError, match="pending exact recovery"):
+        batch_module.recover_batch(repo, batch_id=batch["id"])
+    assert observed[0].read_bytes() == b"new unknown data"
+
+
 def test_four_candidates_wait_and_fifth_finish_auto_integrates_oldest_five(
     git_repo: Path,
 ) -> None:
@@ -1470,15 +1638,16 @@ def test_failed_batch_retirement_is_exact_idempotent_and_preserves_candidate(
 
     def count_inventory(*args, **kwargs):
         nonlocal inventory_runs
-        inventory_runs += 1
+        if kwargs.get("expand_dependencies"):
+            inventory_runs += 1
         return original_inventory(*args, **kwargs)
 
     monkeypatch.setattr(cleanup_module, "_ignored_inventory", count_inventory)
     retired = retire_failed_batch(repo, batch_id=failed["id"])
     repeated = retire_failed_batch(repo, batch_id=failed["id"])
 
-    # 复用删除器自身的完整清点、删除前复核和删除后复核；不另加全量预扫。
-    assert inventory_runs == 3
+    # 只有一次完整依赖清点；源文件末检不可再次展开依赖。
+    assert inventory_runs == 1
     assert retired["status"] == "failed"
     assert retired["worktree_retirement_started_at"]
     assert retired["worktree_retired_at"]

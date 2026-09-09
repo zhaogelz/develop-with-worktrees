@@ -44,6 +44,7 @@ class IntegrationSpec:
     seal_policy: str
     tail_policy: str
     tail_quiet_seconds: float
+    worktree_mode: str = "dedicated"
 
 
 @dataclass(frozen=True)
@@ -345,6 +346,14 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     )
     if integration_mode not in {"direct", "batched"}:
         raise SoloAIError('integration.mode must be "direct" or "batched"')
+    worktree_mode = _string(
+        integration_raw.get("worktree_mode", "dedicated"),
+        field="integration.worktree_mode",
+    )
+    if worktree_mode not in {"dedicated", "reusable"}:
+        raise SoloAIError('integration.worktree_mode must be "dedicated" or "reusable"')
+    if integration_mode != "batched" and worktree_mode != "dedicated":
+        raise SoloAIError('Reusable integration worktrees require mode = "batched"')
     batch_size = _integer(
         integration_raw.get("batch_size", 5), field="integration.batch_size"
     )
@@ -516,6 +525,7 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
             seal_policy=seal_policy,
             tail_policy=tail_policy,
             tail_quiet_seconds=tail_quiet_seconds,
+            worktree_mode=worktree_mode,
         ),
         runtime_adapter=RuntimeAdapterSpec(
             activate=runtime_activate,
@@ -765,7 +775,7 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # An empty list means no dependencies or caches are ever removed automatically.
 cleanup = {{ owned_paths = [] }}
 # 默认每满 5 个候选自动封批；尾批仅在生产者稳定归零或明确要求时封存。
-integration = {{ mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }}
+integration = {{ mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90, worktree_mode = "reusable" }}
 
 # 可选项目运行时 Adapter；DWW 只传递上下文文件，不解释端口、数据库或浏览器语义。
 # [runtime_adapter]

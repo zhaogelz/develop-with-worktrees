@@ -61,13 +61,22 @@ def initialized(path: Path) -> GitRepo:
     # Most lifecycle tests exercise the legacy immediate-promotion transaction.
     # Candidate-first defaults have their own integration suite.
     config = path / ".solo-ai" / "config.toml"
+    policy = config.read_text(encoding="utf-8")
+    integration_lines = [
+        line for line in policy.splitlines() if line.startswith("integration = ")
+    ]
+    assert len(integration_lines) == 1
     config.write_text(
-        config.read_text(encoding="utf-8").replace(
-            'integration = { mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }',
-            'integration = { mode = "direct", batch_size = 5, candidate_capacity = 10, seal_policy = "explicit", tail_policy = "explicit", tail_quiet_seconds = 90 }',
+        policy.replace(
+            integration_lines[0],
+            'integration = { mode = "direct", worktree_mode = "dedicated", batch_size = 5, candidate_capacity = 10, seal_policy = "explicit", tail_policy = "explicit", tail_quiet_seconds = 90 }',
+            1,
         ),
         encoding="utf-8",
     )
+    integration = load_repo_config(repo).integration
+    assert integration.mode == "direct"
+    assert integration.worktree_mode == "dedicated"
     git(path, "add", ".solo-ai/config.toml")
     git(path, "commit", "-m", "test: use legacy direct lifecycle")
     approve(repo, load_verification_config(repo))

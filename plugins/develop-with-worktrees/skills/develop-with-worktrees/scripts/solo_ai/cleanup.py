@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,8 +15,10 @@ from .util import (
     filesystem_path,
     is_link_or_junction,
     path_identity,
+    pinned_plain_directory,
     snapshot_plain_path,
     snapshot_link_path,
+    snapshot_recreatable_file,
 )
 
 KNOWN_RETAINED_ROOTS = {
@@ -236,6 +240,34 @@ def remove_recreatable_ignored(
     policy: CleanupPolicy = CleanupPolicy(),
 ) -> None:
     """按对象身份逐项删除已知可再生忽略文件，保留任何晚到内容。"""
+    # 根和父目录在整个操作期间保持原对象；不锁整个仓库或用户目录树。
+    parent_identity = snapshot_plain_path(cwd.parent)
+    root_identity = snapshot_plain_path(cwd)
+    with (
+        pinned_plain_directory(cwd.parent, parent_identity),
+        pinned_plain_directory(cwd, root_identity),
+    ):
+        _remove_recreatable_contents(repo, cwd=cwd, policy=policy)
+
+
+@contextmanager
+def _pinned_cleanup_ancestors(
+    cwd: Path, parent: Path, directories: dict[Path, dict[str, object]]
+) -> Iterator[None]:
+    """每组同父目录文件共用一组有界句柄；先保护祖先，再访问后代。"""
+    relative = parent.relative_to(cwd)
+    with ExitStack() as stack:
+        current = cwd
+        stack.enter_context(pinned_plain_directory(current, directories[current]))
+        for part in relative.parts:
+            current /= part
+            stack.enter_context(pinned_plain_directory(current, directories[current]))
+        yield
+
+
+def _remove_recreatable_contents(
+    repo: GitRepo, *, cwd: Path, policy: CleanupPolicy
+) -> None:
 
     inventory = inspect_untracked(
         repo, cwd=cwd, policy=policy, expand_dependencies=True
@@ -253,46 +285,55 @@ def remove_recreatable_ignored(
         )
 
     expected_files: dict[str, dict[str, object]] = {}
-    directories: set[Path] = set()
+    directories: dict[Path, dict[str, object]] = {cwd: snapshot_plain_path(cwd)}
+    files_by_parent: dict[Path, list[str]] = {}
     for relative in inventory["retained"]:
         candidate = _require_inventory_path(cwd / relative, cwd, ignored=True)
+        # 先冻结所有原祖先，不在删除空目录时重新收养同路径的新对象。
+        parent = candidate.parent
+        ancestors: list[Path] = []
+        while parent not in directories:
+            ancestors.append(parent)
+            parent = parent.parent
+        for directory in reversed(ancestors):
+            directories[directory] = snapshot_plain_path(
+                _require_plain_path(directory, cwd)
+            )
         if is_link_or_junction(candidate):
             expected_files[relative] = snapshot_link_path(candidate)
         elif filesystem_path(candidate).is_dir():
-            directories.add(candidate)
+            directories[candidate] = snapshot_plain_path(candidate)
+            continue
+        elif _opaque_root(relative) is not None:
+            expected_files[relative] = snapshot_recreatable_file(candidate)
         else:
             expected_files[relative] = snapshot_plain_path(candidate)
-        parent = candidate.parent
-        while parent != cwd:
-            directories.add(parent)
-            parent = parent.parent
+        files_by_parent.setdefault(candidate.parent, []).append(relative)
 
-    if (
-        inspect_untracked(repo, cwd=cwd, policy=policy, expand_dependencies=True)
-        != inventory
-    ):
-        raise SoloAIError(
-            "Untracked content changed before recreatable cleanup; files were preserved"
-        )
-
-    for relative, expected in expected_files.items():
-        candidate = _require_inventory_path(cwd / relative, cwd, ignored=True)
-        if expected["kind"] == "link":
-            delete_link_path_if_unchanged(candidate, expected)
-        else:
-            _require_plain_path(candidate, cwd)
-            delete_plain_path_if_unchanged(candidate, expected)
+    # 清单之外的新条目从不加入本次删除；无需再展开全树比较名称。
+    for parent, relatives in files_by_parent.items():
+        with _pinned_cleanup_ancestors(cwd, parent, directories):
+            for relative in relatives:
+                candidate = cwd / relative
+                expected = expected_files[relative]
+                if expected["kind"] == "link":
+                    delete_link_path_if_unchanged(candidate, expected)
+                else:
+                    delete_plain_path_if_unchanged(candidate, expected)
 
     for directory in sorted(
-        directories, key=lambda item: len(item.parts), reverse=True
+        (path for path in directories if path != cwd),
+        key=lambda item: len(item.parts),
+        reverse=True,
     ):
-        _require_plain_path(directory, cwd)
-        access_path = filesystem_path(directory)
-        if access_path.exists() and not any(access_path.iterdir()):
-            delete_plain_path_if_unchanged(directory, snapshot_plain_path(directory))
+        with _pinned_cleanup_ancestors(cwd, directory.parent, directories):
+            with pinned_plain_directory(directory, directories[directory]):
+                empty = not any(filesystem_path(directory).iterdir())
+            if empty:
+                delete_plain_path_if_unchanged(directory, directories[directory])
 
     remaining = inspect_untracked(
-        repo, cwd=cwd, policy=policy, expand_dependencies=True
+        repo, cwd=cwd, policy=policy, expand_dependencies=False
     )
     if any(remaining.values()):
         raise SoloAIError(

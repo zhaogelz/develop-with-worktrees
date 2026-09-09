@@ -13,7 +13,8 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -643,7 +644,9 @@ def path_identity(path: Path) -> dict[str, Any]:
     }
 
 
-def _windows_handle_identity(handle: int, *, mode: int) -> dict[str, Any]:
+def _windows_handle_identity(
+    handle: int, *, mode: int, file_metadata: bool = False
+) -> dict[str, Any]:
     import ctypes
     from ctypes import wintypes
 
@@ -666,12 +669,114 @@ def _windows_handle_identity(handle: int, *, mode: int) -> dict[str, Any]:
         handle, ctypes.byref(information)
     ):
         raise SoloAIError("Cannot read Windows file identity")
-    return {
+    identity = {
         "device": int(information.dwVolumeSerialNumber),
         "inode": (int(information.nFileIndexHigh) << 32)
         | int(information.nFileIndexLow),
         "mode": mode,
     }
+    if not file_metadata:
+        return identity
+    basic = _windows_basic_information(handle)
+    if basic["attributes"] & (0x0010 | 0x0400):
+        raise SoloAIError("Recreatable cleanup target is not a plain file")
+    return {
+        **identity,
+        "kind": "recreatable-file",
+        "size": (int(information.nFileSizeHigh) << 32) | int(information.nFileSizeLow),
+        "modified_ticks": basic["modified_ticks"],
+        "changed_ticks": basic["changed_ticks"],
+    }
+
+
+def _windows_basic_information(handle: int) -> dict[str, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class FileBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+        ]
+
+    basic = FileBasicInfo()
+    if not ctypes.windll.kernel32.GetFileInformationByHandleEx(
+        handle, 0, ctypes.byref(basic), ctypes.sizeof(basic)
+    ):
+        raise SoloAIError("Cannot read Windows cleanup change metadata")
+    return {
+        "modified_ticks": int(basic.LastWriteTime),
+        "changed_ticks": int(basic.ChangeTime),
+        "attributes": int(basic.FileAttributes),
+    }
+
+
+def snapshot_recreatable_file(path: Path) -> dict[str, Any]:
+    """仅供已确认可重建的依赖；不用内容SHA，不用于用户文件或普通输出。"""
+    details = filesystem_path(path).stat(follow_symlinks=False)
+    if not stat.S_ISREG(details.st_mode) or is_link_or_junction(path):
+        raise SoloAIError(f"Refusing non-plain recreatable file: {path}")
+    if os.name != "nt":
+        return {
+            "device": int(details.st_dev),
+            "inode": int(details.st_ino),
+            "mode": int(details.st_mode),
+            "kind": "recreatable-file",
+            "size": int(details.st_size),
+            "modified_ns": int(details.st_mtime_ns),
+            "changed_ns": int(details.st_ctime_ns),
+        }
+    import ctypes
+    from ctypes import wintypes
+
+    create_file = ctypes.windll.kernel32.CreateFileW
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(filesystem_path(path)), 0x0080, 0x0007, None, 3, 0x00200000, None
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        raise SoloAIError(f"Cannot snapshot recreatable file: {path}")
+    try:
+        return _windows_handle_identity(
+            handle, mode=int(details.st_mode), file_metadata=True
+        )
+    finally:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
+
+
+@contextmanager
+def pinned_plain_directory(path: Path, expected: dict[str, Any]) -> Iterator[None]:
+    """Windows持有可列目录句柄并拒绝重命名；单独READ_ATTRIBUTES不足以阻止替换。"""
+    identity = {key: expected[key] for key in ("device", "inode", "mode")}
+    if os.name != "nt":
+        if is_link_or_junction(path) or path_identity(path) != identity:
+            raise SoloAIError(f"Cleanup directory changed before deletion: {path}")
+        yield
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    create_file = ctypes.windll.kernel32.CreateFileW
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(filesystem_path(path)), 0x0081, 0x0003, None, 3, 0x02200000, None
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        raise SoloAIError(f"Cleanup directory is busy or changed: {path}")
+    try:
+        basic = _windows_basic_information(handle)
+        if (
+            basic["attributes"] & 0x0400
+            or not basic["attributes"] & 0x0010
+            or _windows_handle_identity(handle, mode=int(expected["mode"])) != identity
+        ):
+            raise SoloAIError(f"Cleanup directory changed before deletion: {path}")
+        yield
+    finally:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
 
 
 def snapshot_plain_path(path: Path) -> dict[str, Any]:
@@ -803,7 +908,12 @@ def _mark_windows_handle_for_deletion(handle: int) -> None:
 def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None:
     """在 Windows 用已打开对象句柄条件删除，避免路径校验后的替换竞态。"""
     if os.name != "nt":
-        if snapshot_plain_path(path) != expected:
+        snapshot = (
+            snapshot_recreatable_file
+            if expected.get("kind") == "recreatable-file"
+            else snapshot_plain_path
+        )
+        if snapshot(path) != expected:
             raise SoloAIError(f"Cleanup content changed before deletion: {path}")
         if path.is_dir():
             path.rmdir()
@@ -821,7 +931,6 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
     generic_read = 0x80000000
     delete_access = 0x00010000
     share_read = 0x00000001
-    share_delete = 0x00000004
     open_existing = 3
     backup_semantics = 0x02000000
     open_reparse = 0x00200000
@@ -831,7 +940,7 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
     handle = create_file(
         str(filesystem_path(path)),
         generic_read | delete_access,
-        share_read | share_delete,
+        share_read,
         None,
         open_existing,
         flags,
@@ -845,12 +954,21 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
         handle = None
         observed_stat = os.fstat(fd)
         expected_mode = int(expected.get("mode", 0))
+        metadata_only = expected.get("kind") == "recreatable-file"
+        if not metadata_only and (
+            _windows_basic_information(msvcrt.get_osfhandle(fd))["attributes"] & 0x0400
+        ):
+            raise SoloAIError(f"Cleanup content became a reparse point: {path}")
         # Windows 的 Path.stat 与 CRT fstat 会为同一文件给出不同的权限位；
         # 文件类型仍须一致，而冻结的 mode 用于保持后续结构等值比较。
         if stat.S_IFMT(observed_stat.st_mode) != stat.S_IFMT(expected_mode):
             raise SoloAIError(f"Cleanup content changed before deletion: {path}")
         observed = {
-            **_windows_handle_identity(msvcrt.get_osfhandle(fd), mode=expected_mode),
+            **_windows_handle_identity(
+                msvcrt.get_osfhandle(fd),
+                mode=expected_mode,
+                file_metadata=metadata_only,
+            ),
             "kind": expected.get("kind"),
         }
         if expected.get("kind") == "file":

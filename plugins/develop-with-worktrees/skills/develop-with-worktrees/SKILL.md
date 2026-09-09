@@ -96,7 +96,7 @@ Ready refuses a missing, linked, oversized, non-UTF-8, or identity-mismatched an
 
 ## Candidate-first integration
 
-New repositories use `integration.mode = "batched"`, `batch_size = 5`, `candidate_capacity = 10`, `seal_policy = "auto_full"`, `tail_policy = "quiet_or_explicit"`, and `tail_quiet_seconds = 90`:
+New repositories use `integration.mode = "batched"`, `worktree_mode = "reusable"`, `batch_size = 5`, `candidate_capacity = 10`, `seal_policy = "auto_full"`, `tail_policy = "quiet_or_explicit"`, and `tail_quiet_seconds = 90`:
 
 - An optional project Runtime Adapter may activate project-owned runtime identity after the isolated worktree is exact and before Start returns. DWW supplies the task, slot, base, worktree, and deterministic slot port block; the project still owns every concrete port, database, browser, and service decision.
 - Finish validates and creates one immutable candidate ref. A configured project runtime Adapter must release project-owned resources before the candidate becomes eligible; only then does Finish release the worktree slot, leave the base unchanged, and keep the anchor.
@@ -113,6 +113,8 @@ New repositories use `integration.mode = "batched"`, `batch_size = 5`, `candidat
 - `candidate withdraw` removes an unsealed pending or retained candidate. `batch recover` resumes only an interrupted nonfailed generation. `batch retire --batch <id>` may idempotently remove only the exact clean detached worktree of an already failed generation; it preserves candidate refs and audit facts. Use read-only `batch metrics` before changing batch size.
 
 The task snapshots its integration policy at Start. Missing integration policy in a pre-upgrade repository remains legacy direct, and pre-upgrade explicit candidates never become eligible for automatic sealing merely because configuration changes. Explicit direct and explicit-seal modes are compatibility paths, not the recommended new-user flow.
+
+Reusable batches share one detached `solo-ai-integration` workspace. Ordinary success or failure returns it after durable Git results and confirmed resource release, retaining dependencies without content scans or hashes. Unknown content, conflicts or uncertain ownership preserve the scene; old operations never touch a newer owner. Physical deletion is separate maintenance. Already-started tasks and configuration without `worktree_mode` retain dedicated compatibility; opt in with a compatible Adapter. See the [reusable-workspace lifecycle](references/lifecycle.md#reusable-integration-workspace) before recovery or migration.
 
 ## Task-anchor lifetime and durable facts
 

@@ -168,6 +168,9 @@ class StateStore:
             f"{config.integration.candidate_capacity}:{seal_policy}:"
             f"{tail_policy}:{config.integration.tail_quiet_seconds:g}"
         )
+        worktree_mode = config.integration.worktree_mode
+        if worktree_mode == "reusable":
+            identity += ":worktree-reusable-v1"
         return {
             "schema_version": 2,
             "mode": mode,
@@ -176,6 +179,7 @@ class StateStore:
             "seal_policy": seal_policy,
             "tail_policy": tail_policy,
             "tail_quiet_seconds": config.integration.tail_quiet_seconds,
+            "worktree_mode": worktree_mode,
             "activation_epoch": sha256_text(identity),
         }
 
