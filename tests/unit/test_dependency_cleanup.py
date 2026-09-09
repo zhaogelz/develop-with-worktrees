@@ -47,10 +47,10 @@ def test_dependency_inventory_bounds_repeated_path_resolution(
     assert resolutions <= 4 * len(files) + 40, resolutions
 
 
-def test_physical_dependency_cleanup_does_not_hash_file_contents(
+def test_physical_dependency_cleanup_uses_platform_content_proof_policy(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """已知可重建依赖按对象/变更元数据删除，开放输出仍保留内容证明。"""
+    """Windows依赖恢复内容证明，其他平台单链接快路径及输出证明仍保留。"""
     repo = ignore(git_repo, "node_modules/\n.tmp/")
     dependency = git_repo / "node_modules" / "package" / "large.js"
     dependency.parent.mkdir(parents=True)
@@ -61,14 +61,16 @@ def test_physical_dependency_cleanup_does_not_hash_file_contents(
     hashed = []
     original = util.sha256_file
 
-    def reject_dependency_hash(path):
-        assert not Path(path).is_relative_to(git_repo / "node_modules")
+    def record_hash(path):
+        if os.name != "nt":
+            assert not Path(path).is_relative_to(git_repo / "node_modules")
         hashed.append(Path(path))
         return original(path)
 
-    monkeypatch.setattr(util, "sha256_file", reject_dependency_hash)
+    monkeypatch.setattr(util, "sha256_file", record_hash)
     cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
     assert output in hashed
+    assert (dependency in hashed) == (os.name == "nt")
     assert not dependency.exists()
     assert not output.exists()
 
@@ -94,6 +96,57 @@ def test_physical_cleanup_expands_dependencies_once(
     cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
     assert expanded == 1
     assert not root.exists()
+
+
+@pytest.mark.parametrize("copies", [2, 8])
+def test_physical_cleanup_removes_shared_dependencies_and_keeps_external_cache(
+    git_repo: Path, copies: int
+) -> None:
+    """同树多个虚拟环境共享文件时可连续删除链接，树外缓存不受影响。"""
+    repo = ignore(git_repo, "**/.venv/")
+    files = [
+        git_repo / "apps" / f"project-{index}" / ".venv" / "library.pyd"
+        for index in range(copies)
+    ]
+    for file in files:
+        file.parent.mkdir(parents=True)
+    files[0].write_bytes(b"shared generated dependency")
+    external = git_repo.parent / "shared-cache.bin"
+    os.link(files[0], external)
+    for file in files[1:]:
+        os.link(files[0], file)
+    assert files[0].stat().st_nlink == copies + 1
+
+    cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
+
+    assert all(not file.exists() for file in files)
+    assert external.read_bytes() == b"shared generated dependency"
+    assert external.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("change", ["write-through-alias", "same-content-replacement"])
+def test_shared_dependency_still_rejects_content_change_or_replacement(
+    tmp_path: Path, change: str
+) -> None:
+    """共享链接的元数据兼容不能放过真实写入或同内容的新对象。"""
+    file = tmp_path / "dependency.pyd"
+    file.write_bytes(b"original")
+    external = tmp_path / "cache.pyd"
+    os.link(file, external)
+    before = file.stat()
+    expected = util.snapshot_recreatable_file(file)
+    if change == "write-through-alias":
+        external.write_bytes(b"replaced")
+        os.utime(external, ns=(before.st_atime_ns, before.st_mtime_ns))
+    else:
+        file.rename(tmp_path / "preserved.pyd")
+        file.write_bytes(b"original")
+    with pytest.raises(SoloAIError, match="changed before deletion"):
+        util.delete_plain_path_if_unchanged(file, expected)
+    assert file.exists() and external.exists()
+    assert external.read_bytes() == (
+        b"replaced" if change == "write-through-alias" else b"original"
+    )
 
 
 def extended_test_path(path: Path) -> Path:
@@ -443,12 +496,12 @@ def test_inventory_rejects_linked_ancestor_before_inspecting_leaf(
 def test_metadata_cleanup_preserves_changed_dependency(
     tmp_path: Path, change: str
 ) -> None:
-    """恢复原mtime或同大小也不能掩盖对象替换/写入；无需读取内容做SHA。"""
+    """恢复原mtime或同大小也不能掩盖对象替换/写入。"""
     file = tmp_path / "dependency.js"
     file.write_bytes(b"original")
     before = file.stat()
     expected = util.snapshot_recreatable_file(file)
-    assert "sha256" not in expected
+    assert ("sha256" in expected) == (os.name == "nt")
     if change == "replacement":
         file.rename(tmp_path / "original-preserved.js")
     file.write_bytes(b"replaced")
@@ -458,6 +511,54 @@ def test_metadata_cleanup_preserves_changed_dependency(
     assert file.read_bytes() == b"replaced"
     if change == "replacement":
         assert (tmp_path / "original-preserved.js").read_bytes() == b"original"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows时间戳碰撞")
+def test_windows_cleanup_preserves_content_when_metadata_ticks_collide(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = tmp_path / "dependency.js"
+    file.write_bytes(b"original")
+    before = file.stat()
+    original_basic = util._windows_basic_information
+    frozen = []
+
+    def colliding_ticks(handle):
+        observed = original_basic(handle)
+        if not frozen:
+            frozen.append(observed.copy())
+        return {
+            **observed,
+            "modified_ticks": frozen[0]["modified_ticks"],
+            "changed_ticks": frozen[0]["changed_ticks"],
+        }
+
+    # 只固定实际观察到会碰撞的时间戳；文件、内容和条件删除均走真实实现。
+    monkeypatch.setattr(util, "_windows_basic_information", colliding_ticks)
+    expected = util.snapshot_recreatable_file(file)
+    file.write_bytes(b"replaced")
+    os.utime(file, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with pytest.raises(SoloAIError, match="changed before deletion"):
+        util.delete_plain_path_if_unchanged(file, expected)
+    assert file.read_bytes() == b"replaced"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows旧元数据凭据")
+def test_windows_cleanup_rejects_legacy_metadata_only_proof(tmp_path: Path) -> None:
+    import msvcrt
+
+    file = tmp_path / "dependency.js"
+    file.write_bytes(b"preserved")
+    with file.open("rb") as stream:
+        expected = util._windows_handle_identity(
+            msvcrt.get_osfhandle(stream.fileno()),
+            mode=int(file.stat().st_mode),
+            file_metadata=True,
+        )
+    assert expected["kind"] == "recreatable-file"
+    with pytest.raises(SoloAIError, match="requires content proof"):
+        util.delete_plain_path_if_unchanged(file, expected)
+    assert file.read_bytes() == b"preserved"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows真实目录与文件占用保护")
@@ -527,16 +628,21 @@ def test_replacement_empty_directory_is_not_adopted_for_deletion(
     assert (git_repo / "original-dependencies").exists()
 
 
-def test_recreatable_file_snapshot_and_delete_do_not_construct_sha(
+def test_recreatable_file_snapshot_and_delete_use_platform_hash_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     file = tmp_path / "dependency.js"
     file.write_bytes(b"generated data")
 
-    def reject_hash(*args, **kwargs):
-        pytest.fail("依赖对象快照和条件删除不得读取内容做SHA")
+    original_hash = util.hashlib.sha256
+    calls = []
 
-    monkeypatch.setattr(util.hashlib, "sha256", reject_hash)
+    def record_hash(*args, **kwargs):
+        calls.append(True)
+        return original_hash(*args, **kwargs)
+
+    monkeypatch.setattr(util.hashlib, "sha256", record_hash)
     expected = util.snapshot_recreatable_file(file)
     util.delete_plain_path_if_unchanged(file, expected)
+    assert bool(calls) == (os.name == "nt")
     assert not file.exists()

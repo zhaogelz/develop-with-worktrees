@@ -331,7 +331,10 @@ def test_directory_lock_retries_transient_owner_read_failure(
     errors: list[Exception] = []
 
     def transient_owner_read(target: Path, default: object) -> object:
-        if target == path / "owner.json" and not owner_read_failed.is_set():
+        if (
+            target == util.filesystem_path(path / "owner.json")
+            and not owner_read_failed.is_set()
+        ):
             owner_read_failed.set()
             cause = PermissionError(
                 errno.EACCES, "Windows transient owner read failure"
@@ -368,7 +371,11 @@ def test_directory_lock_retries_transient_acquire_permission_error(
 
     def transient_acquire(self: Path, target: Path) -> Path:
         nonlocal acquire_attempts
-        if self.name.startswith(".dww-p-") and target == path and acquire_attempts == 0:
+        if (
+            self.name.startswith(".dww-p-")
+            and target == util.filesystem_path(path)
+            and acquire_attempts == 0
+        ):
             acquire_attempts += 1
             raise PermissionError(errno.EACCES, "Windows transient acquire failure")
         return original_rename(self, target)
@@ -390,7 +397,11 @@ def test_directory_lock_retries_transient_release_failure(
 
     def transient_release(self: Path, target: Path) -> Path:
         nonlocal release_attempts
-        if self == path and target.name.startswith(".dww-r-") and release_attempts == 0:
+        if (
+            self == util.filesystem_path(path)
+            and target.name.startswith(".dww-r-")
+            and release_attempts == 0
+        ):
             release_attempts += 1
             raise PermissionError(errno.EACCES, "Windows transient release failure")
         return original_rename(self, target)
@@ -403,21 +414,35 @@ def test_directory_lock_retries_transient_release_failure(
     assert not list(tmp_path.glob(".dww-r-*"))
 
 
+@pytest.mark.parametrize("parent_length", [205, 217, 260, 320])
+@pytest.mark.parametrize("stale_owner", [False, True])
 def test_directory_lock_uses_bounded_internal_names_in_a_deep_path(
-    tmp_path: Path,
+    tmp_path: Path, parent_length: int, stale_owner: bool
 ) -> None:
     parent = tmp_path
-    while len(str(parent)) < 205:
+    while parent_length - len(str(parent)) > 180:
         parent /= "deep-segment"
-    parent.mkdir(parents=True)
+    parent /= "p" * max(1, parent_length - len(str(parent)) - 1)
+    util.filesystem_path(parent).mkdir(parents=True)
     path = parent / "batch-123456789012345678901234.lock"
+    access_path = util.filesystem_path(path)
+    if stale_owner:
+        access_path.mkdir()
+        util.atomic_write_json(access_path / "owner.json", {"pid": 0})
 
-    with DirectoryLock(path):
-        assert path.is_dir()
-        assert (path / "owner.json").is_file()
+    with DirectoryLock(path) as lock:
+        assert lock.path == path
+        assert access_path.is_dir()
+        assert (access_path / "owner.json").is_file()
+        assert util.process_matches(util.read_json(access_path / "owner.json", {}))
+        with (
+            pytest.raises(SoloAIError, match="Operation is already active"),
+            DirectoryLock(path),
+        ):
+            raise AssertionError("lock was acquired twice")
 
-    assert not path.exists()
-    assert not list(parent.glob(".dww-*-*"))
+    assert not access_path.exists()
+    assert not list(util.filesystem_path(parent).glob(".dww-*-*"))
 
 
 @pytest.mark.skipif(

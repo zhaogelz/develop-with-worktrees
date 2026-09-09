@@ -485,7 +485,8 @@ class DirectoryLock:
         self.acquired = False
 
     def _remove_stale(self) -> bool:
-        owner_path = self.path / "owner.json"
+        access_path = filesystem_path(self.path)
+        owner_path = access_path / "owner.json"
         try:
             owner = read_json(owner_path, {}) if owner_path.exists() else {}
         except SoloAIError as error:
@@ -496,12 +497,12 @@ class DirectoryLock:
                 errno.EACCES,
                 errno.ENOENT,
             }:
-                return not self.path.exists()
+                return not access_path.exists()
             raise
         if owner and process_matches(owner):
             return False
         try:
-            shutil.rmtree(self.path)
+            shutil.rmtree(access_path)
             return True
         except FileNotFoundError:
             return True
@@ -509,21 +510,23 @@ class DirectoryLock:
             return False
 
     def __enter__(self) -> Self:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 保留公开的逻辑路径；仅底层访问使用扩展路径，覆盖锁内的临时文件。
+        access_path = filesystem_path(self.path)
+        access_path.parent.mkdir(parents=True, exist_ok=True)
         last_report = time.monotonic()
         transient_access_deadline = time.monotonic() + 2.0
         while True:
             # 临时锁名不能再次包含目标锁名；深层 Windows 工作树很容易因此越过
             # 传统 MAX_PATH，而目标锁本身仍在可用范围内。
-            prepared = self.path.parent / f".dww-p-{uuid.uuid4().hex[:16]}"
+            prepared = access_path.parent / f".dww-p-{uuid.uuid4().hex[:16]}"
             try:
                 prepared.mkdir()
                 atomic_write_json(prepared / "owner.json", process_snapshot())
-                prepared.rename(self.path)
+                prepared.rename(access_path)
                 self.acquired = True
                 return self
             except OSError as error:
-                if error.errno == errno.EACCES and not self.path.exists():
+                if error.errno == errno.EACCES and not access_path.exists():
                     # Windows 防病毒或索引器可能在准备目录刚写完后短暂占用它；
                     # 目标锁尚不存在时，这不是另一位所有者，也不能直接失败。
                     shutil.rmtree(prepared, ignore_errors=True)
@@ -557,13 +560,14 @@ class DirectoryLock:
         traceback: TracebackType | None,
     ) -> None:
         if self.acquired:
+            access_path = filesystem_path(self.path)
             releasing: Path | None = (
-                self.path.parent / f".dww-r-{uuid.uuid4().hex[:16]}"
+                access_path.parent / f".dww-r-{uuid.uuid4().hex[:16]}"
             )
             deadline = time.monotonic() + 2.0
             while True:
                 try:
-                    self.path.rename(releasing)
+                    access_path.rename(releasing)
                     break
                 except FileNotFoundError:
                     releasing = None
@@ -715,36 +719,22 @@ def _windows_basic_information(handle: int) -> dict[str, int]:
 
 
 def snapshot_recreatable_file(path: Path) -> dict[str, Any]:
-    """仅供已确认可重建的依赖；不用内容SHA，不用于用户文件或普通输出。"""
+    """Windows及共享硬链接用内容证明，其他单链接依赖保留元数据快路径。"""
     details = filesystem_path(path).stat(follow_symlinks=False)
     if not stat.S_ISREG(details.st_mode) or is_link_or_junction(path):
         raise SoloAIError(f"Refusing non-plain recreatable file: {path}")
-    if os.name != "nt":
-        return {
-            "device": int(details.st_dev),
-            "inode": int(details.st_ino),
-            "mode": int(details.st_mode),
-            "kind": "recreatable-file",
-            "size": int(details.st_size),
-            "modified_ns": int(details.st_mtime_ns),
-            "changed_ns": int(details.st_ctime_ns),
-        }
-    import ctypes
-    from ctypes import wintypes
-
-    create_file = ctypes.windll.kernel32.CreateFileW
-    create_file.restype = wintypes.HANDLE
-    handle = create_file(
-        str(filesystem_path(path)), 0x0080, 0x0007, None, 3, 0x00200000, None
-    )
-    if handle == wintypes.HANDLE(-1).value:
-        raise SoloAIError(f"Cannot snapshot recreatable file: {path}")
-    try:
-        return _windows_handle_identity(
-            handle, mode=int(details.st_mode), file_metadata=True
-        )
-    finally:
-        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
+    if os.name == "nt" or details.st_nlink > 1:
+        # Windows时间戳可能碰撞；删除其他硬链接也会改变ctime而不改变内容。
+        return snapshot_plain_path(path)
+    return {
+        "device": int(details.st_dev),
+        "inode": int(details.st_ino),
+        "mode": int(details.st_mode),
+        "kind": "recreatable-file",
+        "size": int(details.st_size),
+        "modified_ns": int(details.st_mtime_ns),
+        "changed_ns": int(details.st_ctime_ns),
+    }
 
 
 @contextmanager
@@ -924,6 +914,9 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
     import ctypes
     import msvcrt
     from ctypes import wintypes
+
+    if expected.get("kind") == "recreatable-file":
+        raise SoloAIError(f"Windows cleanup requires content proof: {path}")
 
     create_file = ctypes.windll.kernel32.CreateFileW
     create_file.restype = wintypes.HANDLE

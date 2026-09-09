@@ -47,6 +47,9 @@ _EXECUTION_BASELINE = (
     "PATH",
     "SYSTEMROOT",
     "SYSTEMDRIVE",
+    # Windows信息查询不可用时，标准库依靠这两个变量确认原生架构。
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_ARCHITEW6432",
     "COMSPEC",
     "PATHEXT",
     "TEMP",
