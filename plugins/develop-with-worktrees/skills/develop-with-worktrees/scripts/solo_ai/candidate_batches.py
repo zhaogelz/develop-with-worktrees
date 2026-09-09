@@ -1067,9 +1067,8 @@ def _batch_worktree_identity(repo: GitRepo, batch: dict[str, Any]) -> tuple[Path
     return expected, managed_root
 
 
-def _assert_batch_cleanup_safe(repo: GitRepo, batch: dict[str, Any]) -> Path:
-    """只允许批次树携带可再生的已知忽略产物进入终态清理。"""
-
+def _assert_batch_worktree_unchanged(repo: GitRepo, batch: dict[str, Any]) -> Path:
+    """核对批次目录及 Git 身份；内容清点由后续实际操作负责。"""
     worktree, _managed_root = _batch_worktree_identity(repo, batch)
     if (
         not repo.is_clean(worktree)
@@ -1077,6 +1076,12 @@ def _assert_batch_cleanup_safe(repo: GitRepo, batch: dict[str, Any]) -> Path:
         or repo.branch(worktree) is not None
     ):
         raise BatchCleanupPending("Batch worktree changed before cleanup")
+    return worktree
+
+
+def _assert_batch_cleanup_safe(repo: GitRepo, batch: dict[str, Any]) -> Path:
+    """只允许批次树携带可再生的已知忽略产物进入终态清理。"""
+    worktree = _assert_batch_worktree_unchanged(repo, batch)
     inventory = inspect_untracked(repo, cwd=worktree, expand_dependencies=True)
     blocked = sorted(
         {
@@ -1709,7 +1714,8 @@ def retire_failed_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
                     worktree_retired_at=utc_timestamp(),
                 )
 
-            worktree = _assert_batch_cleanup_safe(repo, batch)
+            # 删除器本身会完整清点和拒绝受保护内容；这里不重复预扫依赖。
+            worktree = _assert_batch_worktree_unchanged(repo, batch)
             if not started_at:
                 store.update_batch(
                     batch_id, worktree_retirement_started_at=utc_timestamp()

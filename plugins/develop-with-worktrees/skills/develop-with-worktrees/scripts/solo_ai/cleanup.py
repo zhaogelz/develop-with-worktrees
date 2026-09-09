@@ -64,7 +64,9 @@ def classify_cleanup_path(
     return "ordinary"
 
 
-def _require_plain_path(path: Path, root: Path) -> Path:
+def _require_plain_path(
+    path: Path, root: Path, *, allow_leaf_link: bool = False
+) -> Path:
     root = root.resolve()
     try:
         relative = path.absolute().relative_to(root)
@@ -76,8 +78,17 @@ def _require_plain_path(path: Path, root: Path) -> Path:
     for part in relative.parts:
         current = current / part
         if is_link_or_junction(current):
+            # 依赖叶链接也必须先逐级核对所有祖先，不提前访问目标后代。
+            if allow_leaf_link and current == path.absolute():
+                snapshot_link_path(current)
+                return current
             raise SoloAIError(f"Cleanup content is a link or junction: {current}")
-    ensure_within(path, root)
+    # root 已在本次检查开头解析；再次解析同一根既重复开销，也可能
+    # 把检查期间被替换的根重新接受为新的边界。只与原边界比较。
+    try:
+        path.resolve().relative_to(root)
+    except ValueError as exc:
+        raise SoloAIError(f"Refusing path outside managed root: {path}") from exc
     return path.absolute()
 
 
@@ -131,13 +142,12 @@ def _opaque_root(relative: str) -> str | None:
 def _require_inventory_path(path: Path, cwd: Path, *, ignored: bool) -> Path:
     relative = path.absolute().relative_to(cwd.resolve()).as_posix()
     opaque = _opaque_root(relative)
-    if ignored and opaque is not None and relative != opaque:
-        # 只允许真实依赖根之内的叶链接；根或任一祖先链接仍被拒绝。
-        _require_plain_path(path.parent, cwd)
-        if is_link_or_junction(path):
-            snapshot_link_path(path)
-            return path.absolute()
-    return _require_plain_path(path, cwd)
+    # 只允许真实依赖根之内的叶链接；根或任一祖先链接仍被拒绝。
+    return _require_plain_path(
+        path,
+        cwd,
+        allow_leaf_link=ignored and opaque is not None and relative != opaque,
+    )
 
 
 def _ignored_inventory(
@@ -186,7 +196,10 @@ def inspect_untracked(
     ignored = _ignored_inventory(repo, cwd=cwd, expand_dependencies=expand_dependencies)
     paths = sorted(set(repo.untracked(cwd)) | ignored)
     for relative in paths:
-        _require_inventory_path(cwd / relative, cwd, ignored=relative in ignored)
+        # ignored 已由不跟随链接的库存遍历逐项核验；分类不访问文件系统。
+        # 删除前仍会重新清点、冻结对象，并在删除时复核祖先及对象身份。
+        if relative not in ignored:
+            _require_inventory_path(cwd / relative, cwd, ignored=False)
         parts = tuple(part.casefold() for part in Path(relative).parts)
         opaque = _opaque_root(relative) if relative in ignored else None
         # 依赖根内的生成名称可不透明；根外的 uploads/storage 不能被遮蔽。

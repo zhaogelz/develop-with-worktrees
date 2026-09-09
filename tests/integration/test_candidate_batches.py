@@ -1465,9 +1465,20 @@ def test_failed_batch_retirement_is_exact_idempotent_and_preserves_candidate(
     marker.write_text("preserved", encoding="utf-8")
     directory_link(worktree / "node_modules" / "package", target)
 
+    original_inventory = cleanup_module._ignored_inventory
+    inventory_runs = 0
+
+    def count_inventory(*args, **kwargs):
+        nonlocal inventory_runs
+        inventory_runs += 1
+        return original_inventory(*args, **kwargs)
+
+    monkeypatch.setattr(cleanup_module, "_ignored_inventory", count_inventory)
     retired = retire_failed_batch(repo, batch_id=failed["id"])
     repeated = retire_failed_batch(repo, batch_id=failed["id"])
 
+    # 复用删除器自身的完整清点、删除前复核和删除后复核；不另加全量预扫。
+    assert inventory_runs == 3
     assert retired["status"] == "failed"
     assert retired["worktree_retirement_started_at"]
     assert retired["worktree_retired_at"]

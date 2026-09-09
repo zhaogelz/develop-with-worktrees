@@ -21,6 +21,32 @@ def ignore(root: Path, pattern: str) -> GitRepo:
     return GitRepo(root)
 
 
+def test_dependency_inventory_bounds_repeated_path_resolution(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实目录清点的系统路径解析次数应与条目数线性且不重复倍增。"""
+    repo = ignore(git_repo, "node_modules/")
+    directory = git_repo / "node_modules" / "package" / "lib" / "nested"
+    directory.mkdir(parents=True)
+    files = [directory / f"generated-{index}.js" for index in range(60)]
+    for file in files:
+        file.write_bytes(b"generated")
+    original = Path.resolve
+    resolutions = 0
+
+    def counted(path, *args, **kwargs):
+        nonlocal resolutions
+        resolutions += 1
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counted)
+    inventory = cleanup.inspect_untracked(repo, cwd=git_repo, expand_dependencies=True)
+    assert inventory["retained"] == sorted(
+        file.relative_to(git_repo).as_posix() for file in files
+    )
+    assert resolutions <= 4 * len(files) + 40, resolutions
+
+
 def extended_test_path(path: Path) -> Path:
     # 测试准备独立使用 Windows API 路径，不能用待测实现生成反例。
     return Path("\\\\?\\" + str(path.absolute()))
@@ -309,3 +335,56 @@ def test_dependency_root_replacement_stops_deletion(
         cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
     assert marker.read_text(encoding="utf-8") == "preserved"
     assert (git_repo / "preserved-original-dependencies" / "original.js").is_file()
+
+
+def test_plain_path_check_keeps_its_original_root_boundary(
+    tmp_path: Path, directory_link, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """检查中根被换成链接时，不能再次解析根并接受新的外部边界。"""
+    root = tmp_path / "managed"
+    root.mkdir()
+    file = root / "generated.js"
+    file.write_bytes(b"original")
+    target = tmp_path / "external"
+    target.mkdir()
+    marker = target / file.name
+    marker.write_bytes(b"preserved")
+    original_resolve = Path.resolve
+    replaced = False
+
+    def replace_before_resolve(path, *args, **kwargs):
+        nonlocal replaced
+        if path == file and not replaced:
+            replaced = True
+            root.rename(tmp_path / "original-root")
+            directory_link(root, target)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", replace_before_resolve)
+    with pytest.raises(SoloAIError, match="outside managed root"):
+        cleanup._require_plain_path(file, root)
+    assert marker.read_bytes() == b"preserved"
+    assert (tmp_path / "original-root" / file.name).read_bytes() == b"original"
+
+
+def test_inventory_rejects_linked_ancestor_before_inspecting_leaf(
+    git_repo: Path, tmp_path: Path, directory_link, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "external"
+    target.mkdir()
+    marker = target / "generated.js"
+    marker.write_bytes(b"preserved")
+    ancestor = git_repo / "node_modules" / "package"
+    directory_link(ancestor, target)
+    leaf = ancestor / marker.name
+    original = cleanup.is_link_or_junction
+
+    def reject_target_access(path):
+        if path == leaf:
+            raise AssertionError("祖先链接未拒绝前，不得读取目标后代的元数据")
+        return original(path)
+
+    monkeypatch.setattr(cleanup, "is_link_or_junction", reject_target_access)
+    with pytest.raises(SoloAIError, match="link or junction"):
+        cleanup._require_inventory_path(leaf, git_repo, ignored=True)
+    assert marker.read_bytes() == b"preserved"
