@@ -529,7 +529,7 @@ def test_read_only_parser_accepts_quoted_search_text_and_limited_pipeline() -> N
     assert HOOK._strict_read_only_bash(
         "Get-Content -LiteralPath 'README.md' -Encoding UTF8 | Select-Object -First 40"
     )
-    assert HOOK._strict_read_only_bash("rg -n 'it''s|scope' README.md")
+    assert HOOK._strict_read_only_bash("rg --no-config -n 'it''s|scope' README.md")
 
 
 def test_read_only_parser_rejects_writes_and_external_rg_preprocessors() -> None:
@@ -542,3 +542,38 @@ def test_read_only_parser_rejects_writes_and_external_rg_preprocessors() -> None
     assert not HOOK._strict_read_only_bash("git diff --output=artifact.patch")
     assert not HOOK._strict_read_only_bash("git show --ext-diff HEAD")
     assert not HOOK._strict_read_only_bash("Get-Content -Path -Force")
+
+
+def test_read_only_parser_rejects_newline_command_chaining(git_repo: Path) -> None:
+    command = "rg --no-config needle README.md\nSet-Content escaped.txt value"
+
+    assert not HOOK._strict_read_only_bash(command)
+    result = HOOK.decide(_payload(git_repo, tool="Bash", command=command))
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_read_only_parser_keeps_quoted_pipe_as_search_text() -> None:
+    assert HOOK._strict_read_only_bash("rg --no-config -F '|' README.md")
+    assert HOOK._strict_read_only_bash("rg --no-config -- '--pre' README.md")
+    assert HOOK._strict_read_only_bash("rg --no-config -e '--pre' README.md")
+    assert not HOOK._strict_read_only_bash("git status | Select-Object -First 1")
+
+
+def test_read_only_parser_requires_rg_config_isolation_and_known_options() -> None:
+    assert not HOOK._strict_read_only_bash("rg -n 'anchor|scope' README.md")
+    assert not HOOK._strict_read_only_bash(
+        "rg --no-config --unrecognized-option needle README.md"
+    )
+    assert not HOOK._strict_read_only_bash(
+        "rg --no-config --pre helper needle README.md"
+    )
+
+
+def test_read_only_parser_limits_content_and_select_arguments() -> None:
+    assert not HOOK._strict_read_only_bash("Get-Content README.md CHANGELOG.md")
+    assert not HOOK._strict_read_only_bash(
+        "Get-Content -LiteralPath README.md -Delimiter ,"
+    )
+    assert not HOOK._strict_read_only_bash(
+        "Get-Content README.md | Select-Object -First 1_0"
+    )

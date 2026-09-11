@@ -307,11 +307,34 @@ def _is_valid_in_place(
     return True, ""
 
 
-def _tokenize_read_only(command: str) -> list[str] | None:
-    """只解析有限的 PowerShell 文字和一条管道，不执行用户输入。"""
-    tokens: list[str] = []
+class _ReadToken:
+    """保存只读命令词元及其是否来自引号，避免把字面竖线当作管道。"""
+
+    __slots__ = ("value", "quoted")
+
+    def __init__(self, value: str, quoted: bool = False) -> None:
+        self.value = value
+        self.quoted = quoted
+
+
+def _tokenize_read_only(command: str) -> list[_ReadToken] | None:
+    """只解析一行 PowerShell 文字和一条明确管道，不执行用户输入。"""
+    if "\r" in command or "\n" in command:
+        return None
+    tokens: list[_ReadToken] = []
     current: list[str] = []
     quote: str | None = None
+    quoted = False
+    token_started = False
+
+    def flush() -> None:
+        nonlocal current, quoted, token_started
+        if token_started:
+            tokens.append(_ReadToken("".join(current), quoted=quoted))
+        current = []
+        quoted = False
+        token_started = False
+
     index = 0
     while index < len(command):
         char = command[index]
@@ -337,101 +360,176 @@ def _tokenize_read_only(command: str) -> list[str] | None:
             continue
         if char in {"'", '"'}:
             quote = char
+            quoted = True
+            token_started = True
             index += 1
             continue
         if char.isspace():
-            if current:
-                tokens.append("".join(current))
-                current = []
+            flush()
             index += 1
             continue
         if char == "|":
-            if current:
-                tokens.append("".join(current))
-                current = []
-            tokens.append("|")
+            flush()
+            tokens.append(_ReadToken("|"))
             index += 1
             continue
-        if char in {";", "&", "<", ">", "\x60", "$", "(", ")", "\n", "\r"}:
+        if char in {";", "&", "<", ">", "\x60", "$", "(", ")", "{", "}"}:
             return None
         current.append(char)
+        token_started = True
         index += 1
     if quote is not None:
         return None
-    if current:
-        tokens.append("".join(current))
+    flush()
     return tokens
 
 
-def _command_name(argument: str) -> str:
-    return argument.replace("\\", "/").rsplit("/", 1)[-1].lower()
+def _command_name(argument: _ReadToken) -> str:
+    return argument.value.replace("\\", "/").rsplit("/", 1)[-1].lower()
 
 
-def _safe_rg(tokens: list[str]) -> bool:
+def _safe_rg(tokens: list[_ReadToken]) -> bool:
     if len(tokens) < 2:
         return False
-    return not any(
-        argument.lower() == "--pre"
-        or argument.lower().startswith("--pre=")
-        or argument.lower() == "--pre-glob"
-        or argument.lower().startswith("--pre-glob=")
-        for argument in tokens[1:]
-    )
-
-
-def _safe_get_content(tokens: list[str]) -> bool:
-    if len(tokens) < 2:
-        return False
-    options_with_values = {
-        "-literalpath",
-        "-path",
-        "-encoding",
-        "-totalcount",
-        "-tail",
-        "-delimiter",
-        "-readcount",
+    flags = {
+        "--files",
+        "-n",
+        "--line-number",
+        "-l",
+        "--files-with-matches",
+        "-F",
+        "--fixed-strings",
+        "-i",
+        "--ignore-case",
+        "-S",
+        "--case-sensitive",
+        "-s",
+        "--smart-case",
     }
-    options_without_values = {"-raw"}
+    valued = {
+        "-e",
+        "--regexp",
+        "-g",
+        "--glob",
+        "-a",
+        "--after-context",
+        "-b",
+        "--before-context",
+        "-c",
+        "--context",
+        "-m",
+        "--max-count",
+    }
+    numeric = {
+        "-a",
+        "--after-context",
+        "-b",
+        "--before-context",
+        "-c",
+        "--context",
+        "-m",
+        "--max-count",
+    }
+    no_config = False
+    files_mode = False
+    positions = 0
     index = 1
     while index < len(tokens):
-        argument = tokens[index]
-        lowered = argument.lower()
+        argument = tokens[index].value
+        if argument == "--":
+            positions += len(tokens[index + 1 :])
+            break
+        if argument == "--no-config":
+            if no_config:
+                return False
+            no_config = True
+            index += 1
+            continue
+        if argument in flags:
+            files_mode = files_mode or argument == "--files"
+            index += 1
+            continue
+        if argument in valued:
+            if index + 1 >= len(tokens):
+                return False
+            value = tokens[index + 1].value
+            if argument in numeric and not value.isdecimal():
+                return False
+            index += 2
+            continue
+        if argument.startswith("--regexp=") or argument.startswith("--glob="):
+            if not argument.partition("=")[2]:
+                return False
+            index += 1
+            continue
         if argument.startswith("-"):
-            if lowered in options_with_values:
-                if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
-                    return False
-                index += 2
-                continue
-            if lowered in options_without_values:
-                index += 1
-                continue
             return False
+        positions += 1
         index += 1
-    return True
+    return no_config and (files_mode or positions > 0)
 
 
-def _safe_select(tokens: list[str]) -> bool:
+def _safe_get_content(tokens: list[_ReadToken]) -> bool:
+    if len(tokens) < 2:
+        return False
+    options_with_values = {"-literalpath", "-path", "-encoding", "-totalcount", "-tail"}
+    seen: set[str] = set()
+    path_seen = False
+    index = 1
+    while index < len(tokens):
+        argument = tokens[index].value
+        lowered = argument.lower()
+        if lowered in options_with_values:
+            if lowered in seen or index + 1 >= len(tokens):
+                return False
+            value = tokens[index + 1].value
+            if lowered in {"-literalpath", "-path"}:
+                if path_seen or value.startswith("-"):
+                    return False
+                path_seen = True
+            elif lowered == "-encoding":
+                if value.lower() != "utf8":
+                    return False
+            elif not value.isdecimal():
+                return False
+            seen.add(lowered)
+            index += 2
+            continue
+        if lowered == "-raw":
+            if lowered in seen:
+                return False
+            seen.add(lowered)
+            index += 1
+            continue
+        if argument.startswith("-"):
+            return False
+        if path_seen:
+            return False
+        path_seen = True
+        index += 1
+    return path_seen
+
+
+def _safe_select(tokens: list[_ReadToken]) -> bool:
     if len(tokens) < 3 or _command_name(tokens[0]) != "select-object":
         return False
     allowed = {"-first", "-skip", "-last"}
+    seen: set[str] = set()
     index = 1
     saw_count = False
     while index < len(tokens):
-        argument = tokens[index].lower()
+        argument = tokens[index].value.lower()
         if argument not in allowed or index + 1 >= len(tokens):
             return False
-        try:
-            count = int(tokens[index + 1])
-        except ValueError:
+        if not tokens[index + 1].value.isdecimal() or argument in seen:
             return False
-        if count < 0:
-            return False
+        seen.add(argument)
         saw_count = True
         index += 2
     return saw_count
 
 
-def _safe_read_only_command(tokens: list[str]) -> bool:
+def _safe_read_only_command(tokens: list[_ReadToken]) -> bool:
     if not tokens:
         return False
     name = _command_name(tokens[0])
@@ -445,7 +543,7 @@ def _safe_read_only_command(tokens: list[str]) -> bool:
         return len(tokens) > 1
     if name != "git" or len(tokens) < 2:
         return False
-    subcommand = tokens[1].lower()
+    subcommand = tokens[1].value.lower()
     if subcommand in {"status", "diff", "log", "show", "rev-parse"}:
         blocked = (
             "--output",
@@ -458,36 +556,56 @@ def _safe_read_only_command(tokens: list[str]) -> bool:
             "-o",
         )
         return not any(
-            argument.lower() == option or argument.lower().startswith(option + "=")
+            argument.value.lower() == option
+            or argument.value.lower().startswith(option + "=")
             for argument in tokens[2:]
             for option in blocked
         )
     if subcommand == "branch":
         return len(tokens) == 2 or all(
-            argument.lower() in {"--show-current", "--list", "-a", "-r", "-v"}
+            argument.value.lower() in {"--show-current", "--list", "-a", "-r", "-v"}
             for argument in tokens[2:]
         )
-    return subcommand == "worktree" and tokens[2:3] == ["list"] and len(tokens) == 3
+    return (
+        subcommand == "worktree"
+        and [token.value for token in tokens[2:3]] == ["list"]
+        and len(tokens) == 3
+    )
 
 
 def _strict_read_only_bash(command: str) -> bool:
-    tokens = _tokenize_read_only(command.strip())
-    if not tokens or tokens.count("|") > 1:
+    tokens = _tokenize_read_only(command)
+    pipes = [
+        index
+        for index, token in enumerate(tokens or [])
+        if token.value == "|" and not token.quoted
+    ]
+    if not tokens or len(pipes) > 1:
         return False
-    if "|" not in tokens:
+    if not pipes:
         return _safe_read_only_command(tokens)
-    separator = tokens.index("|")
+    separator = pipes[0]
     left = tokens[:separator]
     right = tokens[separator + 1 :]
-    return _safe_read_only_command(left) and _safe_select(right)
+    return (
+        bool(left)
+        and _command_name(left[0]) in {"rg", "get-content"}
+        and _safe_read_only_command(left)
+        and _safe_select(right)
+    )
 
 
 def _read_only_rejection_reason(command: str) -> str:
-    tokens = _tokenize_read_only(command.strip())
+    tokens = _tokenize_read_only(command)
     if not tokens:
         return "Bash command contains unsupported shell syntax and cannot be confirmed as read-only."
-    if tokens.count("|") > 1 or (
-        "|" in tokens and not _safe_select(tokens[tokens.index("|") + 1 :])
+    pipes = [
+        index
+        for index, token in enumerate(tokens)
+        if token.value == "|" and not token.quoted
+    ]
+    if len(pipes) > 1 or (
+        pipes and not _safe_select(tokens[pipes[0] + 1 :])
     ):
         return "Bash command uses an unsupported pipeline or query form; use a direct read-only command or Get-Content/rg | Select-Object with numeric line options."
     if not _safe_read_only_command(tokens):
