@@ -15,6 +15,7 @@ from .util import SoloAIError, redact_text, sha256_file, sha256_text, stable_jso
 CONFIG_SCHEMA = 2
 VERIFICATION_SCHEMA = 3
 DEFAULT_CLEANUP_OWNED_PATHS: tuple[str, ...] = ()
+STRESS_VERIFICATION_FILENAME = "stress-verification.toml"
 
 
 @dataclass(frozen=True)
@@ -539,15 +540,16 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     )
 
 
-def load_verification_config(
-    repo: GitRepo, *, cwd: Path | None = None
+def _parse_verification_config(
+    data: dict[str, Any],
+    *,
+    source: Path,
+    stress_only: bool = False,
 ) -> VerificationConfig:
-    data = _read_toml((cwd or repo.policy_path()) / ".solo-ai" / "verification.toml")
     schema_version = _integer(data.get("schema_version", 0), field="schema_version")
     if schema_version != VERIFICATION_SCHEMA:
         raise SoloAIError(
-            "Unsupported .solo-ai/verification.toml schema; expected "
-            f"{VERIFICATION_SCHEMA}"
+            f"Unsupported {source} schema; expected {VERIFICATION_SCHEMA}"
         )
     raw_profiles = data.get("profiles", [])
     if not isinstance(raw_profiles, list):
@@ -615,13 +617,17 @@ def load_verification_config(
             field=f"profiles[{index}].level",
             non_empty=True,
         )
-        if level not in {"development", "ready", "full"}:
+        if level not in {"development", "ready", "full", "stress"}:
             raise SoloAIError(
-                f"Profile {profile_id!r} level must be development, ready, or full"
+                f"Profile {profile_id!r} level must be development, ready, full, or stress"
             )
-        if resource_class == "heavy" and level != "full":
+        if stress_only and level != "stress":
             raise SoloAIError(
-                f"Profile {profile_id!r} is heavy and must run at level full"
+                f"Profile {profile_id!r} in {source.name} must run at level stress"
+            )
+        if resource_class == "heavy" and level not in {"full", "stress"}:
+            raise SoloAIError(
+                f"Profile {profile_id!r} is heavy and must run at level full or stress"
             )
         profiles.append(
             VerificationProfile(
@@ -656,6 +662,35 @@ def load_verification_config(
             "static_only cannot be combined with verification profiles; map every changed path explicitly"
         )
     return VerificationConfig(schema_version, static_only, tuple(profiles))
+
+
+def load_verification_config(
+    repo: GitRepo, *, cwd: Path | None = None
+) -> VerificationConfig:
+    config_directory = (cwd or repo.policy_path()) / ".solo-ai"
+    primary_path = config_directory / "verification.toml"
+    primary = _parse_verification_config(_read_toml(primary_path), source=primary_path)
+    stress_path = config_directory / STRESS_VERIFICATION_FILENAME
+    if not stress_path.exists():
+        return primary
+    stress = _parse_verification_config(
+        _read_toml(stress_path), source=stress_path, stress_only=True
+    )
+    if stress.static_only:
+        raise SoloAIError(
+            f"{stress_path.name} must declare stress profiles and cannot enable static_only"
+        )
+    if primary.static_only:
+        raise SoloAIError(
+            "static_only cannot be combined with stress verification profiles"
+        )
+    profiles = primary.profiles + stress.profiles
+    profile_ids = [profile.profile_id for profile in profiles]
+    if len(profile_ids) != len(set(profile_ids)):
+        raise SoloAIError(
+            "Verification profile ids must be unique across configuration files"
+        )
+    return VerificationConfig(primary.schema_version, False, profiles)
 
 
 def _package_json_commands(root: Path) -> list[CommandSpec]:

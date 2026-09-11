@@ -940,6 +940,7 @@ def test_late_recreated_path_is_preserved_by_registration_removal(
     assert observed[0].read_bytes() == b"new unknown data"
 
 
+@pytest.mark.dww_stress
 def test_four_candidates_wait_and_fifth_finish_auto_integrates_oldest_five(
     git_repo: Path,
 ) -> None:
@@ -1076,6 +1077,7 @@ def test_repeating_the_same_exact_seal_returns_the_same_completed_batch(
     assert len(CandidateBatchStore(repo).summary()["batches"]) == 1
 
 
+@pytest.mark.dww_stress
 def test_concurrent_reconcile_resumes_one_frozen_batch_without_duplication(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1239,6 +1241,7 @@ def test_status_projects_active_full_batch_and_abandon_refuses_its_candidate(
     assert StateStore(repo).task(task["id"])["status"] == "active"
 
 
+@pytest.mark.dww_stress
 def test_runtime_release_holds_the_fifth_candidate_until_adapter_success(
     git_repo: Path,
 ) -> None:
@@ -1393,6 +1396,7 @@ def test_finish_releases_candidate_without_waiting_on_an_existing_batch(
     assert store.batch(frozen["id"])["status"] == "sealed"
 
 
+@pytest.mark.dww_stress
 def test_enabling_auto_full_does_not_capture_legacy_explicit_candidates(
     git_repo: Path,
 ) -> None:
@@ -1447,6 +1451,7 @@ def test_enabling_auto_full_does_not_capture_legacy_explicit_candidates(
     )
 
 
+@pytest.mark.dww_stress
 def test_concurrent_fifth_and_sixth_publications_create_only_one_full_batch(
     git_repo: Path,
 ) -> None:

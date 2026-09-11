@@ -999,6 +999,7 @@ def test_natural_adapter_exit_cannot_leave_inherited_stdio_descendant(
     assert not marker.exists()
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
 def test_windows_job_contains_descendant_spawned_after_root_resumes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1076,6 +1077,7 @@ def test_windows_job_contains_descendant_spawned_after_root_resumes(
                 )
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows process handles are required")
 def test_windows_job_ownership_query_uses_native_handle_before_pid_can_be_reused(
     monkeypatch: pytest.MonkeyPatch,
@@ -1113,6 +1115,7 @@ def test_windows_job_ownership_query_uses_native_handle_before_pid_can_be_reused
     assert assigned == [(0xABCDEF, 0x123456)]
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
 def test_windows_job_configuration_failure_occurs_before_popen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1139,6 +1142,7 @@ def test_windows_job_configuration_failure_occurs_before_popen(
         )
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job handles are required")
 def test_windows_job_close_interruption_consumes_handle_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
@@ -1188,6 +1192,7 @@ def test_windows_job_close_interruption_consumes_handle_exactly_once(
     assert live_handles == {0xABCDEF: "unrelated-reused-handle"}
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job handles are required")
 def test_windows_job_detach_interruption_is_explicit_and_never_retries(
     monkeypatch: pytest.MonkeyPatch,
@@ -1233,6 +1238,7 @@ def test_windows_job_detach_interruption_is_explicit_and_never_retries(
     assert calls == []
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows process handles are required")
 def test_windows_process_handle_close_interruption_is_explicit_after_detach(
     monkeypatch: pytest.MonkeyPatch,
@@ -1267,6 +1273,7 @@ def test_windows_process_handle_close_interruption_is_explicit_after_detach(
     assert calls == [0x654321]
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows suspended launch is required")
 def test_windows_create_process_return_interruption_cannot_leak_suspended_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1342,6 +1349,7 @@ def test_windows_create_process_return_interruption_cannot_leak_suspended_root(
             assert close(ctypes.c_void_p(observer_handle))
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows atomic Job launch is required")
 def test_windows_post_create_interruption_cleans_confirmed_unused_closure(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
@@ -1901,6 +1909,7 @@ def test_posix_initial_status_write_failure_holds_for_controlled_stop(
     assert not marker.exists()
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
 @pytest.mark.parametrize("failure_point", ("create", "ownership-query"))
 def test_windows_job_setup_failure_never_executes_root_and_cleans_closure(
@@ -1960,6 +1969,7 @@ def test_windows_job_setup_failure_never_executes_root_and_cleans_closure(
     assert not closure_roots[0].exists()
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows suspended launch is required")
 def test_windows_resume_failure_never_writes_marker_and_preserves_closure(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
@@ -2023,6 +2033,7 @@ def test_windows_resume_failure_never_writes_marker_and_preserves_closure(
                 shutil.rmtree(closure_root)
 
 
+@pytest.mark.dww_stress
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects are required")
 @pytest.mark.parametrize("failure_point", ("terminate", "query"))
 def test_windows_job_confirmation_failure_preserves_verified_input_closure(

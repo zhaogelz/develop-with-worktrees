@@ -514,7 +514,7 @@ def test_cli_choose_current_task_redacts_session_and_delegation_code(
     assert "delegation_code" not in completed.stdout
 
 
-def test_cli_plan_and_verify_cover_registered_development_ready_and_full_levels(
+def test_cli_plan_and_verify_cover_registered_development_ready_full_and_stress_levels(
     git_repo: Path,
 ) -> None:
     runner = (
@@ -581,7 +581,20 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
 """,
         encoding="utf-8",
     )
-    git(git_repo, "add", ".solo-ai/verification.toml")
+    (git_repo / ".solo-ai" / "stress-verification.toml").write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "stress"
+level = "stress"
+resource_class = "heavy"
+paths = ["levels.txt"]
+commands = [["git", "diff", "--check", "main...HEAD"]]
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai")
     git(git_repo, "commit", "-m", "test: configure validation levels")
     call_json("approve", "--accept")
     started = call("start", "--name", "verify levels")
@@ -591,6 +604,9 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
     lease = values["Lease"]
     worktree = Path(values["Worktree"])
     (worktree / "levels.txt").write_text("levels\n", encoding="utf-8")
+    # Stress 仅覆盖其关联的运行时变更；同一候选中的文档不应被错误当成
+    # Ready 全路径门禁，否则无法显式运行压力层。
+    (worktree / "notes.md").write_text("documentation\n", encoding="utf-8")
     call_json(
         "commit",
         "--task",
@@ -601,6 +617,8 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         "test: commit validation level fixture",
         "--path",
         "levels.txt",
+        "--path",
+        "notes.md",
         repo_path=worktree,
     )
     plan = call_json("plan", "--task", task_id, repo_path=worktree)
@@ -608,6 +626,7 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         "development",
         "ready",
         "full",
+        "stress",
     }
     development = call_json(
         "verify",
@@ -675,6 +694,26 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
     # 新Full仍须为外部状态未知的检查产生独立执行身份。
     assert (
         planned["full"]["fingerprint"] != full_proof["profile_proofs"][1]["fingerprint"]
+    )
+    stress = call_json(
+        "verify",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--level",
+        "stress",
+        repo_path=worktree,
+    )
+    stress_proof = json.loads(
+        (
+            git_repo / ".git" / "solo-ai" / "proofs" / f"{stress['proof']}.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert [item["profile_id"] for item in stress_proof["profile_proofs"]] == ["stress"]
+    assert (
+        planned["stress"]["fingerprint"]
+        != stress_proof["profile_proofs"][0]["fingerprint"]
     )
     call_json(
         "abandon",

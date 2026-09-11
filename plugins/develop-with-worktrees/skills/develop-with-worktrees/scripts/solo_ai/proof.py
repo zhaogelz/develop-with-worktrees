@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import (
     CommandSpec,
+    STRESS_VERIFICATION_FILENAME,
     VerificationConfig,
     VerificationProfile,
     load_repo_config,
@@ -223,24 +224,25 @@ def _shared_inputs(
             tool_cache[key] = _tool(command, cwd)
         return tool_cache[key]
 
+    def normalized_file_hash(path: Path) -> str:
+        # 策略的意义不能随平台检出时的 LF/CRLF 转换改变；其余文本变化仍是
+        # 审批与证明复用的有效输入。
+        return sha256_text(path.read_text(encoding="utf-8").replace("\r\n", "\n"))
+
+    config_hashes = {
+        ".solo-ai/config.toml": normalized_file_hash(cwd / ".solo-ai" / "config.toml"),
+        ".solo-ai/verification.toml": normalized_file_hash(
+            cwd / ".solo-ai" / "verification.toml"
+        ),
+        "verification_normalized": sha256_text(stable_json(verification.normalized())),
+    }
+    stress_config = cwd / ".solo-ai" / STRESS_VERIFICATION_FILENAME
+    if stress_config.exists():
+        config_hashes[f".solo-ai/{STRESS_VERIFICATION_FILENAME}"] = (
+            normalized_file_hash(stress_config)
+        )
     return {
-        "config_hashes": {
-            # A policy's meaning cannot depend on a platform checkout changing
-            # LF to CRLF. Other text changes remain approval-significant.
-            ".solo-ai/config.toml": sha256_text(
-                (cwd / ".solo-ai" / "config.toml")
-                .read_text(encoding="utf-8")
-                .replace("\r\n", "\n")
-            ),
-            ".solo-ai/verification.toml": sha256_text(
-                (cwd / ".solo-ai" / "verification.toml")
-                .read_text(encoding="utf-8")
-                .replace("\r\n", "\n")
-            ),
-            "verification_normalized": sha256_text(
-                stable_json(verification.normalized())
-            ),
-        },
+        "config_hashes": config_hashes,
         "lockfiles": {
             relative: sha256_file(cwd / relative)
             for relative in tracked
@@ -519,10 +521,10 @@ def proof_inputs(
         else:
             scope = f"candidate:{candidate_head}"
         inputs["reuse_scope"] = scope
-        if "full" in levels and not (
+        if {"full", "stress"}.intersection(levels) and not (
             profile.external_state == "none" and profile.input_closure == "complete"
         ):
-            # 新Full不是旧事务收尾：未知环境及产物生产检查不能跨执行复用。
+            # 新Full或显式Stress不是旧事务收尾：未知环境及产物生产检查不能跨执行复用。
             # 已通过Full后的释放/推进恢复由批次事务处理，不重新进入validate。
             inputs["full_execution"] = full_execution_id or "plan-only"
         records.append((profile, inputs, sha256_text(stable_json(inputs))))
@@ -820,10 +822,19 @@ def validate(
         levels=levels,
         force_task_scope=force_task_scope,
         expected_candidate_head=expected_candidate_head,
-        full_execution_id=new_id("full-validation") if level == "full" else None,
+        full_execution_id=(
+            new_id(f"{level}-validation") if level in {"full", "stress"} else None
+        ),
         tool_cache=tool_cache,
     )
-    if inputs["unmapped_files"] and not verification.static_only:
+    # Ready（以及包含 Ready 的 Full）是候选晋级门禁，必须覆盖所有候选
+    # 路径。development 与显式 Stress 都是按变更选择的辅助执行层；要求
+    # 每个文档或无关文件也匹配压力配置，会让它们错误地无法单独运行。
+    if (
+        level in {"ready", "full"}
+        and inputs["unmapped_files"]
+        and not verification.static_only
+    ):
         raise SoloAIError(
             "No Ready verification profile covers every candidate path; add explicit path mappings:\n"
             + "\n".join(f"- {path}" for path in inputs["unmapped_files"][:20])

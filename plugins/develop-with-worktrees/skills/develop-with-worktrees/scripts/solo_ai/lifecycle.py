@@ -29,6 +29,7 @@ from .abandonment import write_completed_receipt as write_abandonment_receipt
 from .cleanup import inspect_untracked, require_managed_directory_identity
 from .config import (
     CommandSpec,
+    STRESS_VERIFICATION_FILENAME,
     VerificationConfig,
     discover_validation_commands,
     load_repo_config,
@@ -2930,6 +2931,7 @@ def _deinit_locked(repo: GitRepo, *, confirm: str, message: str) -> dict[str, An
     try:
         (cleanup / ".solo-ai" / "config.toml").unlink()
         (cleanup / ".solo-ai" / "verification.toml").unlink()
+        (cleanup / ".solo-ai" / STRESS_VERIFICATION_FILENAME).unlink(missing_ok=True)
         try:
             (cleanup / ".solo-ai").rmdir()
         except OSError:

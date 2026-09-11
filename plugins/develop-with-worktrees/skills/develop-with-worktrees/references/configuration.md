@@ -5,6 +5,7 @@ Tracked policy is deliberately small. Local state, approvals, queue settings, lo
 ```text
 .solo-ai/config.toml          lifecycle and cleanup boundary
 .solo-ai/verification.toml    schema 3 validation profiles
+.solo-ai/stress-verification.toml  optional schema 3 explicit pressure profiles
 .solo-ai/delegated.toml       optional mature-repository adapter contract
 AGENTS.md managed block        Codex lifecycle reminder
 <git-common-dir>/solo-ai/     repository-local state and receipts
@@ -72,7 +73,7 @@ static_only = false
 
 [[profiles]]
 id = "unit"
-level = "ready"                 # development, ready, or full
+level = "ready"                 # development, ready, full, or stress
 paths = ["src/**", "tests/**"]
 input_paths = ["src/**", "tests/**", "pyproject.toml", "uv.lock"]
 input_closure = "declared"      # complete is required for cross-task reuse
@@ -84,7 +85,11 @@ resource_class = "normal"       # normal or heavy
 commands = [["uv", "run", "pytest"]]
 ```
 
-All changed candidate paths must be covered by a Ready profile. Ready should contain syntax/static checks, affected compilation, and light contract tests. `resource_class = "heavy"` is accepted only with `level = "full"`; database setup, complete builds, authentication, and browser flows belong there. Full validation selects Ready plus Full profiles so cheap checks fail before heavy work. A profile proof is reused only when its normalized commands, tool/platform facts, declared environment hashes, tracked input closure, and reuse scope are identical. A stored proof whose identity changed fails closed. A failed profile declared with `external_state = "none"` and `input_closure = "complete"` is not rerun unchanged; modify the candidate/policy or explicitly reclassify it.
+All changed candidate paths must be covered by a Ready profile. Ready should contain syntax/static checks, affected compilation, and light contract tests. `resource_class = "heavy"` is accepted only with `level = "full"` or `"stress"`; database setup, complete builds, authentication, and browser flows belong in Full. Full validation selects Ready plus Full profiles so cheap checks fail before heavy work.
+
+New repositories place optional, low-frequency pressure checks in `.solo-ai/stress-verification.toml`. It uses the same schema, must set `static_only = false`, and may declare only `level = "stress"` profiles. DWW merges it with the primary policy, but only `dww verify --level stress` selects those profiles: Stress never substitutes for Ready or batch Full, and unlike Ready/Full it does not require every candidate path to match a Stress profile. Existing repositories may keep stress profiles in `verification.toml` for compatibility. Both files are approval- and proof-relevant policy inputs, so a change fails closed and conservatively invalidates old evidence.
+
+A profile proof is reused only when its normalized commands, tool/platform facts, declared environment hashes, tracked input closure, and reuse scope are identical. A stored proof whose identity changed fails closed. A failed profile declared with `external_state = "none"` and `input_closure = "complete"` is not rerun unchanged; modify the candidate/policy or explicitly reclassify it.
 
 `static_only = true` is valid only with no profiles. Commands are explicit argv arrays. Schema 2 is deliberately unsupported for tracked verification policy; migrate the repository policy before installing this release. Older local task state is read-upgraded to schema 6. Candidate-pool schemas 1–3 remain readable and migrate to schema 4; legacy candidates remain in their explicit policy epoch.
 

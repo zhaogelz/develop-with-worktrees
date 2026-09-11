@@ -10,6 +10,7 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 - Automatic integration whenever five eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
 - Completed checks are saved individually. A fresh Full reuses only checks with complete, pure inputs; mutable environments and required build artifacts are not replaced by old success reports.
+- Default Full covers the core lifecycle and a real process-tree boundary. Repeated recovery, high-concurrency, marketplace, and platform fault-injection checks run only when an operator explicitly requests `dww verify --level stress`.
 
 The host's native task system still decides who does what and when. DWW owns only the Git safety lifecycle that carries completed work into the base branch.
 

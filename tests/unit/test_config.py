@@ -164,7 +164,104 @@ commands = [["git", "status"]]
         encoding="utf-8",
     )
 
-    with pytest.raises(SoloAIError, match="must run at level full"):
+    with pytest.raises(SoloAIError, match="must run at level full or stress"):
+        load_verification_config(GitRepo(git_repo))
+
+
+def test_accepts_heavy_stress_profiles(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "verification.toml").write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "explicit-stress"
+level = "stress"
+resource_class = "heavy"
+paths = ["**"]
+commands = [["git", "status"]]
+""",
+        encoding="utf-8",
+    )
+
+    profile = load_verification_config(GitRepo(git_repo)).profiles[0]
+    assert (profile.level, profile.resource_class) == ("stress", "heavy")
+
+
+def test_loads_stress_profiles_from_a_supplement_without_changing_primary_policy(
+    git_repo: Path,
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "verification.toml").write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "ready"
+level = "ready"
+paths = ["**"]
+commands = [["git", "status"]]
+""",
+        encoding="utf-8",
+    )
+    (config / "stress-verification.toml").write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "stress"
+level = "stress"
+resource_class = "heavy"
+paths = ["**"]
+commands = [["git", "status"]]
+""",
+        encoding="utf-8",
+    )
+
+    profiles = load_verification_config(GitRepo(git_repo)).profiles
+
+    assert [(profile.profile_id, profile.level) for profile in profiles] == [
+        ("ready", "ready"),
+        ("stress", "stress"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            """static_only = false
+
+[[profiles]]
+id = "not-stress"
+level = "full"
+paths = ["**"]
+commands = [["git", "status"]]
+""",
+            "must run at level stress",
+        ),
+        (
+            """static_only = true
+""",
+            "cannot enable static_only",
+        ),
+    ],
+)
+def test_rejects_invalid_stress_verification_supplement(
+    git_repo: Path, body: str, message: str
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "verification.toml").write_text(
+        "schema_version = 3\nstatic_only = true\n", encoding="utf-8"
+    )
+    (config / "stress-verification.toml").write_text(
+        "schema_version = 3\n" + body, encoding="utf-8"
+    )
+
+    with pytest.raises(SoloAIError, match=message):
         load_verification_config(GitRepo(git_repo))
 
 

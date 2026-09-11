@@ -1,0 +1,32 @@
+schema_version = 3
+static_only = false
+
+# 此文件由支持 stress 层的 DWW 运行器合并。旧运行器只读取
+# verification.toml，因此仍能独立完成 Ready 和默认 Full 的候选验证。
+# 压力层须由操作者显式执行 `dww verify --level stress`。
+[[profiles]]
+id = "dww-stress"
+paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
+input_closure = "declared"
+timeout_seconds = 43200
+resource_class = "heavy"
+level = "stress"
+commands = [
+  ["uv", "run", "pytest", "-m", "dww_stress", "-vv", "-x", "--durations=30"],
+]

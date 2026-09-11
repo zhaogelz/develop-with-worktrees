@@ -78,7 +78,7 @@ commands = [
 ]
 
 # 组合 Full 只在 DWW 核心、验证策略或它们的测试变化时执行。Full 仍包含
-# 被选中的 Ready profiles，但 dww_fast 和 dww_full 两组 pytest 不重叠。
+# 被选中的 Ready profiles；压力层有独立的显式入口，不能随默认 Full 重跑。
 [[profiles]]
 id = "dww-core-full"
 paths = [
@@ -103,5 +103,5 @@ timeout_seconds = 43200
 resource_class = "heavy"
 level = "full"
 commands = [
-  ["uv", "run", "pytest", "-m", "dww_full", "-vv", "-x", "--durations=30"],
+  ["uv", "run", "pytest", "-m", "dww_full and not dww_stress", "-vv", "-x", "--durations=30"],
 ]

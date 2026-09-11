@@ -123,6 +123,8 @@ def run_logged(
     on_heartbeat: Callable[[dict[str, Any]], None] | None = None,
     receipt_path: Path | None = None,
     receipt_metadata: dict[str, Any] | None = None,
+    monotonic: Callable[[], float] | None = None,
+    poll_interval_seconds: float = 0.2,
 ) -> LoggedRunResult:
     """运行显式 argv，并留下可恢复的日志和运行回执。
 
@@ -134,8 +136,11 @@ def run_logged(
         raise SoloAIError("Command heartbeat_seconds must be positive")
     if termination_grace_seconds <= 0:
         raise SoloAIError("Command termination_grace_seconds must be positive")
+    if poll_interval_seconds < 0:
+        raise SoloAIError("Command poll_interval_seconds must not be negative")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
+    clock = monotonic or time.monotonic
+    started = clock()
     started_at = utc_timestamp()
     creation_flags = (
         getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
@@ -182,7 +187,7 @@ def run_logged(
             force_deadline: float | None = None
             next_heartbeat = started + heartbeat_seconds
             while not reader_finished or process.poll() is None:
-                now = time.monotonic()
+                now = clock()
                 if timeout_seconds is not None and now - started >= timeout_seconds:
                     timed_out = True
                     # 当前 Popen 是本调用刚创建且仍持有的对象；不能再依赖
@@ -228,7 +233,7 @@ def run_logged(
                         on_heartbeat(heartbeat)
                     next_heartbeat = now + heartbeat_seconds
                 try:
-                    line = output.get(timeout=0.2)
+                    line = output.get(timeout=poll_interval_seconds)
                 except Empty:
                     continue
                 if line is None:
@@ -237,7 +242,7 @@ def run_logged(
                     handle.write(redact_text(line))
                     handle.flush()
             returncode = process.wait()
-            duration = time.monotonic() - started
+            duration = clock() - started
             handle.write(
                 f"\n[exit={returncode} duration={duration:.3f}s timed_out={str(timed_out).lower()}]\n"
             )

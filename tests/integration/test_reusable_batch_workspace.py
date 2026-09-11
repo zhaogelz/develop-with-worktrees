@@ -107,6 +107,7 @@ def test_success_returns_workspace_without_deleting_dependencies(
     assert repo.ref_head(saved_candidate["ref"]) == saved_candidate["head"]
 
 
+@pytest.mark.dww_stress
 def test_candidate_conflict_preserves_partial_result_and_unblocks_next_batch(
     git_repo: Path,
 ) -> None:
@@ -209,6 +210,7 @@ def test_isolated_index_interruption_leaves_workspace_recoverable(
     assert store.read()["integration_workspace"]["owner"] is None
 
 
+@pytest.mark.dww_stress
 def test_ten_success_and_failure_rounds_reuse_one_workspace(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -340,6 +342,7 @@ def test_recover_after_promotion_and_later_main_commit_does_not_repeat_full(
     assert store.read()["integration_workspace"]["owner"] is None
 
 
+@pytest.mark.dww_stress
 def test_old_failed_retirement_does_not_touch_new_owner(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -380,6 +383,7 @@ def test_old_failed_retirement_does_not_touch_new_owner(
         batch_workspace.require_owner(repo, store, old)
 
 
+@pytest.mark.dww_stress
 def test_missing_idle_workspace_repairs_only_its_registration(git_repo: Path) -> None:
     """手动删除已归还的临时场地后，精确移除登记并重建，不使用全局prune。"""
     repo = reusable_repo(git_repo)
@@ -443,6 +447,7 @@ def test_active_workspace_path_change_preserves_owner_and_target(
     assert saved.is_dir()
 
 
+@pytest.mark.dww_stress
 @pytest.mark.parametrize(
     "stage", ["before-registration", "after-registration", "busy-checkout"]
 )

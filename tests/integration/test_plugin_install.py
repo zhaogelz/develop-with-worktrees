@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.dww_stress
 def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:

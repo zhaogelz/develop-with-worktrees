@@ -186,6 +186,28 @@ def test_changed_or_damaged_evidence_cannot_skip_execution(
     assert proof._logs_exist(second), "重验后必须得到完整、可再次核验的执行日志"
 
 
+def test_stress_supplement_change_cannot_reuse_full_evidence(git_repo: Path):
+    repo = configure(git_repo, COUNT)
+    validate(repo)
+    (git_repo / ".solo-ai/stress-verification.toml").write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "stress"
+level = "stress"
+resource_class = "heavy"
+paths = ["**"]
+commands = [["git", "status"]]
+""",
+        encoding="utf-8",
+    )
+
+    validate(repo)
+
+    assert (git_repo / ".tmp/count").read_text() == "2"
+
+
 def test_partial_success_receipts_cannot_skip_unrecorded_commands(git_repo: Path):
     repo = configure(git_repo, COUNT)
     policy = git_repo / ".solo-ai/verification.toml"

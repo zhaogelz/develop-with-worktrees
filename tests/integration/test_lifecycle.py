@@ -869,6 +869,7 @@ def test_recover_rejects_corrupted_completed_transaction_before_rebuilding_recei
     assert StateStore(repo).task(task["id"])["candidate_head"] == original_candidate
 
 
+@pytest.mark.dww_stress
 @pytest.mark.parametrize(
     "stage",
     (
@@ -1415,6 +1416,7 @@ def test_recover_completes_abandonment_after_branch_delete(
     assert StateStore(repo).task(task["id"])["status"] == "abandoned"
 
 
+@pytest.mark.dww_stress
 @pytest.mark.parametrize("stage", ["before-delete", "after-delete", "after-complete"])
 def test_public_recover_completes_abandonment_after_real_process_exit(
     git_repo: Path, stage: str
@@ -2830,6 +2832,23 @@ def test_exact_commit_can_complete_reviewed_current_base_merge(
 
 def test_deinit_removes_only_exact_adopted_policy_and_slots(git_repo: Path) -> None:
     repo = initialized(git_repo)
+    stress_policy = git_repo / ".solo-ai" / "stress-verification.toml"
+    stress_policy.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "stress"
+level = "stress"
+resource_class = "heavy"
+paths = ["**"]
+commands = [["git", "status"]]
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/stress-verification.toml")
+    git(git_repo, "commit", "-m", "test: add stress verification policy")
+    approve(repo, load_verification_config(repo))
     task = start(repo, name="discard before uninstall")
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     result = deinit(
@@ -3060,6 +3079,7 @@ def test_prune_slot_plan_is_one_shot(git_repo: Path) -> None:
     assert marker.read_text(encoding="utf-8") == "same"
 
 
+@pytest.mark.dww_stress
 @pytest.mark.parametrize(
     "stage", ["rename", "unlink", "marker-delete", "completed-write"]
 )
@@ -3393,6 +3413,7 @@ def test_prune_slot_retains_an_unregistered_slot_directory(git_repo: Path) -> No
     assert marker.read_text(encoding="utf-8") == "preserve me\n"
 
 
+@pytest.mark.dww_stress
 def test_warm_slot_blocks_concurrent_start(git_repo: Path) -> None:
     repo = initialized(git_repo)
     config = git_repo / ".solo-ai" / "config.toml"

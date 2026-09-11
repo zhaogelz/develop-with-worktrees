@@ -504,7 +504,9 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--lease", required=True)
     verify.add_argument("--session")
     verify.add_argument(
-        "--level", choices=["development", "ready", "full"], default="development"
+        "--level",
+        choices=["development", "ready", "full", "stress"],
+        default="development",
     )
 
     status = sub.add_parser("status", help="show masked slots and tasks")
@@ -1503,6 +1505,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         for level, levels in (
             ("development", ("development",)),
             ("full", ("ready", "full")),
+            ("stress", ("stress",)),
         ):
             _, phase_records = proof_inputs(
                 repo,

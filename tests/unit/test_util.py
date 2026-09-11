@@ -12,6 +12,19 @@ from solo_ai import lifecycle, util
 from solo_ai.util import DirectoryLock, SoloAIError, redact_text, run_logged
 
 
+class AdvancingClock:
+    """用确定性单调时间验证超时状态机，不把测试时长交给真实睡眠。"""
+
+    def __init__(self, start: float = 0.0, step: float = 1.0) -> None:
+        self.current = start
+        self.step = step
+
+    def __call__(self) -> float:
+        value = self.current
+        self.current += self.step
+        return value
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows 共享删除语义")
 def test_atomic_write_survives_a_short_windows_reader(tmp_path: Path) -> None:
     import ctypes
@@ -501,19 +514,24 @@ def test_logged_run_times_out_with_heartbeat_and_receipt(tmp_path: Path) -> None
     log_path = tmp_path / "run.log"
     receipt_path = tmp_path / "receipt.json"
     heartbeats: list[dict[str, object]] = []
+    clock = AdvancingClock()
+    wall_started = time.monotonic()
 
     result = run_logged(
         [sys.executable, "-c", "import time; time.sleep(10)"],
         cwd=tmp_path,
         log_path=log_path,
-        timeout_seconds=0.3,
-        heartbeat_seconds=0.05,
+        timeout_seconds=3,
+        heartbeat_seconds=1,
         on_heartbeat=heartbeats.append,
         receipt_path=receipt_path,
+        monotonic=clock,
+        poll_interval_seconds=0,
     )
 
     assert result.timed_out is True
-    assert result.duration_seconds < 3
+    assert result.duration_seconds >= 3
+    assert time.monotonic() - wall_started < 3
     assert heartbeats
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["status"] == "timed_out"
