@@ -38,6 +38,8 @@ from solo_ai.lifecycle import (
     ready,
     recover,
     resume_in_place,
+    show_task_anchor,
+    update_task_anchor,
     retarget,
     set_local_enabled,
     start,
@@ -3554,3 +3556,53 @@ timeout_seconds = 0.2
     assert time.monotonic() - started_at < 3
     assert not StateStore(repo).task(task["id"])["processes"]
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_anchor_show_and_update_uses_lease_and_digest(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="anchor update")
+    shown = show_task_anchor(repo, task_id=task["id"])
+    input_path = Path(task["worktree"]) / "anchor-update.md"
+    content = shown["content"]
+    content = content.replace(
+        "- Implementation target: fill before editing",
+        "- Implementation target: lifecycle anchor update",
+    )
+    content = content.replace(
+        "- Scope boundary: fill before editing",
+        "- Scope boundary: direct lifecycle tests only",
+    )
+    content = content.replace(
+        "- Acceptance criteria: fill before Ready",
+        "- Acceptance criteria: show and update tests pass",
+    )
+    content = content.replace(
+        "- Current progress: task started",
+        "- Current progress: anchor command implemented",
+    )
+    input_path.write_text(content, encoding="utf-8", newline="\n")
+    result = update_task_anchor(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        input_path=input_path,
+        expected_sha256=shown["sha256"],
+    )
+    assert result["changed"] is True
+    refreshed = show_task_anchor(repo, task_id=task["id"])
+    assert refreshed["content"] == content
+    other = git_repo.parent / "other-caller"
+    repo.git(["worktree", "add", "--detach", str(other), task["base_head"]])
+    try:
+        with pytest.raises(SoloAIError, match="task worktree or its recorded base"):
+            show_task_anchor(GitRepo(other), task_id=task["id"])
+    finally:
+        repo.git(["worktree", "remove", "--force", str(other)])
+    with pytest.raises(SoloAIError, match="current task lease"):
+        update_task_anchor(
+            repo,
+            task_id=task["id"],
+            lease="wrong",
+            input_path=input_path,
+            expected_sha256=refreshed["sha256"],
+        )

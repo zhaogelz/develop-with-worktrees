@@ -149,6 +149,52 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     task_id = values["Task"]
     lease = values["Lease"]
     worktree = Path(values["Worktree"])
+    shown_anchor = run_runner(
+        "--json", "anchor", "show", "--task", task_id, cwd=worktree
+    )
+    assert shown_anchor.returncode == 0, shown_anchor.stderr
+    shown_anchor_payload = json.loads(shown_anchor.stdout)["result"]
+    anchor_input = worktree / "anchor-input.md"
+    anchor_content = shown_anchor_payload["content"]
+    anchor_content = anchor_content.replace(
+        "- Implementation target: fill before editing",
+        "- Implementation target: installed anchor update",
+    )
+    anchor_content = anchor_content.replace(
+        "- Scope boundary: fill before editing",
+        "- Scope boundary: plugin install smoke test",
+    )
+    anchor_content = anchor_content.replace(
+        "- Acceptance criteria: fill before Ready",
+        "- Acceptance criteria: installed show and update pass",
+    )
+    anchor_content = anchor_content.replace(
+        "- Current progress: task started",
+        "- Current progress: installed anchor verified",
+    )
+    anchor_input.write_text(anchor_content, encoding="utf-8", newline="\n")
+    updated_anchor = run_runner(
+        "--json",
+        "anchor",
+        "update",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--file",
+        str(anchor_input),
+        "--expected-sha256",
+        shown_anchor_payload["sha256"],
+        cwd=worktree,
+    )
+    assert updated_anchor.returncode == 0, updated_anchor.stderr
+    assert json.loads(updated_anchor.stdout)["result"]["changed"] is True
+    anchor_input.unlink()
+    refreshed_anchor = run_runner(
+        "--json", "anchor", "show", "--task", task_id, cwd=worktree
+    )
+    assert refreshed_anchor.returncode == 0, refreshed_anchor.stderr
+    assert json.loads(refreshed_anchor.stdout)["result"]["content"] == anchor_content
     (worktree / "smoke.txt").write_text("installed\n", encoding="utf-8")
     committed = run_runner(
         "commit",

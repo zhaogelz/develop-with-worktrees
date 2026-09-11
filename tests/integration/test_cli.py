@@ -859,3 +859,106 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
     )
     assert finished_direct["mode"] == "in-place"
     assert (git_repo / "cli-current.txt").exists()
+
+
+def test_anchor_cli_roundtrip_through_uv_script(git_repo: Path) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+
+    def call(
+        *arguments: str, repo_path: Path = git_repo
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "uv",
+                "run",
+                "--script",
+                str(runner),
+                "--repo",
+                str(repo_path),
+                *arguments,
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=90,
+        )
+
+    def call_json(*arguments: str, repo_path: Path = git_repo) -> dict:
+        completed = call("--json", *arguments, repo_path=repo_path)
+        assert completed.returncode == 0, completed.stderr
+        return json.loads(completed.stdout)["result"]
+
+    call_json("init", "--accept", "--verify", '["git","diff","--check","main...HEAD"]')
+    started = call("start", "--name", "cli anchor")
+    assert started.returncode == 0, started.stderr
+    values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
+    task_id, lease = values["Task"], values["Lease"]
+    worktree = Path(values["Worktree"])
+
+    shown = call_json("anchor", "show", "--task", task_id)
+    input_path = worktree / "anchor-input.md"
+    content = shown["content"]
+    content = content.replace(
+        "- Implementation target: fill before editing",
+        "- Implementation target: CLI anchor roundtrip",
+    )
+    content = content.replace(
+        "- Scope boundary: fill before editing", "- Scope boundary: CLI test only"
+    )
+    content = content.replace(
+        "- Acceptance criteria: fill before Ready",
+        "- Acceptance criteria: show and update succeed",
+    )
+    content = content.replace(
+        "- Current progress: task started", "- Current progress: CLI update verified"
+    )
+    input_path.write_text(content, encoding="utf-8", newline="\n")
+    updated = call_json(
+        "anchor",
+        "update",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--file",
+        str(input_path),
+        "--expected-sha256",
+        shown["sha256"],
+    )
+    assert updated["changed"] is True
+    refreshed = call_json("anchor", "show", "--task", task_id)
+    assert refreshed["content"] == content
+    rejected = call(
+        "--json",
+        "anchor",
+        "update",
+        "--task",
+        task_id,
+        "--lease",
+        "wrong",
+        "--file",
+        str(input_path),
+        "--expected-sha256",
+        refreshed["sha256"],
+    )
+    assert rejected.returncode == 2
+    call_json(
+        "abandon",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--confirm",
+        task_id,
+        repo_path=worktree,
+    )

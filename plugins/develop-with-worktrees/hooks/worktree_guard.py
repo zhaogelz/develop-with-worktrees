@@ -69,6 +69,7 @@ DWW_SUBCOMMANDS = {
     "prune-logs",
     "prune-slot",
     "deinit",
+    "anchor",
 }
 DWW_QUARANTINE_SUBCOMMANDS = {"doctor", "status", "plan", "resume-in-place"}
 SHELL_CONTROL = (";", "|", "&", "`", "$", "(", ")", "<", ">", "\n", "\r")
@@ -306,36 +307,198 @@ def _is_valid_in_place(
     return True, ""
 
 
-def _strict_read_only_bash(command: str) -> bool:
-    value = command.strip().lower()
-    if not value or any(token in command for token in SHELL_CONTROL):
+def _tokenize_read_only(command: str) -> list[str] | None:
+    """只解析有限的 PowerShell 文字和一条管道，不执行用户输入。"""
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                if index + 1 < len(command) and command[index + 1] == "'":
+                    current.append("'")
+                    index += 2
+                    continue
+                quote = None
+            else:
+                current.append(char)
+            index += 1
+            continue
+        if quote == '"':
+            if char in {"$", "\x60"}:
+                return None
+            if char == '"':
+                quote = None
+            else:
+                current.append(char)
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char.isspace():
+            if current:
+                tokens.append("".join(current))
+                current = []
+            index += 1
+            continue
+        if char == "|":
+            if current:
+                tokens.append("".join(current))
+                current = []
+            tokens.append("|")
+            index += 1
+            continue
+        if char in {";", "&", "<", ">", "\x60", "$", "(", ")", "\n", "\r"}:
+            return None
+        current.append(char)
+        index += 1
+    if quote is not None:
+        return None
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def _command_name(argument: str) -> str:
+    return argument.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _safe_rg(tokens: list[str]) -> bool:
+    if len(tokens) < 2:
         return False
-    try:
-        tokens = shlex.split(value, posix=False)
-    except ValueError:
+    return not any(
+        argument.lower() == "--pre"
+        or argument.lower().startswith("--pre=")
+        or argument.lower() == "--pre-glob"
+        or argument.lower().startswith("--pre-glob=")
+        for argument in tokens[1:]
+    )
+
+
+def _safe_get_content(tokens: list[str]) -> bool:
+    if len(tokens) < 2:
         return False
+    options_with_values = {
+        "-literalpath",
+        "-path",
+        "-encoding",
+        "-totalcount",
+        "-tail",
+        "-delimiter",
+        "-readcount",
+    }
+    options_without_values = {"-raw"}
+    index = 1
+    while index < len(tokens):
+        argument = tokens[index]
+        lowered = argument.lower()
+        if argument.startswith("-"):
+            if lowered in options_with_values:
+                if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                    return False
+                index += 2
+                continue
+            if lowered in options_without_values:
+                index += 1
+                continue
+            return False
+        index += 1
+    return True
+
+
+def _safe_select(tokens: list[str]) -> bool:
+    if len(tokens) < 3 or _command_name(tokens[0]) != "select-object":
+        return False
+    allowed = {"-first", "-skip", "-last"}
+    index = 1
+    saw_count = False
+    while index < len(tokens):
+        argument = tokens[index].lower()
+        if argument not in allowed or index + 1 >= len(tokens):
+            return False
+        try:
+            count = int(tokens[index + 1])
+        except ValueError:
+            return False
+        if count < 0:
+            return False
+        saw_count = True
+        index += 2
+    return saw_count
+
+
+def _safe_read_only_command(tokens: list[str]) -> bool:
     if not tokens:
         return False
-    first = tokens[0].lower()
-    if first in {"ls", "dir", "pwd"}:
-        return True
-    if first in {"rg", "get-content", "where", "get-command", "test-path"}:
+    name = _command_name(tokens[0])
+    if name in {"ls", "dir", "pwd"}:
+        return len(tokens) == 1
+    if name == "rg":
+        return _safe_rg(tokens)
+    if name == "get-content":
+        return _safe_get_content(tokens)
+    if name in {"where", "get-command", "test-path"}:
         return len(tokens) > 1
-    if first != "git" or len(tokens) < 2:
+    if name != "git" or len(tokens) < 2:
         return False
-    if tokens[1].lower() in READ_ONLY_GIT_SUBCOMMANDS:
-        return True
-    return (
-        tokens[1].lower() == "worktree"
-        and len(tokens) >= 3
-        and tokens[2].lower() == "list"
-    )
+    subcommand = tokens[1].lower()
+    if subcommand in {"status", "diff", "log", "show", "rev-parse"}:
+        blocked = (
+            "--output",
+            "--ext-diff",
+            "--textconv",
+            "--upload-pack",
+            "--config",
+            "--config-env",
+            "-c",
+            "-o",
+        )
+        return not any(
+            argument.lower() == option or argument.lower().startswith(option + "=")
+            for argument in tokens[2:]
+            for option in blocked
+        )
+    if subcommand == "branch":
+        return len(tokens) == 2 or all(
+            argument.lower() in {"--show-current", "--list", "-a", "-r", "-v"}
+            for argument in tokens[2:]
+        )
+    return subcommand == "worktree" and tokens[2:3] == ["list"] and len(tokens) == 3
+
+
+def _strict_read_only_bash(command: str) -> bool:
+    tokens = _tokenize_read_only(command.strip())
+    if not tokens or tokens.count("|") > 1:
+        return False
+    if "|" not in tokens:
+        return _safe_read_only_command(tokens)
+    separator = tokens.index("|")
+    left = tokens[:separator]
+    right = tokens[separator + 1 :]
+    return _safe_read_only_command(left) and _safe_select(right)
+
+
+def _read_only_rejection_reason(command: str) -> str:
+    tokens = _tokenize_read_only(command.strip())
+    if not tokens:
+        return "Bash command contains unsupported shell syntax and cannot be confirmed as read-only."
+    if tokens.count("|") > 1 or (
+        "|" in tokens and not _safe_select(tokens[tokens.index("|") + 1 :])
+    ):
+        return "Bash command uses an unsupported pipeline or query form; use a direct read-only command or Get-Content/rg | Select-Object with numeric line options."
+    if not _safe_read_only_command(tokens):
+        return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."
+    return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."
 
 
 def _dww_subcommand(command: str, root: Path) -> str | None:
     """只识别已安装插件的真实 runner、当前工作树和已知子命令。"""
     value = command.strip()
-    if not value or any(token in value for token in SHELL_CONTROL):
+    if not value or any(argument in value for argument in SHELL_CONTROL):
         return None
     try:
         tokens = shlex.split(value, posix=False)
@@ -578,6 +741,8 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             "Protected base worktree already has unowned changes. They were preserved; do not continue, reset, clean, or move them automatically. Inspect and ask the user how to proceed. Paths: "
             + detail
         )
+    if tool == "Bash" and command:
+        return _deny(_read_only_rejection_reason(command))
     return _deny(
         "Protected base-worktree write blocked. For ordinary work, run dww Start and edit only its returned worktree. If the user explicitly asks to change this directory for this task, first choose current-task and then follow normal development without a DWW lifecycle."
     )

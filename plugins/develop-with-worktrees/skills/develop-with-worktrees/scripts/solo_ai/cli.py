@@ -36,6 +36,8 @@ from .lifecycle import (
     abandon,
     adopt_task_anchor,
     approve,
+    show_task_anchor,
+    update_task_anchor,
     choose,
     commit_task,
     deinit,
@@ -440,10 +442,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     runtime_verify.add_argument("--candidate", required=True)
 
-    anchor = sub.add_parser(
-        "anchor", help="explicitly reconstruct a reviewed pre-anchor task context"
-    )
+    anchor = sub.add_parser("anchor", help="read or update the active task anchor")
     anchor_sub = anchor.add_subparsers(dest="anchor_command", required=True)
+    anchor_show = anchor_sub.add_parser(
+        "show", help="read one task anchor and its byte SHA-256"
+    )
+    anchor_show.add_argument("--task", required=True)
+    anchor_update = anchor_sub.add_parser(
+        "update", help="atomically update one task anchor from a UTF-8 file"
+    )
+    anchor_update.add_argument("--task", required=True)
+    anchor_update.add_argument("--lease", required=True)
+    anchor_update.add_argument("--file", type=Path, required=True)
+    anchor_update.add_argument("--expected-sha256", required=True)
     anchor_adopt = anchor_sub.add_parser(
         "adopt", help="adopt one legacy task after reviewing its execution contract"
     )
@@ -1402,6 +1413,16 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return verify_runtime_effective(repo, candidate_id=args.candidate)
         raise SoloAIError(f"Unknown runtime command: {args.runtime_command}")
     if args.command == "anchor":
+        if args.anchor_command == "show":
+            return show_task_anchor(repo, task_id=args.task)
+        if args.anchor_command == "update":
+            return update_task_anchor(
+                repo,
+                task_id=args.task,
+                lease=args.lease,
+                input_path=args.file,
+                expected_sha256=args.expected_sha256,
+            )
         if args.anchor_command == "adopt":
             return adopt_task_anchor(
                 repo,

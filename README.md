@@ -5,7 +5,7 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 ## What it gives you
 
 - One isolated worktree per modifying task.
-- A local task anchor that survives continuation, handoff, and model changes.
+- A local task anchor that survives continuation, handoff, and model changes; `anchor show/update` reads and saves checked context during an active task.
 - Exact-path commits and immutable verified candidates.
 - Automatic integration whenever five eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.

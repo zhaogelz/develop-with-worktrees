@@ -66,7 +66,10 @@ from .task_context import (
     adopt_legacy_anchor,
     create_anchor,
     delete_anchor,
+    read_anchor,
+    read_anchor_update,
     require_anchor,
+    update_anchor,
 )
 from .util import (
     DirectoryLock,
@@ -512,7 +515,7 @@ def initialize(
         }
 
 
-def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
+def _require_managed_mode(repo: GitRepo) -> None:
     mode = _effective_mode(repo)
     if mode == "disabled":
         raise SoloAIError(
@@ -526,6 +529,23 @@ def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
         raise SoloAIError(
             "Repository is not set up for isolated tasks. Record the repository choice with `choose` first"
         )
+
+
+def _require_anchor_caller(repo: GitRepo, task: dict[str, Any]) -> None:
+    caller = repo.root.resolve()
+    allowed = {
+        Path(str(task[key])).resolve()
+        for key in ("worktree", "base_worktree")
+        if task.get(key)
+    }
+    if caller not in allowed:
+        raise SoloAIError(
+            "Anchor operations must run from the task worktree or its recorded base worktree"
+        )
+
+
+def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
+    _require_managed_mode(repo)
     policy = repo.policy_path()
     config = load_repo_config(repo, cwd=policy)
     verification = load_verification_config(repo, cwd=policy)
@@ -562,6 +582,46 @@ def adopt_task_anchor(
             confirm=confirm,
         )
         return {"task_id": task_id, "anchor_path": str(path.resolve())}
+
+
+def show_task_anchor(repo: GitRepo, *, task_id: str) -> dict[str, Any]:
+    _require_managed_mode(repo)
+    task = StateStore(repo).task(task_id)
+    _require_anchor_caller(repo, task)
+    result = read_anchor(repo, task)
+    result["status"] = task.get("status")
+    return result
+
+
+def update_task_anchor(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    lease: str,
+    input_path: Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    _require_managed_mode(repo)
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "anchor-update") as task:
+        _require_anchor_caller(repo, task)
+        status = str(task.get("status"))
+        if status not in {"active", "ready"}:
+            raise SoloAIError(
+                "Only an active or ready task can update its task anchor "
+                f"(current status: {status})"
+            )
+        with maintenance_lock(repo):
+            content = read_anchor_update(input_path)
+            result = update_anchor(
+                repo,
+                task,
+                content=content,
+                expected_sha256=expected_sha256,
+                progress_only=status == "ready",
+            )
+        result["status"] = status
+        return result
 
 
 def _checked_out_branch_worktree(repo: GitRepo, branch: str) -> Path:

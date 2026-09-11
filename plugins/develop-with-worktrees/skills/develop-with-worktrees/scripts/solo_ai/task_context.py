@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -7,23 +9,189 @@ from .repo import GitRepo
 from .util import SoloAIError, atomic_write_text, is_link_or_junction, utc_timestamp
 
 MAX_ANCHOR_BYTES = 64 * 1024
+_ANCHOR_FIELDS = (
+    "Task ID",
+    "Original purpose",
+    "Implementation target",
+    "Reference baseline",
+    "Scope boundary",
+    "Acceptance criteria",
+    "Current progress",
+)
+_IMMUTABLE_FIELDS = ("Task ID", "Original purpose", "Reference baseline")
 
 
 def anchor_path(repo: GitRepo, task_id: str) -> Path:
+    if not task_id or any(char in task_id for char in "/\\:"):
+        raise SoloAIError("Task id is not a safe anchor name")
     return repo.local_dir / "task-anchors" / f"{task_id}.md"
 
 
 def _require_plain_anchor(path: Path) -> str:
+    return _read_plain_anchor(path)[1]
+
+
+def _read_plain_anchor(path: Path) -> tuple[bytes, str]:
     if not path.exists():
         raise SoloAIError(f"Task anchor is missing: {path}. Restore it before Ready.")
     if is_link_or_junction(path) or not path.is_file():
         raise SoloAIError("Task anchor must be a regular local UTF-8 file")
-    if path.stat().st_size > MAX_ANCHOR_BYTES:
+    raw = path.read_bytes()
+    if len(raw) > MAX_ANCHOR_BYTES:
         raise SoloAIError("Task anchor exceeds the 64 KiB safety limit")
     try:
-        return path.read_text(encoding="utf-8")
+        return raw, raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SoloAIError("Task anchor must be valid UTF-8") from exc
+
+
+def _read_plain_input(path: Path) -> str:
+    if not path.exists():
+        raise SoloAIError(f"Anchor update input is missing: {path}")
+    if is_link_or_junction(path) or not path.is_file():
+        raise SoloAIError("Anchor update input must be a regular local UTF-8 file")
+    raw = path.read_bytes()
+    if len(raw) > MAX_ANCHOR_BYTES:
+        raise SoloAIError("Anchor update input exceeds the 64 KiB safety limit")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SoloAIError("Anchor update input must be valid UTF-8") from exc
+
+
+def _field_values(content: str, field: str) -> list[str]:
+    pattern = re.compile(rf"^- {re.escape(field)}:([^\r\n]*)$")
+    values: list[str] = []
+    in_fence = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            match = pattern.fullmatch(line)
+            if match:
+                values.append(match.group(1).strip())
+    return values
+
+
+def _identity_value(value: str) -> str:
+    return value.strip().removeprefix("`").removesuffix("`")
+
+
+def _validated_fields(content: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for field in _ANCHOR_FIELDS:
+        values = _field_values(content, field)
+        if len(values) != 1:
+            raise SoloAIError(f"Task anchor must contain exactly one '{field}' field")
+        fields[field] = values[0]
+    return fields
+
+
+def _validate_update_content(
+    content: str,
+    *,
+    task_id: str,
+    previous: dict[str, str],
+    progress_only: bool,
+) -> dict[str, str]:
+    if len(content.encode("utf-8")) > MAX_ANCHOR_BYTES:
+        raise SoloAIError("Task anchor exceeds the 64 KiB safety limit")
+    fields = _validated_fields(content)
+    if _identity_value(fields["Task ID"]) != task_id:
+        raise SoloAIError("Task anchor identity does not match the active task")
+    for field in _IMMUTABLE_FIELDS:
+        if fields[field] != previous[field]:
+            raise SoloAIError(f"Task anchor field cannot be changed: {field}")
+    for field in (
+        "Implementation target",
+        "Scope boundary",
+        "Acceptance criteria",
+        "Current progress",
+    ):
+        if not fields[field]:
+            raise SoloAIError(f"Task anchor field cannot be empty: {field}")
+    for field in ("Implementation target", "Scope boundary", "Acceptance criteria"):
+        if fields[field].lower().startswith("fill before"):
+            raise SoloAIError(
+                f"Task anchor field is still a template placeholder: {field}"
+            )
+    if progress_only:
+        for field in (
+            "Implementation target",
+            "Scope boundary",
+            "Acceptance criteria",
+        ):
+            if fields[field] != previous[field]:
+                raise SoloAIError(
+                    "A ready task may update only Current progress in its anchor"
+                )
+    return fields
+
+
+def read_anchor(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
+    path = anchor_path(repo, str(task["id"]))
+    raw, content = _read_plain_anchor(path)
+    fields = _validated_fields(content)
+    if _identity_value(fields["Task ID"]) != str(task["id"]):
+        raise SoloAIError("Task anchor identity does not match the active task")
+    return {
+        "task_id": str(task["id"]),
+        "anchor_path": str(path.resolve()),
+        "content": content,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def read_anchor_update(path: Path) -> str:
+    return _read_plain_input(path)
+
+
+def update_anchor(
+    repo: GitRepo,
+    task: dict[str, Any],
+    *,
+    content: str,
+    expected_sha256: str,
+    progress_only: bool = False,
+) -> dict[str, Any]:
+    path = anchor_path(repo, str(task["id"]))
+    raw, previous_content = _read_plain_anchor(path)
+    current_sha256 = hashlib.sha256(raw).hexdigest()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256 or ""):
+        raise SoloAIError(
+            "Expected anchor SHA-256 must be 64 lowercase hexadecimal characters"
+        )
+    if current_sha256 != expected_sha256:
+        raise SoloAIError(
+            "Task anchor changed since it was read; fetch it again before updating "
+            f"(current sha256: {current_sha256})"
+        )
+    previous = _validated_fields(previous_content)
+    _validate_update_content(
+        content,
+        task_id=str(task["id"]),
+        previous=previous,
+        progress_only=progress_only,
+    )
+    new_raw = content.encode("utf-8")
+    new_sha256 = hashlib.sha256(new_raw).hexdigest()
+    if new_sha256 == current_sha256:
+        return {
+            "task_id": str(task["id"]),
+            "anchor_path": str(path.resolve()),
+            "sha256": current_sha256,
+            "changed": False,
+        }
+    atomic_write_text(path, content)
+    _read_plain_anchor(path)
+    return {
+        "task_id": str(task["id"]),
+        "anchor_path": str(path.resolve()),
+        "sha256": new_sha256,
+        "changed": True,
+    }
 
 
 def create_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:

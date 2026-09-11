@@ -37,6 +37,12 @@ The result selects the repository lifecycle owner:
 
 Read-only analysis never claims a slot or creates an anchor.
 
+## Keep staged work focused
+
+For a modifying task, read the hard rules, the route result, the active task anchor, the target script, directly related configuration, and the tests that exercise the changed behavior. Use `rg` to locate symbols and then read the small surrounding sections; expand only when a direct caller or current contract requires it. Do not repeatedly reread unrelated history or old test logs.
+
+Use one Start-created task and worktree for all phases of the same change. Validate each behavior in a tight order: syntax or static checks, new unit tests, affected focused regressions, then the relevant test group and DWW Ready/Finish gates. Do not rerun an unchanged failing command without changing the input, environment, or diagnosis. Keep the anchor current when scope, acceptance, phase results, or a material blocker changes.
+
 ## Task orchestration belongs to the host
 
 For multiple independently verifiable outcomes, use the host's native task, subagent, dependency, wait, and status facilities. Each writing worker still receives one routed DWW lifecycle task and its own worktree. DWW does not create a second DAG, controller identity, worker dashboard, or scheduling state.
@@ -91,6 +97,7 @@ If the approved `activate` implementation itself is defective, do not edit the s
 4. Commit exactly the reviewed paths with repeated `--path`; never use broad staging.
 5. Use `plan` or `verify --level development` when useful.
 6. Run `ready`, then `finish` with the same task and lease.
+7. Use `anchor show --task` to reread the current context and `anchor update --task --lease --file --expected-sha256` to save a reviewed UTF-8 revision while the task is active.
 
 Ready refuses a missing, linked, oversized, non-UTF-8, or identity-mismatched anchor. For a genuine pre-anchor task, review its objective, target, scope, and acceptance, then use `anchor adopt` with the exact task-id confirmation; never invent those fields automatically. Ready validates the exact clean candidate and synchronizes only the recorded local base. DWW never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 

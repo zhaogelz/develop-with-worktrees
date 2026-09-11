@@ -522,3 +522,23 @@ def test_hook_script_emits_official_pretooluse_deny_protocol(git_repo: Path) -> 
     assert output["hookEventName"] == "PreToolUse"
     assert output["permissionDecision"] == "deny"
     assert output["permissionDecisionReason"]
+
+
+def test_read_only_parser_accepts_quoted_search_text_and_limited_pipeline() -> None:
+    assert HOOK._strict_read_only_bash("rg --no-config -n 'anchor|scope' README.md")
+    assert HOOK._strict_read_only_bash(
+        "Get-Content -LiteralPath 'README.md' -Encoding UTF8 | Select-Object -First 40"
+    )
+    assert HOOK._strict_read_only_bash("rg -n 'it''s|scope' README.md")
+
+
+def test_read_only_parser_rejects_writes_and_external_rg_preprocessors() -> None:
+    assert not HOOK._strict_read_only_bash(
+        "Get-Content -LiteralPath README.md | Set-Content copy.md"
+    )
+    assert not HOOK._strict_read_only_bash("rg --pre cat -n anchor README.md")
+    assert not HOOK._strict_read_only_bash("git branch -D old-branch")
+    assert not HOOK._strict_read_only_bash("Get-Content README.md; Set-Content copy.md")
+    assert not HOOK._strict_read_only_bash("git diff --output=artifact.patch")
+    assert not HOOK._strict_read_only_bash("git show --ext-diff HEAD")
+    assert not HOOK._strict_read_only_bash("Get-Content -Path -Force")
