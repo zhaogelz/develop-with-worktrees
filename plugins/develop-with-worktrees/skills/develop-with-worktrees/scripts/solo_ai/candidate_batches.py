@@ -1762,9 +1762,9 @@ def prepare_candidate_repair(repo: GitRepo, *, candidate_id: str) -> dict[str, A
         f"""# Task anchor: repair {candidate_id}
 
 - Task ID: `{task["id"]}`
-- Original purpose: automatically repair candidate `{candidate_id}` after a deterministic composition conflict
+- Original purpose: {task["anchor_origin"]["original_purpose"]}
 - Implementation target: replay candidate `{source["head"]}` onto `{base_ref}` at `{base_head}` and preserve its verified intent
-- Reference baseline: source `{source["base_head"]}` → `{source["head"]}`; repair base `{base_ref}` at `{base_head}`
+- Reference baseline: {task["anchor_origin"]["reference_baseline"]}
 - Scope boundary: change only the source candidate's intent and the minimum conflict resolution; do not choose between competing product, permission, migration, deletion, or security rules
 - Acceptance criteria: resolve every recorded conflict, review the exact path manifest, run Commit/Ready/Finish, then explicitly seal the replacement candidate and prove it is in the base
 - Current progress: repair attempt {attempt} prepared at {utc_timestamp()}
