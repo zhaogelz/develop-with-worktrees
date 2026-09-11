@@ -421,6 +421,11 @@ def _parser() -> argparse.ArgumentParser:
         help="idempotently remove one exact failed batch worktree while preserving candidates",
     )
     batch_retire.add_argument("--batch", required=True)
+    batch_retire.add_argument(
+        "--fast",
+        action="store_true",
+        help="skip per-file dependency content proofs after the fast safety preflight",
+    )
     batch_sub.add_parser(
         "metrics",
         help="derive batch-size and validation-cost metrics from existing facts",
@@ -1388,7 +1393,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
         if args.batch_command == "retire":
-            return retire_failed_batch(repo, batch_id=args.batch)
+            return retire_failed_batch(repo, batch_id=args.batch, fast=args.fast)
         if args.batch_command == "metrics":
             return CandidateBatchStore(repo).metrics()
         raise SoloAIError(f"Unknown batch command: {args.batch_command}")

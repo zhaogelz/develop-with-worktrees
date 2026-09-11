@@ -1769,7 +1769,9 @@ def recover_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
     return run_batch(repo, batch_id=batch_id)
 
 
-def retire_failed_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
+def retire_failed_batch(
+    repo: GitRepo, *, batch_id: str, fast: bool = False
+) -> dict[str, Any]:
     """幂等退休一个已失败批次的隔离工作树，保留候选与审计事实。"""
 
     from .lifecycle import _config_and_mode
@@ -1782,6 +1784,18 @@ def retire_failed_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
             batch = store.batch(batch_id)
             if batch.get("status") != "failed":
                 raise SoloAIError("Only a failed integration batch can be retired")
+            if fast:
+                candidates = [
+                    store.candidate(str(item))
+                    for item in batch.get("candidate_ids", [])
+                ]
+                if not candidates or any(
+                    candidate.get("status") != "superseded" for candidate in candidates
+                ):
+                    raise SoloAIError(
+                        "Fast retirement requires every batch candidate to be superseded"
+                    )
+                return worktree_retirement.retire_fast(repo, store, batch)
             if batch.get("worktree_mode") == "reusable":
                 # 退役旧批次只终结其持有权；不得因路径相同删掉下个持有者的目录。
                 return batch_workspace.return_workspace(repo, store, batch)

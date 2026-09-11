@@ -1662,6 +1662,134 @@ def test_failed_batch_retirement_is_exact_idempotent_and_preserves_candidate(
     )
 
 
+def _failed_superseded_batch(
+    repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    relative: str,
+) -> tuple[CandidateBatchStore, dict[str, object], dict[str, str]]:
+    """构造快速退役专用的失败批次；候选已由后续结果替代。"""
+    candidate = publish(repo, name="fast retirement fixture", relative=relative)
+
+    def fail_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        raise SoloAIError("synthetic fast-retirement failure")
+
+    monkeypatch.setattr(batch_module, "validate", fail_validation)
+    with pytest.raises(SoloAIError, match="synthetic fast-retirement failure"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    store = CandidateBatchStore(repo)
+
+    def supersede(value: dict[str, object]) -> None:
+        record = value["candidates"][candidate["candidate_id"]]
+        record.update(
+            {
+                "status": "superseded",
+                "superseded_by": "candidate-replacement-fixture",
+                "repair_eligible": False,
+            }
+        )
+
+    store.mutate(supersede)
+    return store, store.summary()["batches"][0], candidate
+
+
+def test_fast_failed_batch_retirement_skips_dependency_hashes_and_is_idempotent(
+    git_repo: Path,
+    tmp_path: Path,
+    directory_link,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (git_repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore fast retirement dependencies")
+    repo = initialized_batched(git_repo, auto_full=False)
+    store, failed, candidate = _failed_superseded_batch(
+        repo, monkeypatch, relative="fast-retire.txt"
+    )
+    worktree = Path(failed["worktree"])
+    target = tmp_path / "fast-retained-target"
+    target.mkdir()
+    marker = target / "source.txt"
+    marker.write_text("preserved", encoding="utf-8")
+    directory_link(worktree / "node_modules" / "package", target)
+    (worktree / "node_modules" / "large-generated.bin").write_bytes(b"generated")
+
+    def no_slow_inventory(*args: object, **kwargs: object) -> None:
+        pytest.fail("fast retirement must not expand the exact dependency inventory")
+
+    monkeypatch.setattr(cleanup_module, "_ignored_inventory", no_slow_inventory)
+    retired = retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+    repeated = retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+
+    assert retired["status"] == "failed"
+    assert retired["fast_retirement_receipt_sha256"]
+    assert retired["worktree_retired_at"]
+    assert repeated["worktree_retired_at"] == retired["worktree_retired_at"]
+    assert not worktree.exists()
+    assert marker.read_text(encoding="utf-8") == "preserved"
+    assert all(item.path != worktree for item in repo.worktrees())
+    assert (
+        repo.ref_head(store.candidate(candidate["candidate_id"])["ref"])
+        == candidate["candidate_head"]
+    )
+    assert store.candidate(candidate["candidate_id"])["status"] == "superseded"
+
+
+def test_fast_failed_batch_retirement_rejects_protected_ignored_content(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text(".tmp/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: protect fast retirement data")
+    repo = initialized_batched(git_repo, auto_full=False)
+    _, failed, _ = _failed_superseded_batch(
+        repo, monkeypatch, relative="fast-protected.txt"
+    )
+    worktree = Path(failed["worktree"])
+    protected = worktree / ".tmp" / "state.db"
+    protected.parent.mkdir()
+    protected.write_bytes(b"do not remove")
+
+    with pytest.raises(SoloAIError, match="Protected content"):
+        retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+
+    assert protected.read_bytes() == b"do not remove"
+    assert worktree.exists()
+    assert any(item.path == worktree for item in repo.worktrees())
+
+
+def test_fast_failed_batch_retirement_resumes_after_staging_interruption(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from solo_ai import worktree_retirement as retirement
+
+    repo = initialized_batched(git_repo, auto_full=False)
+    store, failed, _ = _failed_superseded_batch(
+        repo, monkeypatch, relative="fast-resume.txt"
+    )
+    worktree = Path(failed["worktree"])
+    stage = worktree.parent / f".dww-fast-retire-{failed['id']}"
+    original_remove = retirement._fast_remove_tree
+
+    def interrupt(path: Path) -> None:
+        raise KeyboardInterrupt("interrupted after staging")
+
+    monkeypatch.setattr(retirement, "_fast_remove_tree", interrupt)
+    with pytest.raises(KeyboardInterrupt, match="interrupted after staging"):
+        retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+
+    pending = store.batch(str(failed["id"]))
+    assert pending["fast_retirement_started_at"]
+    assert pending["fast_retirement_staging"] == str(stage)
+    assert stage.exists() and not worktree.exists()
+
+    monkeypatch.setattr(retirement, "_fast_remove_tree", original_remove)
+    completed = retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+    assert completed["worktree_retired_at"]
+    assert not stage.exists()
+    assert not worktree.exists()
+
+
 def test_failed_batch_retirement_recovers_after_removal_before_final_projection(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
