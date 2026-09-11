@@ -67,6 +67,17 @@ LEGACY_EXPLICIT_POLICY = {
 AUTOMATIC_REPAIR_LIMIT = 2
 
 
+def _candidate_lane(candidate: dict[str, Any]) -> tuple[str, str, str]:
+    """自动封批只使用同一冻结基线和同一策略的候选。"""
+
+    policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
+    return (
+        str(candidate["base_ref"]),
+        str(candidate.get("base_head") or ""),
+        str(policy.get("activation_epoch") or "legacy-explicit"),
+    )
+
+
 class CandidateCompositionConflict(SoloAIError):
     def __init__(self, candidate_id: str, detail: str):
         super().__init__(detail)
@@ -519,6 +530,7 @@ class CandidateBatchStore:
                         if item.get("status") == "pending"
                         and not item.get("sealed_batch")
                         and item.get("base_ref") == record.get("base_ref")
+                        and item.get("base_head") == record.get("base_head")
                         and (item.get("integration_policy") or {}).get("seal_policy")
                         == "auto_full"
                         and (item.get("integration_policy") or {}).get(
@@ -595,6 +607,7 @@ class CandidateBatchStore:
                         if item.get("status") == "pending"
                         and not item.get("sealed_batch")
                         and item.get("base_ref") == candidate.get("base_ref")
+                        and item.get("base_head") == candidate.get("base_head")
                         and (item.get("integration_policy") or {}).get("seal_policy")
                         == "auto_full"
                         and (item.get("integration_policy") or {}).get(
@@ -650,18 +663,16 @@ class CandidateBatchStore:
                 str(item.get("candidate_id")),
             ),
         )
-        lanes: dict[tuple[str, str], dict[str, Any]] = {}
+        lanes: dict[tuple[str, str, str], dict[str, Any]] = {}
         for candidate in candidates:
             policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
-            key = (
-                str(candidate["base_ref"]),
-                str(policy.get("activation_epoch") or "legacy-explicit"),
-            )
+            key = _candidate_lane(candidate)
             lane = lanes.setdefault(
                 key,
                 {
                     "base_ref": key[0],
-                    "activation_epoch": key[1],
+                    "base_head": key[1],
+                    "activation_epoch": key[2],
                     "integration_policy": copy.deepcopy(policy),
                     "candidate_ids": [],
                     "first_publication_sequence": int(
@@ -677,7 +688,7 @@ class CandidateBatchStore:
     def reconcile(
         self,
         *,
-        producer_snapshots: dict[tuple[str, str], dict[str, Any]],
+        producer_snapshots: dict[tuple[str, str, str], dict[str, Any]],
         force: bool = False,
         cause: str = "heartbeat",
         now_epoch: float | None = None,
@@ -727,13 +738,9 @@ class CandidateBatchStore:
                     str(item.get("candidate_id")),
                 ),
             )
-            lane_candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            lane_candidates: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
             for candidate in candidates:
-                policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
-                key = (
-                    str(candidate["base_ref"]),
-                    str(policy.get("activation_epoch") or "legacy-explicit"),
-                )
+                key = _candidate_lane(candidate)
                 lane_candidates.setdefault(key, []).append(candidate)
             for key, eligible in lane_candidates.items():
                 policy = eligible[0].get("integration_policy") or LEGACY_EXPLICIT_POLICY
@@ -791,7 +798,8 @@ class CandidateBatchStore:
                 waiting.append(
                     {
                         "base_ref": key[0],
-                        "activation_epoch": key[1],
+                        "base_head": key[1],
+                        "activation_epoch": key[2],
                         "candidate_ids": candidate_ids,
                         "active_candidate_producers": active_count,
                         "active_task_ids": list(snapshot.get("active_task_ids", [])),
@@ -1118,9 +1126,16 @@ def _apply_candidate_diff(
         with tempfile.TemporaryDirectory(
             prefix="candidate-index-", dir=repo.local_dir
         ) as temporary:
+            temporary_root = Path(temporary)
+            temporary_worktree = temporary_root / "worktree"
+            temporary_worktree.mkdir()
             environment = {
                 **os.environ,
-                "GIT_INDEX_FILE": str(Path(temporary) / "index"),
+                "GIT_INDEX_FILE": str(temporary_root / "index"),
+                # git apply --cached --3way can materialize conflict markers in
+                # GIT_WORK_TREE for add/add conflicts. The probe must never use
+                # the reusable integration worktree as that target.
+                "GIT_WORK_TREE": str(temporary_worktree),
             }
             command = ["git", "-C", str(worktree)]
             initialized = subprocess.run(
@@ -1672,11 +1687,15 @@ def reconcile_batches(
     batch_store = CandidateBatchStore(repo)
     state_store = StateStore(repo)
     with candidate_admission_lock(repo):
-        snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+        snapshots: dict[tuple[str, str, str], dict[str, Any]] = {}
         for lane in batch_store.pending_lanes():
-            key = (str(lane["base_ref"]), str(lane["activation_epoch"]))
+            key = (
+                str(lane["base_ref"]),
+                str(lane["base_head"]),
+                str(lane["activation_epoch"]),
+            )
             snapshots[key] = state_store.candidate_producer_snapshot(
-                base_ref=key[0], activation_epoch=key[1]
+                base_ref=key[0], base_head=key[1], activation_epoch=key[2]
             )
         result = batch_store.reconcile(
             producer_snapshots=snapshots,

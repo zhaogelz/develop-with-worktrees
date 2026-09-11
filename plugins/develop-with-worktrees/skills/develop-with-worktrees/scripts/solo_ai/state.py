@@ -185,7 +185,7 @@ class StateStore:
         }
 
     def candidate_producer_snapshot(
-        self, *, base_ref: str, activation_epoch: str
+        self, *, base_ref: str, base_head: str, activation_epoch: str
     ) -> dict[str, Any]:
         """从任务事实投影一个候选通道的生产者状态，不猜测宿主活动。"""
 
@@ -194,11 +194,14 @@ class StateStore:
         for task in self.read()["tasks"].values():
             policy = task.get("integration_policy") or {}
             in_place_blocker = (
-                self.mode(task) == IN_PLACE_MODE and task.get("base_ref") == base_ref
+                self.mode(task) == IN_PLACE_MODE
+                and task.get("base_ref") == base_ref
+                and task.get("base_head") == base_head
             )
             if not in_place_blocker and (
                 self.mode(task) != ISOLATED_MODE
                 or task.get("base_ref") != base_ref
+                or task.get("base_head") != base_head
                 or policy.get("mode") != "batched"
                 or policy.get("activation_epoch") != activation_epoch
             ):
@@ -211,6 +214,7 @@ class StateStore:
             quiet_since = max(str(task.get("updated_at") or "") for task in matching)
         return {
             "base_ref": base_ref,
+            "base_head": base_head,
             "activation_epoch": activation_epoch,
             "active_count": len(active),
             "active_task_ids": sorted(str(task["id"]) for task in active),

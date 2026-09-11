@@ -144,6 +144,32 @@ def test_candidate_conflict_preserves_partial_result_and_unblocks_next_batch(
     assert not (git_repo / "shared.txt").exists()
 
 
+def test_add_add_conflict_probe_does_not_dirty_reusable_workspace(
+    git_repo: Path,
+) -> None:
+    """新增同名文件的三方探测只能污染临时位置，不能锁死共享工作树。"""
+    repo = reusable_repo(git_repo)
+    candidate = publish(repo, name="candidate add", relative="same.txt")
+    (git_repo / "same.txt").write_text("main add\n", encoding="utf-8")
+    git(git_repo, "add", "same.txt")
+    git(git_repo, "commit", "-m", "test: add competing main file")
+
+    with pytest.raises(SoloAIError, match="conflicts with the sealed batch"):
+        batches.seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    failed = next(iter(batches.CandidateBatchStore(repo).read()["batches"].values()))
+    workspace = Path(failed["worktree"])
+    assert failed["failed_candidate_id"] == candidate["candidate_id"]
+    assert failed["worktree_released_at"]
+    assert (
+        batches.CandidateBatchStore(repo).read()["integration_workspace"]["owner"]
+        is None
+    )
+    assert repo.is_clean(workspace)
+    assert repo.head(workspace) == failed["integration_head"]
+    assert (workspace / "same.txt").read_text(encoding="utf-8") == "main add\n"
+
+
 def test_new_repository_defaults_to_reusable_batches(git_repo: Path) -> None:
     repo = GitRepo(git_repo)
     initialize(repo, slots=3, commands=[VERIFY], accept=True, accept_static_only=False)

@@ -991,8 +991,9 @@ def test_quiet_tail_waits_for_all_producers_and_the_full_stability_period(
         confirm=blocker["id"],
     )
     policy = candidate["reconciliation"]["waiting"][0]["activation_epoch"]
+    base_head = candidate["reconciliation"]["waiting"][0]["base_head"]
     snapshot = StateStore(repo).candidate_producer_snapshot(
-        base_ref="main", activation_epoch=policy
+        base_ref="main", base_head=base_head, activation_epoch=policy
     )
     quiet_epoch = calendar.timegm(
         time.strptime(snapshot["quiet_since"], "%Y-%m-%dT%H:%M:%SZ")
@@ -1021,6 +1022,44 @@ def test_forced_tail_requires_an_explicit_authorized_cause(git_repo: Path) -> No
     assert completed["status"] == "completed"
     assert completed["batch"]["candidate_ids"] == [candidate["candidate_id"]]
     assert completed["batch"]["trigger"] == "explicit_tail"
+
+
+def test_reconcile_does_not_mix_candidates_from_different_frozen_bases(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    earlier = publish(repo, name="earlier baseline", relative="earlier.txt")
+    earlier_record = CandidateBatchStore(repo).candidate(earlier["candidate_id"])
+    (git_repo / "advance.txt").write_text("advance\n", encoding="utf-8")
+    git(git_repo, "add", "advance.txt")
+    git(git_repo, "commit", "-m", "test: advance base before later candidate")
+    later = publish(repo, name="later baseline", relative="later.txt")
+    later_record = CandidateBatchStore(repo).candidate(later["candidate_id"])
+
+    assert earlier_record["base_head"] != later_record["base_head"]
+    store = CandidateBatchStore(repo)
+    lanes = store.pending_lanes()
+    assert [lane["candidate_ids"] for lane in lanes] == [
+        [earlier["candidate_id"]],
+        [later["candidate_id"]],
+    ]
+    snapshots = {
+        (lane["base_ref"], lane["base_head"], lane["activation_epoch"]): {
+            "active_count": 0,
+            "active_task_ids": [],
+            "quiet_since": "2000-01-01T00:00:00Z",
+        }
+        for lane in lanes
+    }
+
+    sealed = store.reconcile(
+        producer_snapshots=snapshots,
+        cause="heartbeat",
+        now_epoch=time.time(),
+    )
+
+    assert sealed["batch"]["candidate_ids"] == [earlier["candidate_id"]]
+    assert store.candidate(later["candidate_id"])["status"] == "pending"
 
 
 def test_repeating_the_same_exact_seal_returns_the_same_completed_batch(
@@ -1068,8 +1107,9 @@ def test_start_cannot_cross_a_tail_freeze_decision(
     repo = initialized_batched(git_repo)
     candidate = publish(repo, name="before freeze", relative="before.txt")
     policy = candidate["reconciliation"]["waiting"][0]["activation_epoch"]
+    base_head = candidate["reconciliation"]["waiting"][0]["base_head"]
     snapshot = StateStore(repo).candidate_producer_snapshot(
-        base_ref="main", activation_epoch=policy
+        base_ref="main", base_head=base_head, activation_epoch=policy
     )
     quiet_epoch = calendar.timegm(
         time.strptime(snapshot["quiet_since"], "%Y-%m-%dT%H:%M:%SZ")
