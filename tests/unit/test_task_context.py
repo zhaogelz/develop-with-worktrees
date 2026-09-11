@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from solo_ai.repo import GitRepo
-from solo_ai.task_context import anchor_path, read_anchor, read_anchor_update, update_anchor
+from solo_ai.task_context import (
+    anchor_path,
+    read_anchor,
+    read_anchor_update,
+    require_anchor,
+    update_anchor,
+)
 from solo_ai.util import SoloAIError
 
 
@@ -182,6 +188,22 @@ def test_anchor_rejects_indented_fake_field_and_origin_mismatch(git_repo: Path) 
     )
     with pytest.raises(SoloAIError, match="original purpose does not match"):
         read_anchor(repo, task)
+
+
+def test_legacy_anchor_can_be_shown_but_not_ready_or_updated(git_repo: Path) -> None:
+    repo, task = _task(git_repo)
+    task.pop("anchor_origin")
+    shown = read_anchor(repo, task)
+    assert shown["origin_verified"] is False
+    with pytest.raises(SoloAIError, match="before Ready"):
+        require_anchor(repo, task, require_verified_origin=True)
+    with pytest.raises(SoloAIError, match="before updating"):
+        update_anchor(
+            repo,
+            task,
+            content=shown["content"],
+            expected_sha256=shown["sha256"],
+        )
 
 
 def test_anchor_path_rejects_path_like_task_id(git_repo: Path) -> None:

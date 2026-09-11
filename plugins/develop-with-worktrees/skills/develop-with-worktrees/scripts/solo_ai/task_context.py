@@ -427,9 +427,15 @@ This local file was explicitly reconstructed for a pre-anchor task. It is not co
     return require_anchor(repo, task)
 
 
-def require_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:
+def require_anchor(
+    repo: GitRepo, task: dict[str, Any], *, require_verified_origin: bool = False
+) -> Path:
     path = anchor_path(repo, str(task["id"]))
-    read_anchor(repo, task)
+    shown = read_anchor(repo, task)
+    if require_verified_origin and not shown["origin_verified"]:
+        raise SoloAIError(
+            "Task anchor origin is unverified; explicitly adopt the legacy anchor before Ready"
+        )
     return path
 
 

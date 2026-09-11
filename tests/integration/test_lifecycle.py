@@ -25,6 +25,7 @@ from solo_ai.candidate_batches import seal_batch
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
     abandon,
+    adopt_task_anchor,
     approve,
     choose,
     commit_task,
@@ -3611,3 +3612,27 @@ def test_anchor_show_and_update_uses_lease_and_digest(git_repo: Path) -> None:
             input_path=input_path,
             expected_sha256=refreshed["sha256"],
         )
+
+
+def test_legacy_anchor_adoption_persists_the_reviewed_origin(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="legacy anchor")
+    Path(task["anchor_path"]).unlink()
+    StateStore(repo).update_task(task["id"], anchor_origin=None)
+
+    adopted = adopt_task_anchor(
+        repo,
+        task_id=task["id"],
+        objective="reviewed legacy objective",
+        target="legacy lifecycle test",
+        scope="only this integration test",
+        acceptance="anchor can be verified",
+        confirm=task["id"],
+    )
+
+    assert adopted["task_id"] == task["id"]
+    shown = show_task_anchor(repo, task_id=task["id"])
+    assert shown["origin_verified"] is True
+    assert StateStore(repo).task(task["id"])["anchor_origin"]["original_purpose"] == (
+        "reviewed legacy objective"
+    )

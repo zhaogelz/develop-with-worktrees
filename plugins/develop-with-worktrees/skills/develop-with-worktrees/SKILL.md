@@ -97,9 +97,9 @@ If the approved `activate` implementation itself is defective, do not edit the s
 4. Commit exactly the reviewed paths with repeated `--path`; never use broad staging.
 5. Use `plan` or `verify --level development` when useful.
 6. Run `ready`, then `finish` with the same task and lease.
-7. Use `anchor show --task` to reread the current context and `anchor update --task --lease --file --expected-sha256` to save a reviewed UTF-8 revision while the task is active.
+7. Use `anchor show --task` to reread the current context and `anchor update --task --lease --file --expected-sha256` to save a reviewed UTF-8 revision while the task is active. Run it from the recorded task or base worktree, with an input file below that same worktree.
 
-Ready refuses a missing, linked, oversized, non-UTF-8, or identity-mismatched anchor. For a genuine pre-anchor task, review its objective, target, scope, and acceptance, then use `anchor adopt` with the exact task-id confirmation; never invent those fields automatically. Ready validates the exact clean candidate and synchronizes only the recorded local base. DWW never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
+Ready refuses a missing, linked, oversized, non-UTF-8, identity-mismatched, or origin-mismatched anchor. Start persists the original purpose and baseline; `show` reports whether a legacy anchor has verified origin. A repeated update whose content is already current is a successful no-op, while Ready permits changes only to the complete `Current progress` block. For a genuine pre-anchor task, review its objective, target, scope, and acceptance, then use `anchor adopt` with the exact task-id confirmation; never invent those fields automatically. Ready validates the exact clean candidate and synchronizes only the recorded local base. DWW never fetches, pulls, pushes, opens a PR, rebases, squashes, amends, or rewrites history.
 
 ## Candidate-first integration
 

@@ -1392,7 +1392,7 @@ def ready(
     _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     with store.operation(task_id, lease, "ready") as task:
-        require_anchor(repo, task)
+        require_anchor(repo, task, require_verified_origin=True)
         worktree = Path(task["worktree"])
         if task.get("status") not in {"active", "ready"}:
             raise SoloAIError(f"Task cannot enter Ready from {task.get('status')}")
