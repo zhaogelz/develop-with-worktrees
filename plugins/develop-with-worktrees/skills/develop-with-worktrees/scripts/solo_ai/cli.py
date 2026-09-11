@@ -36,6 +36,8 @@ from .lifecycle import (
     abandon,
     adopt_task_anchor,
     approve,
+    close_root_task_anchor,
+    create_root_task_anchor,
     show_task_anchor,
     update_task_anchor,
     choose,
@@ -48,6 +50,7 @@ from .lifecycle import (
     handoff,
     initialize,
     local_enabled,
+    list_root_task_anchors,
     maintenance_lock,
     ready,
     recover,
@@ -56,6 +59,8 @@ from .lifecycle import (
     retarget,
     set_local_enabled,
     start,
+    show_root_task_anchor,
+    update_root_task_anchor,
     warm_slot,
 )
 from .orchestration import BatchStore
@@ -361,6 +366,42 @@ def _parser() -> argparse.ArgumentParser:
         "--supersedes",
         help="candidate id replaced by this repair task when it is published",
     )
+    start_parser.add_argument(
+        "--root-anchor",
+        help="optional durable coordinator root anchor to bind to this task",
+    )
+
+    root_anchor = sub.add_parser(
+        "root-anchor", help="manage one local cross-phase coordinator anchor"
+    )
+    root_anchor_sub = root_anchor.add_subparsers(
+        dest="root_anchor_command", required=True
+    )
+    root_create = root_anchor_sub.add_parser(
+        "create",
+        help="create a complete root execution contract without claiming a slot",
+    )
+    root_create.add_argument("--purpose", required=True)
+    root_create.add_argument("--target", required=True)
+    root_create.add_argument("--scope", required=True)
+    root_create.add_argument("--acceptance", required=True)
+    root_create.add_argument("--base")
+    root_show = root_anchor_sub.add_parser(
+        "show", help="read one root anchor and its byte SHA-256"
+    )
+    root_show.add_argument("--root", required=True)
+    root_update = root_anchor_sub.add_parser(
+        "update", help="atomically update one root anchor from a UTF-8 file"
+    )
+    root_update.add_argument("--root", required=True)
+    root_update.add_argument("--file", type=Path, required=True)
+    root_update.add_argument("--expected-sha256", required=True)
+    root_close = root_anchor_sub.add_parser(
+        "close", help="delete a root anchor after every child task is terminal"
+    )
+    root_close.add_argument("--root", required=True)
+    root_close.add_argument("--confirm", required=True)
+    root_anchor_sub.add_parser("list", help="list local open root anchors")
 
     candidate = sub.add_parser(
         "candidate", help="inspect or withdraw verified candidates in batched mode"
@@ -1406,7 +1447,32 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             session_id=args.session,
             request_id=args.request_id,
             supersedes=args.supersedes,
+            root_anchor_id=args.root_anchor,
         )
+    if args.command == "root-anchor":
+        if args.root_anchor_command == "create":
+            return create_root_task_anchor(
+                repo,
+                purpose=args.purpose,
+                target=args.target,
+                scope=args.scope,
+                acceptance=args.acceptance,
+                base=args.base,
+            )
+        if args.root_anchor_command == "show":
+            return show_root_task_anchor(repo, root_id=args.root)
+        if args.root_anchor_command == "update":
+            return update_root_task_anchor(
+                repo,
+                root_id=args.root,
+                input_path=args.file,
+                expected_sha256=args.expected_sha256,
+            )
+        if args.root_anchor_command == "close":
+            return close_root_task_anchor(repo, root_id=args.root, confirm=args.confirm)
+        if args.root_anchor_command == "list":
+            return list_root_task_anchors(repo)
+        raise SoloAIError(f"Unknown root anchor command: {args.root_anchor_command}")
     if args.command == "candidate":
         if args.candidate_command == "status":
             return CandidateBatchStore(repo).summary()

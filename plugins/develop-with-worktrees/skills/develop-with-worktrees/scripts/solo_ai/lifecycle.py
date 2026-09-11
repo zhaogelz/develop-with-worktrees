@@ -57,6 +57,13 @@ from .proof import (
     validate,
 )
 from .repo import GitRepo
+from .root_context import (
+    create_root_anchor,
+    delete_root_anchor,
+    list_root_anchors,
+    show_root_anchor,
+    update_root_anchor,
+)
 from .routing import decide_route, detect_existing_workflows
 from .safety import require_safe
 from .state import (
@@ -898,11 +905,14 @@ def start(
     session_id: str | None = None,
     request_id: str | None = None,
     supersedes: str | None = None,
+    root_anchor_id: str | None = None,
 ) -> dict[str, Any]:
     with maintenance_lock(repo):
         config, _, _ = _config_and_mode(repo)
         store = StateStore(repo)
         store.ensure_slots(config)
+        if root_anchor_id is not None:
+            show_root_anchor(repo, root_id=root_anchor_id)
         if in_place:
             if request_id or supersedes:
                 raise SoloAIError(
@@ -942,6 +952,7 @@ def start(
                         head=repo.head(repo.root),
                         base_worktree=repo.root,
                         session_id=session_id,
+                        root_anchor_id=root_anchor_id,
                     )
                 anchor = create_anchor(repo, task)
                 return {**task, "anchor_path": str(anchor.resolve())}
@@ -959,6 +970,7 @@ def start(
                 base_worktree=base_worktree,
                 request_id=request_id,
                 supersedes=supersedes,
+                root_anchor_id=root_anchor_id,
             )
         if task.get("request_reused"):
             if task.get("status") == "quarantined":
@@ -1608,6 +1620,88 @@ def _integrate_pending_bootstrap(repo: GitRepo, primary: Path) -> dict[str, str]
     repo.git(["branch", "-d", branch], cwd=primary)
     (repo.local_dir / "bootstrap.json").unlink(missing_ok=True)
     return result
+
+
+def create_root_task_anchor(
+    repo: GitRepo,
+    *,
+    purpose: str,
+    target: str,
+    scope: str,
+    acceptance: str,
+    base: str | None = None,
+) -> dict[str, Any]:
+    """创建主会话长期执行合同；它不领取工作树也不创建候选。"""
+
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        base_ref = base or repo.branch(repo.root)
+        if not base_ref:
+            raise SoloAIError("Root anchor requires an attached local base branch")
+        base_head = repo.ref_head(f"refs/heads/{base_ref}")
+        if not base_head:
+            raise SoloAIError("Root anchor base branch no longer exists")
+        root_id = f"root-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+        return create_root_anchor(
+            repo,
+            root_id=root_id,
+            purpose=purpose,
+            target=target,
+            base_ref=base_ref,
+            base_head=base_head,
+            scope=scope,
+            acceptance=acceptance,
+        )
+
+
+def show_root_task_anchor(repo: GitRepo, *, root_id: str) -> dict[str, Any]:
+    _config_and_mode(repo)
+    return show_root_anchor(repo, root_id=root_id)
+
+
+def update_root_task_anchor(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    input_path: Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        return update_root_anchor(
+            repo,
+            root_id=root_id,
+            input_path=input_path,
+            expected_sha256=expected_sha256,
+        )
+
+
+def close_root_task_anchor(
+    repo: GitRepo, *, root_id: str, confirm: str
+) -> dict[str, Any]:
+    _config_and_mode(repo)
+    if confirm != root_id:
+        raise SoloAIError("Root anchor close confirmation must equal the root id")
+    with maintenance_lock(repo):
+        show_root_anchor(repo, root_id=root_id)
+        active = [
+            str(task["id"])
+            for task in StateStore(repo).read()["tasks"].values()
+            if task.get("root_anchor_id") == root_id
+            and task.get("status") not in FINAL_TASK_STATES
+        ]
+        if active:
+            raise SoloAIError(
+                "Root anchor still has nonterminal child tasks:\n"
+                + "\n".join(f"- {task_id}" for task_id in active)
+            )
+        delete_root_anchor(repo, root_id=root_id)
+        return {"root_id": root_id, "status": "closed"}
+
+
+def list_root_task_anchors(repo: GitRepo) -> dict[str, Any]:
+    _config_and_mode(repo)
+    return {"root_anchors": list_root_anchors(repo)}
 
 
 def _in_place_receipt_path(repo: GitRepo, task_id: str) -> Path:

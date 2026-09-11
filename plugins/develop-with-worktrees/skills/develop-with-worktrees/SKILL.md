@@ -54,6 +54,22 @@ Do not confuse task orchestration with candidate integration batches:
 - native orchestration answers “who works on which outcome and when?”;
 - DWW candidate batches answer “which exact verified Git candidates are intentionally combined and promoted together?”.
 
+## Cross-phase coordinator anchors
+
+For a user-confirmed implementation that spans multiple independently managed writing tasks, the host coordinator may first create one durable local contract:
+
+```text
+uv run --script <DWW> --repo <repository-or-worktree> root-anchor create \
+  --purpose <original-objective> --target <implementation-target> \
+  --scope <explicit-boundary> --acceptance <acceptance-criteria>
+```
+
+Use this only for confirmed cross-phase work that is likely to survive handoffs, context compression, or several child lifecycles. Do not create it for discussion, read-only analysis, or an ordinary one-candidate change. The host decides whether the condition is met; DWW validates and preserves the resulting contract but does not infer hidden intent.
+
+The root anchor is stored under the repository Git common-dir and records the immutable original purpose and baseline plus the current target, scope, acceptance, and progress. It is not committed and never creates a `scope_id`, candidate group, task DAG, worker schedule, batch boundary, or cross-worktree atomicity. A child task that belongs to it starts normally with `start --root-anchor <root-id>` and still receives exactly one ordinary task anchor, one isolated worktree, and one candidate.
+
+After any continuation, first read both the root anchor and the active child anchor. Update the root only with reviewed coordinator facts. `root-anchor close --root <root-id> --confirm <root-id>` rejects any linked nonterminal child. Before closing it, the coordinator must record the checked acceptance outcome and verify that every required candidate was delivered or intentionally withdrawn; root close itself never treats candidate publication, host idleness, or a task count as delivery.
+
 ## First modifying intent in an unchosen repository
 
 When route is `ask`, show exactly this question:

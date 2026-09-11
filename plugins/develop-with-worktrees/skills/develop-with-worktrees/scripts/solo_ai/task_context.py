@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .repo import GitRepo
+from .root_context import show_root_anchor
 from .util import SoloAIError, atomic_write_text, is_link_or_junction, utc_timestamp
 
 MAX_ANCHOR_BYTES = 64 * 1024
@@ -20,6 +21,7 @@ _ANCHOR_FIELDS = (
 )
 _IMMUTABLE_FIELDS = ("Task ID", "Original purpose", "Reference baseline")
 _TASK_ID_PATTERN = re.compile(r"task-[A-Za-z0-9][A-Za-z0-9-]*\Z")
+_ROOT_REFERENCE_HEADER = re.compile(r"^- Root anchor:(?P<value>[^\r\n]*)$")
 
 
 def anchor_origin(task: dict[str, Any]) -> dict[str, str]:
@@ -192,6 +194,40 @@ def _validated_fields(content: str) -> dict[str, str]:
     return _validated_anchor(content)[0]
 
 
+def _root_reference(content: str) -> str | None:
+    references: list[str] = []
+    in_fence = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = _ROOT_REFERENCE_HEADER.fullmatch(line)
+        if match:
+            references.append(_identity_value(match.group("value")))
+    if len(references) > 1:
+        raise SoloAIError("Task anchor must contain at most one Root anchor reference")
+    return references[0] if references else None
+
+
+def _require_root_reference(repo: GitRepo, task: dict[str, Any], content: str) -> None:
+    expected = task.get("root_anchor_id")
+    recorded = _root_reference(content)
+    if expected is None:
+        if recorded is not None:
+            raise SoloAIError(
+                "Task anchor root reference is not recorded in task state"
+            )
+        return
+    if not isinstance(expected, str) or not expected:
+        raise SoloAIError("Task root anchor reference is invalid")
+    if recorded != expected:
+        raise SoloAIError("Task anchor root reference does not match task state")
+    show_root_anchor(repo, root_id=expected)
+
+
 def _origin_is_verified(task: dict[str, Any], fields: dict[str, str]) -> bool:
     origin = task.get("anchor_origin")
     if origin is None:
@@ -273,6 +309,7 @@ def read_anchor(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
     fields = _validated_fields(content)
     if _identity_value(fields["Task ID"]) != str(task["id"]):
         raise SoloAIError("Task anchor identity does not match the active task")
+    _require_root_reference(repo, task, content)
     origin_verified = _origin_is_verified(task, fields)
     return {
         "task_id": str(task["id"]),
@@ -314,6 +351,7 @@ def update_anchor(
         previous_content=previous_content,
         progress_only=progress_only,
     )
+    _require_root_reference(repo, task, content)
     new_raw = content.encode("utf-8")
     new_sha256 = hashlib.sha256(new_raw).hexdigest()
     if new_sha256 == current_sha256:
@@ -348,11 +386,17 @@ def create_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:
         require_anchor(repo, task)
         return path
     origin = anchor_origin(task)
+    root_reference = task.get("root_anchor_id")
+    if root_reference is not None:
+        if not isinstance(root_reference, str) or not root_reference:
+            raise SoloAIError("Task root anchor reference is invalid")
+        show_root_anchor(repo, root_id=root_reference)
+    root_line = f"- Root anchor: `{root_reference}`\n" if root_reference else ""
     content = f"""# Task anchor: {task["name"]}
 
 - Task ID: `{task["id"]}`
 - Original purpose: {origin["original_purpose"]}
-- Implementation target: fill before editing
+{root_line}- Implementation target: fill before editing
 - Reference baseline: {origin["reference_baseline"]}
 - Scope boundary: fill before editing
 - Acceptance criteria: fill before Ready

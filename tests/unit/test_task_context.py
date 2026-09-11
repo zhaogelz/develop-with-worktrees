@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from solo_ai.repo import GitRepo
+from solo_ai.root_context import create_root_anchor
 from solo_ai.task_context import (
     anchor_path,
     read_anchor,
@@ -188,6 +189,42 @@ def test_anchor_rejects_indented_fake_field_and_origin_mismatch(git_repo: Path) 
     )
     with pytest.raises(SoloAIError, match="original purpose does not match"):
         read_anchor(repo, task)
+
+
+def test_root_bound_anchor_update_rejects_changed_root_reference(
+    git_repo: Path,
+) -> None:
+    repo, task = _task(git_repo)
+    root = create_root_anchor(
+        repo,
+        root_id="root-20260912000100-test",
+        purpose="durable objective",
+        target="bind a child anchor",
+        base_ref="main",
+        base_head=repo.head(repo.root),
+        scope="anchor reference only",
+        acceptance="child reference cannot drift",
+    )
+    task["root_anchor_id"] = root["root_id"]
+    path = anchor_path(repo, str(task["id"]))
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "- Original purpose: test purpose\n",
+            f"- Original purpose: test purpose\n- Root anchor: `{root['root_id']}`\n",
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    shown = read_anchor(repo, task)
+    drifted = str(shown["content"]).replace(f"- Root anchor: `{root['root_id']}`\n", "")
+
+    with pytest.raises(SoloAIError, match="root reference does not match"):
+        update_anchor(
+            repo,
+            task,
+            content=drifted,
+            expected_sha256=str(shown["sha256"]),
+        )
 
 
 def test_legacy_anchor_can_be_shown_but_not_ready_or_updated(git_repo: Path) -> None:

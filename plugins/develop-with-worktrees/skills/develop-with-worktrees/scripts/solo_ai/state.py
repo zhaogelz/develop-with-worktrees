@@ -370,6 +370,7 @@ class StateStore:
         base_worktree: Path,
         request_id: str | None = None,
         supersedes: str | None = None,
+        root_anchor_id: str | None = None,
     ) -> dict[str, Any]:
         task_id = f"task-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         lease = uuid.uuid4().hex
@@ -386,6 +387,7 @@ class StateStore:
                     if (
                         existing.get("name") != name
                         or existing.get("base_ref") != base_ref
+                        or existing.get("root_anchor_id") != root_anchor_id
                     ):
                         raise SoloAIError(
                             "The request id is already bound to a different task"
@@ -424,6 +426,7 @@ class StateStore:
                     "original_purpose": name,
                     "reference_baseline": f"`{base_ref}` at `{base_head}`",
                 },
+                "root_anchor_id": root_anchor_id,
                 "candidate_head": None,
                 "status": "starting",
                 "lease": lease,
@@ -467,6 +470,7 @@ class StateStore:
         head: str,
         base_worktree: Path,
         session_id: str,
+        root_anchor_id: str | None = None,
     ) -> dict[str, Any]:
         """登记一次性当前工作树任务；不占槽位、不创建分支。"""
         if not session_id:
@@ -508,6 +512,7 @@ class StateStore:
                     "original_purpose": name,
                     "reference_baseline": f"`{branch}` at `{head}`",
                 },
+                "root_anchor_id": root_anchor_id,
                 "candidate_head": head,
                 "status": "active",
                 "lease": lease,

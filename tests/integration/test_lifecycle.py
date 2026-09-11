@@ -27,6 +27,8 @@ from solo_ai.lifecycle import (
     abandon,
     adopt_task_anchor,
     approve,
+    close_root_task_anchor,
+    create_root_task_anchor,
     choose,
     commit_task,
     deinit,
@@ -41,6 +43,7 @@ from solo_ai.lifecycle import (
     recover,
     resume_in_place,
     show_task_anchor,
+    show_root_task_anchor,
     update_task_anchor,
     retarget,
     set_local_enabled,
@@ -85,6 +88,63 @@ def initialized(path: Path) -> GitRepo:
     git(path, "commit", "-m", "test: use legacy direct lifecycle")
     approve(repo, load_verification_config(repo))
     return repo
+
+
+def test_root_anchor_binds_child_task_and_closes_only_after_terminal_child(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    root = create_root_task_anchor(
+        repo,
+        purpose="multi-phase migration",
+        target="persist cross-phase contract",
+        scope="no candidate grouping or scheduling",
+        acceptance="child binding is durable and close is terminal-only",
+    )
+    task = start(
+        repo,
+        name="root child",
+        root_anchor_id=root["root_id"],
+        request_id="root-child-test",
+    )
+
+    assert StateStore(repo).task(task["id"])["root_anchor_id"] == root["root_id"]
+    assert (
+        f"- Root anchor: `{root['root_id']}`"
+        in show_task_anchor(repo, task_id=task["id"])["content"]
+    )
+    assert (
+        show_root_task_anchor(repo, root_id=root["root_id"])["root_id"]
+        == root["root_id"]
+    )
+    with pytest.raises(SoloAIError, match="nonterminal child"):
+        close_root_task_anchor(repo, root_id=root["root_id"], confirm=root["root_id"])
+
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    closed = close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    )
+    assert closed == {"root_id": root["root_id"], "status": "closed"}
+
+    plain = start(repo, name="ordinary task")
+    assert "Root anchor:" not in show_task_anchor(repo, task_id=plain["id"])["content"]
+    abandon(repo, task_id=plain["id"], lease=plain["lease"], confirm=plain["id"])
+
+
+def test_root_child_refuses_a_missing_root_anchor(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    root = create_root_task_anchor(
+        repo,
+        purpose="recoverable objective",
+        target="verify missing parent handling",
+        scope="anchor references only",
+        acceptance="missing parent blocks continued child work",
+    )
+    task = start(repo, name="root child", root_anchor_id=root["root_id"])
+    Path(root["root_anchor_path"]).unlink()
+
+    with pytest.raises(SoloAIError, match="Root anchor is missing"):
+        show_task_anchor(repo, task_id=task["id"])
 
 
 def declare_cleanup(repo: GitRepo, *owned_paths: str) -> None:
