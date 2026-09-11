@@ -107,10 +107,80 @@ def test_success_returns_workspace_without_deleting_dependencies(
     assert repo.ref_head(saved_candidate["ref"]) == saved_candidate["head"]
 
 
+def test_candidate_conflict_preserves_partial_result_and_unblocks_next_batch(
+    git_repo: Path,
+) -> None:
+    """同批第二候选冲突后，保留首候选组合提交并让下一独立批次正常使用位置。"""
+    repo = reusable_repo(git_repo)
+    first = publish(repo, name="first change", relative="shared.txt")
+    second = publish(repo, name="second change", relative="shared.txt")
+    base_head = repo.head(git_repo)
+    with pytest.raises(SoloAIError, match="conflicts with the sealed batch"):
+        batches.seal_batch(
+            repo, candidate_ids=[first["candidate_id"], second["candidate_id"]]
+        )
+    store = batches.CandidateBatchStore(repo)
+    failed = next(iter(store.read()["batches"].values()))
+    workspace = Path(failed["worktree"])
+    assert failed["applied_candidate_ids"] == [first["candidate_id"]]
+    assert failed["failed_candidate_id"] == second["candidate_id"]
+    assert failed["worktree_released_at"]
+    assert store.read()["integration_workspace"]["owner"] is None
+    assert repo.is_clean(workspace)
+    assert repo.head(git_repo) == base_head
+    assert (workspace / "shared.txt").read_text() == "first change\n"
+    partial_ref = failed["integration_ref"]
+    assert repo.ref_head(partial_ref) == failed["integration_head"]
+    for item in (first, second):
+        candidate = store.candidate(item["candidate_id"])
+        assert candidate["status"] == "retained"
+        assert repo.ref_head(candidate["ref"]) == candidate["head"]
+    following = publish(repo, name="independent task", relative="following.txt")
+    result = batches.seal_batch(repo, candidate_ids=[following["candidate_id"]])
+    assert result["status"] == "completed"
+    assert result["worktree"] == str(workspace)
+    assert result["worktree_generation"] == failed["worktree_generation"] + 1
+    assert repo.ref_head(partial_ref) == failed["integration_head"]
+    assert not (git_repo / "shared.txt").exists()
+
+
 def test_new_repository_defaults_to_reusable_batches(git_repo: Path) -> None:
     repo = GitRepo(git_repo)
     initialize(repo, slots=3, commands=[VERIFY], accept=True, accept_static_only=False)
     assert load_repo_config(repo).integration.worktree_mode == "reusable"
+
+
+@pytest.mark.parametrize("interrupted_after_apply", [False, True])
+def test_isolated_index_interruption_leaves_workspace_recoverable(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, interrupted_after_apply: bool
+) -> None:
+    """预检前后中断都不留下真实索引改动，恢复仍使用原工作区代次。"""
+    repo = reusable_repo(git_repo)
+    candidate = publish(repo, name="index interruption", relative="candidate.txt")
+    run = batches.subprocess.run
+
+    def interrupted(args, **kwargs):
+        if "apply" in args and "--cached" in args:
+            if interrupted_after_apply:
+                run(args, **kwargs)
+            raise KeyboardInterrupt("isolated index interrupted")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(batches.subprocess, "run", interrupted)
+    with pytest.raises(KeyboardInterrupt, match="isolated index interrupted"):
+        batches.seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    store = batches.CandidateBatchStore(repo)
+    record = store.read()["integration_workspace"]
+    batch = store.batch(record["owner"])
+    assert batch["status"] == "composing"
+    assert repo.is_clean(Path(batch["worktree"]))
+    assert repo.head(Path(batch["worktree"])) == batch["integration_head"]
+    assert not list(repo.local_dir.glob("candidate-index-*"))
+    monkeypatch.setattr(batches.subprocess, "run", run)
+    recovered = batches.recover_batch(repo, batch_id=batch["id"])
+    assert recovered["status"] == "completed"
+    assert recovered["worktree_generation"] == record["generation"]
+    assert store.read()["integration_workspace"]["owner"] is None
 
 
 def test_ten_success_and_failure_rounds_reuse_one_workspace(

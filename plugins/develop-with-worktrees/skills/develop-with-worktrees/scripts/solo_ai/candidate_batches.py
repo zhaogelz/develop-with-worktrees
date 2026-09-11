@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -1089,6 +1091,7 @@ def _apply_candidate_diff(
     base_head: str,
     candidate_head: str,
     candidate_id: str,
+    keep_conflicts_out_of_worktree: bool = False,
 ) -> None:
     diff = subprocess.run(
         [
@@ -1109,6 +1112,47 @@ def _apply_candidate_diff(
         raise SoloAIError("Could not freeze the candidate tree difference")
     if not diff.stdout:
         return
+    if keep_conflicts_out_of_worktree:
+        # --check --3way 在真实冲突时也可能退出0，不能据此保护共享工作区。
+        # 用临时索引执行真实三方应用；冲突只留在索引中，不污染已组合的干净结果。
+        with tempfile.TemporaryDirectory(
+            prefix="candidate-index-", dir=repo.local_dir
+        ) as temporary:
+            environment = {
+                **os.environ,
+                "GIT_INDEX_FILE": str(Path(temporary) / "index"),
+            }
+            command = ["git", "-C", str(worktree)]
+            initialized = subprocess.run(
+                [*command, "read-tree", "HEAD"],
+                env=environment,
+                capture_output=True,
+                check=False,
+            )
+            if initialized.returncode:
+                raise SoloAIError("Could not prepare the isolated candidate index")
+            checked = subprocess.run(
+                [*command, "apply", "--cached", "--3way", "-"],
+                input=diff.stdout,
+                env=environment,
+                capture_output=True,
+                check=False,
+            )
+            conflicts = subprocess.run(
+                [*command, "ls-files", "--unmerged", "-z"],
+                env=environment,
+                capture_output=True,
+                check=False,
+            )
+            if conflicts.returncode:
+                raise SoloAIError("Could not inspect the isolated candidate index")
+            if checked.returncode or conflicts.stdout:
+                detail = checked.stderr.decode("utf-8", errors="replace").strip()
+                raise CandidateCompositionConflict(
+                    candidate_id,
+                    "Candidate conflicts with the sealed batch; base was preserved"
+                    + (f": {detail}" if detail else ""),
+                )
     applied = subprocess.run(
         ["git", "-C", str(worktree), "apply", "--index", "--3way", "-"],
         input=diff.stdout,
@@ -1239,6 +1283,7 @@ def _compose(
             base_head=str(candidate["base_head"]),
             candidate_head=str(candidate["head"]),
             candidate_id=candidate_id,
+            keep_conflicts_out_of_worktree=batch.get("worktree_mode") == "reusable",
         )
         staged = repo.git(["diff", "--cached", "--quiet"], cwd=worktree, check=False)
         if staged.returncode not in {0, 1}:

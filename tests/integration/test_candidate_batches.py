@@ -2318,10 +2318,12 @@ def test_interruption_after_batch_release_reuses_exact_release_receipt(
     assert release_count.read_text(encoding="utf-8") == "1"
 
 
+@pytest.mark.parametrize("reusable", [False, True])
 def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
     git_repo: Path,
+    reusable: bool,
 ) -> None:
-    repo = initialized_batched(git_repo)
+    repo = initialized_batched(git_repo, reusable=reusable)
     candidate = publish(repo, name="candidate conflict", relative="shared.txt")
     (git_repo / "shared.txt").write_text("main change\n", encoding="utf-8")
     git(git_repo, "add", "shared.txt")
@@ -2335,6 +2337,14 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
     assert source["status"] == "retained"
     assert source["last_failure_kind"] == "composition_conflict"
     assert source["repair_eligible"] is True
+
+    if reusable:
+        pool = CandidateBatchStore(repo).read()
+        failed = pool["batches"][source["last_failed_batch"]]
+        assert pool["integration_workspace"]["owner"] is None
+        assert failed["worktree_released_at"]
+        assert repo.is_clean(Path(failed["worktree"]))
+        assert repo.ref_head(failed["integration_ref"]) == failed["integration_head"]
 
     repair = prepare_candidate_repair(repo, candidate_id=candidate["candidate_id"])
     repair_worktree = Path(repair["worktree"])
