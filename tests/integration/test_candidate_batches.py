@@ -1735,6 +1735,39 @@ def test_fast_failed_batch_retirement_skips_dependency_hashes_and_is_idempotent(
     assert store.candidate(candidate["candidate_id"])["status"] == "superseded"
 
 
+def test_fast_failed_batch_retirement_accepts_nested_opaque_dependencies(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (git_repo / ".gitignore").write_text(
+        "components/api/.venv/\nweb/node_modules/\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: accept nested fast dependencies")
+    repo = initialized_batched(git_repo, auto_full=False)
+    _, failed, _ = _failed_superseded_batch(
+        repo, monkeypatch, relative="nested-fast-retire.txt"
+    )
+    worktree = Path(failed["worktree"])
+    venv = worktree / "components" / "api" / ".venv"
+    node_modules = worktree / "web" / "node_modules"
+    venv.mkdir(parents=True)
+    node_modules.mkdir(parents=True)
+    (venv / "marker.bin").write_bytes(b"generated")
+    (node_modules / "marker.bin").write_bytes(b"generated")
+
+    def no_slow_inventory(*args: object, **kwargs: object) -> None:
+        pytest.fail("fast retirement must not expand nested dependency inventory")
+
+    monkeypatch.setattr(cleanup_module, "_ignored_inventory", no_slow_inventory)
+    retired = retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+
+    assert retired["worktree_retired_at"]
+    assert retired["fast_retirement_receipt_sha256"]
+    assert not worktree.exists()
+
+
 def test_fast_failed_batch_retirement_rejects_protected_ignored_content(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

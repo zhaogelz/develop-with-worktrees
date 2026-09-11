@@ -61,10 +61,6 @@ def _fast_registration(repo: GitRepo, worktree: Path, head: str) -> list[Any]:
     ]
 
 
-def _fast_top_level(relative: str) -> str:
-    return Path(relative.rstrip("/")).parts[0]
-
-
 def _fast_validate_open_root(path: Path, *, worktree: Path, policy: Any) -> None:
     """只检查开放式可再生根的名称；不读取或哈希其文件内容。"""
     if is_link_or_junction(path):
@@ -102,19 +98,38 @@ def _fast_validate_untracked(repo: GitRepo, worktree: Path) -> dict[str, Any]:
             "Ordinary untracked content blocks fast retirement:\n"
             + "\n".join(f"- {item}" for item in ordinary[:20])
         )
-    ignored = repo.ignored_untracked(worktree, directories=True)
-    checked_roots: set[str] = set()
-    for item in ignored:
-        relative = item.rstrip("/")
-        if not relative:
-            continue
-        top = _fast_top_level(relative)
-        if top in FAST_RECREATABLE_ROOTS:
-            checked_roots.add(top)
-            root = worktree / top
+    ignored = [
+        item.rstrip("/") for item in repo.ignored_untracked(worktree, directories=True)
+    ]
+    ignored = [item for item in ignored if item]
+    root_specs: dict[tuple[str, ...], tuple[tuple[str, ...], Path, str]] = {}
+    for relative in ignored:
+        parts = Path(relative).parts
+        for root_index, part in enumerate(parts):
+            root_name = part.casefold()
+            if root_name not in FAST_RECREATABLE_ROOTS:
+                continue
+            root_parts = parts[: root_index + 1]
+            folded_root_parts = tuple(value.casefold() for value in root_parts)
+            if folded_root_parts in root_specs:
+                continue
+            root_relative = Path(*root_parts).as_posix()
+            root = worktree.joinpath(*root_parts)
             _require_plain_path(root, worktree)
-            if top not in FAST_OPAQUE_ROOTS:
+            if root_name not in FAST_OPAQUE_ROOTS:
                 _fast_validate_open_root(root, worktree=worktree, policy=policy)
+            root_specs[folded_root_parts] = (
+                folded_root_parts,
+                root,
+                root_relative,
+            )
+    checked_roots = {spec[2] for spec in root_specs.values()}
+    for relative in ignored:
+        parts = tuple(value.casefold() for value in Path(relative).parts)
+        if any(
+            parts[: len(root_parts)] == root_parts or root_parts[: len(parts)] == parts
+            for root_parts, _, _ in root_specs.values()
+        ):
             continue
         leaf = Path(relative).name.casefold()
         if len(Path(relative).parts) == 1 and (
