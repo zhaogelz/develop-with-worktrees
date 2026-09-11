@@ -715,7 +715,7 @@ def test_protected_ignored_content_blocks_promotion_until_exact_recovery(
     assert repo.head(git_repo) == base_before
     assert protected_path is not None and protected_path.is_file()
     batch = CandidateBatchStore(repo).summary()["batches"][0]
-    assert batch["status"] == "validated"
+    assert batch["status"] == "promotion_blocked"
 
     monkeypatch.setattr(batch_module, "_promote", original_promote)
     protected_path.unlink()
@@ -724,6 +724,148 @@ def test_protected_ignored_content_blocks_promotion_until_exact_recovery(
 
     assert completed["status"] == "completed"
     assert repo.head(git_repo) == completed["integrated_head"]
+
+
+def test_promotion_blocked_by_base_garbage_recovers_without_repeating_full(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="base garbage", relative="candidate.txt")
+    base_before = repo.head(git_repo)
+    original_promote = batch_module._promote
+    original_validate = batch_module.validate
+    validation_calls = 0
+    garbage = git_repo / "operator-leftover.txt"
+
+    def count_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validate(*args, **kwargs)
+
+    def promote_with_base_garbage(repo, store, batch):
+        garbage.write_text("preserve before recovery\n", encoding="utf-8")
+        return original_promote(repo, store, batch)
+
+    monkeypatch.setattr(batch_module, "validate", count_validation)
+    monkeypatch.setattr(batch_module, "_promote", promote_with_base_garbage)
+    with pytest.raises(batch_module.BatchPromotionPending, match="Full passed"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    assert pending["status"] == "promotion_blocked"
+    assert pending["validation_outcome"] == "passed"
+    assert validation_calls == 1
+    assert repo.head(git_repo) == base_before
+    assert garbage.read_text(encoding="utf-8") == "preserve before recovery\n"
+
+    monkeypatch.setattr(batch_module, "_promote", original_promote)
+    garbage.unlink()
+    completed = batch_module.recover_batch(repo, batch_id=pending["id"])
+
+    assert completed["status"] == "completed"
+    assert validation_calls == 1
+    assert repo.head(git_repo) == completed["integrated_head"]
+
+
+def test_promotion_recovery_rejects_changed_release_receipt_without_full_rerun(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script="pass",
+        batch_release_script="pass",
+    )
+    candidate = publish(repo, name="release receipt drift", relative="candidate.txt")
+    base_before = repo.head(git_repo)
+    original_promote = batch_module._promote
+    original_validate = batch_module.validate
+    validation_calls = 0
+    garbage = git_repo / "operator-leftover.txt"
+
+    def count_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validate(*args, **kwargs)
+
+    def promote_with_base_garbage(repo, store, batch):
+        garbage.write_text("preserve before recovery\n", encoding="utf-8")
+        return original_promote(repo, store, batch)
+
+    monkeypatch.setattr(batch_module, "validate", count_validation)
+    monkeypatch.setattr(batch_module, "_promote", promote_with_base_garbage)
+    with pytest.raises(batch_module.BatchPromotionPending, match="Full passed"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    release = pending["runtime_release"]
+    receipt_path = (
+        repo.local_dir
+        / "runtime-adapter"
+        / "receipts"
+        / f"{release['invocation_id']}.json"
+    )
+    persisted = read_json(receipt_path, {})
+    persisted["result"] = "failed"
+    atomic_write_json(receipt_path, persisted)
+    monkeypatch.setattr(batch_module, "_promote", original_promote)
+    garbage.unlink()
+
+    with pytest.raises(SoloAIError, match="release receipt"):
+        batch_module.recover_batch(repo, batch_id=pending["id"])
+
+    failed = CandidateBatchStore(repo).summary()["batches"][0]
+    assert failed["status"] == "failed"
+    assert failed["failure_kind"] == "promotion_blocked"
+    assert validation_calls == 1
+    assert repo.head(git_repo) == base_before
+
+
+def test_promotion_recovery_rejects_advanced_base_without_full_rerun(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="base drift", relative="candidate.txt")
+    base_before = repo.head(git_repo)
+    original_promote = batch_module._promote
+    original_validate = batch_module.validate
+    validation_calls = 0
+    garbage = git_repo / "operator-leftover.txt"
+
+    def count_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validate(*args, **kwargs)
+
+    def promote_with_base_garbage(repo, store, batch):
+        garbage.write_text("preserve before recovery\n", encoding="utf-8")
+        return original_promote(repo, store, batch)
+
+    monkeypatch.setattr(batch_module, "validate", count_validation)
+    monkeypatch.setattr(batch_module, "_promote", promote_with_base_garbage)
+    with pytest.raises(batch_module.BatchPromotionPending, match="Full passed"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    monkeypatch.setattr(batch_module, "_promote", original_promote)
+    garbage.unlink()
+    (git_repo / "intervening-main-change.txt").write_text(
+        "new main\n", encoding="utf-8"
+    )
+    git(git_repo, "add", "intervening-main-change.txt")
+    git(git_repo, "commit", "-m", "test: advance main before recovery")
+
+    with pytest.raises(SoloAIError, match="Batch base advanced"):
+        batch_module.recover_batch(repo, batch_id=pending["id"])
+
+    failed = CandidateBatchStore(repo).summary()["batches"][0]
+    assert failed["status"] == "failed"
+    assert failed["failure_kind"] == "promotion_blocked"
+    assert validation_calls == 1
+    assert repo.head(git_repo) != base_before
+    assert not (git_repo / "candidate.txt").exists()
 
 
 def test_batch_cleanup_preserves_protected_content_arriving_during_cleanup(

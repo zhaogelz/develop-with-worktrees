@@ -20,9 +20,13 @@ from .cleanup import (
 )
 from .config import CommandSpec, load_repo_config, load_verification_config
 from .integration import integration_turn
-from .proof import require_approved_plan, validate
+from .proof import require_approved_plan, require_exact_passed_proof, validate
 from .repo import GitRepo
-from .runtime_adapter import activate_batch_runtime, release_batch_runtime
+from .runtime_adapter import (
+    activate_batch_runtime,
+    release_batch_runtime,
+    require_exact_passed_batch_release,
+)
 from .safety import require_safe
 from .state import StateStore, candidate_admission_lock
 from .task_context import delete_anchor, require_anchor
@@ -52,6 +56,7 @@ ACTIVE_BATCH_STATES = {
     "runtime_releasing",
     "runtime_release_pending",
     "validated",
+    "promotion_blocked",
     "promoted",
 }
 LEGACY_EXPLICIT_POLICY = {
@@ -90,6 +95,10 @@ class BatchRuntimePending(SoloAIError):
 
 class BatchCleanupPending(SoloAIError):
     """批次清理事实不安全或不确定；保持当前阶段等待精确恢复。"""
+
+
+class BatchPromotionPending(SoloAIError):
+    """Full 已通过，但推进前的外部工作区事实尚未稳定。"""
 
 
 class CandidateBatchStore:
@@ -1512,6 +1521,97 @@ def _release_batch_runtime(
     return resumed
 
 
+def _require_exact_passed_promotion_recovery(
+    repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
+) -> None:
+    """阻断后的恢复只能推进同一份已验证、已释放的批次事务。"""
+
+    if batch.get("status") != "promotion_blocked":
+        raise SoloAIError("Only a promotion-blocked batch can reuse a passed Full")
+    integration_head = str(batch.get("integration_head") or "")
+    base_before = str(batch.get("base_before") or "")
+    proof_fingerprint = str(batch.get("proof") or "")
+    if (
+        batch.get("validation_outcome") != "passed"
+        or not integration_head
+        or not base_before
+        or not proof_fingerprint
+    ):
+        raise SoloAIError("Promotion recovery has no exact passed Full facts")
+    proof = read_json(repo.local_dir / "proofs" / f"{proof_fingerprint}.json", {})
+    require_exact_passed_proof(
+        proof,
+        fingerprint=proof_fingerprint,
+        candidate_head=integration_head,
+        base_head=base_before,
+    )
+    if "full" not in (proof.get("inputs") or {}).get("levels", []):
+        raise SoloAIError("Promotion recovery proof is not a Full validation")
+    require_exact_passed_batch_release(
+        repo, receipt=copy.deepcopy(batch.get("runtime_release") or {})
+    )
+
+    frozen = list(batch.get("candidates") or [])
+    candidate_ids = [str(item) for item in batch.get("candidate_ids") or []]
+    if (
+        not frozen
+        or len(frozen) != len(candidate_ids)
+        or candidate_ids != [str(item.get("candidate_id") or "") for item in frozen]
+        or len(set(candidate_ids)) != len(candidate_ids)
+    ):
+        raise SoloAIError("Promotion recovery candidate snapshot changed")
+    pool = store.read().get("candidates") or {}
+    for candidate_id, sealed in zip(candidate_ids, frozen, strict=True):
+        current = pool.get(candidate_id)
+        if not current or current.get("status") != "sealed":
+            raise SoloAIError("Promotion recovery candidate ownership changed")
+        if current.get("sealed_batch") != batch["id"]:
+            raise SoloAIError("Promotion recovery candidate batch ownership changed")
+        for field in (
+            "candidate_id",
+            "task_id",
+            "ref",
+            "head",
+            "base_ref",
+            "base_head",
+            "integration_policy",
+        ):
+            if current.get(field) != sealed.get(field):
+                raise SoloAIError(
+                    f"Promotion recovery candidate identity changed: {candidate_id}"
+                )
+        if (
+            sealed.get("base_ref") != batch.get("base_ref")
+            or sealed.get("base_head") != base_before
+            or repo.ref_head(str(sealed.get("ref") or "")) != sealed.get("head")
+            or not repo.is_ancestor(base_before, str(sealed.get("head") or ""))
+        ):
+            raise SoloAIError(
+                f"Promotion recovery candidate Git facts changed: {candidate_id}"
+            )
+    integration_ref = batch.get("integration_ref")
+    if integration_ref and repo.ref_head(str(integration_ref)) != integration_head:
+        raise SoloAIError("Promotion recovery integration ref changed")
+    if not repo.is_ancestor(base_before, integration_head):
+        raise SoloAIError("Promotion recovery integration head changed")
+
+
+def _block_promotion(
+    store: CandidateBatchStore, batch: dict[str, Any], error: Exception
+) -> None:
+    store.update_batch(
+        batch["id"],
+        status="promotion_blocked",
+        promotion_blocked_at=utc_timestamp(),
+        promotion_blocked_error=str(error),
+    )
+    raise BatchPromotionPending(
+        "Combined Full passed; promotion is pending exact recovery: "
+        f"{error}. "
+        "Restore the recorded worktree facts, then run batch recover."
+    ) from error
+
+
 def _promote(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1521,35 +1621,48 @@ def _promote(
     else:
         _assert_batch_cleanup_safe(repo, batch)
     base_ref = str(batch["base_ref"])
+    base_ref_head = repo.ref_head(f"refs/heads/{base_ref}")
+    integration_head = str(batch["integration_head"])
+    if not base_ref_head:
+        raise SoloAIError("Batch base branch no longer exists; Full reuse is unsafe")
+    if base_ref_head != batch["base_before"] and not repo.is_ancestor(
+        integration_head, base_ref_head
+    ):
+        raise SoloAIError("Batch base advanced; no promotion was attempted")
     matching = [
         item.path
         for item in repo.worktrees()
         if not item.bare and repo.branch(item.path) == base_ref
     ]
     if len(matching) != 1:
-        raise SoloAIError(
-            "Batch base branch must be checked out in one stable worktree"
+        raise BatchPromotionPending(
+            "Batch base branch is not checked out in one stable worktree"
         )
     base_worktree = matching[0]
     observed = repo.head(base_worktree)
     # Git已推进而记录中断，或此后主线再次前进：不重复Full或要求回退主线。
     if (
         repo.is_clean(base_worktree)
-        and repo.ref_head(f"refs/heads/{base_ref}") == observed
-        and repo.is_ancestor(str(batch["integration_head"]), observed)
+        and base_ref_head == observed
+        and repo.is_ancestor(integration_head, observed)
     ):
         return store.update_batch(
             batch["id"], status="promoted", promoted_at=utc_timestamp()
         )
-    if (
-        not repo.is_clean(base_worktree)
-        or repo.head(base_worktree) != batch["base_before"]
-        or repo.ref_head(f"refs/heads/{base_ref}") != batch["base_before"]
-    ):
-        raise SoloAIError("Batch base changed; no promotion was attempted")
-    repo.git(["merge", "--ff-only", str(batch["integration_head"])], cwd=base_worktree)
+    if base_ref_head != batch["base_before"]:
+        raise SoloAIError("Batch base advanced; no promotion was attempted")
+    if not repo.is_clean(base_worktree) or observed != batch["base_before"]:
+        raise BatchPromotionPending(
+            "Batch base worktree is not clean and exact; no promotion was attempted"
+        )
+    try:
+        repo.git(["merge", "--ff-only", integration_head], cwd=base_worktree)
+    except SoloAIError as exc:
+        raise BatchPromotionPending(
+            "Batch promotion could not complete with otherwise exact facts"
+        ) from exc
     observed = repo.head(base_worktree)
-    if observed != batch["integration_head"]:
+    if observed != integration_head:
         raise SoloAIError(
             "Batch promotion did not reach the validated integration head"
         )
@@ -1630,8 +1743,13 @@ def _resume(
         if batch["status"] == "composed":
             batch = _activate_batch_runtime(repo, store, batch)
             batch = _validate_batch(repo, store, batch)
-    if batch["status"] == "validated":
-        batch = _promote(repo, store, batch)
+    if batch["status"] == "promotion_blocked":
+        _require_exact_passed_promotion_recovery(repo, store, batch)
+    if batch["status"] in {"validated", "promotion_blocked"}:
+        try:
+            batch = _promote(repo, store, batch)
+        except (BatchCleanupPending, BatchPromotionPending) as exc:
+            _block_promotion(store, batch, exc)
     if batch["status"] == "promoted":
         batch = _cleanup(repo, store, batch)
     return batch
@@ -1748,6 +1866,7 @@ def _run_owned_batch(
         SystemExit,
         BatchRuntimePending,
         BatchCleanupPending,
+        BatchPromotionPending,
         batch_workspace.BatchWorkspacePending,
     ):
         raise
@@ -1759,7 +1878,7 @@ def _run_owned_batch(
         elif current.get("status") == "composed":
             failure_kind = "validation_failed"
             failed_candidate_id = None
-        elif current.get("status") == "validated":
+        elif current.get("status") in {"validated", "promotion_blocked"}:
             failure_kind = "promotion_blocked"
             failed_candidate_id = None
         else:

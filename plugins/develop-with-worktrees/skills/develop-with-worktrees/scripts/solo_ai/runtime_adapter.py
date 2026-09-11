@@ -386,6 +386,54 @@ def release_batch_runtime(
     return {"configured": True, **receipt}
 
 
+def require_exact_passed_batch_release(
+    repo: GitRepo, *, receipt: dict[str, Any]
+) -> None:
+    """恢复已通过 Full 的推进前，复核批次运行时已按原事实释放。"""
+
+    if receipt.get("configured") is False:
+        if receipt != {"configured": False, "operation": "batch-release"}:
+            raise SoloAIError("Stored batch runtime release identity is invalid")
+        return
+    if receipt.get("configured") is not True:
+        raise SoloAIError("Batch runtime release has no exact persisted outcome")
+
+    stored_receipt = {
+        key: value
+        for key, value in receipt.items()
+        if key not in {"configured", "reused"}
+    }
+    invocation_id = stored_receipt.get("invocation_id")
+    if not isinstance(invocation_id, str) or not invocation_id:
+        raise SoloAIError("Stored batch runtime release invocation is invalid")
+    persisted = read_json(
+        repo.local_dir / "runtime-adapter" / "receipts" / f"{invocation_id}.json",
+        {},
+    )
+    if persisted != stored_receipt:
+        raise SoloAIError("Stored batch runtime release receipt changed")
+    if (
+        persisted.get("schema_version") != ADAPTER_RECEIPT_SCHEMA
+        or persisted.get("operation") != "batch-release"
+        or persisted.get("result") != "passed"
+        or persisted.get("exit_code") != 0
+        or persisted.get("timed_out") is not False
+        or not _logs_exist(persisted)
+    ):
+        raise SoloAIError("Stored batch runtime release receipt is not a passed result")
+    context_path = Path(str(persisted.get("context") or ""))
+    context_root = repo.local_dir / "runtime-adapter" / "contexts"
+    try:
+        context_path.resolve().relative_to(context_root.resolve())
+    except (OSError, ValueError) as exc:
+        raise SoloAIError(
+            "Stored batch runtime release context escaped DWW storage"
+        ) from exc
+    context = read_json(context_path, {})
+    if sha256_text(stable_json(context)) != persisted.get("context_digest"):
+        raise SoloAIError("Stored batch runtime release context changed")
+
+
 def verify_runtime_effective(repo: GitRepo, *, candidate_id: str) -> dict[str, Any]:
     from .candidate_batches import CandidateBatchStore
 
