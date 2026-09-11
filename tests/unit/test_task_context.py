@@ -6,14 +6,23 @@ from pathlib import Path
 import pytest
 
 from solo_ai.repo import GitRepo
-from solo_ai.task_context import anchor_path, read_anchor, update_anchor
+from solo_ai.task_context import anchor_path, read_anchor, read_anchor_update, update_anchor
 from solo_ai.util import SoloAIError
 
 
-def _task(repo: Path) -> tuple[GitRepo, dict[str, str]]:
+def _task(repo: Path) -> tuple[GitRepo, dict[str, object]]:
     git_repo = GitRepo(repo)
     task_id = "task-20260911034605-test"
-    task = {"id": task_id, "status": "active"}
+    task: dict[str, object] = {
+        "id": task_id,
+        "status": "active",
+        "anchor_origin": {
+            "schema_version": "1",
+            "task_id": task_id,
+            "original_purpose": "test purpose",
+            "reference_baseline": "main at abc",
+        },
+    }
     path = anchor_path(git_repo, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -48,7 +57,7 @@ def test_read_and_update_anchor_returns_byte_sha_and_preserves_extra_text(
     assert reread["sha256"] == hashlib.sha256(changed.encode("utf-8")).hexdigest()
 
 
-def test_update_anchor_rejects_stale_identity_and_template_content(
+def test_update_anchor_accepts_identical_retry_before_stale_digest_check(
     git_repo: Path,
 ) -> None:
     repo, task = _task(git_repo)
@@ -57,10 +66,10 @@ def test_update_anchor_rejects_stale_identity_and_template_content(
         "- Current progress: started", "- Current progress: other"
     )
     update_anchor(repo, task, content=stale, expected_sha256=shown["sha256"])
-    with pytest.raises(SoloAIError, match="changed since it was read"):
-        update_anchor(
-            repo, task, content=shown["content"], expected_sha256=shown["sha256"]
-        )
+    retry = update_anchor(
+        repo, task, content=stale, expected_sha256=shown["sha256"]
+    )
+    assert retry["changed"] is False
     current = read_anchor(repo, task)
     invalid = current["content"].replace(
         "- Scope boundary: tests only", "- Scope boundary: fill before editing"
@@ -93,6 +102,18 @@ def test_ready_anchor_update_allows_only_progress(git_repo: Path) -> None:
             repo,
             task,
             content=invalid,
+            expected_sha256=current["sha256"],
+            progress_only=True,
+        )
+    changed_body = current["content"].replace("Details stay here.", "Details changed.")
+    with pytest.raises(SoloAIError, match="full Current progress block"):
+        update_anchor(
+            repo,
+            task,
+            content=changed_body.replace(
+                "- Current progress: ready proof complete",
+                "- Current progress:\n  ready proof recorded",
+            ),
             expected_sha256=current["sha256"],
             progress_only=True,
         )
@@ -142,7 +163,38 @@ def test_anchor_fields_inside_code_fence_do_not_satisfy_identity(
         )
 
 
+def test_anchor_rejects_indented_fake_field_and_origin_mismatch(git_repo: Path) -> None:
+    repo, task = _task(git_repo)
+    shown = read_anchor(repo, task)
+    indented = shown["content"] + "\n  - Original purpose: forged\n"
+    with pytest.raises(SoloAIError, match="indented duplicate"):
+        update_anchor(
+            repo,
+            task,
+            content=indented,
+            expected_sha256=shown["sha256"],
+        )
+    path = anchor_path(repo, str(task["id"]))
+    path.write_text(
+        shown["content"].replace("- Original purpose: test purpose", "- Original purpose: forged"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    with pytest.raises(SoloAIError, match="original purpose does not match"):
+        read_anchor(repo, task)
+
+
 def test_anchor_path_rejects_path_like_task_id(git_repo: Path) -> None:
     repo = GitRepo(git_repo)
     with pytest.raises(SoloAIError, match="safe anchor name"):
         anchor_path(repo, "../outside")
+    with pytest.raises(SoloAIError, match="safe anchor name"):
+        anchor_path(repo, "not-a-task-id")
+
+
+def test_anchor_update_input_must_stay_in_the_calling_worktree(git_repo: Path) -> None:
+    repo, _ = _task(git_repo)
+    outside = git_repo.parent / "outside-anchor-update.md"
+    outside.write_text("outside", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="outside the allowed"):
+        read_anchor_update(repo, outside)

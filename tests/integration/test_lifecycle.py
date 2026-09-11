@@ -3562,6 +3562,11 @@ def test_anchor_show_and_update_uses_lease_and_digest(git_repo: Path) -> None:
     repo = initialized(git_repo)
     task = start(repo, name="anchor update")
     shown = show_task_anchor(repo, task_id=task["id"])
+    assert task["anchor_origin"]["original_purpose"] == "anchor update"
+    assert task["anchor_origin"]["reference_baseline"] == (
+        f"`{task['base_ref']}` at `{task['base_head']}`"
+    )
+    assert shown["origin_verified"] is True
     input_path = Path(task["worktree"]) / "anchor-update.md"
     content = shown["content"]
     content = content.replace(

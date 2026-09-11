@@ -19,24 +19,91 @@ _ANCHOR_FIELDS = (
     "Current progress",
 )
 _IMMUTABLE_FIELDS = ("Task ID", "Original purpose", "Reference baseline")
+_TASK_ID_PATTERN = re.compile(r"task-[A-Za-z0-9][A-Za-z0-9-]*\Z")
+
+
+def anchor_origin(task: dict[str, Any]) -> dict[str, str]:
+    """从任务创建时的事实生成可持久化的锚点不变量。"""
+
+    task_id = str(task.get("id") or "")
+    purpose = str(task.get("name") or "").strip()
+    base_ref = str(task.get("base_ref") or "").strip()
+    base_head = str(task.get("base_head") or "").strip()
+    if not task_id or not purpose or not base_ref or not base_head:
+        raise SoloAIError("Task lacks the original facts required for an anchor")
+    return {
+        "schema_version": "1",
+        "task_id": task_id,
+        "original_purpose": purpose,
+        "reference_baseline": f"`{base_ref}` at `{base_head}`",
+    }
 
 
 def anchor_path(repo: GitRepo, task_id: str) -> Path:
-    if not task_id or any(char in task_id for char in "/\\:"):
+    if not _TASK_ID_PATTERN.fullmatch(task_id):
         raise SoloAIError("Task id is not a safe anchor name")
     return repo.local_dir / "task-anchors" / f"{task_id}.md"
 
 
-def _require_plain_anchor(path: Path) -> str:
-    return _read_plain_anchor(path)[1]
+def _require_plain_file(path: Path, *, root: Path, label: str) -> Path:
+    """不跟随链接地确认文件位于已知本地根中。"""
+
+    raw_root = root.absolute()
+    raw_path = path.absolute()
+    if is_link_or_junction(raw_root) or not raw_root.is_dir():
+        raise SoloAIError(f"{label} root is not a plain local directory")
+    try:
+        relative = raw_path.relative_to(raw_root)
+    except ValueError as exc:
+        raise SoloAIError(f"{label} is outside the allowed local directory") from exc
+    current = raw_root
+    for part in relative.parts:
+        current = current / part
+        if is_link_or_junction(current):
+            raise SoloAIError(f"{label} must not be a link or junction")
+    if not raw_path.is_file():
+        raise SoloAIError(f"{label} must be a regular local UTF-8 file")
+    try:
+        raw_path.resolve().relative_to(raw_root.resolve())
+    except ValueError as exc:
+        raise SoloAIError(f"{label} escaped the allowed local directory") from exc
+    return raw_path
 
 
-def _read_plain_anchor(path: Path) -> tuple[bytes, str]:
+def _require_plain_directory(path: Path, *, root: Path, label: str) -> Path:
+    raw_root = root.absolute()
+    raw_path = path.absolute()
+    if is_link_or_junction(raw_root) or not raw_root.is_dir():
+        raise SoloAIError(f"{label} root is not a plain local directory")
+    try:
+        relative = raw_path.relative_to(raw_root)
+    except ValueError as exc:
+        raise SoloAIError(f"{label} is outside the allowed local directory") from exc
+    current = raw_root
+    for part in relative.parts:
+        current = current / part
+        if is_link_or_junction(current):
+            raise SoloAIError(f"{label} must not be a link or junction")
+    if not raw_path.is_dir():
+        raise SoloAIError(f"{label} must be a plain local directory")
+    try:
+        raw_path.resolve().relative_to(raw_root.resolve())
+    except ValueError as exc:
+        raise SoloAIError(f"{label} escaped the allowed local directory") from exc
+    return raw_path
+
+
+def _require_plain_anchor(repo: GitRepo, path: Path) -> str:
+    return _read_plain_anchor(repo, path)[1]
+
+
+def _read_plain_anchor(repo: GitRepo, path: Path) -> tuple[bytes, str]:
     if not path.exists():
         raise SoloAIError(f"Task anchor is missing: {path}. Restore it before Ready.")
-    if is_link_or_junction(path) or not path.is_file():
-        raise SoloAIError("Task anchor must be a regular local UTF-8 file")
-    raw = path.read_bytes()
+    plain_path = _require_plain_file(
+        path, root=repo.local_dir, label="Task anchor"
+    )
+    raw = plain_path.read_bytes()
     if len(raw) > MAX_ANCHOR_BYTES:
         raise SoloAIError("Task anchor exceeds the 64 KiB safety limit")
     try:
@@ -45,12 +112,13 @@ def _read_plain_anchor(path: Path) -> tuple[bytes, str]:
         raise SoloAIError("Task anchor must be valid UTF-8") from exc
 
 
-def _read_plain_input(path: Path) -> str:
+def _read_plain_input(repo: GitRepo, path: Path) -> str:
     if not path.exists():
         raise SoloAIError(f"Anchor update input is missing: {path}")
-    if is_link_or_junction(path) or not path.is_file():
-        raise SoloAIError("Anchor update input must be a regular local UTF-8 file")
-    raw = path.read_bytes()
+    plain_path = _require_plain_file(
+        path, root=repo.root, label="Anchor update input"
+    )
+    raw = plain_path.read_bytes()
     if len(raw) > MAX_ANCHOR_BYTES:
         raise SoloAIError("Anchor update input exceeds the 64 KiB safety limit")
     try:
@@ -59,20 +127,63 @@ def _read_plain_input(path: Path) -> str:
         raise SoloAIError("Anchor update input must be valid UTF-8") from exc
 
 
-def _field_values(content: str, field: str) -> list[str]:
-    pattern = re.compile(rf"^- {re.escape(field)}:([^\r\n]*)$")
-    values: list[str] = []
+_FIELD_HEADER = re.compile(
+    rf"^- (?P<field>{'|'.join(re.escape(field) for field in _ANCHOR_FIELDS)}):(?P<value>[^\r\n]*)$"
+)
+_INDENTED_FIELD_HEADER = re.compile(
+    rf"^\s+- (?:{'|'.join(re.escape(field) for field in _ANCHOR_FIELDS)}):"
+)
+
+
+def _validated_anchor(content: str) -> tuple[dict[str, str], tuple[int, int]]:
+    """提取顶层锚点字段，并保留完整 Current progress 块的精确范围。"""
+
+    fields: dict[str, str] = {}
+    lines = content.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
     in_fence = False
-    for line in content.splitlines():
-        stripped = line.strip()
+    progress_index: int | None = None
+    for index, line in enumerate(lines):
+        plain = line.rstrip("\r\n")
+        stripped = plain.strip()
         if stripped.startswith(("```", "~~~")):
             in_fence = not in_fence
             continue
-        if not in_fence:
-            match = pattern.fullmatch(line)
-            if match:
-                values.append(match.group(1).strip())
-    return values
+        if in_fence:
+            continue
+        if _INDENTED_FIELD_HEADER.match(plain):
+            raise SoloAIError("Task anchor must not contain indented duplicate fields")
+        match = _FIELD_HEADER.fullmatch(plain)
+        if not match:
+            continue
+        field = match.group("field")
+        if field in fields:
+            raise SoloAIError(f"Task anchor must contain exactly one '{field}' field")
+        fields[field] = match.group("value").strip()
+        if field == "Current progress":
+            progress_index = index
+    for field in _ANCHOR_FIELDS:
+        if field not in fields:
+            raise SoloAIError(f"Task anchor must contain exactly one '{field}' field")
+    assert progress_index is not None
+    progress_end = progress_index + 1
+    progress_lines = [fields["Current progress"]]
+    while progress_end < len(lines):
+        continuation = lines[progress_end].rstrip("\r\n")
+        if not continuation.startswith(("  ", "\t")):
+            break
+        progress_lines.append(continuation.strip())
+        progress_end += 1
+    fields["Current progress"] = "\n".join(
+        value for value in progress_lines if value
+    ).strip()
+    progress_start_offset = offsets[progress_index]
+    progress_end_offset = offsets[progress_end] if progress_end < len(lines) else len(content)
+    return fields, (progress_start_offset, progress_end_offset)
 
 
 def _identity_value(value: str) -> str:
@@ -80,13 +191,25 @@ def _identity_value(value: str) -> str:
 
 
 def _validated_fields(content: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for field in _ANCHOR_FIELDS:
-        values = _field_values(content, field)
-        if len(values) != 1:
-            raise SoloAIError(f"Task anchor must contain exactly one '{field}' field")
-        fields[field] = values[0]
-    return fields
+    return _validated_anchor(content)[0]
+
+
+def _origin_is_verified(task: dict[str, Any], fields: dict[str, str]) -> bool:
+    origin = task.get("anchor_origin")
+    if origin is None:
+        return False
+    if not isinstance(origin, dict):
+        raise SoloAIError("Task anchor origin record is invalid")
+    required = ("schema_version", "task_id", "original_purpose", "reference_baseline")
+    if any(not isinstance(origin.get(key), str) or not origin[key] for key in required):
+        raise SoloAIError("Task anchor origin record is incomplete")
+    if origin["schema_version"] != "1" or origin["task_id"] != str(task["id"]):
+        raise SoloAIError("Task anchor origin record does not match the active task")
+    if fields["Original purpose"] != origin["original_purpose"]:
+        raise SoloAIError("Task anchor original purpose does not match task origin")
+    if fields["Reference baseline"] != origin["reference_baseline"]:
+        raise SoloAIError("Task anchor reference baseline does not match task origin")
+    return True
 
 
 def _validate_update_content(
@@ -94,11 +217,12 @@ def _validate_update_content(
     *,
     task_id: str,
     previous: dict[str, str],
+    previous_content: str,
     progress_only: bool,
 ) -> dict[str, str]:
     if len(content.encode("utf-8")) > MAX_ANCHOR_BYTES:
         raise SoloAIError("Task anchor exceeds the 64 KiB safety limit")
-    fields = _validated_fields(content)
+    fields, progress_span = _validated_anchor(content)
     if _identity_value(fields["Task ID"]) != task_id:
         raise SoloAIError("Task anchor identity does not match the active task")
     for field in _IMMUTABLE_FIELDS:
@@ -127,25 +251,42 @@ def _validate_update_content(
                 raise SoloAIError(
                     "A ready task may update only Current progress in its anchor"
                 )
+        _, previous_progress_span = _validated_anchor(previous_content)
+        previous_without_progress = (
+            previous_content[: previous_progress_span[0]]
+            + "<current-progress>"
+            + previous_content[previous_progress_span[1] :]
+        )
+        updated_without_progress = (
+            content[: progress_span[0]]
+            + "<current-progress>"
+            + content[progress_span[1] :]
+        )
+        if updated_without_progress != previous_without_progress:
+            raise SoloAIError(
+                "A ready task may update only the full Current progress block"
+            )
     return fields
 
 
 def read_anchor(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
     path = anchor_path(repo, str(task["id"]))
-    raw, content = _read_plain_anchor(path)
+    raw, content = _read_plain_anchor(repo, path)
     fields = _validated_fields(content)
     if _identity_value(fields["Task ID"]) != str(task["id"]):
         raise SoloAIError("Task anchor identity does not match the active task")
+    origin_verified = _origin_is_verified(task, fields)
     return {
         "task_id": str(task["id"]),
         "anchor_path": str(path.resolve()),
         "content": content,
         "sha256": hashlib.sha256(raw).hexdigest(),
+        "origin_verified": origin_verified,
     }
 
 
-def read_anchor_update(path: Path) -> str:
-    return _read_plain_input(path)
+def read_anchor_update(repo: GitRepo, path: Path) -> str:
+    return _read_plain_input(repo, path)
 
 
 def update_anchor(
@@ -157,22 +298,22 @@ def update_anchor(
     progress_only: bool = False,
 ) -> dict[str, Any]:
     path = anchor_path(repo, str(task["id"]))
-    raw, previous_content = _read_plain_anchor(path)
+    raw, previous_content = _read_plain_anchor(repo, path)
     current_sha256 = hashlib.sha256(raw).hexdigest()
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256 or ""):
         raise SoloAIError(
             "Expected anchor SHA-256 must be 64 lowercase hexadecimal characters"
         )
-    if current_sha256 != expected_sha256:
-        raise SoloAIError(
-            "Task anchor changed since it was read; fetch it again before updating "
-            f"(current sha256: {current_sha256})"
-        )
     previous = _validated_fields(previous_content)
+    if not _origin_is_verified(task, previous):
+        raise SoloAIError(
+            "Task anchor origin is unverified; explicitly adopt the legacy anchor before updating it"
+        )
     _validate_update_content(
         content,
         task_id=str(task["id"]),
         previous=previous,
+        previous_content=previous_content,
         progress_only=progress_only,
     )
     new_raw = content.encode("utf-8")
@@ -184,8 +325,13 @@ def update_anchor(
             "sha256": current_sha256,
             "changed": False,
         }
+    if current_sha256 != expected_sha256:
+        raise SoloAIError(
+            "Task anchor changed since it was read; fetch it again before updating "
+            f"(current sha256: {current_sha256})"
+        )
     atomic_write_text(path, content)
-    _read_plain_anchor(path)
+    _read_plain_anchor(repo, path)
     return {
         "task_id": str(task["id"]),
         "anchor_path": str(path.resolve()),
@@ -197,17 +343,19 @@ def update_anchor(
 def create_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:
     path = anchor_path(repo, str(task["id"]))
     path.parent.mkdir(parents=True, exist_ok=True)
-    if is_link_or_junction(path.parent) or not path.parent.is_dir():
-        raise SoloAIError("Task anchor directory is not a plain local directory")
+    _require_plain_directory(
+        path.parent, root=repo.local_dir, label="Task anchor directory"
+    )
     if path.exists():
         require_anchor(repo, task)
         return path
+    origin = anchor_origin(task)
     content = f"""# Task anchor: {task["name"]}
 
 - Task ID: `{task["id"]}`
-- Original purpose: {task["name"]}
+- Original purpose: {origin["original_purpose"]}
 - Implementation target: fill before editing
-- Reference baseline: `{task.get("base_ref")}` at `{task.get("base_head")}`
+- Reference baseline: {origin["reference_baseline"]}
 - Scope boundary: fill before editing
 - Acceptance criteria: fill before Ready
 - Current progress: task started at {utc_timestamp()}
@@ -245,9 +393,23 @@ def adopt_legacy_anchor(
         raise SoloAIError("A terminal task does not accept a new active anchor")
     path = anchor_path(repo, str(task["id"]))
     path.parent.mkdir(parents=True, exist_ok=True)
-    if is_link_or_junction(path.parent) or not path.parent.is_dir():
-        raise SoloAIError("Task anchor directory is not a plain local directory")
+    _require_plain_directory(
+        path.parent, root=repo.local_dir, label="Task anchor directory"
+    )
     if path.exists():
+        existing = _validated_fields(_require_plain_anchor(repo, path))
+        expected = {
+            "Task ID": f"`{task['id']}`",
+            "Original purpose": fields["objective"],
+            "Implementation target": fields["target"],
+            "Reference baseline": f"`{task.get('base_ref')}` at `{task.get('base_head')}`",
+            "Scope boundary": fields["scope"],
+            "Acceptance criteria": fields["acceptance"],
+        }
+        if any(existing[key] != value for key, value in expected.items()):
+            raise SoloAIError(
+                "Existing legacy anchor does not match the reviewed adoption facts"
+            )
         return require_anchor(repo, task)
     content = f"""# Task anchor: {task["name"]}
 
@@ -267,9 +429,7 @@ This local file was explicitly reconstructed for a pre-anchor task. It is not co
 
 def require_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:
     path = anchor_path(repo, str(task["id"]))
-    content = _require_plain_anchor(path)
-    if f"`{task['id']}`" not in content:
-        raise SoloAIError("Task anchor identity does not match the active task")
+    read_anchor(repo, task)
     return path
 
 
@@ -277,7 +437,7 @@ def delete_anchor(repo: GitRepo, task_id: str) -> None:
     path = anchor_path(repo, task_id)
     if not path.exists():
         return
-    _require_plain_anchor(path)
+    _require_plain_anchor(repo, path)
     path.unlink()
 
 
@@ -289,7 +449,7 @@ def list_anchors(repo: GitRepo) -> list[dict[str, Any]]:
         raise SoloAIError("Task anchor directory is not a plain local directory")
     result: list[dict[str, Any]] = []
     for path in sorted(root.glob("task-*.md")):
-        _require_plain_anchor(path)
+        _require_plain_anchor(repo, path)
         result.append(
             {
                 "task_id": path.stem,

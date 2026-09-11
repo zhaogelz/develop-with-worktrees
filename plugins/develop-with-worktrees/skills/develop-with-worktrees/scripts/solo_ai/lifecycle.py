@@ -533,15 +533,53 @@ def _require_managed_mode(repo: GitRepo) -> None:
 
 def _require_anchor_caller(repo: GitRepo, task: dict[str, Any]) -> None:
     caller = repo.root.resolve()
-    allowed = {
-        Path(str(task[key])).resolve()
-        for key in ("worktree", "base_worktree")
-        if task.get(key)
-    }
-    if caller not in allowed:
-        raise SoloAIError(
-            "Anchor operations must run from the task worktree or its recorded base worktree"
+    registered_worktrees = {item.path.resolve() for item in repo.worktrees()}
+    locations = (
+        (
+            "worktree",
+            task.get("worktree"),
+            task.get("slot_worktree_resolved"),
+            task.get("slot_worktree_identity"),
+            task.get("slot_managed_root_resolved"),
+            task.get("slot_managed_root_identity"),
+        ),
+        (
+            "base worktree",
+            task.get("base_worktree"),
+            task.get("base_worktree_resolved"),
+            task.get("base_worktree_identity"),
+            None,
+            None,
+        ),
+    )
+    for label, stored, expected, identity, root_expected, root_identity in locations:
+        if not stored:
+            continue
+        target = Path(str(stored))
+        if caller != target.resolve():
+            continue
+        if target.resolve() not in registered_worktrees:
+            raise SoloAIError("Recorded anchor caller is no longer a Git worktree")
+        managed_root = target.absolute().parent
+        require_managed_directory_identity(
+            target,
+            managed_root=managed_root,
+            expected_resolved=str(expected) if expected else None,
+            expected_identity=identity if isinstance(identity, dict) else None,
+            expected_root_resolved=(str(root_expected) if root_expected else None),
+            expected_root_identity=(
+                root_identity if isinstance(root_identity, dict) else None
+            ),
         )
+        if label == "worktree" and StateStore.mode(task) == ISOLATED_MODE:
+            slots = StateStore(repo).read().get("slots", {})
+            slot = slots.get(str(task.get("slot_id")))
+            if not slot or slot.get("task_id") != task.get("id"):
+                raise SoloAIError("Task worktree no longer belongs to its recorded slot")
+        return
+    raise SoloAIError(
+        "Anchor operations must run from the task worktree or its recorded base worktree"
+    )
 
 
 def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
@@ -581,6 +619,17 @@ def adopt_task_anchor(
             acceptance=acceptance,
             confirm=confirm,
         )
+        StateStore(repo).update_task(
+            task_id,
+            anchor_origin={
+                "schema_version": "1",
+                "task_id": task_id,
+                "original_purpose": objective.strip(),
+                "reference_baseline": (
+                    f"`{task.get('base_ref')}` at `{task.get('base_head')}`"
+                ),
+            },
+        )
         return {"task_id": task_id, "anchor_path": str(path.resolve())}
 
 
@@ -612,7 +661,7 @@ def update_task_anchor(
                 f"(current status: {status})"
             )
         with maintenance_lock(repo):
-            content = read_anchor_update(input_path)
+            content = read_anchor_update(repo, input_path)
             result = update_anchor(
                 repo,
                 task,
