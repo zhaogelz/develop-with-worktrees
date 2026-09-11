@@ -610,6 +610,10 @@ def adopt_task_anchor(
     _config_and_mode(repo)
     with maintenance_lock(repo):
         task = StateStore(repo).task(task_id)
+        if task.get("anchor_origin") is not None:
+            raise SoloAIError(
+                "anchor adopt is only for a pre-origin legacy task; restore the original anchor facts instead"
+            )
         path = adopt_legacy_anchor(
             repo,
             task,

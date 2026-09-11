@@ -455,6 +455,7 @@ def test_ready_requires_the_managed_task_anchor(git_repo: Path) -> None:
     repo = initialized_batched(git_repo, auto_full=False)
     task = start(repo, name="anchor required")
     anchor_path(repo, task["id"]).unlink()
+    StateStore(repo).update_task(task["id"], anchor_origin=None)
 
     with pytest.raises(SoloAIError, match="anchor is missing"):
         ready(repo, task_id=task["id"], lease=task["lease"])
