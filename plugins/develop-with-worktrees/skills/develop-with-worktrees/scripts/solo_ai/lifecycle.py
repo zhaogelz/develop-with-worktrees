@@ -2449,6 +2449,120 @@ def recover(
             return store.recover(task_id, operation_id=recovery_operation_id)
 
 
+def _assert_handoff_identity(repo: GitRepo, task: dict[str, Any]) -> None:
+    """交接只确认原现场，绝不清理、合并或改写其中的内容。"""
+
+    worktree = Path(str(task["worktree"]))
+    managed_root = worktree.absolute().parent
+    identity_fields = (
+        task.get("slot_worktree_identity"),
+        task.get("slot_managed_root_identity"),
+        task.get("slot_worktree_resolved"),
+        task.get("slot_managed_root_resolved"),
+    )
+    if not all(identity_fields):
+        raise SoloAIError("Task lacks complete managed-directory identity for handoff")
+    require_managed_directory_identity(
+        worktree,
+        managed_root=managed_root,
+        expected_resolved=str(task["slot_worktree_resolved"]),
+        expected_root_resolved=str(task["slot_managed_root_resolved"]),
+        expected_identity=dict(task["slot_worktree_identity"]),
+        expected_root_identity=dict(task["slot_managed_root_identity"]),
+    )
+    if not worktree.is_dir() or not any(
+        item.path == worktree.resolve() for item in repo.worktrees()
+    ):
+        raise SoloAIError("Task worktree is missing or unregistered; preserve it")
+    expected_head = task.get("candidate_head")
+    if not isinstance(expected_head, str) or not expected_head:
+        raise SoloAIError("Task has no exact recorded HEAD for handoff")
+    if repo.branch(worktree) != task.get("branch"):
+        raise SoloAIError("Task worktree branch differs from its recorded identity")
+    if repo.head(worktree) != expected_head:
+        raise SoloAIError("Task worktree HEAD differs from its recorded identity")
+    require_anchor(repo, task, require_verified_origin=True)
+
+
+def _assert_handoff_validation_idle(repo: GitRepo, task_id: str) -> None:
+    """不接管正在运行或尚未被常规恢复确认的验证。"""
+
+    run_root = repo.local_dir / "validation-runs"
+    for receipt_path in run_root.glob("**/*.json") if run_root.exists() else ():
+        receipt = read_json(receipt_path, {})
+        if receipt.get("metadata", {}).get("task_id") != task_id:
+            continue
+        if receipt.get("status") not in {"running", "terminating"}:
+            continue
+        if process_matches(receipt.get("process", {})):
+            raise SoloAIError(
+                "Task still has a live validation process; handoff is unsafe"
+            )
+        raise SoloAIError(
+            "Task has an unsettled validation receipt; recover it before handoff"
+        )
+
+
+def handoff(repo: GitRepo, *, task_id: str, confirm: str) -> dict[str, Any]:
+    """显式转交中断会话遗留的隔离任务，不改变其 Git 或文件现场。"""
+
+    _, _, _ = _config_and_mode(repo)
+    store = StateStore(repo)
+    store.reconcile_operation_receipts()
+    task = store.task(task_id)
+    confirmed_branch = task.get("branch")
+    confirmed_head = task.get("candidate_head")
+    expected = f"{task_id}:{confirmed_branch}:{confirmed_head}"
+    if confirm != expected:
+        raise SoloAIError(f"Handoff requires --confirm {expected!r}")
+    if StateStore.mode(task) != ISOLATED_MODE:
+        raise SoloAIError("Handoff only applies to isolated tasks")
+    if task.get("status") not in {"active", "ready"}:
+        raise SoloAIError("Only active or ready tasks can be handed off")
+    if (
+        task.get("candidate_publication")
+        or task.get("integration")
+        or task.get("abandonment")
+    ):
+        raise SoloAIError(
+            "Published, finishing, or abandonment tasks cannot be handed off"
+        )
+    active = task.get("active_operation") or {}
+    if active:
+        if process_matches(active.get("owner", {})):
+            raise SoloAIError("Task still has a live operation; handoff is unsafe")
+        raise SoloAIError("Task has an unsettled operation; recover it before handoff")
+    if task.get("processes"):
+        if any(process_matches(item) for item in task["processes"]):
+            raise SoloAIError(
+                "Task still has a live registered process; handoff is unsafe"
+            )
+        raise SoloAIError("Task has an unsettled registered process; preserve it")
+    _assert_handoff_validation_idle(repo, task_id)
+    with store.recovery_operation(task_id) as recovery_task:
+        operation_id = str(recovery_task["active_operation"]["id"])
+        with maintenance_lock(repo):
+            task = store.task(task_id)
+            active = task.get("active_operation") or {}
+            if active.get("id") != operation_id or active.get("kind") != "recover":
+                raise SoloAIError(
+                    "Task handoff operation identity changed while waiting"
+                )
+            if (
+                task.get("branch") != confirmed_branch
+                or task.get("candidate_head") != confirmed_head
+            ):
+                raise SoloAIError("Task identity changed after handoff confirmation")
+            _assert_handoff_validation_idle(repo, task_id)
+            _assert_handoff_identity(repo, task)
+            return store.handoff_isolated_task(
+                task_id,
+                operation_id=operation_id,
+                expected_branch=str(confirmed_branch),
+                expected_head=str(confirmed_head),
+            )
+
+
 def resume_in_place(
     repo: GitRepo,
     *,

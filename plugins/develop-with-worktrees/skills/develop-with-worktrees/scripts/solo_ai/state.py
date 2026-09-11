@@ -1459,6 +1459,56 @@ class StateStore:
 
         return self.mutate(update)
 
+    def handoff_isolated_task(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        expected_branch: str,
+        expected_head: str,
+    ) -> dict[str, Any]:
+        """在生命周期已复核脏工作树现场后，原子轮换隔离任务租约。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            if not task or self.mode(task) != ISOLATED_MODE:
+                raise SoloAIError("Only isolated tasks can be handed off")
+            if task.get("status") not in {"active", "ready"}:
+                raise SoloAIError("Only active or ready tasks can be handed off")
+            if (
+                task.get("candidate_publication")
+                or task.get("integration")
+                or task.get("abandonment")
+            ):
+                raise SoloAIError(
+                    "Published, finishing, or abandonment tasks cannot be handed off"
+                )
+            active = task.get("active_operation") or {}
+            if active.get("id") != operation_id or active.get("kind") != "recover":
+                raise SoloAIError("Task handoff lost its recovery operation")
+            if (
+                task.get("branch") != expected_branch
+                or task.get("candidate_head") != expected_head
+            ):
+                raise SoloAIError("Task branch or HEAD changed before handoff")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") not in {"active", "ready"}
+            ):
+                raise SoloAIError("Task lost its managed slot before handoff")
+            task.update(
+                {
+                    "lease": uuid.uuid4().hex,
+                    "lease_owner": process_snapshot(),
+                    "updated_at": utc_timestamp(),
+                }
+            )
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     def resume_in_place(self, task_id: str, *, session_id: str) -> dict[str, Any]:
         """在生命周期已复核 Git 身份后，仅轮换直改任务的会话与租约。"""
         if not session_id:

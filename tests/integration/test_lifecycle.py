@@ -34,6 +34,7 @@ from solo_ai.lifecycle import (
     dev_stop,
     disable,
     finish,
+    handoff,
     initialize,
     local_enabled,
     ready,
@@ -2585,6 +2586,121 @@ def test_recover_rejects_live_validation_and_marks_stale_receipt_interrupted(
     assert recovered["lease"] != task["lease"]
     assert read_json(receipt_path, {})["status"] == "interrupted"
     abandon(repo, task_id=task["id"], lease=recovered["lease"], confirm=task["id"])
+
+
+def test_handoff_preserves_dirty_isolated_task_and_rotates_its_lease(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="handoff dirty worktree")
+    worktree = Path(task["worktree"])
+    draft = worktree / "draft.txt"
+    draft.write_text("preserve this work\n", encoding="utf-8")
+
+    received = handoff(
+        repo,
+        task_id=task["id"],
+        confirm=f"{task['id']}:{task['branch']}:{task['candidate_head']}",
+    )
+
+    assert received["lease"] != task["lease"]
+    assert received["status"] == "active"
+    assert draft.read_text(encoding="utf-8") == "preserve this work\n"
+    assert repo.branch(worktree) == task["branch"]
+    assert repo.head(worktree) == task["candidate_head"]
+    assert "draft.txt" in repo.git(["status", "--porcelain"], cwd=worktree).stdout
+
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=received["lease"],
+        message="test: preserve handoff draft",
+        paths=["draft.txt"],
+    )
+    abandon(repo, task_id=task["id"], lease=received["lease"], confirm=task["id"])
+
+
+def test_handoff_transfers_ready_task_without_invalidating_its_proof(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="handoff ready task")
+    commit_one(repo, task, "ready.txt", "ready\n", "test: handoff ready")
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+    current = StateStore(repo).task(task["id"])
+
+    received = handoff(
+        repo,
+        task_id=task["id"],
+        confirm=f"{task['id']}:{current['branch']}:{current['candidate_head']}",
+    )
+
+    assert received["lease"] != task["lease"]
+    assert received["status"] == "ready"
+    assert received["ready_proof"] == prepared["ready_proof"]
+    finish(repo, task_id=task["id"], lease=received["lease"])
+
+
+def test_handoff_rejects_bad_confirmation_live_operation_and_live_validation(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="handoff guards")
+    confirmation = f"{task['id']}:{task['branch']}:{task['candidate_head']}"
+
+    with pytest.raises(SoloAIError, match="Handoff requires"):
+        handoff(repo, task_id=task["id"], confirm=f"{task['id']}:wrong")
+    assert StateStore(repo).task(task["id"])["lease"] == task["lease"]
+
+    with (
+        StateStore(repo).operation(task["id"], task["lease"], "test"),
+        pytest.raises(SoloAIError, match="live operation"),
+    ):
+        handoff(repo, task_id=task["id"], confirm=confirmation)
+
+    receipt_path = repo.local_dir / "validation-runs" / "handoff" / "01.json"
+    atomic_write_json(
+        receipt_path,
+        {
+            "schema_version": 1,
+            "status": "running",
+            "process": process_snapshot(),
+            "metadata": {"task_id": task["id"]},
+        },
+    )
+    with pytest.raises(SoloAIError, match="live validation"):
+        handoff(repo, task_id=task["id"], confirm=confirmation)
+    assert StateStore(repo).task(task["id"])["lease"] == task["lease"]
+    receipt_path.unlink()
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_handoff_rejects_identity_changed_after_confirmation(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="handoff confirmation drift")
+    original_head = task["candidate_head"]
+    original_assert = lifecycle._assert_handoff_validation_idle
+
+    def drift_after_confirmation(candidate_repo: GitRepo, task_id: str) -> None:
+        original_assert(candidate_repo, task_id)
+        StateStore(candidate_repo).update_task(task_id, candidate_head="f" * 40)
+
+    monkeypatch.setattr(
+        lifecycle, "_assert_handoff_validation_idle", drift_after_confirmation
+    )
+    with pytest.raises(
+        SoloAIError, match="identity changed after handoff confirmation"
+    ):
+        handoff(
+            repo,
+            task_id=task["id"],
+            confirm=f"{task['id']}:{task['branch']}:{original_head}",
+        )
+    assert StateStore(repo).task(task["id"])["lease"] == task["lease"]
+    StateStore(repo).update_task(task["id"], candidate_head=original_head)
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
 def test_cross_task_profile_reuse_is_off_by_default(git_repo: Path) -> None:

@@ -45,6 +45,7 @@ from .lifecycle import (
     dev_stop,
     disable,
     finish,
+    handoff,
     initialize,
     local_enabled,
     maintenance_lock,
@@ -524,6 +525,15 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         dest="repair_path",
         help="exact approved Adapter input path allowed for this repair; repeat for multiple paths",
+    )
+
+    handoff_parser = sub.add_parser(
+        "handoff",
+        help="explicitly transfer an interrupted isolated task without changing its worktree",
+    )
+    handoff_parser.add_argument("--task", required=True)
+    handoff_parser.add_argument(
+        "--confirm", required=True, help="exactly TASK_ID:BRANCH:HEAD"
     )
 
     abandoned = sub.add_parser(
@@ -1588,6 +1598,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 args.repair_path if args.repair_runtime_adapter else None
             ),
         )
+    if args.command == "handoff":
+        return handoff(repo, task_id=args.task, confirm=args.confirm)
     if args.command == "resume-in-place":
         return resume_in_place(
             repo,
@@ -1697,7 +1709,7 @@ def _human(command: str, result: dict[str, Any]) -> str:
             f"from {len(batch['candidate_ids'])} candidate(s) "
             f"({batch.get('trigger', 'explicit_tail')})."
         )
-    if command in {"recover", "resume-in-place"}:
+    if command in {"recover", "handoff", "resume-in-place"}:
         if result.get("status") == "completed":
             return (
                 f"Task: {result['id']}\nStatus: completed\n"
