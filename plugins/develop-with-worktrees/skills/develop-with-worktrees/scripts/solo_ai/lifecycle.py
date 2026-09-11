@@ -578,7 +578,9 @@ def _require_anchor_caller(repo: GitRepo, task: dict[str, Any]) -> None:
             slots = StateStore(repo).read().get("slots", {})
             slot = slots.get(str(task.get("slot_id")))
             if not slot or slot.get("task_id") != task.get("id"):
-                raise SoloAIError("Task worktree no longer belongs to its recorded slot")
+                raise SoloAIError(
+                    "Task worktree no longer belongs to its recorded slot"
+                )
         return
     raise SoloAIError(
         "Anchor operations must run from the task worktree or its recorded base worktree"
@@ -617,7 +619,7 @@ def adopt_task_anchor(
             raise SoloAIError(
                 "anchor adopt is only for a pre-origin legacy task; restore the original anchor facts instead"
             )
-        path = adopt_legacy_anchor(
+        path, origin = adopt_legacy_anchor(
             repo,
             task,
             objective=objective,
@@ -628,14 +630,7 @@ def adopt_task_anchor(
         )
         StateStore(repo).update_task(
             task_id,
-            anchor_origin={
-                "schema_version": "1",
-                "task_id": task_id,
-                "original_purpose": objective.strip(),
-                "reference_baseline": (
-                    f"`{task.get('base_ref')}` at `{task.get('base_head')}`"
-                ),
-            },
+            anchor_origin=origin,
         )
         return {"task_id": task_id, "anchor_path": str(path.resolve())}
 

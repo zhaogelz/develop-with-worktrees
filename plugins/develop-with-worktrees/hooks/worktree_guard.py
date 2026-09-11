@@ -604,9 +604,7 @@ def _read_only_rejection_reason(command: str) -> str:
         for index, token in enumerate(tokens)
         if token.value == "|" and not token.quoted
     ]
-    if len(pipes) > 1 or (
-        pipes and not _safe_select(tokens[pipes[0] + 1 :])
-    ):
+    if len(pipes) > 1 or (pipes and not _safe_select(tokens[pipes[0] + 1 :])):
         return "Bash command uses an unsupported pipeline or query form; use a direct read-only command or Get-Content/rg | Select-Object with numeric line options."
     if not _safe_read_only_command(tokens):
         return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."

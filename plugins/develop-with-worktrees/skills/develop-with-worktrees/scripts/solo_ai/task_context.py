@@ -100,9 +100,7 @@ def _require_plain_anchor(repo: GitRepo, path: Path) -> str:
 def _read_plain_anchor(repo: GitRepo, path: Path) -> tuple[bytes, str]:
     if not path.exists():
         raise SoloAIError(f"Task anchor is missing: {path}. Restore it before Ready.")
-    plain_path = _require_plain_file(
-        path, root=repo.local_dir, label="Task anchor"
-    )
+    plain_path = _require_plain_file(path, root=repo.local_dir, label="Task anchor")
     raw = plain_path.read_bytes()
     if len(raw) > MAX_ANCHOR_BYTES:
         raise SoloAIError("Task anchor exceeds the 64 KiB safety limit")
@@ -115,9 +113,7 @@ def _read_plain_anchor(repo: GitRepo, path: Path) -> tuple[bytes, str]:
 def _read_plain_input(repo: GitRepo, path: Path) -> str:
     if not path.exists():
         raise SoloAIError(f"Anchor update input is missing: {path}")
-    plain_path = _require_plain_file(
-        path, root=repo.root, label="Anchor update input"
-    )
+    plain_path = _require_plain_file(path, root=repo.root, label="Anchor update input")
     raw = plain_path.read_bytes()
     if len(raw) > MAX_ANCHOR_BYTES:
         raise SoloAIError("Anchor update input exceeds the 64 KiB safety limit")
@@ -182,7 +178,9 @@ def _validated_anchor(content: str) -> tuple[dict[str, str], tuple[int, int]]:
         value for value in progress_lines if value
     ).strip()
     progress_start_offset = offsets[progress_index]
-    progress_end_offset = offsets[progress_end] if progress_end < len(lines) else len(content)
+    progress_end_offset = (
+        offsets[progress_end] if progress_end < len(lines) else len(content)
+    )
     return fields, (progress_start_offset, progress_end_offset)
 
 
@@ -376,7 +374,7 @@ def adopt_legacy_anchor(
     scope: str,
     acceptance: str,
     confirm: str,
-) -> Path:
+) -> tuple[Path, dict[str, str]]:
     """Create a reviewed anchor for a pre-anchor task without inventing intent."""
 
     if confirm != str(task["id"]):
@@ -402,7 +400,6 @@ def adopt_legacy_anchor(
             "Task ID": f"`{task['id']}`",
             "Original purpose": fields["objective"],
             "Implementation target": fields["target"],
-            "Reference baseline": f"`{task.get('base_ref')}` at `{task.get('base_head')}`",
             "Scope boundary": fields["scope"],
             "Acceptance criteria": fields["acceptance"],
         }
@@ -410,13 +407,22 @@ def adopt_legacy_anchor(
             raise SoloAIError(
                 "Existing legacy anchor does not match the reviewed adoption facts"
             )
-        return require_anchor(repo, task)
+        reference_baseline = existing["Reference baseline"]
+        _verify_legacy_reference_baseline(
+            repo, task=task, reference_baseline=reference_baseline
+        )
+        return require_anchor(repo, task), _reviewed_anchor_origin(
+            task,
+            original_purpose=fields["objective"],
+            reference_baseline=reference_baseline,
+        )
+    reference_baseline = f"`{task.get('base_ref')}` at `{task.get('base_head')}`"
     content = f"""# Task anchor: {task["name"]}
 
 - Task ID: `{task["id"]}`
 - Original purpose: {fields["objective"]}
 - Implementation target: {fields["target"]}
-- Reference baseline: `{task.get("base_ref")}` at `{task.get("base_head")}`
+- Reference baseline: {reference_baseline}
 - Scope boundary: {fields["scope"]}
 - Acceptance criteria: {fields["acceptance"]}
 - Current progress: legacy task anchor reviewed and adopted at {utc_timestamp()}
@@ -424,7 +430,55 @@ def adopt_legacy_anchor(
 This local file was explicitly reconstructed for a pre-anchor task. It is not committed. Reread it before continuing changes.
 """
     atomic_write_text(path, content)
-    return require_anchor(repo, task)
+    return require_anchor(repo, task), _reviewed_anchor_origin(
+        task,
+        original_purpose=fields["objective"],
+        reference_baseline=reference_baseline,
+    )
+
+
+def _reviewed_anchor_origin(
+    task: dict[str, Any], *, original_purpose: str, reference_baseline: str
+) -> dict[str, str]:
+    return {
+        "schema_version": "1",
+        "task_id": str(task["id"]),
+        "original_purpose": original_purpose,
+        "reference_baseline": reference_baseline,
+    }
+
+
+def _verify_legacy_reference_baseline(
+    repo: GitRepo, *, task: dict[str, Any], reference_baseline: str
+) -> None:
+    """验证旧锚点记录的原始基线仍是当前任务历史的一部分。"""
+
+    match = re.fullmatch(r"`[^`\r\n]+` at `([0-9a-fA-F]{40,64})`", reference_baseline)
+    if not match:
+        raise SoloAIError("Existing legacy anchor has an invalid reference baseline")
+    original_head = match.group(1)
+    resolved = repo.git(
+        ["rev-parse", "--verify", f"{original_head}^{{commit}}"], check=False
+    )
+    if (
+        resolved.returncode != 0
+        or resolved.stdout.strip().lower() != original_head.lower()
+    ):
+        raise SoloAIError(
+            "Existing legacy anchor references an unknown baseline commit"
+        )
+    current_base = str(task.get("base_head") or "")
+    branch = str(task.get("branch") or "")
+    branch_head = repo.ref_head(f"refs/heads/{branch}") if branch else None
+    if (
+        not current_base
+        or branch_head is None
+        or not repo.is_ancestor(original_head, current_base)
+        or not repo.is_ancestor(original_head, branch_head)
+    ):
+        raise SoloAIError(
+            "Existing legacy anchor baseline is not an ancestor of the active task"
+        )
 
 
 def require_anchor(

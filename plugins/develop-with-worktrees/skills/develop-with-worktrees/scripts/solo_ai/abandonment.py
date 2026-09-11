@@ -73,6 +73,10 @@ def assert_task_not_held_by_candidate_delivery(
 def _active_ref_snapshot(
     repo: GitRepo, store: StateStore, *, task: dict[str, Any], candidate: str
 ) -> dict[str, str]:
+    # 任务分支若正好停在自己的起始基线，后代任务只引用了仍由 base
+    # 分支保留的提交；删除这条冗余任务分支不会使后代失去祖先。
+    if candidate == task["base_head"]:
+        return {}
     snapshot: dict[str, str] = {}
     for other in store.read()["tasks"].values():
         if other.get("id") == task["id"] or other.get("status") in FINAL_TASK_STATES:

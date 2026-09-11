@@ -72,9 +72,7 @@ def test_update_anchor_accepts_identical_retry_before_stale_digest_check(
         "- Current progress: started", "- Current progress: other"
     )
     update_anchor(repo, task, content=stale, expected_sha256=shown["sha256"])
-    retry = update_anchor(
-        repo, task, content=stale, expected_sha256=shown["sha256"]
-    )
+    retry = update_anchor(repo, task, content=stale, expected_sha256=shown["sha256"])
     assert retry["changed"] is False
     current = read_anchor(repo, task)
     invalid = current["content"].replace(
@@ -182,7 +180,9 @@ def test_anchor_rejects_indented_fake_field_and_origin_mismatch(git_repo: Path) 
         )
     path = anchor_path(repo, str(task["id"]))
     path.write_text(
-        shown["content"].replace("- Original purpose: test purpose", "- Original purpose: forged"),
+        shown["content"].replace(
+            "- Original purpose: test purpose", "- Original purpose: forged"
+        ),
         encoding="utf-8",
         newline="\n",
     )

@@ -3636,3 +3636,67 @@ def test_legacy_anchor_adoption_persists_the_reviewed_origin(git_repo: Path) -> 
     assert StateStore(repo).task(task["id"])["anchor_origin"]["original_purpose"] == (
         "reviewed legacy objective"
     )
+
+
+def test_legacy_anchor_adoption_preserves_verified_original_baseline_after_retarget(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="legacy original baseline")
+    worktree = Path(task["worktree"])
+    anchor = Path(task["anchor_path"])
+    original_baseline = f"`{task['base_ref']}` at `{task['base_head']}`"
+    content = anchor.read_text(encoding="utf-8")
+    content = (
+        content.replace(
+            "- Implementation target: fill before editing",
+            "- Implementation target: legacy lifecycle test",
+        )
+        .replace(
+            "- Scope boundary: fill before editing",
+            "- Scope boundary: only this integration test",
+        )
+        .replace(
+            "- Acceptance criteria: fill before Ready",
+            "- Acceptance criteria: anchor can be verified",
+        )
+    )
+    anchor.write_text(content, encoding="utf-8", newline="\n")
+    (git_repo / "advanced-base.txt").write_text("advance\n", encoding="utf-8")
+    git(git_repo, "add", "advanced-base.txt")
+    git(git_repo, "commit", "-m", "test: advance base")
+    git(worktree, "merge", "--no-edit", "main")
+    retarget(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        base="main",
+        confirm=f"{task['id']}:main",
+    )
+    StateStore(repo).update_task(task["id"], anchor_origin=None)
+
+    adopt_task_anchor(
+        repo,
+        task_id=task["id"],
+        objective="legacy original baseline",
+        target="legacy lifecycle test",
+        scope="only this integration test",
+        acceptance="anchor can be verified",
+        confirm=task["id"],
+    )
+
+    restored = StateStore(repo).task(task["id"])
+    assert restored["anchor_origin"]["reference_baseline"] == original_baseline
+    assert show_task_anchor(repo, task_id=task["id"])["origin_verified"] is True
+
+
+def test_abandon_base_candidate_allows_active_descendant_branch(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="abandon base candidate")
+    descendant = start(repo, name="active descendant")
+    commit_one(repo, descendant, "descendant.txt", "descendant\n", "test: descendant")
+
+    result = abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+    assert result["status"] == "abandoned"
+    assert repo.ref_head(f"refs/heads/{descendant['branch']}") is not None
