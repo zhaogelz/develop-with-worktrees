@@ -1,34 +1,107 @@
 schema_version = 3
 static_only = false
 
+# 覆盖所有跟踪路径的真实静态检查。它既阻止未知路径静默通过，也为
+# 输入闭包不变的纯检查提供可复用的证明。
 [[profiles]]
-id = "quick-ready"
+id = "repository-static-ready"
 paths = ["**"]
 cross_task_reuse = true
 external_state = "none"
 input_paths = ["**"]
 environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
 input_closure = "complete"
-timeout_seconds = 1200
+timeout_seconds = 120
+resource_class = "normal"
+level = "ready"
+commands = [
+  ["uv", "run", "python", "scripts/verify_repository.py"],
+]
+
+# 核心代码、策略、测试及 CI 先运行可快速、纯本地的回归；测试层级由
+# tests/conftest.py 集中审计，新增测试默认进入 dww_full。
+[[profiles]]
+id = "dww-fast-ready"
+paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+cross_task_reuse = true
+external_state = "none"
+input_paths = [
+  "pyproject.toml", "tests/conftest.py", "tests/unit/test_config.py",
+  "tests/unit/test_proof.py", "tests/unit/test_routing.py",
+  "tests/unit/test_safety.py", "tests/unit/test_task_context.py",
+  "tests/unit/test_test_layers.py", "uv.lock",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
+input_closure = "complete"
+timeout_seconds = 600
+resource_class = "normal"
+level = "ready"
+commands = [
+  ["uv", "run", "pytest", "-m", "dww_fast", "-q", "--durations=20"],
+]
+
+# ruff 仍由 uvx 提供，尚未能把被包装工具版本放入项目锁文件闭包；
+# 所以它是非纯检查，不能跨任务复用。
+[[profiles]]
+id = "dww-lint-ready"
+paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
+input_closure = "declared"
+timeout_seconds = 600
 resource_class = "normal"
 level = "ready"
 commands = [
   ["uvx", "ruff", "check", "."],
   ["uvx", "ruff", "format", "--check", "."],
-  ["uv", "run", "pytest", "tests/unit", "-q"],
 ]
 
+# 组合 Full 只在 DWW 核心、验证策略或它们的测试变化时执行。Full 仍包含
+# 被选中的 Ready profiles，但 dww_fast 和 dww_full 两组 pytest 不重叠。
 [[profiles]]
-id = "full-suite"
-paths = ["**"]
+id = "dww-core-full"
+paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
 cross_task_reuse = false
 external_state = "unknown"
-input_paths = ["**"]
+input_paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
 environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
 input_closure = "declared"
 timeout_seconds = 43200
 resource_class = "heavy"
 level = "full"
 commands = [
-  ["uv", "run", "pytest", "-vv", "-x"],
+  ["uv", "run", "pytest", "-m", "dww_full", "-vv", "-x", "--durations=30"],
 ]

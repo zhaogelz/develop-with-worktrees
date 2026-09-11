@@ -23,6 +23,51 @@ from solo_ai.delegated import approve_delegated, inspect_delegated
 from solo_ai.repo import GitRepo
 
 
+_DWW_TEST_LAYERS = ("dww_fast", "dww_full", "dww_stress")
+_DWW_FAST_MODULES = frozenset(
+    {
+        "tests/unit/test_config.py",
+        "tests/unit/test_proof.py",
+        "tests/unit/test_routing.py",
+        "tests/unit/test_safety.py",
+        "tests/unit/test_task_context.py",
+        "tests/unit/test_test_layers.py",
+    }
+)
+_TEST_ROOT = Path(__file__).parents[1].resolve()
+
+
+def dww_test_layer(path: Path) -> str:
+    """为未显式标记的测试给出保守层级；新增测试默认进入完整回归。"""
+
+    relative = path.resolve().relative_to(_TEST_ROOT).as_posix()
+    return "dww_fast" if relative in _DWW_FAST_MODULES else "dww_full"
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """每个测试恰好属于一个执行层，避免选择器悄悄遗漏安全回归。"""
+
+    violations: list[str] = []
+    for item in items:
+        layers = [
+            name
+            for name in _DWW_TEST_LAYERS
+            if item.get_closest_marker(name) is not None
+        ]
+        if not layers:
+            item.add_marker(getattr(pytest.mark, dww_test_layer(Path(str(item.path)))))
+            continue
+        if len(layers) != 1:
+            violations.append(f"{item.nodeid}: {', '.join(layers)}")
+    if violations:
+        raise pytest.UsageError(
+            "Every DWW test must have exactly one execution layer:\n"
+            + "\n".join(violations[:20])
+        )
+
+
 @pytest.fixture
 def directory_link():
     """Windows 用真实 junction；其他平台使用目录 symlink。"""
