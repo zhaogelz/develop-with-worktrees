@@ -72,7 +72,9 @@ Older frozen `dedicated` batches retain their original per-batch directory and p
 
 ## Abandonment
 
-`abandon` uses a persisted transaction under the integration and maintenance locks. It never discards tracked changes or uses blanket `git clean`. Ordinary untracked files are removed only through unchanged-object checks; protected, unknown, replaced, or late content blocks release. Task-ref deletion verifies every other active task ref. Successful abandonment deletes the task anchor.
+`status` projects a task's `candidate_delivery` and, when applicable, its `batch_ownership`: candidate ID/status, batch ID, full-or-tail kind, persisted phase, and the current batch-run process with a live-identity result. This lets a task card distinguish “ready locally” from “already owned by batch Full” without inferring delivery from the task state alone.
+
+`abandon` uses a persisted transaction under the integration and maintenance locks. Before stopping registered processes or releasing task runtime, it takes the candidate-admission lock and rejects a candidate that is queued or held by an active batch; the refusal names the candidate, batch, kind, and phase. It never discards tracked changes or uses blanket `git clean`. Ordinary untracked files are removed only through unchanged-object checks; protected, unknown, replaced, or late content blocks release. Task-ref deletion verifies every other active task ref. Successful abandonment deletes the task anchor.
 
 A published candidate is no longer an active leased task and is not abandoned through task cleanup. Use explicit candidate withdrawal while it is pending.
 
