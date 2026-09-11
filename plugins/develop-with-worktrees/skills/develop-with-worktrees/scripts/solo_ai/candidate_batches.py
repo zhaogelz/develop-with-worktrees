@@ -30,6 +30,8 @@ from .util import (
     atomic_write_json,
     atomic_write_text,
     path_identity,
+    process_matches,
+    process_snapshot,
     read_json,
     run_logged,
     sha256_text,
@@ -195,7 +197,65 @@ class CandidateBatchStore:
             if status in {"withdrawn", "superseded"}
             else "awaiting-integration"
         )
+        projected["batch_ownership"] = self._batch_ownership(candidate, batches)
         return projected
+
+    @staticmethod
+    def _batch_ownership(
+        candidate: dict[str, Any], batches: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """投影候选被队列或活动批次持有的事实，供任务状态和安全检查共用。"""
+        candidate_status = str(candidate.get("status"))
+        if candidate_status in {"integrated", "withdrawn", "superseded"}:
+            return None
+        batch_id = candidate.get("sealed_batch") or candidate.get("integrated_batch")
+        batch = batches.get(str(batch_id), {}) if batch_id else {}
+        batch_status = str(batch.get("status") or "")
+        active_batch = batch_status in ACTIVE_BATCH_STATES
+        policy = (
+            batch.get("integration_policy")
+            or candidate.get("integration_policy")
+            or LEGACY_EXPLICIT_POLICY
+        )
+        batch_size = int(policy.get("batch_size", 5))
+        candidate_count = len(batch.get("candidate_ids", []))
+        process = copy.deepcopy(batch.get("run_owner")) if active_batch else None
+        if process:
+            process["live"] = process_matches(process)
+        return {
+            "state": "active_full_batch"
+            if active_batch and candidate_count >= batch_size
+            else "active_tail_batch"
+            if active_batch
+            else "candidate_queued",
+            "candidate": {
+                "id": candidate.get("candidate_id"),
+                "status": candidate_status,
+            },
+            "batch": {
+                "id": batch.get("id"),
+                "kind": "full" if candidate_count >= batch_size else "tail",
+                "phase": batch_status or None,
+                "process": process,
+            }
+            if batch
+            else None,
+        }
+
+    def task_batch_ownership(self, task_id: str) -> dict[str, Any] | None:
+        """返回任务候选的未完成交付所有权；终态候选不再阻止任务收尾。"""
+        value = self.read()
+        candidate = next(
+            (
+                item
+                for item in value["candidates"].values()
+                if item.get("task_id") == task_id
+            ),
+            None,
+        )
+        if not candidate:
+            return None
+        return self._batch_ownership(candidate, value["batches"])
 
     def active(self) -> bool:
         value = self.read()
@@ -1600,7 +1660,16 @@ def run_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
     run_lock = repo.local_dir / "locks" / f"batch-{sha256_text(batch_id)[:24]}.lock"
     with DirectoryLock(run_lock, wait=True):
         with integration_turn(repo, batch_id):
-            return _run_owned_batch(repo, store, batch_id)
+            batch = store.batch(batch_id)
+            owner = process_snapshot()
+            if batch.get("status") in ACTIVE_BATCH_STATES:
+                store.update_batch(batch_id, run_owner=owner)
+            try:
+                return _run_owned_batch(repo, store, batch_id)
+            finally:
+                current = store.batch(batch_id)
+                if current.get("run_owner") == owner:
+                    store.update_batch(batch_id, run_owner=None)
 
 
 def _run_owned_batch(

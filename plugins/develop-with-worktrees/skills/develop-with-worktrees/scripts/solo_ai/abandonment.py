@@ -10,7 +10,7 @@ from .cleanup import (
     require_managed_directory_identity,
 )
 from .repo import GitRepo
-from .state import FINAL_TASK_STATES, StateStore
+from .state import FINAL_TASK_STATES, StateStore, candidate_admission_lock
 from .util import (
     SoloAIError,
     atomic_write_json,
@@ -44,6 +44,30 @@ def _assert_no_active_reference(
             raise SoloAIError(
                 f"Candidate is still referenced by active task {other['id']}"
             )
+
+
+def assert_task_not_held_by_candidate_delivery(
+    repo: GitRepo, *, task: dict[str, Any]
+) -> None:
+    """候选已交给队列或批次时，任务的本地工作树不再拥有完整交付控制权。"""
+    from .candidate_batches import CandidateBatchStore
+
+    ownership = CandidateBatchStore(repo).task_batch_ownership(str(task["id"]))
+    if not ownership:
+        return
+    candidate = ownership["candidate"]
+    batch = ownership.get("batch")
+    if batch:
+        raise SoloAIError(
+            "Abandon blocked: candidate "
+            f"{candidate['id']} is held by active {batch['kind']} batch "
+            f"{batch['id']} at phase {batch['phase']}; recover, wait for, or "
+            "withdraw the candidate instead"
+        )
+    raise SoloAIError(
+        "Abandon blocked: candidate "
+        f"{candidate['id']} is still queued for integration; withdraw the candidate instead"
+    )
 
 
 def _active_ref_snapshot(
@@ -102,6 +126,7 @@ def new_transaction(
         raise SoloAIError(
             "Task candidate is already integrated; Recover must finish cleanup"
         )
+    assert_task_not_held_by_candidate_delivery(repo, task=task)
     _assert_no_active_reference(repo, store, task=task, candidate=expected_tip)
     tracked_status = repo.git(
         ["status", "--porcelain=v1", "--untracked-files=no"], cwd=worktree
@@ -189,12 +214,14 @@ def write_completed_receipt(repo: GitRepo, task: dict[str, Any]) -> dict[str, An
 def prepare(
     repo: GitRepo, *, store: StateStore, task: dict[str, Any]
 ) -> dict[str, Any]:
-    transaction = new_transaction(repo, store, task=task)
-    return store.prepare_abandonment(
-        task["id"],
-        operation_id=str(transaction["prepared_by_operation_id"]),
-        abandonment=transaction,
-    )
+    # 与候选封存共用准入锁：检查完成并把任务置入 abandonment 前，批次不能抢占它。
+    with candidate_admission_lock(repo):
+        transaction = new_transaction(repo, store, task=task)
+        return store.prepare_abandonment(
+            task["id"],
+            operation_id=str(transaction["prepared_by_operation_id"]),
+            abandonment=transaction,
+        )
 
 
 def resume(repo: GitRepo, *, store: StateStore, task: dict[str, Any]) -> dict[str, Any]:

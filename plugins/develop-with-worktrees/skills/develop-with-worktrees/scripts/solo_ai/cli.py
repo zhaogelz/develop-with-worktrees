@@ -653,6 +653,24 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
     state = store.read()
     route = repository_route(repo)
     candidate_batches = CandidateBatchStore(repo).summary()
+    candidates_by_task = {
+        str(candidate["task_id"]): candidate
+        for candidate in candidate_batches["candidates"]
+        if candidate.get("task_id")
+    }
+    tasks: list[dict[str, Any]] = []
+    for task in state.get("tasks", {}).values():
+        projected_task = StateStore.public_task(task)
+        candidate = candidates_by_task.get(str(task.get("id")))
+        if candidate:
+            projected_task["candidate_delivery"] = {
+                "id": candidate.get("candidate_id"),
+                "status": candidate.get("status"),
+                "delivery_status": candidate.get("delivery_status"),
+            }
+            if candidate.get("batch_ownership"):
+                projected_task["batch_ownership"] = candidate["batch_ownership"]
+        tasks.append(projected_task)
     from .task_context import list_anchors
 
     result: dict[str, Any] = {
@@ -666,9 +684,7 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
         "local_enabled": local_enabled(repo),
         "validation_queue": queue_status(),
         "slots": list(state.get("slots", {}).values()),
-        "tasks": [
-            StateStore.public_task(task) for task in state.get("tasks", {}).values()
-        ],
+        "tasks": tasks,
         "guard_alerts": store.guard_alerts(),
         "task_anchors": list_anchors(repo),
         "candidate_pool": candidate_batches["candidates"],

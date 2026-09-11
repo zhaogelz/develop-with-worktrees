@@ -20,7 +20,10 @@ from typing import Any
 
 import psutil
 
-from .abandonment import prepare as prepare_abandonment
+from .abandonment import (
+    assert_task_not_held_by_candidate_delivery,
+    prepare as prepare_abandonment,
+)
 from .abandonment import resume as resume_abandonment
 from .abandonment import write_completed_receipt as write_abandonment_receipt
 from .cleanup import inspect_untracked, require_managed_directory_identity
@@ -2530,6 +2533,8 @@ def abandon(
                     with candidate_admission_lock(repo):
                         result = resume_abandonment(repo, store=store, task=task)
                 else:
+                    with candidate_admission_lock(repo):
+                        assert_task_not_held_by_candidate_delivery(repo, task=task)
                     ensure_within(
                         Path(task["worktree"]),
                         repo.primary_path / config.worktree_directory,

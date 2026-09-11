@@ -12,6 +12,8 @@ import pytest
 from conftest import git
 from solo_ai import candidate_batches as batch_module
 from solo_ai import cleanup as cleanup_module
+from solo_ai import lifecycle as lifecycle_module
+from solo_ai.cli import _status
 from solo_ai.candidate_batches import (
     CandidateBatchStore,
     prepare_candidate_repair,
@@ -1120,6 +1122,81 @@ def test_candidate_publication_is_not_reported_as_delivery(git_repo: Path) -> No
     projected = CandidateBatchStore(repo).summary()["candidates"][0]
     assert projected["delivered"] is False
     assert projected["delivery_status"] == "awaiting-integration"
+
+
+def test_status_projects_active_full_batch_and_abandon_refuses_its_candidate(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    task = start(repo, name="batch ownership card")
+    head = repo.head(Path(task["worktree"]))
+    policy = StateStore.integration_policy(load_repo_config(repo))
+    store = CandidateBatchStore(repo)
+    candidate_ids: list[str] = []
+    owned_candidate_id = "candidate-owned-by-batch"
+
+    for index in range(5):
+        candidate_id = owned_candidate_id if index == 0 else f"candidate-peer-{index}"
+        task_id = task["id"] if index == 0 else f"task-peer-{index}"
+        store.publish(
+            {
+                "candidate_id": candidate_id,
+                "task_id": task_id,
+                "name": candidate_id,
+                "ref": f"refs/dww/candidates/{candidate_id}",
+                "head": head,
+                "base_head": head,
+                "base_ref": "main",
+                "proof": f"proof-{index}",
+                "integration_policy": policy,
+            },
+            capacity=10,
+            batch_size=5,
+            seal_policy="explicit",
+        )
+        candidate_ids.append(candidate_id)
+
+    batch = store.seal(candidate_ids, batch_size=5)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def pause_batch(
+        _repo: GitRepo, _store: CandidateBatchStore, current: dict[str, object]
+    ) -> dict[str, object]:
+        entered.set()
+        assert release.wait(timeout=10)
+        return current
+
+    monkeypatch.setattr(batch_module, "_resume", pause_batch)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(batch_module.run_batch, repo, batch_id=batch["id"])
+        try:
+            assert entered.wait(timeout=10)
+            report = _status(repo, detailed=False)
+            card = next(item for item in report["tasks"] if item["id"] == task["id"])
+            ownership = card["batch_ownership"]
+            assert ownership["state"] == "active_full_batch"
+            assert ownership["candidate"] == {
+                "id": owned_candidate_id,
+                "status": "sealed",
+            }
+            assert ownership["batch"]["id"] == batch["id"]
+            assert ownership["batch"]["kind"] == "full"
+            assert ownership["batch"]["phase"] == "sealed"
+            assert ownership["batch"]["process"]["live"] is True
+        finally:
+            release.set()
+        assert future.result(timeout=10)["id"] == batch["id"]
+
+    def fail_if_abandon_stops_processes(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Abandon must reject a batch-held candidate before side effects")
+
+    monkeypatch.setattr(
+        lifecycle_module, "_stop_registered_processes", fail_if_abandon_stops_processes
+    )
+    with pytest.raises(SoloAIError, match="held by active full batch"):
+        abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert StateStore(repo).task(task["id"])["status"] == "active"
 
 
 def test_runtime_release_holds_the_fifth_candidate_until_adapter_success(
