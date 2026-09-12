@@ -2540,6 +2540,69 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
     assert repair["manual_notification_required"] is False
     assert repair["conflict_paths"] == ["shared.txt"]
     assert repo.head(git_repo) == base_before
+
+    legacy_anchor = Path(repair["anchor_path"])
+    legacy_content = legacy_anchor.read_text(encoding="utf-8")
+    adoption_fields = {
+        label: legacy_content.split(f"- {label}: ", 1)[1].split("\n", 1)[0]
+        for label in (
+            "Original purpose",
+            "Implementation target",
+            "Scope boundary",
+            "Acceptance criteria",
+        )
+    }
+    legacy_baseline = (
+        f"source `{source['base_head']}` → `{source['head']}`; "
+        f"repair base `{repair['base_ref']}` at `{repair['base_head']}`"
+    )
+    canonical_baseline = f"`{repair['base_ref']}` at `{repair['base_head']}`"
+    legacy_anchor.write_text(
+        legacy_content.replace(
+            f"- Reference baseline: {canonical_baseline}",
+            f"- Reference baseline: {legacy_baseline}",
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    repair_state = StateStore(repo).task(repair["id"])
+    preparation = dict(repair_state["repair_preparation"])
+    StateStore(repo).update_task(repair["id"], anchor_origin=None)
+    mismatched_preparation = {**preparation, "base_head": source["base_head"]}
+    StateStore(repo).update_task(
+        repair["id"], repair_preparation=mismatched_preparation
+    )
+    with pytest.raises(SoloAIError, match="repair anchor facts do not match"):
+        adopt_task_anchor(
+            repo,
+            task_id=repair["id"],
+            objective=adoption_fields["Original purpose"],
+            target=adoption_fields["Implementation target"],
+            scope=adoption_fields["Scope boundary"],
+            acceptance=adoption_fields["Acceptance criteria"],
+            confirm=repair["id"],
+        )
+    StateStore(repo).update_task(repair["id"], repair_preparation=preparation)
+    adopted = adopt_task_anchor(
+        repo,
+        task_id=repair["id"],
+        objective=adoption_fields["Original purpose"],
+        target=adoption_fields["Implementation target"],
+        scope=adoption_fields["Scope boundary"],
+        acceptance=adoption_fields["Acceptance criteria"],
+        confirm=repair["id"],
+    )
+    assert (
+        Path(adopted["anchor_path"])
+        .read_text(encoding="utf-8")
+        .count(f"- Reference baseline: {canonical_baseline}")
+        == 1
+    )
+    assert (
+        StateStore(repo).task(repair["id"])["anchor_origin"]["reference_baseline"]
+        == canonical_baseline
+    )
+
     reused = prepare_candidate_repair(repo, candidate_id=candidate["candidate_id"])
     assert reused["id"] == repair["id"]
     assert reused["request_reused"] is True

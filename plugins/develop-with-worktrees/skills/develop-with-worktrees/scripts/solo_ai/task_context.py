@@ -22,6 +22,12 @@ _ANCHOR_FIELDS = (
 _IMMUTABLE_FIELDS = ("Task ID", "Original purpose", "Reference baseline")
 _TASK_ID_PATTERN = re.compile(r"task-[A-Za-z0-9][A-Za-z0-9-]*\Z")
 _ROOT_REFERENCE_HEADER = re.compile(r"^- Root anchor:(?P<value>[^\r\n]*)$")
+_LEGACY_REPAIR_REFERENCE_BASELINE = re.compile(
+    r"source `(?P<source_base>[0-9a-fA-F]{40,64})` → "
+    r"`(?P<source_head>[0-9a-fA-F]{40,64})`; repair base "
+    r"`(?P<repair_base_ref>[^`\r\n]+)` at "
+    r"`(?P<repair_base_head>[0-9a-fA-F]{40,64})`"
+)
 
 
 def anchor_origin(task: dict[str, Any]) -> dict[str, str]:
@@ -457,7 +463,8 @@ def adopt_legacy_anchor(
         path.parent, root=repo.local_dir, label="Task anchor directory"
     )
     if path.exists():
-        existing = _validated_fields(_require_plain_anchor(repo, path))
+        existing_content = _require_plain_anchor(repo, path)
+        existing = _validated_fields(existing_content)
         expected = {
             "Task ID": f"`{task['id']}`",
             "Original purpose": fields["objective"],
@@ -469,10 +476,24 @@ def adopt_legacy_anchor(
             raise SoloAIError(
                 "Existing legacy anchor does not match the reviewed adoption facts"
             )
-        reference_baseline = existing["Reference baseline"]
-        _verify_legacy_reference_baseline(
-            repo, task=task, reference_baseline=reference_baseline
+        existing_reference_baseline = existing["Reference baseline"]
+        reference_baseline = _verify_legacy_reference_baseline(
+            repo, task=task, reference_baseline=existing_reference_baseline
         )
+        if reference_baseline != existing_reference_baseline:
+            old_line = f"- Reference baseline: {existing_reference_baseline}"
+            if existing_content.count(old_line) != 1:
+                raise SoloAIError(
+                    "Existing legacy repair anchor baseline cannot be normalized safely"
+                )
+            atomic_write_text(
+                path,
+                existing_content.replace(
+                    old_line,
+                    f"- Reference baseline: {reference_baseline}",
+                    1,
+                ),
+            )
         return require_anchor(repo, task), _reviewed_anchor_origin(
             task,
             original_purpose=fields["objective"],
@@ -512,13 +533,29 @@ def _reviewed_anchor_origin(
 
 def _verify_legacy_reference_baseline(
     repo: GitRepo, *, task: dict[str, Any], reference_baseline: str
-) -> None:
+) -> str:
     """验证旧锚点记录的原始基线仍是当前任务历史的一部分。"""
 
     match = re.fullmatch(r"`[^`\r\n]+` at `([0-9a-fA-F]{40,64})`", reference_baseline)
-    if not match:
-        raise SoloAIError("Existing legacy anchor has an invalid reference baseline")
-    original_head = match.group(1)
+    if match:
+        original_head = match.group(1)
+        normalized_baseline = reference_baseline
+    else:
+        repair_match = _LEGACY_REPAIR_REFERENCE_BASELINE.fullmatch(reference_baseline)
+        if not repair_match:
+            raise SoloAIError(
+                "Existing legacy anchor has an invalid reference baseline"
+            )
+        original_head = repair_match.group("source_base")
+        _verify_legacy_repair_reference_baseline(
+            repo,
+            task=task,
+            source_base=original_head,
+            source_head=repair_match.group("source_head"),
+            repair_base_ref=repair_match.group("repair_base_ref"),
+            repair_base_head=repair_match.group("repair_base_head"),
+        )
+        normalized_baseline = f"`{task.get('base_ref')}` at `{task.get('base_head')}`"
     resolved = repo.git(
         ["rev-parse", "--verify", f"{original_head}^{{commit}}"], check=False
     )
@@ -540,6 +577,61 @@ def _verify_legacy_reference_baseline(
     ):
         raise SoloAIError(
             "Existing legacy anchor baseline is not an ancestor of the active task"
+        )
+    return normalized_baseline
+
+
+def _verify_legacy_repair_reference_baseline(
+    repo: GitRepo,
+    *,
+    task: dict[str, Any],
+    source_base: str,
+    source_head: str,
+    repair_base_ref: str,
+    repair_base_head: str,
+) -> None:
+    """仅接管可由任务与候选事实交叉验证的旧版修复锚点。"""
+
+    preparation = task.get("repair_preparation")
+    if not isinstance(preparation, dict):
+        raise SoloAIError("Existing legacy repair anchor lacks repair facts")
+    candidate_id = preparation.get("candidate_id")
+    source_ref = preparation.get("source_ref")
+    expected_source_head = preparation.get("source_head")
+    if (
+        not isinstance(candidate_id, str)
+        or not candidate_id
+        or task.get("supersedes") != candidate_id
+        or source_ref != f"refs/dww/candidates/{candidate_id}"
+        or not isinstance(expected_source_head, str)
+        or expected_source_head.lower() != source_head.lower()
+        or preparation.get("base_ref") != repair_base_ref
+        or preparation.get("base_head") != repair_base_head
+        or task.get("base_ref") != repair_base_ref
+        or task.get("base_head") != repair_base_head
+    ):
+        raise SoloAIError(
+            "Existing legacy repair anchor facts do not match the active task"
+        )
+    if repo.ref_head(source_ref) != source_head:
+        raise SoloAIError("Existing legacy repair anchor source ref changed")
+    for head in (source_base, source_head, repair_base_head):
+        resolved = repo.git(
+            ["rev-parse", "--verify", f"{head}^{{commit}}"], check=False
+        )
+        if resolved.returncode != 0 or resolved.stdout.strip().lower() != head.lower():
+            raise SoloAIError(
+                "Existing legacy repair anchor references an unknown commit"
+            )
+    if not repo.is_ancestor(source_base, source_head) or not repo.is_ancestor(
+        source_base, repair_base_head
+    ):
+        raise SoloAIError("Existing legacy repair anchor source history is invalid")
+    branch = str(task.get("branch") or "")
+    branch_head = repo.ref_head(f"refs/heads/{branch}") if branch else None
+    if branch_head is None or not repo.is_ancestor(repair_base_head, branch_head):
+        raise SoloAIError(
+            "Existing legacy repair anchor repair base is not an ancestor of the task"
         )
 
 
