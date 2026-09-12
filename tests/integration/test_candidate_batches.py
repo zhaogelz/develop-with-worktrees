@@ -2511,9 +2511,9 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
     reusable: bool,
 ) -> None:
     repo = initialized_batched(git_repo, reusable=reusable)
-    candidate = publish(repo, name="candidate conflict", relative="shared.txt")
-    (git_repo / "shared.txt").write_text("main change\n", encoding="utf-8")
-    git(git_repo, "add", "shared.txt")
+    candidate = publish(repo, name="candidate conflict", relative="测试路径.txt")
+    (git_repo / "测试路径.txt").write_text("main change\n", encoding="utf-8")
+    git(git_repo, "add", "测试路径.txt")
     git(git_repo, "commit", "-m", "test: advance conflicting base")
     base_before = repo.head(git_repo)
 
@@ -2538,7 +2538,7 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
     assert repair["outcome"] == "conflicted"
     assert repair["repair_attempt"] == 1
     assert repair["manual_notification_required"] is False
-    assert repair["conflict_paths"] == ["shared.txt"]
+    assert repair["conflict_paths"] == ["测试路径.txt"]
     assert repo.head(git_repo) == base_before
 
     legacy_anchor = Path(repair["anchor_path"])
@@ -2635,7 +2635,7 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
     assert reused["request_reused"] is True
     assert reused["outcome"] == "conflicted"
 
-    (repair_worktree / "shared.txt").write_text(
+    (repair_worktree / "测试路径.txt").write_text(
         "main change\ncandidate conflict\n", encoding="utf-8"
     )
     committed = commit_task(
@@ -2643,7 +2643,7 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
         task_id=repair["id"],
         lease=repair["lease"],
         message="test: resolve candidate conflict",
-        paths=["shared.txt"],
+        paths=["测试路径.txt"],
     )
     assert committed["supersedes"] == candidate["candidate_id"]
     ready(repo, task_id=repair["id"], lease=repair["lease"])
@@ -2656,7 +2656,7 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
 
     integrated = seal_batch(repo, candidate_ids=[replacement["candidate_id"]])
     assert integrated["status"] == "completed"
-    assert (git_repo / "shared.txt").read_text(encoding="utf-8") == (
+    assert (git_repo / "测试路径.txt").read_text(encoding="utf-8") == (
         "main change\ncandidate conflict\n"
     )
 

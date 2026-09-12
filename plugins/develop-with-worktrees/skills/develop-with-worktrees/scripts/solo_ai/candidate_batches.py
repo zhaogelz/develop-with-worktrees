@@ -1962,10 +1962,11 @@ This local file is not committed. Keep it current, and reread it after context l
         check=False,
     )
     unmerged = repo.git(
-        ["diff", "--name-only", "--diff-filter=U"],
+        ["diff", "--name-only", "--diff-filter=U", "-z"],
         cwd=worktree,
         check=False,
-    ).stdout.splitlines()
+    ).stdout.split("\0")
+    unmerged = [path for path in unmerged if path]
     if merge_head.returncode == 0:
         if merge_head.stdout.strip() != source["head"]:
             reason = "Repair worktree already contains a different merge identity"
@@ -1983,10 +1984,11 @@ This local file is not committed. Keep it current, and reread it after context l
             check=False,
         )
         unmerged = repo.git(
-            ["diff", "--name-only", "--diff-filter=U"],
+            ["diff", "--name-only", "--diff-filter=U", "-z"],
             cwd=worktree,
             check=False,
-        ).stdout.splitlines()
+        ).stdout.split("\0")
+        unmerged = [path for path in unmerged if path]
         if merged.returncode == 0:
             outcome = "prepared"
         elif unmerged:

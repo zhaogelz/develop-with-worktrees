@@ -640,8 +640,8 @@ def _verify_legacy_repair_reference_baseline(
     source_paths = [
         path
         for path in repo.git(
-            ["diff", "--name-only", source_base, source_head]
-        ).stdout.splitlines()
+            ["diff", "--name-only", "-z", source_base, source_head]
+        ).stdout.split("\0")
         if path
     ]
     if sorted(changed_paths) != sorted(source_paths):
