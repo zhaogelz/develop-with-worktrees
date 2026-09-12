@@ -18,8 +18,8 @@ def test_new_test_modules_default_to_full() -> None:
     assert dww_test_layer(Path("tests/unit/test_new_contract.py")) == "dww_full"
 
 
-def test_default_full_profile_excludes_the_explicit_stress_layer() -> None:
-    """默认 Full 与显式 Stress 必须互斥，避免一次候选验证重复长测。"""
+def test_complete_full_profile_excludes_the_explicit_stress_layer() -> None:
+    """完整回归与显式 Stress 必须互斥，避免一次里程碑验证重复长测。"""
 
     with (_REPOSITORY_ROOT / ".solo-ai" / "verification.toml").open("rb") as handle:
         primary = tomllib.load(handle)
@@ -29,7 +29,9 @@ def test_default_full_profile_excludes_the_explicit_stress_layer() -> None:
         stress = tomllib.load(handle)
 
     full = next(
-        profile for profile in primary["profiles"] if profile["id"] == "dww-core-full"
+        profile
+        for profile in primary["profiles"]
+        if profile["id"] == "dww-core-complete"
     )
     explicit_stress = next(
         profile for profile in stress["profiles"] if profile["id"] == "dww-stress"
@@ -47,6 +49,7 @@ def test_default_full_profile_excludes_the_explicit_stress_layer() -> None:
             "--durations=30",
         ]
     ]
+    assert full["full_scope"] == "complete"
     assert explicit_stress["commands"] == [
         ["uv", "run", "pytest", "-m", "dww_stress", "-vv", "-x", "--durations=30"]
     ]

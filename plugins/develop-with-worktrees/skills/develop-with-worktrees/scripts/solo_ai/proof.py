@@ -120,10 +120,17 @@ def select_profiles(
     files: list[str],
     *,
     levels: tuple[str, ...] = ("ready",),
+    full_scopes: tuple[str, ...] | None = None,
 ) -> list[VerificationProfile]:
     selected: list[VerificationProfile] = []
     for profile in config.profiles:
         if profile.level not in levels:
+            continue
+        if (
+            profile.level == "full"
+            and full_scopes is not None
+            and profile.full_scope not in full_scopes
+        ):
             continue
         if not files or any(
             any(fnmatch.fnmatchcase(path, pattern) for pattern in profile.paths)
@@ -138,9 +145,19 @@ def unmapped_files(
     files: list[str],
     *,
     levels: tuple[str, ...] = ("ready",),
+    full_scopes: tuple[str, ...] | None = None,
 ) -> list[str]:
     """只要候选改动没有 Ready 映射，就拒绝猜测该运行什么验证。"""
-    available = [profile for profile in config.profiles if profile.level in levels]
+    available = [
+        profile
+        for profile in config.profiles
+        if profile.level in levels
+        and not (
+            profile.level == "full"
+            and full_scopes is not None
+            and profile.full_scope not in full_scopes
+        )
+    ]
     return [
         path
         for path in files
@@ -492,6 +509,7 @@ def proof_inputs(
     verification: VerificationConfig,
     task_id: str | None = None,
     levels: tuple[str, ...] = ("ready",),
+    full_scopes: tuple[str, ...] | None = None,
     force_task_scope: bool = False,
     expected_candidate_head: str | None = None,
     full_execution_id: str | None = None,
@@ -501,8 +519,12 @@ def proof_inputs(
         repo, cwd=cwd, expected_candidate_head=expected_candidate_head
     )
     files = changed_files(repo, cwd=cwd, base=base)
-    profiles = select_profiles(verification, files, levels=levels)
-    missing = unmapped_files(verification, files, levels=levels)
+    profiles = select_profiles(
+        verification, files, levels=levels, full_scopes=full_scopes
+    )
+    missing = unmapped_files(
+        verification, files, levels=levels, full_scopes=full_scopes
+    )
     commands = [command for profile in profiles for command in profile.commands]
     tracked = _tracked(repo, cwd)
     shared = _shared_inputs(repo, cwd, commands, verification, tool_cache)
@@ -537,6 +559,7 @@ def proof_inputs(
         "files": files,
         "unmapped_files": missing,
         "levels": list(levels),
+        "full_scopes": list(full_scopes) if full_scopes is not None else None,
         "profiles": [profile.profile_id for profile in profiles],
         "profile_fingerprints": [item[2] for item in records],
         "command_manifest": [
@@ -675,6 +698,7 @@ def _run_profile(
     base: str,
     expected_base_head: str | None,
     expected_candidate_head: str | None,
+    validation_environment: dict[str, str],
     check_inputs: Callable[[], None],
 ) -> dict[str, Any]:
     proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
@@ -718,6 +742,7 @@ def _run_profile(
                 repo.local_dir / "validation-runs" / run_id / f"{index:02d}.json"
             )
             environment = _execution_environment(profile)
+            environment.update(validation_environment)
             environment.update(inherited_claim_environment(queue_claim))
             result = run_logged(
                 command.argv,
@@ -807,10 +832,20 @@ def validate(
     force_task_scope: bool = False,
     expected_base_head: str | None = None,
     expected_candidate_head: str | None = None,
+    full_scope: str = "integration",
 ) -> dict[str, Any]:
     from .util import read_json
 
+    if full_scope not in {"integration", "complete"}:
+        raise SoloAIError("full_scope must be integration or complete")
+    if level != "full" and full_scope != "integration":
+        raise SoloAIError("A complete validation scope requires level full")
     levels = ("ready", "full") if level == "full" else (level,)
+    full_scopes = (
+        ("integration", "complete")
+        if level == "full" and full_scope == "complete"
+        else (("integration",) if level == "full" else None)
+    )
     # 仅本次调用内复用版本探测；每次读取均复核解析路径与文件身份。
     tool_cache: dict[tuple[Any, ...], dict[str, str | None]] = {}
     inputs, records = proof_inputs(
@@ -820,6 +855,7 @@ def validate(
         verification=verification,
         task_id=task_id,
         levels=levels,
+        full_scopes=full_scopes,
         force_task_scope=force_task_scope,
         expected_candidate_head=expected_candidate_head,
         full_execution_id=(
@@ -827,6 +863,14 @@ def validate(
         ),
         tool_cache=tool_cache,
     )
+    validation_environment: dict[str, str] = {}
+    if level == "full":
+        validation_environment = {
+            "DWW_VALIDATION_BASE_REF": base,
+            "DWW_VALIDATION_BASE_HEAD": expected_base_head
+            or repo.git(["rev-parse", base], cwd=cwd).stdout.strip(),
+            "DWW_VALIDATION_SCOPE": full_scope,
+        }
     # Ready（以及包含 Ready 的 Full）是候选晋级门禁，必须覆盖所有候选
     # 路径。development 与显式 Stress 都是按变更选择的辅助执行层；要求
     # 每个文档或无关文件也匹配压力配置，会让它们错误地无法单独运行。
@@ -891,6 +935,7 @@ def validate(
             base=base,
             expected_base_head=expected_base_head,
             expected_candidate_head=expected_candidate_head,
+            validation_environment=validation_environment,
             check_inputs=check_inputs,
         )
         profile_proofs.append(

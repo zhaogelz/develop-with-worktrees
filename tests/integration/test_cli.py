@@ -617,6 +617,13 @@ id = "full"
 level = "full"
 paths = ["**"]
 commands = [["git", "diff", "--check", "main...HEAD"]]
+
+[[profiles]]
+id = "complete"
+level = "full"
+full_scope = "complete"
+paths = ["**"]
+commands = [["git", "diff", "--check", "main...HEAD"]]
 """,
         encoding="utf-8",
     )
@@ -734,6 +741,28 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
     assert (
         planned["full"]["fingerprint"] != full_proof["profile_proofs"][1]["fingerprint"]
     )
+    complete = call_json(
+        "verify",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--level",
+        "full",
+        "--complete",
+        repo_path=worktree,
+    )
+    assert complete["full_scope"] == "complete"
+    complete_proof = json.loads(
+        (
+            git_repo / ".git" / "solo-ai" / "proofs" / f"{complete['proof']}.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert [item["profile_id"] for item in complete_proof["profile_proofs"]] == [
+        "ready",
+        "full",
+        "complete",
+    ]
     stress = call_json(
         "verify",
         "--task",

@@ -624,6 +624,26 @@ def test_finish_publishes_then_explicit_seal_integrates_exact_candidates(
     assert {item["status"] for item in pool["candidates"]} == {"integrated"}
 
 
+def test_batch_validation_uses_integration_scope(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="scoped batch", relative="scoped.txt")
+    observed: dict[str, object] = {}
+
+    def scoped_validate(*args: object, **kwargs: object) -> dict[str, object]:
+        observed.update(kwargs)
+        return {"fingerprint": "integration-scope-proof"}
+
+    monkeypatch.setattr(batch_module, "validate", scoped_validate)
+
+    completed = seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    assert completed["status"] == "completed"
+    assert observed["level"] == "full"
+    assert observed["full_scope"] == "integration"
+
+
 def test_batch_cleanup_removes_known_recreatable_ignored_content(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

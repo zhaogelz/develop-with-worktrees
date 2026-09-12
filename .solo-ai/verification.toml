@@ -77,10 +77,39 @@ commands = [
   ["uvx", "ruff", "format", "--check", "."],
 ]
 
-# 组合 Full 只在 DWW 核心、验证策略或它们的测试变化时执行。Full 仍包含
-# 被选中的 Ready profiles；压力层有独立的显式入口，不能随默认 Full 重跑。
+# 日常组合验证只覆盖最小真实生命周期：它仍包含按变更选中的 Ready，且验证
+# 配置、CLI 或批次实现的改动会再经过候选发布与精确封批。它不是宽回归入口。
 [[profiles]]
-id = "dww-core-full"
+id = "dww-batch-integration"
+paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = [
+  "pyproject.toml", "tests/conftest.py", "tests/integration/test_cli.py",
+  "tests/integration/test_candidate_batches.py", "tests/unit/test_config.py",
+  "tests/unit/test_proof.py", "uv.lock",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
+input_closure = "declared"
+timeout_seconds = 900
+resource_class = "heavy"
+level = "full"
+full_scope = "integration"
+commands = [
+  ["uv", "run", "pytest", "-q", "tests/integration/test_cli.py::test_cli_plan_and_verify_cover_registered_development_ready_full_and_stress_levels", "tests/integration/test_candidate_batches.py::test_finish_publishes_then_explicit_seal_integrates_exact_candidates", "tests/integration/test_candidate_batches.py::test_batch_validation_uses_integration_scope", "--durations=10"],
+]
+
+# 宽回归是明确里程碑入口（dww verify --level full --complete 或 CI），不会
+# 因日常候选或尾批自动重复执行。压力层仍有独立显式入口。
+[[profiles]]
+id = "dww-core-complete"
 paths = [
   ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
   "scripts/verify_repository.py", "tests/**", "uv.lock",
@@ -102,6 +131,7 @@ input_closure = "declared"
 timeout_seconds = 43200
 resource_class = "heavy"
 level = "full"
+full_scope = "complete"
 commands = [
   ["uv", "run", "pytest", "-m", "dww_full and not dww_stress", "-vv", "-x", "--durations=30"],
 ]

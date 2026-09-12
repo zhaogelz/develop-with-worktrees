@@ -554,6 +554,11 @@ def _parser() -> argparse.ArgumentParser:
         choices=["development", "ready", "full", "stress"],
         default="development",
     )
+    verify.add_argument(
+        "--complete",
+        action="store_true",
+        help="at level full, include complete-regression profiles as an explicit milestone check",
+    )
 
     status = sub.add_parser("status", help="show masked slots and tasks")
     status.add_argument("--detailed", action="store_true")
@@ -1629,6 +1634,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             "advisory": estimate["advisory"],
         }
     if args.command == "verify":
+        if args.complete and args.level != "full":
+            raise SoloAIError("--complete requires --level full")
         store = StateStore(repo)
         with store.operation(args.task, args.lease, "verify") as task:
             worktree = Path(str(task["worktree"]))
@@ -1648,11 +1655,13 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 verification=verification,
                 task_id=task["id"],
                 level=args.level,
+                full_scope="complete" if args.complete else "integration",
                 force_task_scope=_is_in_place(task),
             )
             return {
                 "task_id": task["id"],
                 "level": args.level,
+                "full_scope": "complete" if args.complete else "integration",
                 "proof": proof["fingerprint"],
                 "reused": proof.get("reused", False),
                 "kind": proof["kind"],

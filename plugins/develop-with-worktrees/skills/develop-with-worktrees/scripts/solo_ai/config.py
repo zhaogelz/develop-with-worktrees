@@ -92,6 +92,7 @@ class VerificationProfile:
     timeout_seconds: float
     resource_class: str
     level: str
+    full_scope: str | None
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ class VerificationConfig:
                     "timeout_seconds": profile.timeout_seconds,
                     "resource_class": profile.resource_class,
                     "level": profile.level,
+                    "full_scope": profile.full_scope,
                 }
                 for profile in self.profiles
             ],
@@ -629,6 +631,21 @@ def _parse_verification_config(
             raise SoloAIError(
                 f"Profile {profile_id!r} is heavy and must run at level full or stress"
             )
+        full_scope: str | None = None
+        if level == "full":
+            full_scope = _string(
+                raw.get("full_scope", "integration"),
+                field=f"profiles[{index}].full_scope",
+                non_empty=True,
+            )
+            if full_scope not in {"integration", "complete"}:
+                raise SoloAIError(
+                    f"Profile {profile_id!r} full_scope must be integration or complete"
+                )
+        elif "full_scope" in raw:
+            raise SoloAIError(
+                f"Profile {profile_id!r} may declare full_scope only at level full"
+            )
         profiles.append(
             VerificationProfile(
                 profile_id=profile_id,
@@ -650,6 +667,7 @@ def _parse_verification_config(
                 timeout_seconds=timeout_seconds,
                 resource_class=resource_class,
                 level=level,
+                full_scope=full_scope,
             )
         )
     static_only = _boolean(data.get("static_only", False), field="static_only")

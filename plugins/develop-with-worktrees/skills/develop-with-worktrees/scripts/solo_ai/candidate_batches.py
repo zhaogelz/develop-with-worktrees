@@ -1375,6 +1375,7 @@ def _validate_batch(
             verification=verification,
             task_id=str(batch["id"]),
             level="full",
+            full_scope="integration",
             expected_base_head=str(batch["base_before"]),
             expected_candidate_head=str(batch["integration_head"]),
         )

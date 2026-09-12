@@ -168,6 +168,45 @@ commands = [["git", "status"]]
         load_verification_config(GitRepo(git_repo))
 
 
+def test_full_profiles_default_to_integration_and_accept_explicit_complete_scope(
+    git_repo: Path,
+) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    path = config / "verification.toml"
+    path.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "integration"
+level = "full"
+paths = ["**"]
+commands = [["git", "status"]]
+
+[[profiles]]
+id = "complete"
+level = "full"
+full_scope = "complete"
+paths = ["**"]
+commands = [["git", "status"]]
+""",
+        encoding="utf-8",
+    )
+
+    profiles = load_verification_config(GitRepo(git_repo)).profiles
+    assert [profile.full_scope for profile in profiles] == ["integration", "complete"]
+
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'full_scope = "complete"', 'full_scope = "unexpected"'
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SoloAIError, match="full_scope"):
+        load_verification_config(GitRepo(git_repo))
+
+
 def test_accepts_heavy_stress_profiles(git_repo: Path) -> None:
     config = git_repo / ".solo-ai"
     config.mkdir()
