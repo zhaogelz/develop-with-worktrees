@@ -52,7 +52,7 @@ from solo_ai.lifecycle import (
     warm_slot,
 )
 from solo_ai.repo import GitRepo
-from solo_ai.state import StateStore
+from solo_ai.state import STATE_SCHEMA, StateStore
 from solo_ai.util import SoloAIError, atomic_write_json, process_snapshot, read_json
 
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
@@ -145,6 +145,65 @@ def test_root_child_refuses_a_missing_root_anchor(git_repo: Path) -> None:
 
     with pytest.raises(SoloAIError, match="Root anchor is missing"):
         show_task_anchor(repo, task_id=task["id"])
+
+
+def test_external_root_anchor_binds_one_cross_repository_child_and_closes_safely(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    owner = initialized(git_repo)
+    root = create_root_task_anchor(
+        owner,
+        purpose="cross-repository migration",
+        target="retain one durable root contract",
+        scope="no scope id, candidate group, DAG, or scheduler",
+        acceptance="external child is registered and root close is terminal-only",
+    )
+    child_path = tmp_path / "child-repository"
+    child_path.mkdir()
+    git(child_path, "init", "-b", "main")
+    git(child_path, "config", "user.name", "Test User")
+    git(child_path, "config", "user.email", "test@example.invalid")
+    (child_path / "README.md").write_text("# Child\n", encoding="utf-8")
+    git(child_path, "add", "README.md")
+    git(child_path, "commit", "-m", "initial")
+    child = initialized(child_path)
+
+    task = start(
+        child,
+        name="external root child",
+        root_anchor_id=root["root_id"],
+        root_anchor_file=Path(root["root_anchor_path"]),
+        request_id="external-root-child-test",
+    )
+    stored = StateStore(child).task(task["id"])
+    assert stored["root_anchor_id"] == root["root_id"]
+    assert stored["root_anchor_file"] == root["root_anchor_path"]
+    assert show_task_anchor(child, task_id=task["id"])["task_id"] == task["id"]
+    registered = show_root_task_anchor(owner, root_id=root["root_id"])[
+        "linked_child_tasks"
+    ]
+    assert registered == [
+        {
+            "task_id": task["id"],
+            "state_path": str(child.local_dir / "state.json"),
+            "root_anchor_path": root["root_anchor_path"],
+        }
+    ]
+
+    with pytest.raises(SoloAIError, match="nonterminal child"):
+        close_root_task_anchor(owner, root_id=root["root_id"], confirm=root["root_id"])
+
+    StateStore(child).update_task(
+        task["id"], root_anchor_file=str(child.local_dir / "forged-root.md")
+    )
+    with pytest.raises(SoloAIError, match="root path is ambiguous"):
+        close_root_task_anchor(owner, root_id=root["root_id"], confirm=root["root_id"])
+    StateStore(child).update_task(task["id"], root_anchor_file=root["root_anchor_path"])
+
+    abandon(child, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert close_root_task_anchor(
+        owner, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
 
 
 def declare_cleanup(repo: GitRepo, *owned_paths: str) -> None:
@@ -650,7 +709,7 @@ def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
     assert StateStore(repo).task(task["id"])["mode"] == "isolated"
     ready(repo, task_id=task["id"], lease=task["lease"])
     finish(repo, task_id=task["id"], lease=task["lease"])
-    assert read_json(state_path, {})["schema_version"] == 6
+    assert read_json(state_path, {})["schema_version"] == STATE_SCHEMA
 
 
 def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
@@ -678,7 +737,7 @@ def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
     assert repo.head(git_repo) == candidate
     assert finished["status"] == "finished"
     assert finished["integration"]["transaction_id"].startswith("legacy-")
-    assert read_json(state_path, {})["schema_version"] == 6
+    assert read_json(state_path, {})["schema_version"] == STATE_SCHEMA
     upgraded = read_json(state_path, {})
     assert upgraded["pending_operation_outcomes"] == {}
     assert isinstance(upgraded["slots"][task["slot_id"]]["generation"], int)

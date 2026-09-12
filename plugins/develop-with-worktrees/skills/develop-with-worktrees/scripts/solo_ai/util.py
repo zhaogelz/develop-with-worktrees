@@ -343,16 +343,17 @@ def stable_json(value: Any) -> str:
 
 
 def atomic_write_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    access_path = filesystem_path(path)
+    access_path.parent.mkdir(parents=True, exist_ok=True)
     # 不把长目标文件名再次拼进临时文件，避免 Windows 深层工作树超过路径限制。
-    temporary = path.parent / f".w-{uuid.uuid4().hex[:16]}"
+    temporary = access_path.parent / f".w-{uuid.uuid4().hex[:16]}"
     try:
         temporary.write_text(value, encoding="utf-8", newline="\n")
         deadline = time.monotonic() + 1.0
         delay = 0.01
         while True:
             try:
-                os.replace(temporary, path)
+                os.replace(temporary, access_path)
                 return
             except OSError as error:
                 # 只重试 Windows 暂时禁止替换的共享/锁定错误；不改权限、不降级为覆盖写。

@@ -24,7 +24,7 @@ from .util import (
     utc_timestamp,
 )
 
-STATE_SCHEMA = 6
+STATE_SCHEMA = 7
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 IN_PLACE_MODE = "in-place"
 
@@ -141,6 +141,10 @@ class StateStore:
             for task in state.get("tasks", {}).values():
                 task.setdefault("integration_policy", None)
             state["schema_version"] = STATE_SCHEMA
+        elif version == 6:
+            for task in state.get("tasks", {}).values():
+                task.setdefault("root_anchor_file", None)
+            state["schema_version"] = STATE_SCHEMA
         elif version != STATE_SCHEMA:
             raise SoloAIError(
                 "Unsupported local state schema; run doctor before changing this repository"
@@ -149,6 +153,7 @@ class StateStore:
             slot.setdefault("generation", 0)
         for task in state.get("tasks", {}).values():
             task.setdefault("integration_policy", None)
+            task.setdefault("root_anchor_file", None)
         state.setdefault("pending_operation_outcomes", {})
         self._apply_guard_quarantines(state)
         return state
@@ -371,6 +376,7 @@ class StateStore:
         request_id: str | None = None,
         supersedes: str | None = None,
         root_anchor_id: str | None = None,
+        root_anchor_file: str | None = None,
     ) -> dict[str, Any]:
         task_id = f"task-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         lease = uuid.uuid4().hex
@@ -388,6 +394,7 @@ class StateStore:
                         existing.get("name") != name
                         or existing.get("base_ref") != base_ref
                         or existing.get("root_anchor_id") != root_anchor_id
+                        or existing.get("root_anchor_file") != root_anchor_file
                     ):
                         raise SoloAIError(
                             "The request id is already bound to a different task"
@@ -427,6 +434,7 @@ class StateStore:
                     "reference_baseline": f"`{base_ref}` at `{base_head}`",
                 },
                 "root_anchor_id": root_anchor_id,
+                "root_anchor_file": root_anchor_file,
                 "candidate_head": None,
                 "status": "starting",
                 "lease": lease,
@@ -471,6 +479,7 @@ class StateStore:
         base_worktree: Path,
         session_id: str,
         root_anchor_id: str | None = None,
+        root_anchor_file: str | None = None,
     ) -> dict[str, Any]:
         """登记一次性当前工作树任务；不占槽位、不创建分支。"""
         if not session_id:
@@ -513,6 +522,7 @@ class StateStore:
                     "reference_baseline": f"`{branch}` at `{head}`",
                 },
                 "root_anchor_id": root_anchor_id,
+                "root_anchor_file": root_anchor_file,
                 "candidate_head": head,
                 "status": "active",
                 "lease": lease,

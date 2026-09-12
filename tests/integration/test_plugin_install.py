@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from solo_ai.state import STATE_SCHEMA
+
 
 @pytest.mark.dww_stress
 def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
@@ -143,7 +145,7 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert version_payload["version"] == expected_version.partition("+codex.")[0]
     assert version_payload["plugin_version"] == expected_version
     assert version_payload["verification_schema"] == 3
-    assert version_payload["state_schema"] == 6
+    assert version_payload["state_schema"] == STATE_SCHEMA
     started = run_runner("start", "--name", "installed artifact smoke")
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())

@@ -114,6 +114,22 @@ def test_atomic_write_does_not_retry_unrelated_io_failure(
     assert not list(tmp_path.glob(".w-*"))
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows MAX_PATH 真实回归")
+def test_atomic_write_uses_extended_paths_for_deep_parent(tmp_path: Path) -> None:
+    parent = tmp_path
+    while len(str(parent)) < 310:
+        parent /= "nested-atomic-write-0123456789"
+    util.filesystem_path(parent).mkdir(parents=True)
+    target = parent / "state.json"
+
+    util.atomic_write_json(target, {"generation": 1})
+
+    assert json.loads(util.filesystem_path(target).read_text(encoding="utf-8")) == {
+        "generation": 1
+    }
+    assert not list(util.filesystem_path(parent).glob(".w-*"))
+
+
 @pytest.mark.parametrize(
     "failure_stage",
     [

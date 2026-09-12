@@ -61,6 +61,11 @@ from .root_context import (
     create_root_anchor,
     delete_root_anchor,
     list_root_anchors,
+    nonterminal_external_root_children,
+    register_external_root_child,
+    resolve_root_anchor,
+    root_anchor_path,
+    root_anchor_lock,
     show_root_anchor,
     update_root_anchor,
 )
@@ -906,14 +911,27 @@ def start(
     request_id: str | None = None,
     supersedes: str | None = None,
     root_anchor_id: str | None = None,
+    root_anchor_file: Path | None = None,
 ) -> dict[str, Any]:
     with maintenance_lock(repo):
         config, _, _ = _config_and_mode(repo)
         store = StateStore(repo)
         store.ensure_slots(config)
+        if root_anchor_file is not None and root_anchor_id is None:
+            raise SoloAIError("--root-anchor-file requires --root-anchor")
+        root_binding: dict[str, Any] | None = None
+        external_root_file: str | None = None
         if root_anchor_id is not None:
-            show_root_anchor(repo, root_id=root_anchor_id)
+            root_binding = resolve_root_anchor(
+                repo, root_id=root_anchor_id, external_path=root_anchor_file
+            )
+            if root_anchor_file is not None:
+                external_root_file = str(root_binding["root_anchor_path"])
         if in_place:
+            if root_anchor_file is not None:
+                raise SoloAIError(
+                    "In-place tasks cannot bind an external root anchor; use an isolated managed task"
+                )
             if request_id or supersedes:
                 raise SoloAIError(
                     "In-place tasks do not support managed request or candidate-repair identities"
@@ -953,6 +971,7 @@ def start(
                         base_worktree=repo.root,
                         session_id=session_id,
                         root_anchor_id=root_anchor_id,
+                        root_anchor_file=external_root_file,
                     )
                 anchor = create_anchor(repo, task)
                 return {**task, "anchor_path": str(anchor.resolve())}
@@ -971,7 +990,25 @@ def start(
                 request_id=request_id,
                 supersedes=supersedes,
                 root_anchor_id=root_anchor_id,
+                root_anchor_file=external_root_file,
             )
+        if external_root_file is not None:
+            try:
+                register_external_root_child(
+                    root_id=str(root_anchor_id),
+                    root_anchor_file=Path(external_root_file),
+                    task_id=str(task["id"]),
+                    child_state_path=store.path,
+                )
+            except Exception:
+                if not task.get("request_reused"):
+                    store.update_task(
+                        str(task["id"]), root_anchor_id=None, root_anchor_file=None
+                    )
+                    store.quarantine(
+                        str(task["id"]), "external root anchor registration failed"
+                    )
+                raise
         if task.get("request_reused"):
             if task.get("status") == "quarantined":
                 return _resume_quarantined_start(
@@ -1683,20 +1720,29 @@ def close_root_task_anchor(
     if confirm != root_id:
         raise SoloAIError("Root anchor close confirmation must equal the root id")
     with maintenance_lock(repo):
-        show_root_anchor(repo, root_id=root_id)
-        active = [
-            str(task["id"])
-            for task in StateStore(repo).read()["tasks"].values()
-            if task.get("root_anchor_id") == root_id
-            and task.get("status") not in FINAL_TASK_STATES
-        ]
-        if active:
-            raise SoloAIError(
-                "Root anchor still has nonterminal child tasks:\n"
-                + "\n".join(f"- {task_id}" for task_id in active)
+        root_path = root_anchor_path(repo, root_id)
+        with root_anchor_lock(root_path):
+            show_root_anchor(repo, root_id=root_id)
+            active = [
+                str(task["id"])
+                for task in StateStore(repo).read()["tasks"].values()
+                if task.get("root_anchor_id") == root_id
+                and task.get("status") not in FINAL_TASK_STATES
+            ]
+            active.extend(
+                nonterminal_external_root_children(
+                    root_id=root_id,
+                    root_anchor_file=root_path,
+                    final_states=FINAL_TASK_STATES,
+                )
             )
-        delete_root_anchor(repo, root_id=root_id)
-        return {"root_id": root_id, "status": "closed"}
+            if active:
+                raise SoloAIError(
+                    "Root anchor still has nonterminal child tasks:\n"
+                    + "\n".join(f"- {task_id}" for task_id in sorted(set(active)))
+                )
+            delete_root_anchor(repo, root_id=root_id, locked=True)
+            return {"root_id": root_id, "status": "closed"}
 
 
 def list_root_task_anchors(repo: GitRepo) -> dict[str, Any]:

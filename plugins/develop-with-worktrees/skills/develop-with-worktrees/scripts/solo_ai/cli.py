@@ -370,6 +370,11 @@ def _parser() -> argparse.ArgumentParser:
         "--root-anchor",
         help="optional durable coordinator root anchor to bind to this task",
     )
+    start_parser.add_argument(
+        "--root-anchor-file",
+        type=Path,
+        help="explicit absolute external root-anchor file; requires --root-anchor",
+    )
 
     root_anchor = sub.add_parser(
         "root-anchor", help="manage one local cross-phase coordinator anchor"
@@ -1448,6 +1453,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             request_id=args.request_id,
             supersedes=args.supersedes,
             root_anchor_id=args.root_anchor,
+            root_anchor_file=args.root_anchor_file,
         )
     if args.command == "root-anchor":
         if args.root_anchor_command == "create":

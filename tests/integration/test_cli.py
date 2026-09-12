@@ -10,6 +10,7 @@ from pathlib import Path
 from conftest import declare_delegated_adapter, git
 from solo_ai import __version__
 from solo_ai.cli import _human
+from solo_ai.state import STATE_SCHEMA
 
 
 def test_human_batch_output_accepts_direct_and_reconcile_results() -> None:
@@ -113,7 +114,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
         encoding="utf-8"
     )
     assert payload["verification_schema"] == 3
-    assert payload["state_schema"] == 6
+    assert payload["state_schema"] == STATE_SCHEMA
     assert "PreToolUse deny" in payload["codex_guard"]
     assert Path(payload["script"]).name == "dww.py"
 

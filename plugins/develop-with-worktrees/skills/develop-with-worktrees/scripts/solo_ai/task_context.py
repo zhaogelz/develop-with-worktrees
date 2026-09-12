@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .repo import GitRepo
-from .root_context import show_root_anchor
+from .root_context import resolve_root_anchor
 from .util import SoloAIError, atomic_write_text, is_link_or_junction, utc_timestamp
 
 MAX_ANCHOR_BYTES = 64 * 1024
@@ -225,7 +225,16 @@ def _require_root_reference(repo: GitRepo, task: dict[str, Any], content: str) -
         raise SoloAIError("Task root anchor reference is invalid")
     if recorded != expected:
         raise SoloAIError("Task anchor root reference does not match task state")
-    show_root_anchor(repo, root_id=expected)
+    external_root = task.get("root_anchor_file")
+    if external_root is not None and (
+        not isinstance(external_root, str) or not external_root
+    ):
+        raise SoloAIError("Task root anchor file reference is invalid")
+    resolve_root_anchor(
+        repo,
+        root_id=expected,
+        external_path=Path(external_root) if external_root else None,
+    )
 
 
 def _origin_is_verified(task: dict[str, Any], fields: dict[str, str]) -> bool:
@@ -390,7 +399,16 @@ def create_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:
     if root_reference is not None:
         if not isinstance(root_reference, str) or not root_reference:
             raise SoloAIError("Task root anchor reference is invalid")
-        show_root_anchor(repo, root_id=root_reference)
+        external_root = task.get("root_anchor_file")
+        if external_root is not None and (
+            not isinstance(external_root, str) or not external_root
+        ):
+            raise SoloAIError("Task root anchor file reference is invalid")
+        resolve_root_anchor(
+            repo,
+            root_id=root_reference,
+            external_path=Path(external_root) if external_root else None,
+        )
     root_line = f"- Root anchor: `{root_reference}`\n" if root_reference else ""
     content = f"""# Task anchor: {task["name"]}
 
