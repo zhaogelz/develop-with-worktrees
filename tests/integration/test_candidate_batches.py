@@ -1448,6 +1448,86 @@ def test_runtime_release_holds_the_fifth_candidate_until_adapter_success(
     assert verify_context["candidate_id"] == completed["candidate_id"]
 
 
+def test_recover_held_candidate_release_uses_delivered_adapter_inputs(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    release_marker = repo.local_dir / "delivered-release-context.json"
+    entry = git_repo / "adapter_entry.py"
+    entry.write_text("raise SystemExit(1)\n", encoding="utf-8")
+    install_runtime_adapter(
+        repo,
+        release_script="raise SystemExit(1)",
+        verify_script="pass",
+    )
+    config = git_repo / ".solo-ai" / "config.toml"
+    original_release = json.dumps([sys.executable, "-c", "raise SystemExit(1)"])
+    contents = config.read_text(encoding="utf-8")
+    assert f"release = {original_release}" in contents
+    contents = contents.replace(
+        f"release = {original_release}",
+        "release = " + json.dumps([sys.executable, "adapter_entry.py"]),
+    ).replace(
+        'input_paths = [".solo-ai/config.toml"]',
+        'input_paths = [".solo-ai/config.toml", "adapter_entry.py"]',
+    )
+    config.write_text(contents, encoding="utf-8")
+    git(repo.root, "add", ".solo-ai/config.toml", "adapter_entry.py")
+    git(repo.root, "commit", "-m", "test: use a tracked runtime adapter entrypoint")
+    approve(repo, load_verification_config(repo))
+
+    task = start(repo, name="recover held release from delivered adapter")
+    worktree = Path(task["worktree"])
+    (worktree / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: candidate with failed release",
+        paths=["candidate.txt"],
+    )
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    with pytest.raises(SoloAIError, match="Runtime Adapter release failed"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+
+    held = CandidateBatchStore(repo).candidate_for_task(task["id"])
+    assert held is not None
+    assert held["status"] == "held"
+    entry.write_text(
+        "from pathlib import Path; import sys; "
+        f"Path({str(release_marker)!r}).write_text("
+        "Path(sys.argv[-1]).read_text(encoding='utf-8'), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    git(repo.root, "add", "adapter_entry.py")
+    git(repo.root, "commit", "-m", "test: deliver fixed runtime adapter entrypoint")
+    approve(repo, load_verification_config(repo))
+
+    with pytest.raises(SoloAIError, match="changed, tracked, and covered"):
+        recover(
+            repo,
+            task_id=task["id"],
+            repair_runtime_adapter_paths=[".solo-ai/config.toml"],
+        )
+    recovered = recover(
+        repo,
+        task_id=task["id"],
+        repair_runtime_adapter_paths=["adapter_entry.py"],
+    )
+
+    assert recovered["status"] == "candidate-published"
+    assert recovered["candidate_id"] == held["candidate_id"]
+    released = CandidateBatchStore(repo).candidate_for_task(task["id"])
+    assert released is not None
+    assert released["status"] == "pending"
+    release_context = json.loads(release_marker.read_text(encoding="utf-8"))
+    assert release_context["worktree"] == str(worktree.resolve())
+    assert release_context["candidate_id"] == held["candidate_id"]
+    assert release_context["candidate_head"] == held["head"]
+    assert release_context["adapter_source"] == str(git_repo.resolve())
+    assert release_context["adapter_repair_paths"] == ["adapter_entry.py"]
+
+
 def test_recover_activates_a_held_candidate_after_post_release_interruption(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

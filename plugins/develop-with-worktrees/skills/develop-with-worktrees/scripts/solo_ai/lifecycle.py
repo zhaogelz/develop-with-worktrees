@@ -99,6 +99,7 @@ from .util import (
     redact_text,
     run_logged,
     safe_slug,
+    sha256_file,
     sha256_text,
     stable_json,
     utc_timestamp,
@@ -2017,14 +2018,30 @@ def _resume_candidate_publication(
         activate=False,
     )
     published = publication_result["candidate"]
-    from .runtime_adapter import release_task_runtime
-
-    runtime_release = release_task_runtime(
-        repo,
-        task=task,
-        reason="candidate-published",
-        candidate=published,
+    from .runtime_adapter import (
+        release_task_runtime,
+        require_exact_passed_task_runtime_release,
     )
+
+    stored_release = publication.get("runtime_release")
+    if isinstance(stored_release, dict):
+        require_exact_passed_task_runtime_release(
+            repo, task=task, candidate=published, receipt=stored_release
+        )
+        runtime_release = stored_release
+    else:
+        runtime_release = release_task_runtime(
+            repo,
+            task=task,
+            reason="candidate-published",
+            candidate=published,
+        )
+        if runtime_release.get("configured"):
+            task = store.record_candidate_runtime_release(
+                task["id"],
+                candidate_id=str(published["candidate_id"]),
+                receipt=runtime_release,
+            )
     if (
         not repo.is_clean(worktree)
         or repo.head(worktree) != head
@@ -2348,6 +2365,131 @@ def _recover_runtime_adapter_repair(
     return {**activated, "anchor_path": str(anchor.resolve())}
 
 
+def _recover_published_runtime_adapter_release(
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    paths: list[str],
+) -> dict[str, Any]:
+    """从已交付 base 重试一个 held 候选的 Adapter release，不改候选内容。"""
+
+    publication = task.get("candidate_publication") or {}
+    active = task.get("active_operation") or {}
+    if (
+        _is_in_place(task)
+        or task.get("status") != "publishing"
+        or publication.get("phase") != "prepared"
+        or publication.get("task_id") != task.get("id")
+        or active
+        and process_matches(active.get("owner", {}))
+    ):
+        raise SoloAIError(
+            "Delivered-base Runtime Adapter recovery requires an idle prepared candidate publication"
+        )
+    if (
+        not paths
+        or len(paths) != len(set(paths))
+        or any(not _path_is_safe(path) for path in paths)
+    ):
+        raise SoloAIError(
+            "Delivered-base Runtime Adapter recovery requires unique repository-relative exact --path values"
+        )
+    worktree = Path(str(task["worktree"]))
+    source_root = Path(str(task["base_worktree"]))
+    if (
+        not worktree.is_dir()
+        or not repo.is_clean(worktree)
+        or repo.head(worktree) != publication.get("head")
+        or repo.branch(worktree) not in {None, task.get("branch")}
+        or not source_root.is_dir()
+        or not repo.is_clean(source_root)
+        or repo.branch(source_root) != task.get("base_ref")
+    ):
+        raise SoloAIError(
+            "Delivered-base Runtime Adapter recovery requires exact clean candidate and base worktrees"
+        )
+    delivered_head = repo.head(source_root)
+    if (
+        delivered_head == task.get("base_head")
+        or repo.git(
+            ["merge-base", "--is-ancestor", str(task["base_head"]), delivered_head],
+            cwd=source_root,
+            check=False,
+        ).returncode
+        != 0
+    ):
+        raise SoloAIError(
+            "Delivered-base Runtime Adapter recovery requires a clean base advanced from the task baseline"
+        )
+    config = load_repo_config(repo, cwd=source_root)
+    if config.runtime_adapter.release is None:
+        raise SoloAIError(
+            "Delivered base no longer configures a Runtime Adapter release"
+        )
+    candidate_tracked = {
+        item
+        for item in repo.git(["ls-files", "-z"], cwd=worktree).stdout.split("\0")
+        if item
+    }
+    source_tracked = {
+        item
+        for item in repo.git(["ls-files", "-z"], cwd=source_root).stdout.split("\0")
+        if item
+    }
+    allowed_inputs = tuple(config.runtime_adapter.input_paths)
+    invalid = sorted(
+        path
+        for path in paths
+        if path not in candidate_tracked
+        or path not in source_tracked
+        or (
+            path != ".solo-ai/config.toml"
+            and not any(
+                fnmatch.fnmatchcase(path, pattern) for pattern in allowed_inputs
+            )
+        )
+        or sha256_file(worktree / path) == sha256_file(source_root / path)
+    )
+    if invalid:
+        raise SoloAIError(
+            "Delivered-base Runtime Adapter recovery paths must be changed, tracked, and covered by input_paths:\n"
+            + "\n".join(f"- {path}" for path in invalid)
+        )
+    from .candidate_batches import CandidateBatchStore
+    from .runtime_adapter import release_task_runtime
+
+    candidate = CandidateBatchStore(repo).candidate_for_task(str(task["id"]))
+    if (
+        candidate is None
+        or candidate.get("status") != "held"
+        or candidate.get("candidate_id") != publication.get("candidate_id")
+        or candidate.get("head") != publication.get("head")
+        or candidate.get("ref") != publication.get("ref")
+    ):
+        raise SoloAIError(
+            "Delivered-base Runtime Adapter recovery requires the exact held candidate"
+        )
+    with store.recovery_operation(str(task["id"])):
+        task = store.task(str(task["id"]))
+        runtime_release = release_task_runtime(
+            repo,
+            task=task,
+            reason="candidate-published",
+            candidate=candidate,
+            adapter_source=source_root,
+            repaired_paths=tuple(paths),
+        )
+        if runtime_release.get("configured"):
+            task = store.record_candidate_runtime_release(
+                str(task["id"]),
+                candidate_id=str(candidate["candidate_id"]),
+                receipt=runtime_release,
+            )
+        with candidate_admission_lock(repo):
+            return _resume_candidate_publication(repo, store=store, task=task)
+
+
 def recover(
     repo: GitRepo,
     *,
@@ -2361,6 +2503,13 @@ def recover(
     task = store.task(task_id)
     if repair_runtime_adapter_paths is not None:
         with maintenance_lock(repo):
+            if task.get("status") == "publishing" and task.get("candidate_publication"):
+                return _recover_published_runtime_adapter_release(
+                    repo,
+                    store=store,
+                    task=task,
+                    paths=repair_runtime_adapter_paths,
+                )
             return _recover_runtime_adapter_repair(
                 repo,
                 store=store,

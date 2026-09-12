@@ -72,6 +72,31 @@ def _logs_exist(receipt: dict[str, Any]) -> bool:
     )
 
 
+def _bind_command_inputs_to_source(
+    command: CommandSpec, *, source_root: Path, adapter_inputs: dict[str, str]
+) -> CommandSpec:
+    """让受限恢复从已交付源码执行 Adapter 输入，CWD 仍由调用方固定。"""
+
+    resolved_source = source_root.resolve()
+    rebound: list[str] = []
+    for argument in command.argv:
+        candidate = Path(argument)
+        if candidate.is_absolute():
+            rebound.append(argument)
+            continue
+        source = (resolved_source / candidate).resolve()
+        try:
+            relative = source.relative_to(resolved_source).as_posix()
+        except ValueError:
+            rebound.append(argument)
+            continue
+        if source.is_file() and relative in adapter_inputs:
+            rebound.append(str(source))
+        else:
+            rebound.append(argument)
+    return CommandSpec(tuple(rebound))
+
+
 def _content_address_log(repo: GitRepo, temporary: Path) -> tuple[Path, str]:
     digest = sha256_file(temporary)
     target = repo.local_dir / "logs" / "content" / f"{digest}.log"
@@ -251,19 +276,29 @@ def release_task_runtime(
     task: dict[str, Any],
     reason: str,
     candidate: dict[str, Any] | None = None,
+    adapter_source: Path | None = None,
+    repaired_paths: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     worktree = Path(str(task["worktree"]))
-    config = load_repo_config(repo, cwd=worktree)
+    source_root = adapter_source.resolve() if adapter_source is not None else worktree
+    config = load_repo_config(repo, cwd=source_root)
     command = config.runtime_adapter.release
     repair = task.get("runtime_adapter_repair") or {}
     if repair.get("release_required") and command is None:
         raise SoloAIError("Runtime Adapter repair removed its required release command")
     if command is None:
         return {"configured": False, "operation": "release"}
-    _require_approval(repo, cwd=worktree)
+    _require_approval(repo, cwd=source_root)
     selected_candidate = candidate or {}
     adapter_inputs = _adapter_input_hashes(
-        repo, cwd=worktree, patterns=config.runtime_adapter.input_paths
+        repo, cwd=source_root, patterns=config.runtime_adapter.input_paths
+    )
+    invoked_command = (
+        _bind_command_inputs_to_source(
+            command, source_root=source_root, adapter_inputs=adapter_inputs
+        )
+        if adapter_source is not None
+        else command
     )
     context = {
         "reason": "runtime-adapter-repair" if repair else reason,
@@ -277,18 +312,84 @@ def release_task_runtime(
         "registered_processes": copy.deepcopy(task.get("processes", [])),
         "adapter_inputs": adapter_inputs,
     }
+    if adapter_source is not None:
+        context["adapter_source"] = str(source_root)
+        context["adapter_repair_paths"] = list(repaired_paths)
     if repair:
         context["repair_mode"] = True
     receipt = _invoke(
         repo,
         cwd=worktree,
         operation="release",
-        command=command,
+        command=invoked_command,
         timeout_seconds=config.runtime_adapter.timeout_seconds,
         context=context,
         reusable_success=True,
     )
     return {"configured": True, **receipt}
+
+
+def require_exact_passed_task_runtime_release(
+    repo: GitRepo,
+    *,
+    task: dict[str, Any],
+    candidate: dict[str, Any],
+    receipt: dict[str, Any],
+) -> None:
+    """只复用原任务、原候选的完整成功 release 收据。"""
+
+    if receipt.get("configured") is False:
+        return
+    invocation_id = receipt.get("invocation_id")
+    if not isinstance(invocation_id, str) or not invocation_id:
+        raise SoloAIError("Stored task Runtime Adapter release receipt is incomplete")
+    stored = read_json(
+        repo.local_dir / "runtime-adapter" / "receipts" / f"{invocation_id}.json",
+        {},
+    )
+    required = (
+        "schema_version",
+        "context_digest",
+        "command_digest",
+        "result",
+        "log_sha256",
+    )
+    if (
+        any(stored.get(key) != receipt.get(key) for key in required)
+        or stored.get("operation") != "release"
+        or stored.get("result") != "passed"
+        or not _logs_exist(stored)
+    ):
+        raise SoloAIError(
+            "Stored task Runtime Adapter release receipt changed or is not passed"
+        )
+    context_path = stored.get("context")
+    if not isinstance(context_path, str) or not context_path:
+        raise SoloAIError("Stored task Runtime Adapter release context is missing")
+    context = read_json(Path(context_path), {})
+    if (
+        context.get("schema_version") != ADAPTER_CONTEXT_SCHEMA
+        or context.get("contract") != "dww-runtime-adapter-v1"
+        or context.get("operation") != "release"
+        or sha256_text(stable_json(context)) != stored.get("context_digest")
+        or context.get("task_id") != task.get("id")
+        or context.get("base_ref") != task.get("base_ref")
+        or context.get("base_head") != task.get("base_head")
+        or context.get("candidate_id") != candidate.get("candidate_id")
+        or context.get("candidate_head") != candidate.get("head")
+    ):
+        raise SoloAIError("Stored task Runtime Adapter release context changed")
+    try:
+        same_worktree = (
+            Path(str(context.get("worktree"))).resolve()
+            == Path(str(task["worktree"])).resolve()
+        )
+    except OSError as exc:
+        raise SoloAIError(
+            "Stored task Runtime Adapter release worktree is invalid"
+        ) from exc
+    if not same_worktree:
+        raise SoloAIError("Stored task Runtime Adapter release worktree changed")
 
 
 def _batch_context(

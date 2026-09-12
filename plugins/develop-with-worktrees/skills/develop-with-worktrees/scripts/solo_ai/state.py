@@ -832,6 +832,35 @@ class StateStore:
 
         return self.mutate(update)
 
+    def record_candidate_runtime_release(
+        self,
+        task_id: str,
+        *,
+        candidate_id: str,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        """把候选冻结后的成功 Adapter release 固化到既有发布事务。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            publication = task.get("candidate_publication") if task else None
+            if (
+                not publication
+                or publication.get("candidate_id") != candidate_id
+                or task.get("status") != "publishing"
+                or receipt.get("operation") != "release"
+                or receipt.get("result") != "passed"
+            ):
+                raise SoloAIError("Candidate Runtime Adapter release identity changed")
+            existing = publication.get("runtime_release")
+            if existing is not None and existing != receipt:
+                raise SoloAIError("Candidate Runtime Adapter release receipt changed")
+            publication["runtime_release"] = copy.deepcopy(receipt)
+            task["updated_at"] = utc_timestamp()
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     def mark_integration_promoted(
         self, task_id: str, *, transaction_id: str, observed_base_head: str
     ) -> dict[str, Any]:
