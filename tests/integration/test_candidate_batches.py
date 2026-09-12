@@ -2583,6 +2583,32 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
             confirm=repair["id"],
         )
     StateStore(repo).update_task(repair["id"], repair_preparation=preparation)
+    source_ref = str(preparation["source_ref"])
+    repo.git(["update-ref", source_ref, source["base_head"]])
+    with pytest.raises(SoloAIError, match="source ref changed"):
+        adopt_task_anchor(
+            repo,
+            task_id=repair["id"],
+            objective=adoption_fields["Original purpose"],
+            target=adoption_fields["Implementation target"],
+            scope=adoption_fields["Scope boundary"],
+            acceptance=adoption_fields["Acceptance criteria"],
+            confirm=repair["id"],
+        )
+    repo.git(["update-ref", "-d", source_ref])
+    mismatched_paths = {**preparation, "changed_paths": []}
+    StateStore(repo).update_task(repair["id"], repair_preparation=mismatched_paths)
+    with pytest.raises(SoloAIError, match="repair anchor facts do not match"):
+        adopt_task_anchor(
+            repo,
+            task_id=repair["id"],
+            objective=adoption_fields["Original purpose"],
+            target=adoption_fields["Implementation target"],
+            scope=adoption_fields["Scope boundary"],
+            acceptance=adoption_fields["Acceptance criteria"],
+            confirm=repair["id"],
+        )
+    StateStore(repo).update_task(repair["id"], repair_preparation=preparation)
     adopted = adopt_task_anchor(
         repo,
         task_id=repair["id"],
@@ -2603,6 +2629,7 @@ def test_composition_conflict_prepares_bounded_repair_and_replacement_candidate(
         == canonical_baseline
     )
 
+    repo.git(["update-ref", source_ref, source["head"]])
     reused = prepare_candidate_repair(repo, candidate_id=candidate["candidate_id"])
     assert reused["id"] == repair["id"]
     assert reused["request_reused"] is True

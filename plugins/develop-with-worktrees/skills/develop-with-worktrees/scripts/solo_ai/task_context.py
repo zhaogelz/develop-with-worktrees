@@ -598,6 +598,9 @@ def _verify_legacy_repair_reference_baseline(
     candidate_id = preparation.get("candidate_id")
     source_ref = preparation.get("source_ref")
     expected_source_head = preparation.get("source_head")
+    changed_paths = preparation.get("changed_paths")
+    conflict_paths = preparation.get("conflict_paths")
+    repair_attempt = preparation.get("repair_attempt")
     if (
         not isinstance(candidate_id, str)
         or not candidate_id
@@ -609,12 +612,23 @@ def _verify_legacy_repair_reference_baseline(
         or preparation.get("base_head") != repair_base_head
         or task.get("base_ref") != repair_base_ref
         or task.get("base_head") != repair_base_head
+        or preparation.get("outcome") != "conflicted"
+        or preparation.get("manual_notification_required") is not False
+        or not isinstance(repair_attempt, int)
+        or isinstance(repair_attempt, bool)
+        or repair_attempt < 1
+        or not isinstance(changed_paths, list)
+        or not changed_paths
+        or any(not isinstance(path, str) or not path for path in changed_paths)
+        or len(set(changed_paths)) != len(changed_paths)
+        or not isinstance(conflict_paths, list)
+        or not conflict_paths
+        or any(not isinstance(path, str) or not path for path in conflict_paths)
+        or not set(conflict_paths).issubset(set(changed_paths))
     ):
         raise SoloAIError(
             "Existing legacy repair anchor facts do not match the active task"
         )
-    if repo.ref_head(source_ref) != source_head:
-        raise SoloAIError("Existing legacy repair anchor source ref changed")
     for head in (source_base, source_head, repair_base_head):
         resolved = repo.git(
             ["rev-parse", "--verify", f"{head}^{{commit}}"], check=False
@@ -623,13 +637,33 @@ def _verify_legacy_repair_reference_baseline(
             raise SoloAIError(
                 "Existing legacy repair anchor references an unknown commit"
             )
+    source_paths = [
+        path
+        for path in repo.git(
+            ["diff", "--name-only", source_base, source_head]
+        ).stdout.splitlines()
+        if path
+    ]
+    if sorted(changed_paths) != sorted(source_paths):
+        raise SoloAIError(
+            "Existing legacy repair anchor source path facts do not match"
+        )
+    source_ref_head = repo.ref_head(source_ref)
+    if source_ref_head is not None and source_ref_head != source_head:
+        raise SoloAIError("Existing legacy repair anchor source ref changed")
     if not repo.is_ancestor(source_base, source_head) or not repo.is_ancestor(
         source_base, repair_base_head
     ):
         raise SoloAIError("Existing legacy repair anchor source history is invalid")
     branch = str(task.get("branch") or "")
     branch_head = repo.ref_head(f"refs/heads/{branch}") if branch else None
-    if branch_head is None or not repo.is_ancestor(repair_base_head, branch_head):
+    candidate_head = task.get("candidate_head")
+    if (
+        not isinstance(candidate_head, str)
+        or branch_head is None
+        or candidate_head != branch_head
+        or not repo.is_ancestor(repair_base_head, branch_head)
+    ):
         raise SoloAIError(
             "Existing legacy repair anchor repair base is not an ancestor of the task"
         )
