@@ -62,6 +62,7 @@ from .root_context import (
     delete_root_anchor,
     list_root_anchors,
     nonterminal_external_root_children,
+    require_candidate_delivery_terminal,
     register_external_root_child,
     resolve_root_anchor,
     root_anchor_path,
@@ -1724,12 +1725,31 @@ def close_root_task_anchor(
         root_path = root_anchor_path(repo, root_id)
         with root_anchor_lock(root_path):
             show_root_anchor(repo, root_id=root_id)
-            active = [
-                str(task["id"])
+            root_tasks = [
+                task
                 for task in StateStore(repo).read()["tasks"].values()
                 if task.get("root_anchor_id") == root_id
-                and task.get("status") not in FINAL_TASK_STATES
             ]
+            active = [
+                str(task["id"])
+                for task in root_tasks
+                if task.get("status") not in FINAL_TASK_STATES
+            ]
+            published = [
+                task
+                for task in root_tasks
+                if task.get("status") == "candidate-published"
+            ]
+            if published:
+                from .candidate_batches import CandidateBatchStore
+
+                candidates = CandidateBatchStore(repo).read()["candidates"]
+                for task in published:
+                    require_candidate_delivery_terminal(
+                        candidates,
+                        task_id=str(task["id"]),
+                        label=f"Root child {task['id']}",
+                    )
             active.extend(
                 nonterminal_external_root_children(
                     root_id=root_id,

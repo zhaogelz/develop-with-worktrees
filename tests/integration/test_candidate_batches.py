@@ -20,13 +20,16 @@ from solo_ai.candidate_batches import (
     reconcile_batches,
     retire_failed_batch,
     seal_batch,
+    withdraw_candidate,
 )
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
     abandon,
     adopt_task_anchor,
     approve,
+    close_root_task_anchor,
     commit_task,
+    create_root_task_anchor,
     finish,
     initialize,
     ready,
@@ -126,6 +129,93 @@ def publish(repo: GitRepo, *, name: str, relative: str) -> dict[str, str]:
     )
     ready(repo, task_id=task["id"], lease=task["lease"])
     return finish(repo, task_id=task["id"], lease=task["lease"])
+
+
+def test_root_close_requires_a_local_published_candidate_to_finish_delivery(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    root = create_root_task_anchor(
+        repo,
+        purpose="close only after candidate delivery",
+        target="block a pending root candidate",
+        scope="root lifecycle only",
+        acceptance="pending candidate blocks close until terminal delivery",
+    )
+    task = start(repo, name="local root candidate", root_anchor_id=root["root_id"])
+    worktree = Path(task["worktree"])
+    (worktree / "local-root.txt").write_text("pending\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: publish local root candidate",
+        paths=["local-root.txt"],
+    )
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    candidate = finish(repo, task_id=task["id"], lease=task["lease"])
+
+    with pytest.raises(SoloAIError, match="not delivered or withdrawn"):
+        close_root_task_anchor(repo, root_id=root["root_id"], confirm=root["root_id"])
+
+    completed = reconcile_batches(repo, force=True, cause="dependency")
+    assert completed["status"] == "completed"
+    assert close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
+    assert (
+        CandidateBatchStore(repo).candidate(candidate["candidate_id"])["status"]
+        == "integrated"
+    )
+
+
+def test_root_close_requires_external_published_candidate_to_be_withdrawn(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    owner = initialized_batched(git_repo, auto_full=False)
+    root = create_root_task_anchor(
+        owner,
+        purpose="close external candidate safely",
+        target="block an external pending root candidate",
+        scope="cross-repository root lifecycle only",
+        acceptance="external pending candidate blocks close until withdrawal",
+    )
+    child_path = tmp_path / "external-child"
+    child_path.mkdir()
+    git(child_path, "init", "-b", "main")
+    git(child_path, "config", "user.name", "Test User")
+    git(child_path, "config", "user.email", "test@example.invalid")
+    (child_path / "README.md").write_text("# Child\n", encoding="utf-8")
+    git(child_path, "add", "README.md")
+    git(child_path, "commit", "-m", "initial")
+    child = initialized_batched(child_path, auto_full=False)
+
+    task = start(
+        child,
+        name="external root candidate",
+        root_anchor_id=root["root_id"],
+        root_anchor_file=Path(root["root_anchor_path"]),
+    )
+    worktree = Path(task["worktree"])
+    (worktree / "external-root.txt").write_text("pending\n", encoding="utf-8")
+    commit_task(
+        child,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: publish external root candidate",
+        paths=["external-root.txt"],
+    )
+    ready(child, task_id=task["id"], lease=task["lease"])
+    candidate = finish(child, task_id=task["id"], lease=task["lease"])
+
+    with pytest.raises(SoloAIError, match="not delivered or withdrawn"):
+        close_root_task_anchor(owner, root_id=root["root_id"], confirm=root["root_id"])
+
+    withdrawn = withdraw_candidate(child, candidate_id=candidate["candidate_id"])
+    assert withdrawn["status"] == "withdrawn"
+    assert close_root_task_anchor(
+        owner, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
 
 
 def test_start_request_is_idempotent_and_anchor_is_first_class(git_repo: Path) -> None:

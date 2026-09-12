@@ -7,6 +7,7 @@ import pytest
 from solo_ai.repo import GitRepo
 from solo_ai.root_context import (
     create_root_anchor,
+    require_candidate_delivery_terminal,
     root_anchor_path,
     show_root_anchor,
     update_root_anchor,
@@ -87,6 +88,44 @@ def test_root_anchor_update_rejects_manual_child_registry(git_repo: Path) -> Non
             input_path=update,
             expected_sha256=str(created["sha256"]),
         )
+
+
+@pytest.mark.parametrize("status", ["held", "pending", "sealed", "retained"])
+def test_root_candidate_delivery_rejects_nonterminal_candidate_states(
+    status: str,
+) -> None:
+    candidates = {
+        "candidate-one": {
+            "candidate_id": "candidate-one",
+            "task_id": "task-one",
+            "status": status,
+        }
+    }
+
+    with pytest.raises(SoloAIError, match="not delivered or withdrawn"):
+        require_candidate_delivery_terminal(
+            candidates, task_id="task-one", label="Root child task-one"
+        )
+
+
+def test_root_candidate_delivery_follows_supersession_to_terminal_outcome() -> None:
+    candidates = {
+        "candidate-original": {
+            "candidate_id": "candidate-original",
+            "task_id": "task-one",
+            "status": "superseded",
+            "superseded_by": "candidate-repair",
+        },
+        "candidate-repair": {
+            "candidate_id": "candidate-repair",
+            "task_id": "task-two",
+            "status": "integrated",
+        },
+    }
+
+    require_candidate_delivery_terminal(
+        candidates, task_id="task-one", label="Root child task-one"
+    )
 
 
 def test_cli_exposes_root_anchor_and_child_binding() -> None:

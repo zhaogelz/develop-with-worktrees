@@ -38,6 +38,7 @@ _CHILDREN_END = "<!-- dww-root-children:end -->"
 _CHILD_RECORD = re.compile(r"^- Child state: (?P<value>[^\r\n]+)$")
 _TASK_ID_PATTERN = re.compile(r"task-[A-Za-z0-9][A-Za-z0-9-]*\Z")
 MAX_CHILD_STATE_BYTES = 2 * 1024 * 1024
+MAX_CHILD_CANDIDATE_BATCHES_BYTES = 2 * 1024 * 1024
 
 
 def root_anchor_path(repo: GitRepo, root_id: str) -> Path:
@@ -412,9 +413,9 @@ def register_external_root_child(
         }
 
 
-def _registered_child_status(
+def _registered_child_task(
     record: dict[str, str], *, root_id: str, root_anchor_path: Path
-) -> str:
+) -> tuple[dict[str, Any], Path]:
     """读取跨仓库登记任务；任一身份或文件歧义都会使根关闭失败。"""
 
     expected_root_path = str(root_anchor_path.resolve())
@@ -451,7 +452,94 @@ def _registered_child_status(
     status = task.get("status")
     if not isinstance(status, str):
         raise SoloAIError("Registered child task status is invalid")
-    return status
+    return task, raw_path.parent
+
+
+def _registered_child_status(
+    record: dict[str, str], *, root_id: str, root_anchor_path: Path
+) -> str:
+    task, _ = _registered_child_task(
+        record, root_id=root_id, root_anchor_path=root_anchor_path
+    )
+    return str(task["status"])
+
+
+def require_candidate_delivery_terminal(
+    candidates: dict[str, Any], *, task_id: str, label: str
+) -> None:
+    """确认根子任务的候选谱系已交付或明确撤回。"""
+
+    if not isinstance(candidates, dict):
+        raise SoloAIError(f"{label} candidate state has an invalid candidate map")
+    matches = [
+        (candidate_id, candidate)
+        for candidate_id, candidate in candidates.items()
+        if isinstance(candidate_id, str)
+        and isinstance(candidate, dict)
+        and candidate.get("task_id") == task_id
+    ]
+    if len(matches) != 1:
+        raise SoloAIError(f"{label} candidate identity is missing or ambiguous")
+
+    candidate_id, candidate = matches[0]
+    seen: set[str] = set()
+    while True:
+        if candidate_id in seen:
+            raise SoloAIError(f"{label} candidate supersession chain is cyclic")
+        seen.add(candidate_id)
+        if candidate.get("candidate_id") != candidate_id:
+            raise SoloAIError(f"{label} candidate identity changed")
+        status = candidate.get("status")
+        if status in {"integrated", "withdrawn"}:
+            return
+        if status != "superseded":
+            raise SoloAIError(
+                f"{label} candidate is not delivered or withdrawn: "
+                f"{candidate_id} ({status})"
+            )
+        successor_id = candidate.get("superseded_by")
+        if not isinstance(successor_id, str) or not successor_id:
+            raise SoloAIError(f"{label} superseded candidate has no exact successor")
+        successor = candidates.get(successor_id)
+        if not isinstance(successor, dict):
+            raise SoloAIError(f"{label} candidate successor is missing")
+        candidate_id, candidate = successor_id, successor
+
+
+def _require_registered_child_candidate_delivery(
+    record: dict[str, str], *, root_id: str, root_anchor_path: Path
+) -> None:
+    """跨仓库候选发布不能单独作为根锚点的关闭终态。"""
+
+    task, local_dir = _registered_child_task(
+        record, root_id=root_id, root_anchor_path=root_anchor_path
+    )
+    if task["status"] != "candidate-published":
+        return
+    candidate_path = local_dir / "candidate-batches.json"
+    plain_path = _require_plain_file(
+        candidate_path,
+        root=local_dir.parent,
+        label="Registered child candidate state",
+    )
+    raw = plain_path.read_bytes()
+    if len(raw) > MAX_CHILD_CANDIDATE_BATCHES_BYTES:
+        raise SoloAIError(
+            "Registered child candidate state exceeds the 2 MiB safety limit"
+        )
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SoloAIError(
+            "Registered child candidate state is not valid UTF-8 JSON"
+        ) from exc
+    if not isinstance(value, dict):
+        raise SoloAIError("Registered child candidate state is invalid")
+    require_candidate_delivery_terminal(
+        value.get("candidates"),
+        task_id=record["task_id"],
+        label=f"Registered child {record['task_id']}",
+    )
 
 
 def nonterminal_external_root_children(
@@ -467,6 +555,10 @@ def nonterminal_external_root_children(
         )
         if status not in final_states:
             result.append(record["task_id"])
+        elif status == "candidate-published":
+            _require_registered_child_candidate_delivery(
+                record, root_id=root_id, root_anchor_path=root_anchor_file
+            )
     return result
 
 
