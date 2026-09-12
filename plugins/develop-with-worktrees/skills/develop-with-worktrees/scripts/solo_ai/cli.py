@@ -1793,7 +1793,7 @@ def _human(command: str, result: dict[str, Any]) -> str:
             )
         if result.get("status") == "candidate-published":
             return (
-                f"Task: {result['task_id']}\n"
+                f"Task: {result.get('task_id') or result['id']}\n"
                 "Status: candidate published; awaiting integration\n"
                 f"Candidate: {result['candidate_id']} at {result['candidate_head']}"
             )
