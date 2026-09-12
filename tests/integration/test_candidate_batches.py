@@ -2412,7 +2412,67 @@ def test_batch_metrics_are_derived_without_mutating_lifecycle_state(
     assert metrics["executed_full_validation_seconds"]["median"] == 12.5
     assert metrics["reused_full_profiles"] == 0
     assert metrics["missing_full_proofs"] == 0
+    assert metrics["legacy_completed_without_full_proof"] == 0
     assert store.path.read_bytes() == before
+
+
+def test_batch_metrics_separate_legacy_weak_proofs_from_current_missing_full_proofs(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    store = CandidateBatchStore(repo)
+    atomic_write_json(
+        store.path,
+        {
+            "schema_version": 4,
+            "next_publication_sequence": 1,
+            "updated_at": "2026-09-12T00:00:00Z",
+            "candidates": {},
+            "batches": {
+                "batch-legacy": {
+                    "id": "batch-legacy",
+                    "status": "completed",
+                    "candidate_ids": [],
+                    "integration_policy": {"schema_version": 1},
+                    "proof": "legacy-ready-proof",
+                },
+                "batch-current-no-proof": {
+                    "id": "batch-current-no-proof",
+                    "status": "completed",
+                    "candidate_ids": [],
+                    "integration_policy": {"schema_version": 2},
+                },
+                "batch-current-ready-proof": {
+                    "id": "batch-current-ready-proof",
+                    "status": "completed",
+                    "candidate_ids": [],
+                    "integration_policy": {"schema_version": 2},
+                    "proof": "current-ready-proof",
+                },
+            },
+        },
+    )
+    atomic_write_json(
+        repo.local_dir / "proofs" / "legacy-ready-proof.json",
+        {"profile_proofs": [{"fingerprint": "legacy-ready", "reused": False}]},
+    )
+    atomic_write_json(
+        repo.local_dir / "profile-proofs" / "legacy-ready.json",
+        {"inputs": {"level": "ready"}, "runs": []},
+    )
+    atomic_write_json(
+        repo.local_dir / "proofs" / "current-ready-proof.json",
+        {"profile_proofs": [{"fingerprint": "current-ready", "reused": False}]},
+    )
+    atomic_write_json(
+        repo.local_dir / "profile-proofs" / "current-ready.json",
+        {"inputs": {"level": "ready"}, "runs": []},
+    )
+
+    metrics = store.metrics()
+
+    assert metrics["legacy_completed_without_full_proof"] == 1
+    assert metrics["missing_full_proofs"] == 2
 
 
 def test_batch_runtime_release_failure_blocks_promotion_and_recovery_reuses_full(

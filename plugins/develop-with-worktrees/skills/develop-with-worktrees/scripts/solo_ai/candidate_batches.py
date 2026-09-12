@@ -881,34 +881,41 @@ class CandidateBatchStore:
         full_costs: list[float] = []
         reused_full_profiles = 0
         missing_full_proofs = 0
+        legacy_completed_without_full_proof = 0
         for batch in terminal:
-            if batch.get("status") != "completed" or not batch.get("proof"):
+            if batch.get("status") != "completed":
                 continue
-            proof = read_json(
-                self.repo.local_dir / "proofs" / f"{batch['proof']}.json", {}
-            )
             matched = False
-            for item in proof.get("profile_proofs", []):
-                profile = read_json(
-                    self.repo.local_dir
-                    / "profile-proofs"
-                    / f"{item.get('fingerprint')}.json",
-                    {},
+            proof_id = batch.get("proof")
+            if isinstance(proof_id, str) and proof_id:
+                proof = read_json(
+                    self.repo.local_dir / "proofs" / f"{proof_id}.json", {}
                 )
-                if (profile.get("inputs") or {}).get("level") != "full":
-                    continue
-                matched = True
-                if item.get("reused"):
-                    reused_full_profiles += 1
-                    continue
-                full_costs.append(
-                    sum(
-                        float(run.get("duration_seconds", 0))
-                        for run in profile.get("runs", [])
+                for item in proof.get("profile_proofs", []):
+                    profile = read_json(
+                        self.repo.local_dir
+                        / "profile-proofs"
+                        / f"{item.get('fingerprint')}.json",
+                        {},
                     )
-                )
+                    if (profile.get("inputs") or {}).get("level") != "full":
+                        continue
+                    matched = True
+                    if item.get("reused"):
+                        reused_full_profiles += 1
+                        continue
+                    full_costs.append(
+                        sum(
+                            float(run.get("duration_seconds", 0))
+                            for run in profile.get("runs", [])
+                        )
+                    )
             if not matched:
-                missing_full_proofs += 1
+                policy = batch.get("integration_policy")
+                if isinstance(policy, dict) and policy.get("schema_version") == 1:
+                    legacy_completed_without_full_proof += 1
+                else:
+                    missing_full_proofs += 1
 
         count = len(terminal)
         return {
@@ -928,6 +935,7 @@ class CandidateBatchStore:
             "executed_full_validation_seconds": _numeric_summary(full_costs),
             "reused_full_profiles": reused_full_profiles,
             "missing_full_proofs": missing_full_proofs,
+            "legacy_completed_without_full_proof": legacy_completed_without_full_proof,
         }
 
     def fail(
