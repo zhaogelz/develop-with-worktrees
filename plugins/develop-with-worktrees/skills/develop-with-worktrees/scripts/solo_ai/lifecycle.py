@@ -1487,6 +1487,7 @@ def ready(
                     force_task_scope=_is_in_place(task),
                     expected_base_head=expected_base_head,
                     expected_candidate_head=expected_candidate_head,
+                    validation_base_ref=str(task["base_ref"]),
                 )
             except ValidationBaseChanged as exc:
                 convergence_retries += 1
@@ -1865,6 +1866,7 @@ def _finish_in_place(
         task_id=task["id"],
         force_task_scope=True,
         expected_candidate_head=str(task["candidate_head"]),
+        validation_base_ref=str(task["base_ref"]),
     )
     _assert_in_place_binding(repo, store, task, session_id=session_id)
     if not repo.is_clean(worktree):
@@ -2234,6 +2236,7 @@ def finish(
                     task_id=task_id,
                     expected_base_head=str(task["base_head"]),
                     expected_candidate_head=candidate_head,
+                    validation_base_ref=str(task["base_ref"]),
                 )
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
                 if unknown := _unknown_ignored(repo, worktree):

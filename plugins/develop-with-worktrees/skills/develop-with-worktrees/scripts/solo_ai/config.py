@@ -92,6 +92,7 @@ class VerificationProfile:
     timeout_seconds: float
     resource_class: str
     level: str
+    frozen_base: bool
     full_scope: str | None
 
 
@@ -118,6 +119,7 @@ class VerificationConfig:
                     "timeout_seconds": profile.timeout_seconds,
                     "resource_class": profile.resource_class,
                     "level": profile.level,
+                    "frozen_base": profile.frozen_base,
                     "full_scope": profile.full_scope,
                 }
                 for profile in self.profiles
@@ -646,6 +648,13 @@ def _parse_verification_config(
             raise SoloAIError(
                 f"Profile {profile_id!r} may declare full_scope only at level full"
             )
+        frozen_base = _boolean(
+            raw.get("frozen_base", False), field=f"profiles[{index}].frozen_base"
+        )
+        if frozen_base and level not in {"ready", "full"}:
+            raise SoloAIError(
+                f"Profile {profile_id!r} may declare frozen_base only at level ready or full"
+            )
         profiles.append(
             VerificationProfile(
                 profile_id=profile_id,
@@ -667,6 +676,7 @@ def _parse_verification_config(
                 timeout_seconds=timeout_seconds,
                 resource_class=resource_class,
                 level=level,
+                frozen_base=frozen_base,
                 full_scope=full_scope,
             )
         )

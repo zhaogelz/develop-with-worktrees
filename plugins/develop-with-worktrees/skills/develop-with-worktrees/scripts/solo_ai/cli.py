@@ -66,7 +66,7 @@ from .lifecycle import (
 from .orchestration import BatchStore
 from .orchestration.adapters import adapter_for
 from .orchestration.models import MAX_DEVELOPMENT_PARALLELISM
-from .proof import approval_plan, proof_inputs, validate
+from .proof import approval_plan, frozen_validation_environment, proof_inputs, validate
 from .repo import GitRepo
 from .routing import detect_existing_workflows
 from .runtime_adapter import verify_runtime_effective
@@ -1567,6 +1567,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         worktree = Path(str(task["worktree"]))
         verification = load_verification_config(repo, cwd=worktree)
         verification_base = str(task.get("start_head") or task["base_ref"])
+        validation_base_ref = str(task["base_ref"])
         force_task_scope = task.get("mode") == "in-place"
         inputs, ready_records = proof_inputs(
             repo,
@@ -1576,6 +1577,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             task_id=task["id"],
             levels=("ready",),
             force_task_scope=force_task_scope,
+            validation_environment=frozen_validation_environment(
+                repo,
+                cwd=worktree,
+                base=verification_base,
+                validation_base_ref=validation_base_ref,
+            ),
         )
         records_by_id = {record[0].profile_id: record for record in ready_records}
         # 计划按各检查的实际执行阶段计算，避免Full身份污染Ready或开发证明。
@@ -1592,6 +1599,17 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 task_id=task["id"],
                 levels=levels,
                 force_task_scope=force_task_scope,
+                validation_environment=(
+                    frozen_validation_environment(
+                        repo,
+                        cwd=worktree,
+                        base=verification_base,
+                        validation_base_ref=validation_base_ref,
+                        full_scope="integration",
+                    )
+                    if level == "full"
+                    else {}
+                ),
             )
             records_by_id.update(
                 (record[0].profile_id, record)
@@ -1657,6 +1675,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 level=args.level,
                 full_scope="complete" if args.complete else "integration",
                 force_task_scope=_is_in_place(task),
+                validation_base_ref=str(task["base_ref"]),
             )
             return {
                 "task_id": task["id"],

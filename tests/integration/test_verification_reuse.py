@@ -14,7 +14,12 @@ from solo_ai.util import SoloAIError
 
 
 def configure(
-    root: Path, script: str, *, external: str = "none", closure: str = "complete"
+    root: Path,
+    script: str,
+    *,
+    external: str = "none",
+    closure: str = "complete",
+    frozen_base: bool = False,
 ) -> GitRepo:
     """只搭建验证接口所需的真实Git事实，不创建任务和集成队列。"""
     policy = root / ".solo-ai"
@@ -34,6 +39,7 @@ paths = ["**"]
 input_paths = ["**"]
 input_closure = "{closure}"
 external_state = "{external}"
+frozen_base = {str(frozen_base).lower()}
 commands = [{json.dumps([sys.executable, "-c", script])}]
 ''',
         encoding="utf-8",
@@ -127,6 +133,48 @@ def test_input_drift_during_cached_log_check_cannot_receive_success(
     monkeypatch.setattr(proof, "_logs_exist", change_after_check)
     with pytest.raises(SoloAIError, match="inputs changed"):
         validate(repo)
+
+
+def test_profile_proof_does_not_cross_frozen_validation_bases(git_repo: Path):
+    """项目命令可读取 DWW 基线，因此不同基线绝不能复用同一 profile proof。"""
+    repo = configure(git_repo, COUNT, frozen_base=True)
+    git(git_repo, "branch", "base-a")
+    (git_repo / "notes.md").write_text("base-b\n", encoding="utf-8")
+    git(git_repo, "add", "notes.md")
+    git(git_repo, "commit", "-m", "test: advance alternate base")
+    git(git_repo, "branch", "base-b")
+    (git_repo / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    git(git_repo, "add", "candidate.txt")
+    git(git_repo, "commit", "-m", "test: add candidate")
+    candidate_head = repo.head(repo.root)
+
+    def validate_against(base: str):
+        return proof.validate(
+            repo,
+            cwd=repo.root,
+            base=base,
+            validation_base_ref=base,
+            task_id="same-candidate",
+            verification=load_verification_config(repo),
+            level="full",
+            expected_base_head=repo.git(
+                ["rev-parse", base], cwd=repo.root
+            ).stdout.strip(),
+            expected_candidate_head=candidate_head,
+        )
+
+    first = validate_against("base-a")
+    second = validate_against("base-b")
+
+    assert (git_repo / ".tmp" / "count").read_text(encoding="utf-8") == "2"
+    assert (
+        first["profile_proofs"][0]["fingerprint"]
+        != second["profile_proofs"][0]["fingerprint"]
+    )
+    assert (
+        first["inputs"]["validation_environment"]["DWW_VALIDATION_BASE_HEAD"]
+        != second["inputs"]["validation_environment"]["DWW_VALIDATION_BASE_HEAD"]
+    )
 
 
 COUNT = (

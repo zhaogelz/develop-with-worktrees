@@ -181,6 +181,7 @@ static_only = false
 [[profiles]]
 id = "integration"
 level = "full"
+frozen_base = true
 paths = ["**"]
 commands = [["git", "status"]]
 
@@ -196,6 +197,7 @@ commands = [["git", "status"]]
 
     profiles = load_verification_config(GitRepo(git_repo)).profiles
     assert [profile.full_scope for profile in profiles] == ["integration", "complete"]
+    assert [profile.frozen_base for profile in profiles] == [True, False]
 
     path.write_text(
         path.read_text(encoding="utf-8").replace(
@@ -204,6 +206,19 @@ commands = [["git", "status"]]
         encoding="utf-8",
     )
     with pytest.raises(SoloAIError, match="full_scope"):
+        load_verification_config(GitRepo(git_repo))
+
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        .replace('full_scope = "unexpected"', 'full_scope = "complete"')
+        .replace(
+            'level = "full"\nfrozen_base = true',
+            'level = "development"\nfrozen_base = true',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SoloAIError, match="frozen_base"):
         load_verification_config(GitRepo(git_repo))
 
 

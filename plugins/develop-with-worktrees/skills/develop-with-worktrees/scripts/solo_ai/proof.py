@@ -281,6 +281,7 @@ def _profile_inputs(
     cwd: Path,
     tracked: list[str],
     shared: dict[str, Any],
+    validation_environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         **shared,
@@ -300,6 +301,8 @@ def _profile_inputs(
             name: sha256_text(os.environ[name]) if name in os.environ else "absent"
             for name in profile.environment
         },
+        # DWW 注入的冻结基线会影响项目选择器；它与声明环境一样属于证明身份。
+        "dww_validation_environment": dict(validation_environment or {}),
     }
 
 
@@ -307,6 +310,41 @@ def _execution_environment(profile: VerificationProfile) -> dict[str, str]:
     """命令仅继承运行所需的受控基线和策略显式列出的变量。"""
     names = (*_EXECUTION_BASELINE, *profile.environment)
     return {name: os.environ[name] for name in names if name in os.environ}
+
+
+def frozen_validation_environment(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    base: str,
+    validation_base_ref: str | None = None,
+    expected_base_head: str | None = None,
+    full_scope: str | None = None,
+) -> dict[str, str]:
+    """Return the non-secret frozen-base facts visible to Ready/Full commands."""
+    _require_expected_base_head(
+        repo, cwd=cwd, base=base, expected_base_head=expected_base_head
+    )
+    environment = {
+        "DWW_VALIDATION_BASE_REF": validation_base_ref or base,
+        "DWW_VALIDATION_BASE_HEAD": expected_base_head
+        or repo.git(["rev-parse", "--verify", base], cwd=cwd).stdout.strip(),
+    }
+    if full_scope is not None:
+        environment["DWW_VALIDATION_SCOPE"] = full_scope
+    return environment
+
+
+def _profile_validation_environment(
+    profile: VerificationProfile, validation_environment: dict[str, str]
+) -> dict[str, str]:
+    """Only profiles that select by base may observe the frozen base environment."""
+    if not profile.frozen_base:
+        return {}
+    environment = dict(validation_environment)
+    if profile.level != "full":
+        environment.pop("DWW_VALIDATION_SCOPE", None)
+    return environment
 
 
 def approval_plan(
@@ -514,10 +552,12 @@ def proof_inputs(
     expected_candidate_head: str | None = None,
     full_execution_id: str | None = None,
     tool_cache: dict[tuple[Any, ...], dict[str, str | None]] | None = None,
+    validation_environment: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[VerificationProfile, dict[str, Any], str]]]:
     _require_expected_candidate_head(
         repo, cwd=cwd, expected_candidate_head=expected_candidate_head
     )
+    frozen_environment = dict(validation_environment or {})
     files = changed_files(repo, cwd=cwd, base=base)
     profiles = select_profiles(
         verification, files, levels=levels, full_scopes=full_scopes
@@ -532,7 +572,15 @@ def proof_inputs(
     candidate_tree = repo.tree(cwd=cwd)
     records: list[tuple[VerificationProfile, dict[str, Any], str]] = []
     for profile in profiles:
-        inputs = _profile_inputs(profile, cwd=cwd, tracked=tracked, shared=shared)
+        inputs = _profile_inputs(
+            profile,
+            cwd=cwd,
+            tracked=tracked,
+            shared=shared,
+            validation_environment=_profile_validation_environment(
+                profile, frozen_environment
+            ),
+        )
         # 同一任务可在输入闭包未变时复用；跨任务复用仍需显式闭包和无外部状态。
         if force_task_scope and task_id:
             scope = f"task:{task_id}"
@@ -550,12 +598,17 @@ def proof_inputs(
             # 已通过Full后的释放/推进恢复由批次事务处理，不重新进入validate。
             inputs["full_execution"] = full_execution_id or "plan-only"
         records.append((profile, inputs, sha256_text(stable_json(inputs))))
+    visible_validation_environment = (
+        frozen_environment if any(profile.frozen_base for profile in profiles) else {}
+    )
     candidate = {
         "schema_version": PROOF_SCHEMA,
         **shared,
         "candidate_head": candidate_head,
         "candidate_tree": candidate_tree,
-        "base_head": repo.git(["rev-parse", base], cwd=cwd).stdout.strip(),
+        "base_head": frozen_environment.get("DWW_VALIDATION_BASE_HEAD")
+        or repo.git(["rev-parse", base], cwd=cwd).stdout.strip(),
+        "validation_environment": visible_validation_environment,
         "files": files,
         "unmapped_files": missing,
         "levels": list(levels),
@@ -619,6 +672,7 @@ def _require_profile_inputs(
     verification: VerificationConfig,
     commands: list[CommandSpec],
     tool_cache: dict[tuple[Any, ...], dict[str, str | None]],
+    validation_environment: dict[str, str],
 ) -> None:
     """HEAD未变不足以证明输入稳定；同时复核文件、配置、工具和环境。"""
     current = _profile_inputs(
@@ -626,6 +680,9 @@ def _require_profile_inputs(
         cwd=cwd,
         tracked=_tracked(repo, cwd),
         shared=_shared_inputs(repo, cwd, commands, verification, tool_cache),
+        validation_environment=_profile_validation_environment(
+            profile, validation_environment
+        ),
     )
     if any(inputs.get(key) != value for key, value in current.items()):
         raise SoloAIError(
@@ -833,6 +890,7 @@ def validate(
     expected_base_head: str | None = None,
     expected_candidate_head: str | None = None,
     full_scope: str = "integration",
+    validation_base_ref: str | None = None,
 ) -> dict[str, Any]:
     from .util import read_json
 
@@ -848,6 +906,16 @@ def validate(
     )
     # 仅本次调用内复用版本探测；每次读取均复核解析路径与文件身份。
     tool_cache: dict[tuple[Any, ...], dict[str, str | None]] = {}
+    validation_environment: dict[str, str] = {}
+    if level in {"ready", "full"}:
+        validation_environment = frozen_validation_environment(
+            repo,
+            cwd=cwd,
+            base=base,
+            validation_base_ref=validation_base_ref,
+            expected_base_head=expected_base_head,
+            full_scope=full_scope if level == "full" else None,
+        )
     inputs, records = proof_inputs(
         repo,
         cwd=cwd,
@@ -862,15 +930,8 @@ def validate(
             new_id(f"{level}-validation") if level in {"full", "stress"} else None
         ),
         tool_cache=tool_cache,
+        validation_environment=validation_environment,
     )
-    validation_environment: dict[str, str] = {}
-    if level == "full":
-        validation_environment = {
-            "DWW_VALIDATION_BASE_REF": base,
-            "DWW_VALIDATION_BASE_HEAD": expected_base_head
-            or repo.git(["rev-parse", base], cwd=cwd).stdout.strip(),
-            "DWW_VALIDATION_SCOPE": full_scope,
-        }
     # Ready（以及包含 Ready 的 Full）是候选晋级门禁，必须覆盖所有候选
     # 路径。development 与显式 Stress 都是按变更选择的辅助执行层；要求
     # 每个文档或无关文件也匹配压力配置，会让它们错误地无法单独运行。
@@ -905,6 +966,7 @@ def validate(
                 verification=verification,
                 commands=commands,
                 tool_cache=tool_cache,
+                validation_environment=validation_environment,
             )
         existing["reused_at"] = utc_timestamp()
         atomic_write_json(proof_path, existing)
@@ -923,6 +985,7 @@ def validate(
                 verification=verification,
                 commands=commands,
                 tool_cache=tool_cache,
+                validation_environment=validation_environment,
             )
 
         result = _run_profile(
@@ -935,7 +998,9 @@ def validate(
             base=base,
             expected_base_head=expected_base_head,
             expected_candidate_head=expected_candidate_head,
-            validation_environment=validation_environment,
+            validation_environment=_profile_validation_environment(
+                profile, validation_environment
+            ),
             check_inputs=check_inputs,
         )
         profile_proofs.append(
@@ -982,6 +1047,9 @@ def validate(
             verification=verification,
             commands=commands,
             tool_cache=tool_cache,
+            validation_environment=_profile_validation_environment(
+                profile, validation_environment
+            ),
         )
     proof = {
         "schema_version": PROOF_SCHEMA,

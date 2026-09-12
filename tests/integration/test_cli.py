@@ -609,21 +609,33 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
 [[profiles]]
 id = "ready"
 level = "ready"
+frozen_base = true
 paths = ["**"]
-commands = [["git", "diff", "--check", "main...HEAD"]]
+commands = [
+  ["git", "diff", "--check", "main...HEAD"],
+  ["uv", "run", "python", "-c", "import os; print('DWW_TEST_BASE_REF=' + os.environ['DWW_VALIDATION_BASE_REF']); print('DWW_TEST_BASE_HEAD=' + os.environ['DWW_VALIDATION_BASE_HEAD'])"],
+]
 
 [[profiles]]
 id = "full"
 level = "full"
+frozen_base = true
 paths = ["**"]
-commands = [["git", "diff", "--check", "main...HEAD"]]
+commands = [
+  ["git", "diff", "--check", "main...HEAD"],
+  ["uv", "run", "python", "-c", "import os; print('DWW_TEST_SCOPE=' + os.environ['DWW_VALIDATION_SCOPE']); print('DWW_TEST_BASE_REF=' + os.environ['DWW_VALIDATION_BASE_REF']); print('DWW_TEST_BASE_HEAD=' + os.environ['DWW_VALIDATION_BASE_HEAD'])"],
+]
 
 [[profiles]]
 id = "complete"
 level = "full"
 full_scope = "complete"
+frozen_base = true
 paths = ["**"]
-commands = [["git", "diff", "--check", "main...HEAD"]]
+commands = [
+  ["git", "diff", "--check", "main...HEAD"],
+  ["uv", "run", "python", "-c", "import os; print('DWW_TEST_SCOPE=' + os.environ['DWW_VALIDATION_SCOPE']); print('DWW_TEST_BASE_REF=' + os.environ['DWW_VALIDATION_BASE_REF']); print('DWW_TEST_BASE_HEAD=' + os.environ['DWW_VALIDATION_BASE_HEAD'])"],
+]
 """,
         encoding="utf-8",
     )
@@ -698,6 +710,37 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         planned["development"]["fingerprint"]
         == development_proof["profile_proofs"][0]["fingerprint"]
     )
+    ready_gate = call_json(
+        "ready",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        repo_path=worktree,
+    )
+    ready_proof = json.loads(
+        (
+            git_repo
+            / ".git"
+            / "solo-ai"
+            / "proofs"
+            / f"{ready_gate['ready_proof']}.json"
+        ).read_text(encoding="utf-8")
+    )
+    environment_lines = {
+        key: value
+        for line in Path(ready_proof["runs"][-1]["log"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.startswith("DWW_TEST_")
+        for key, value in (line.split("=", 1),)
+    }
+    assert environment_lines["DWW_TEST_BASE_REF"] == "main"
+    assert environment_lines["DWW_TEST_BASE_HEAD"] == ready_proof["inputs"]["base_head"]
+    assert (
+        git(git_repo, "rev-parse", environment_lines["DWW_TEST_BASE_REF"])
+        == environment_lines["DWW_TEST_BASE_HEAD"]
+    )
     ready = call_json(
         "verify",
         "--task",
@@ -708,11 +751,7 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         "ready",
         repo_path=worktree,
     )
-    ready_proof = json.loads(
-        (git_repo / ".git" / "solo-ai" / "proofs" / f"{ready['proof']}.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    assert ready["reused"] is True
     assert [item["profile_id"] for item in ready_proof["profile_proofs"]] == ["ready"]
     assert (
         planned["ready"]["fingerprint"]
@@ -737,6 +776,20 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         "ready",
         "full",
     ]
+    full_environment_lines = {
+        key: value
+        for line in Path(full_proof["runs"][-1]["log"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.startswith("DWW_TEST_")
+        for key, value in (line.split("=", 1),)
+    }
+    assert full_environment_lines["DWW_TEST_SCOPE"] == "integration"
+    assert full_environment_lines["DWW_TEST_BASE_REF"] == "main"
+    assert (
+        full_environment_lines["DWW_TEST_BASE_HEAD"]
+        == full_proof["inputs"]["base_head"]
+    )
     # 新Full仍须为外部状态未知的检查产生独立执行身份。
     assert (
         planned["full"]["fingerprint"] != full_proof["profile_proofs"][1]["fingerprint"]
@@ -763,6 +816,20 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         "full",
         "complete",
     ]
+    complete_environment_lines = {
+        key: value
+        for line in Path(complete_proof["runs"][-1]["log"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.startswith("DWW_TEST_")
+        for key, value in (line.split("=", 1),)
+    }
+    assert complete_environment_lines["DWW_TEST_SCOPE"] == "complete"
+    assert complete_environment_lines["DWW_TEST_BASE_REF"] == "main"
+    assert (
+        complete_environment_lines["DWW_TEST_BASE_HEAD"]
+        == complete_proof["inputs"]["base_head"]
+    )
     stress = call_json(
         "verify",
         "--task",
