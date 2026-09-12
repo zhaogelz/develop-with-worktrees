@@ -1791,6 +1791,12 @@ def _human(command: str, result: dict[str, Any]) -> str:
                 f"Transaction: {result['transaction_id']}\n"
                 f"Candidate: {result['candidate_head']}"
             )
+        if result.get("status") == "candidate-published":
+            return (
+                f"Task: {result['task_id']}\n"
+                "Status: candidate published; awaiting integration\n"
+                f"Candidate: {result['candidate_id']} at {result['candidate_head']}"
+            )
         if result.get("status") == "abandoned":
             return (
                 f"Task: {result.get('id') or result.get('task_id')}\n"

@@ -34,6 +34,24 @@ def test_human_batch_output_accepts_direct_and_reconcile_results() -> None:
     )
 
 
+def test_human_recover_output_accepts_candidate_publication_without_a_lease() -> None:
+    result = {
+        "task_id": "task-published",
+        "status": "candidate-published",
+        "candidate_id": "candidate-published",
+        "candidate_head": "a" * 40,
+    }
+
+    rendered = _human("recover", result)
+
+    assert rendered == (
+        "Task: task-published\n"
+        "Status: candidate published; awaiting integration\n"
+        f"Candidate: candidate-published at {'a' * 40}"
+    )
+    assert "Lease:" not in rendered
+
+
 def test_runtime_adapter_repair_cli_requires_an_exact_path(git_repo: Path) -> None:
     runner = (
         Path(__file__).parents[2]
