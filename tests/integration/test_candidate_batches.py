@@ -2148,6 +2148,79 @@ def _failed_superseded_batch(
     return store, store.summary()["batches"][0], candidate
 
 
+def _failed_withdrawn_batch(
+    repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    relative: str,
+) -> tuple[CandidateBatchStore, dict[str, object], dict[str, str]]:
+    """构造失败后由用户明确放弃的候选，覆盖真实退役前置流程。"""
+    candidate = publish(
+        repo, name="fast withdrawn retirement fixture", relative=relative
+    )
+
+    def fail_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        raise SoloAIError("synthetic withdrawn fast-retirement failure")
+
+    monkeypatch.setattr(batch_module, "validate", fail_validation)
+    with pytest.raises(
+        SoloAIError, match="synthetic withdrawn fast-retirement failure"
+    ):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    withdrawn = withdraw_candidate(repo, candidate_id=candidate["candidate_id"])
+    assert withdrawn["status"] == "withdrawn"
+    store = CandidateBatchStore(repo)
+    return store, store.summary()["batches"][0], candidate
+
+
+def test_fast_failed_batch_retirement_accepts_explicitly_withdrawn_candidate(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    store, failed, candidate = _failed_withdrawn_batch(
+        repo, monkeypatch, relative="fast-withdrawn-retire.txt"
+    )
+    worktree = Path(failed["worktree"])
+
+    retired = retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+
+    record = store.candidate(candidate["candidate_id"])
+    assert retired["worktree_retired_at"]
+    assert retired["fast_retirement_receipt_sha256"]
+    assert record["status"] == "withdrawn"
+    assert repo.ref_head(record["ref"]) is None
+    assert not worktree.exists()
+
+
+def test_fast_failed_batch_retirement_rejects_retained_candidate(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(
+        repo, name="retained fast retirement fixture", relative="retained.txt"
+    )
+    monkeypatch.setattr(
+        batch_module,
+        "validate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            SoloAIError("synthetic retained fast-retirement failure")
+        ),
+    )
+    with pytest.raises(SoloAIError, match="synthetic retained fast-retirement failure"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    store = CandidateBatchStore(repo)
+    failed = store.summary()["batches"][0]
+
+    with pytest.raises(
+        SoloAIError,
+        match="superseded or explicitly withdrawn",
+    ):
+        retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+
+    assert store.candidate(candidate["candidate_id"])["status"] == "retained"
+    assert Path(failed["worktree"]).exists()
+
+
 def test_fast_failed_batch_retirement_skips_dependency_hashes_and_is_idempotent(
     git_repo: Path,
     tmp_path: Path,

@@ -2053,10 +2053,12 @@ def retire_failed_batch(
                     for item in batch.get("candidate_ids", [])
                 ]
                 if not candidates or any(
-                    candidate.get("status") != "superseded" for candidate in candidates
+                    candidate.get("status") not in {"superseded", "withdrawn"}
+                    for candidate in candidates
                 ):
                     raise SoloAIError(
-                        "Fast retirement requires every batch candidate to be superseded"
+                        "Fast retirement requires every batch candidate to be superseded "
+                        "or explicitly withdrawn"
                     )
                 return worktree_retirement.retire_fast(repo, store, batch)
             if batch.get("worktree_mode") == "reusable":
