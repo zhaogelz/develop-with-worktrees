@@ -305,6 +305,43 @@ def test_full_managed_lifecycle_and_exact_ready_proof_reuse(git_repo: Path) -> N
     assert StateStore(repo).task(task["id"])["status"] == "finished"
 
 
+def test_finish_keeps_ready_proof_when_prepublication_cleanup_blocks(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="preserve ready proof before candidate publication")
+    commit_one(repo, task, "blocked.txt", "blocked\n", "test: blocked publication")
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+    original = lifecycle._unknown_ignored
+    monkeypatch.setattr(lifecycle, "_unknown_ignored", lambda *_: ["pytest-current"])
+
+    with pytest.raises(SoloAIError, match="Unknown or protected ignored files"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+
+    held = StateStore(repo).task(task["id"])
+    assert held["status"] == "ready"
+    assert held["ready_proof"] == prepared["ready_proof"]
+    monkeypatch.setattr(lifecycle, "_unknown_ignored", original)
+
+    completed = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert completed["proof"] == prepared["ready_proof"]
+    assert completed["proof_reused"] is True
+
+
+def test_recover_restores_one_task_scoped_orphaned_ready_proof(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="restore orphaned ready proof")
+    commit_one(repo, task, "orphaned.txt", "orphaned\n", "test: orphaned proof")
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+    StateStore(repo).update_task(task["id"], status="active", ready_proof=None)
+
+    restored = recover(repo, task_id=task["id"])
+
+    assert restored["status"] == "ready"
+    assert restored["ready_proof"] == prepared["ready_proof"]
+    assert restored["recovered_ready_proof"] is True
+
+
 def test_full_validation_reuses_the_exact_ready_profile_before_heavy_work(
     git_repo: Path,
 ) -> None:

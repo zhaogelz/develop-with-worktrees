@@ -2024,6 +2024,75 @@ def _prepare_candidate_publication(
     )
 
 
+def _restore_orphaned_ready_proof(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any] | None:
+    """仅恢复旧版 Finish 在发布前错误遗失的、任务专属的 Ready 证明。"""
+    if (
+        task.get("status") != "active"
+        or task.get("ready_proof")
+        or task.get("candidate_publication")
+        or task.get("integration")
+    ):
+        return None
+    candidate = str(task.get("candidate_head") or "")
+    base_head = str(task.get("base_head") or "")
+    if not candidate or not base_head:
+        return None
+    worktree = Path(str(task["worktree"]))
+    if (
+        not worktree.is_dir()
+        or not any(item.path == worktree.resolve() for item in repo.worktrees())
+        or not repo.is_clean(worktree)
+        or repo.head(worktree) != candidate
+        or repo.branch(worktree) != task.get("branch")
+    ):
+        return None
+    matches: list[dict[str, Any]] = []
+    for path in (repo.local_dir / "proofs").glob("*.json"):
+        fingerprint = path.stem
+        proof = read_json(path, {})
+        try:
+            require_exact_passed_proof(
+                proof,
+                fingerprint=fingerprint,
+                candidate_head=candidate,
+                base_head=base_head,
+            )
+        except SoloAIError:
+            continue
+        profiles = proof.get("profile_proofs") or []
+        if not isinstance(profiles, list):
+            continue
+        if any(
+            read_json(
+                repo.local_dir / "profile-proofs" / f"{item.get('fingerprint')}.json",
+                {},
+            )
+            .get("inputs", {})
+            .get("reuse_scope")
+            != f"task:{task['id']}"
+            for item in profiles
+            if isinstance(item, dict) and item.get("fingerprint")
+        ):
+            continue
+        if any(
+            not isinstance(item, dict) or not item.get("fingerprint")
+            for item in profiles
+        ):
+            continue
+        matches.append(proof)
+    if len(matches) > 1:
+        raise SoloAIError(
+            "More than one task-scoped Ready proof matches this candidate; run Ready again"
+        )
+    if not matches:
+        return None
+    return store.update_task(
+        task["id"], status="ready", ready_proof=str(matches[0]["fingerprint"])
+    )
+
+
 def _resume_candidate_publication(
     repo: GitRepo, *, store: StateStore, task: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2263,12 +2332,6 @@ def finish(
                 )
                 task = _sync_base(repo, task)
                 candidate_head = repo.head(worktree)
-                task = store.update_task(
-                    task_id,
-                    candidate_head=candidate_head,
-                    base_head=task["base_head"],
-                    ready_proof=None,
-                )
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
                 # Freeze the exact candidate before policy, safety, and validation gates.
                 candidate_config = load_repo_config(repo, cwd=worktree)
@@ -2742,6 +2805,14 @@ def recover(
                 raise SoloAIError(
                     "Task recovery operation identity changed while waiting"
                 )
+            restored = _restore_orphaned_ready_proof(repo, store=store, task=task)
+            if restored is not None:
+                return {
+                    "id": restored["id"],
+                    "status": restored["status"],
+                    "ready_proof": restored["ready_proof"],
+                    "recovered_ready_proof": True,
+                }
             if task.get("candidate_publication"):
                 return _resume_candidate_publication(repo, store=store, task=task)
             if task.get("abandonment"):
