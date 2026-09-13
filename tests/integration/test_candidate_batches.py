@@ -2195,7 +2195,7 @@ def test_fast_failed_batch_retirement_accepts_nested_opaque_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (git_repo / ".gitignore").write_text(
-        "components/api/.venv/\nweb/node_modules/\n",
+        "components/api/.venv/\nweb/node_modules/\nweb/tsconfig.tsbuildinfo\n",
         encoding="utf-8",
     )
     git(git_repo, "add", ".gitignore")
@@ -2211,6 +2211,8 @@ def test_fast_failed_batch_retirement_accepts_nested_opaque_dependencies(
     node_modules.mkdir(parents=True)
     (venv / "marker.bin").write_bytes(b"generated")
     (node_modules / "marker.bin").write_bytes(b"generated")
+    tsbuildinfo = worktree / "web" / "tsconfig.tsbuildinfo"
+    tsbuildinfo.write_text('{"version":"generated"}', encoding="utf-8")
 
     def no_slow_inventory(*args: object, **kwargs: object) -> None:
         pytest.fail("fast retirement must not expand nested dependency inventory")
@@ -2221,6 +2223,7 @@ def test_fast_failed_batch_retirement_accepts_nested_opaque_dependencies(
     assert retired["worktree_retired_at"]
     assert retired["fast_retirement_receipt_sha256"]
     assert not worktree.exists()
+    assert not tsbuildinfo.exists()
 
 
 def test_fast_failed_batch_retirement_rejects_protected_ignored_content(
@@ -2244,6 +2247,28 @@ def test_fast_failed_batch_retirement_rejects_protected_ignored_content(
     assert protected.read_bytes() == b"do not remove"
     assert worktree.exists()
     assert any(item.path == worktree for item in repo.worktrees())
+
+
+def test_fast_failed_batch_retirement_rejects_tsbuildinfo_in_protected_directory(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text("storage/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: protect nested tsbuildinfo data")
+    repo = initialized_batched(git_repo, auto_full=False)
+    _, failed, _ = _failed_superseded_batch(
+        repo, monkeypatch, relative="fast-protected-tsbuildinfo.txt"
+    )
+    worktree = Path(failed["worktree"])
+    protected = worktree / "storage" / "tsconfig.tsbuildinfo"
+    protected.parent.mkdir()
+    protected.write_bytes(b"do not remove")
+
+    with pytest.raises(SoloAIError, match="Protected ignored content"):
+        retire_failed_batch(repo, batch_id=str(failed["id"]), fast=True)
+
+    assert protected.read_bytes() == b"do not remove"
+    assert worktree.exists()
 
 
 def test_fast_failed_batch_retirement_resumes_after_staging_interruption(

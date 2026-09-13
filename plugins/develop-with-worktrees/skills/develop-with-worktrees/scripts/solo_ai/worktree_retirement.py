@@ -132,16 +132,15 @@ def _fast_validate_untracked(repo: GitRepo, worktree: Path) -> dict[str, Any]:
         ):
             continue
         leaf = Path(relative).name.casefold()
-        if len(Path(relative).parts) == 1 and (
-            leaf == "uv.toml"
-            or any(leaf.endswith(suffix) for suffix in KNOWN_RECREATABLE_FILE_SUFFIXES)
-        ):
-            continue
         classification = classify_cleanup_path(relative, policy)
         if classification in {"keep", "protected"}:
             raise SoloAIError(
                 f"Protected ignored content blocks fast retirement: {relative}"
             )
+        if (len(Path(relative).parts) == 1 and leaf == "uv.toml") or any(
+            leaf.endswith(suffix) for suffix in KNOWN_RECREATABLE_FILE_SUFFIXES
+        ):
+            continue
         raise SoloAIError(f"Unknown ignored content blocks fast retirement: {relative}")
     return {"ordinary_untracked": 0, "ignored_roots_checked": sorted(checked_roots)}
 

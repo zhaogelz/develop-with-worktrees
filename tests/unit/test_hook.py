@@ -530,7 +530,9 @@ def test_read_only_parser_accepts_quoted_search_text_and_limited_pipeline() -> N
         "Get-Content -LiteralPath 'README.md' -Encoding UTF8 | Select-Object -First 40"
     )
     assert HOOK._strict_read_only_bash("rg --no-config -n 'it''s|scope' README.md")
-    assert HOOK._strict_read_only_bash("rg --no-config -n -A 3 'anchor|scope' README.md")
+    assert HOOK._strict_read_only_bash(
+        "rg --no-config -n -A 3 'anchor|scope' README.md"
+    )
 
 
 def test_read_only_parser_accepts_common_repository_enumeration() -> None:

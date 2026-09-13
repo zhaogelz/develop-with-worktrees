@@ -364,7 +364,9 @@ def _redact_legacy_approval_plan(plan: dict[str, Any]) -> dict[str, Any]:
     sanitized = copy.deepcopy(plan)
     configuration = sanitized.get("policy", {}).get("configuration", {})
     verification = configuration.get("verification", {})
-    profiles = verification.get("profiles", []) if isinstance(verification, dict) else []
+    profiles = (
+        verification.get("profiles", []) if isinstance(verification, dict) else []
+    )
     if not isinstance(profiles, list):
         return sanitized
     for profile in profiles:
@@ -375,7 +377,9 @@ def _redact_legacy_approval_plan(plan: dict[str, Any]) -> dict[str, Any]:
             continue
         redacted: list[Any] = []
         for command in commands:
-            if isinstance(command, list) and all(isinstance(value, str) for value in command):
+            if isinstance(command, list) and all(
+                isinstance(value, str) for value in command
+            ):
                 redacted.append(
                     {
                         "argv": [redact_text(value) for value in command],

@@ -2547,11 +2547,9 @@ commands = [["git", "diff", "--check", "{token}"]]
     ][0]["fingerprint"]
     # 模拟 schema 4 在本机遗留的原始 argv；下一次计划检查必须清理它。
     approvals = read_json(approvals_path, {"accepted": {}})
-    approvals["accepted"][approval["fingerprint"]]["plan"]["policy"][
-        "configuration"
-    ]["verification"]["profiles"][0]["commands"] = [
-        ["git", "diff", "--check", token]
-    ]
+    approvals["accepted"][approval["fingerprint"]]["plan"]["policy"]["configuration"][
+        "verification"
+    ]["profiles"][0]["commands"] = [["git", "diff", "--check", token]]
     atomic_write_json(approvals_path, approvals)
 
     changed = verification_path.read_text(encoding="utf-8").replace(

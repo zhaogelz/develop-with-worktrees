@@ -966,7 +966,8 @@ def start(
                 branch = repo.branch(repo.root)
                 if branch is None and bind_branch:
                     registered = next(
-                        (item for item in repo.worktrees() if item.path == repo.root), None
+                        (item for item in repo.worktrees() if item.path == repo.root),
+                        None,
                     )
                     if registered is None or not registered.detached:
                         raise SoloAIError(
@@ -980,7 +981,9 @@ def start(
                         ["check-ref-format", "--branch", bind_branch], check=False
                     )
                     if checked.returncode != 0 or checked.stdout.strip() != bind_branch:
-                        raise SoloAIError("--bind-branch must be a valid local branch name")
+                        raise SoloAIError(
+                            "--bind-branch must be a valid local branch name"
+                        )
                     ref = f"refs/heads/{bind_branch}"
                     if any(item.branch == ref for item in repo.worktrees()):
                         raise SoloAIError(
@@ -992,7 +995,11 @@ def start(
                         raise SoloAIError(
                             "--bind-branch already points at a different commit; preserve it"
                         )
-                    switch_args = ["switch", bind_branch] if existing else ["switch", "-c", bind_branch]
+                    switch_args = (
+                        ["switch", bind_branch]
+                        if existing
+                        else ["switch", "-c", bind_branch]
+                    )
                     repo.git(switch_args, cwd=repo.root)
                     branch = repo.branch(repo.root)
                     if branch != bind_branch or repo.head(repo.root) != head:
