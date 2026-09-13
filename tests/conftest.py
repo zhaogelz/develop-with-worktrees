@@ -31,6 +31,8 @@ _DWW_FAST_MODULES = frozenset(
         "tests/unit/test_routing.py",
         "tests/unit/test_safety.py",
         "tests/unit/test_task_context.py",
+        "tests/unit/test_host_context.py",
+        "tests/unit/test_host_handoff_state.py",
         "tests/unit/test_test_layers.py",
     }
 )

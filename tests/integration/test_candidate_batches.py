@@ -122,8 +122,14 @@ timeout_seconds = 30
     approve(repo, load_verification_config(repo))
 
 
-def publish(repo: GitRepo, *, name: str, relative: str) -> dict[str, str]:
-    task = start(repo, name=name)
+def publish(
+    repo: GitRepo,
+    *,
+    name: str,
+    relative: str,
+    host_origin: dict[str, str] | None = None,
+) -> dict[str, str]:
+    task = start(repo, name=name, host_origin=host_origin)
     worktree = Path(task["worktree"])
     (worktree / relative).write_text(f"{name}\n", encoding="utf-8")
     commit_task(
@@ -135,6 +141,74 @@ def publish(repo: GitRepo, *, name: str, relative: str) -> dict[str, str]:
     )
     ready(repo, task_id=task["id"], lease=task["lease"])
     return finish(repo, task_id=task["id"], lease=task["lease"])
+
+
+def test_candidate_handoff_records_source_and_auto_batch_coordinator(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo)
+    source = {"kind": "codex", "thread_id": "developer-task"}
+    coordinator = {"kind": "codex", "thread_id": "integration-task"}
+
+    first = publish(
+        repo,
+        name="source handoff",
+        relative="source-handoff.txt",
+        host_origin=source,
+    )
+    second = publish(
+        repo,
+        name="coordinator handoff",
+        relative="coordinator-handoff.txt",
+        host_origin=coordinator,
+    )
+
+    pool = CandidateBatchStore(repo).summary()
+    candidates = {item["candidate_id"]: item for item in pool["candidates"]}
+    assert candidates[first["candidate_id"]]["host_origin"] == source
+    assert candidates[second["candidate_id"]]["host_origin"] == coordinator
+    assert len(pool["batches"]) == 1
+    assert pool["batches"][0]["host_coordinator"] == coordinator
+
+    status = _status(repo, detailed=False)
+    tasks = {item["id"]: item for item in status["tasks"]}
+    assert tasks[first["task_id"]]["candidate_delivery"]["source_host"] == source
+    assert tasks[second["task_id"]]["candidate_delivery"]["source_host"] == coordinator
+
+
+def test_explicit_tail_records_the_triggering_host_as_coordinator(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(
+        repo,
+        name="explicit handoff",
+        relative="explicit-handoff.txt",
+        host_origin={"kind": "codex", "thread_id": "developer-task"},
+    )
+
+    completed = seal_batch(
+        repo,
+        candidate_ids=[candidate["candidate_id"]],
+        coordinator={"kind": "codex", "thread_id": "integration-task"},
+    )
+
+    assert completed["status"] == "completed"
+    assert completed["host_coordinator"] == {
+        "kind": "codex",
+        "thread_id": "integration-task",
+    }
+
+
+def test_start_refuses_an_unverified_host_reference(git_repo: Path) -> None:
+    repo = initialized_batched(git_repo)
+
+    with pytest.raises(SoloAIError, match="lowercase"):
+        start(
+            repo,
+            name="invalid host origin",
+            host_origin={"kind": "Codex", "thread_id": "developer-task"},
+        )
 
 
 def test_root_close_requires_a_local_published_candidate_to_finish_delivery(

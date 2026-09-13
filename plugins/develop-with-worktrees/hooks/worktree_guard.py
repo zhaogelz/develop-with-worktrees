@@ -52,6 +52,7 @@ DWW_SUBCOMMANDS = {
     "orchestrate",
     "candidate",
     "batch",
+    "host-handoff",
     "start",
     "commit",
     "ready",
@@ -70,6 +71,8 @@ DWW_SUBCOMMANDS = {
     "prune-slot",
     "deinit",
     "anchor",
+    "root-anchor",
+    "handoff",
 }
 DWW_QUARANTINE_SUBCOMMANDS = {"doctor", "status", "plan", "resume-in-place"}
 SHELL_CONTROL = (";", "|", "&", "`", "$", "(", ")", "<", ">", "\n", "\r")

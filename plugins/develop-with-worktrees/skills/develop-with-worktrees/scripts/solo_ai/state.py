@@ -24,7 +24,7 @@ from .util import (
     utc_timestamp,
 )
 
-STATE_SCHEMA = 7
+STATE_SCHEMA = 8
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 IN_PLACE_MODE = "in-place"
 
@@ -145,6 +145,10 @@ class StateStore:
             for task in state.get("tasks", {}).values():
                 task.setdefault("root_anchor_file", None)
             state["schema_version"] = STATE_SCHEMA
+        elif version == 7:
+            for task in state.get("tasks", {}).values():
+                task.setdefault("host_origin", None)
+            state["schema_version"] = STATE_SCHEMA
         elif version != STATE_SCHEMA:
             raise SoloAIError(
                 "Unsupported local state schema; run doctor before changing this repository"
@@ -154,6 +158,7 @@ class StateStore:
         for task in state.get("tasks", {}).values():
             task.setdefault("integration_policy", None)
             task.setdefault("root_anchor_file", None)
+            task.setdefault("host_origin", None)
         state.setdefault("pending_operation_outcomes", {})
         self._apply_guard_quarantines(state)
         return state
@@ -377,6 +382,7 @@ class StateStore:
         supersedes: str | None = None,
         root_anchor_id: str | None = None,
         root_anchor_file: str | None = None,
+        host_origin: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         task_id = f"task-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         lease = uuid.uuid4().hex
@@ -395,6 +401,7 @@ class StateStore:
                         or existing.get("base_ref") != base_ref
                         or existing.get("root_anchor_id") != root_anchor_id
                         or existing.get("root_anchor_file") != root_anchor_file
+                        or existing.get("host_origin") != host_origin
                     ):
                         raise SoloAIError(
                             "The request id is already bound to a different task"
@@ -435,6 +442,7 @@ class StateStore:
                 },
                 "root_anchor_id": root_anchor_id,
                 "root_anchor_file": root_anchor_file,
+                "host_origin": copy.deepcopy(host_origin),
                 "candidate_head": None,
                 "status": "starting",
                 "lease": lease,

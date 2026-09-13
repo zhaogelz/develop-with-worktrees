@@ -46,6 +46,7 @@ from .integration import (
     migrate_legacy_receipt,
     write_completed_receipt,
 )
+from .host_context import normalize_host_reference
 from .integration import legacy_transaction as legacy_integration_transaction
 from .integration import prepare as prepare_integration
 from .integration import resume_prepared as resume_integration
@@ -915,9 +916,11 @@ def start(
     supersedes: str | None = None,
     root_anchor_id: str | None = None,
     root_anchor_file: Path | None = None,
+    host_origin: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     with maintenance_lock(repo):
         config, _, _ = _config_and_mode(repo)
+        host_origin = normalize_host_reference(host_origin)
         store = StateStore(repo)
         store.ensure_slots(config)
         if root_anchor_file is not None and root_anchor_id is None:
@@ -1046,6 +1049,7 @@ def start(
                 supersedes=supersedes,
                 root_anchor_id=root_anchor_id,
                 root_anchor_file=external_root_file,
+                host_origin=host_origin,
             )
         if external_root_file is not None:
             try:
@@ -2010,6 +2014,7 @@ def _prepare_candidate_publication(
         "proof_kind": proof["kind"],
         "supersedes": task.get("supersedes"),
         "integration_policy": task.get("integration_policy"),
+        "host_origin": task.get("host_origin"),
         "anchor_path": str(require_anchor(repo, task).resolve()),
         "prepared_by_operation_id": operation_id,
         "prepared_at": utc_timestamp(),

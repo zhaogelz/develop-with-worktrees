@@ -594,3 +594,29 @@ def test_read_only_parser_limits_content_and_select_arguments() -> None:
     )
     assert not HOOK._strict_read_only_bash("Get-ChildItem -Recurse")
     assert not HOOK._strict_read_only_bash("git ls-files --with-tree=HEAD")
+
+
+def test_hook_allows_recognized_host_handoff_and_rejects_a_spoofed_runner(
+    git_repo: Path,
+) -> None:
+    _initialized(git_repo)
+    allowed = HOOK.decide(
+        _payload(
+            git_repo,
+            tool="Bash",
+            command=(
+                f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
+                "host-handoff status"
+            ),
+        )
+    )
+    denied = HOOK.decide(
+        _payload(
+            git_repo,
+            tool="Bash",
+            command=(f'python x/dww.py --repo "{git_repo}" host-handoff status'),
+        )
+    )
+
+    assert allowed is None
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"

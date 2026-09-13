@@ -19,6 +19,8 @@ from .candidate_batches import (
     withdraw_candidate,
 )
 from .cleanup import classify_cleanup_path, require_managed_directory_identity
+from .host_context import host_reference
+from .host_handoffs import HostHandoffStore
 from .config import (
     CommandSpec,
     load_repo_config,
@@ -89,6 +91,19 @@ from .util import (
     utc_timestamp,
 )
 from .validation_queue import estimate_validation, queue_status, set_capacity
+
+
+def _add_host_reference_arguments(
+    parser: argparse.ArgumentParser, *, role: str
+) -> None:
+    parser.add_argument(
+        "--host-kind",
+        help=f"verified host kind that owns this {role}; requires --host-thread",
+    )
+    parser.add_argument(
+        "--host-thread",
+        help=f"verified host task or session identifier that owns this {role}; requires --host-kind",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -379,6 +394,7 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="explicit absolute external root-anchor file; requires --root-anchor",
     )
+    _add_host_reference_arguments(start_parser, role="development task")
 
     root_anchor = sub.add_parser(
         "root-anchor", help="manage one local cross-phase coordinator anchor"
@@ -422,6 +438,7 @@ def _parser() -> argparse.ArgumentParser:
         help="prepare one bounded managed repair task for a composition conflict",
     )
     candidate_repair.add_argument("--candidate", required=True)
+    _add_host_reference_arguments(candidate_repair, role="repair task")
     candidate_withdraw = candidate_sub.add_parser(
         "withdraw", help="withdraw one pending candidate that is not in an active batch"
     )
@@ -442,6 +459,7 @@ def _parser() -> argparse.ArgumentParser:
         "--after-failed-batch",
         help="create one reviewed idempotent generation after this exact failed batch",
     )
+    _add_host_reference_arguments(batch_seal, role="integration batch")
     batch_reconcile = batch_sub.add_parser(
         "reconcile",
         help="freeze one full or proven quiet tail batch from persisted facts",
@@ -464,6 +482,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
         default="heartbeat",
     )
+    _add_host_reference_arguments(batch_reconcile, role="integration batch")
     batch_recover = batch_sub.add_parser(
         "recover",
         help="resume an interrupted sealed generation from recorded Git facts",
@@ -483,6 +502,69 @@ def _parser() -> argparse.ArgumentParser:
         "metrics",
         help="derive batch-size and validation-cost metrics from existing facts",
     )
+
+    host_handoff = sub.add_parser(
+        "host-handoff",
+        help="record and resume host-native repair handoffs without invoking host APIs",
+    )
+    host_handoff_sub = host_handoff.add_subparsers(
+        dest="host_handoff_command", required=True
+    )
+    host_handoff_sub.add_parser(
+        "status", help="show durable repair handoffs and next host actions"
+    )
+    host_handoff_batch = host_handoff_sub.add_parser(
+        "batch", help="inspect or explicitly take over a batch coordinator receipt"
+    )
+    host_handoff_batch_sub = host_handoff_batch.add_subparsers(
+        dest="host_handoff_batch_command", required=True
+    )
+    host_handoff_batch_take_over = host_handoff_batch_sub.add_parser(
+        "take-over",
+        help="replace an unavailable batch coordinator at one exact revision",
+    )
+    host_handoff_batch_take_over.add_argument("--batch", required=True)
+    host_handoff_batch_take_over.add_argument(
+        "--expected-revision", type=int, required=True
+    )
+    host_handoff_batch_take_over.add_argument("--reason", required=True)
+    _add_host_reference_arguments(
+        host_handoff_batch_take_over, role="integration batch"
+    )
+    host_handoff_repair = host_handoff_sub.add_parser(
+        "repair",
+        help="dispatch, receive, take over, or prepare one durable repair request",
+    )
+    host_handoff_repair_sub = host_handoff_repair.add_subparsers(
+        dest="host_handoff_repair_command", required=True
+    )
+    host_handoff_dispatch = host_handoff_repair_sub.add_parser(
+        "dispatch",
+        help="return the stable message payload for the recorded repair assignee",
+    )
+    host_handoff_dispatch.add_argument("--request", required=True)
+    host_handoff_dispatch.add_argument(
+        "--retry",
+        action="store_true",
+        help="record one explicit resend after a delivery failure",
+    )
+    _add_host_reference_arguments(host_handoff_dispatch, role="repair dispatch")
+    host_handoff_claim = host_handoff_repair_sub.add_parser(
+        "claim", help="acknowledge receipt as the exact current repair assignee"
+    )
+    host_handoff_claim.add_argument("--request", required=True)
+    _add_host_reference_arguments(host_handoff_claim, role="repair assignee")
+    host_handoff_take_over = host_handoff_repair_sub.add_parser(
+        "take-over", help="explicitly replace an unavailable repair assignee"
+    )
+    host_handoff_take_over.add_argument("--request", required=True)
+    host_handoff_take_over.add_argument("--reason", required=True)
+    _add_host_reference_arguments(host_handoff_take_over, role="repair assignee")
+    host_handoff_prepare = host_handoff_repair_sub.add_parser(
+        "prepare", help="claim then create or return the single managed repair task"
+    )
+    host_handoff_prepare.add_argument("--request", required=True)
+    _add_host_reference_arguments(host_handoff_prepare, role="repair assignee")
 
     runtime = sub.add_parser(
         "runtime", help="ask the project Adapter to verify a delivered runtime"
@@ -734,6 +816,7 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
                 "id": candidate.get("candidate_id"),
                 "status": candidate.get("status"),
                 "delivery_status": candidate.get("delivery_status"),
+                "source_host": candidate.get("host_origin"),
             }
             if candidate.get("batch_ownership"):
                 projected_task["batch_ownership"] = candidate["batch_ownership"]
@@ -756,6 +839,7 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
         "task_anchors": list_anchors(repo),
         "candidate_pool": candidate_batches["candidates"],
         "integration_batches": candidate_batches["batches"],
+        "host_handoffs": HostHandoffStore(repo).status(),
     }
     if detailed:
         for slot in result["slots"]:
@@ -1464,6 +1548,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             supersedes=args.supersedes,
             root_anchor_id=args.root_anchor,
             root_anchor_file=args.root_anchor_file,
+            host_origin=host_reference(args.host_kind, args.host_thread),
         )
     if args.command == "root-anchor":
         if args.root_anchor_command == "create":
@@ -1489,11 +1574,48 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         if args.root_anchor_command == "list":
             return list_root_task_anchors(repo)
         raise SoloAIError(f"Unknown root anchor command: {args.root_anchor_command}")
+    if args.command == "host-handoff":
+        handoffs = HostHandoffStore(repo)
+        if args.host_handoff_command == "status":
+            return handoffs.status()
+        if args.host_handoff_command == "batch":
+            if args.host_handoff_batch_command == "take-over":
+                return CandidateBatchStore(repo).assign_host_coordinator(
+                    args.batch,
+                    coordinator=host_reference(args.host_kind, args.host_thread),
+                    expected_revision=args.expected_revision,
+                    reason=args.reason,
+                )
+            raise SoloAIError(
+                f"Unknown host handoff batch command: {args.host_handoff_batch_command}"
+            )
+        if args.host_handoff_command == "repair":
+            actor = host_reference(args.host_kind, args.host_thread)
+            if args.host_handoff_repair_command == "dispatch":
+                return handoffs.dispatch(
+                    request_id=args.request, sender=actor, retry=args.retry
+                )
+            if args.host_handoff_repair_command == "claim":
+                return handoffs.claim(request_id=args.request, actor=actor)
+            if args.host_handoff_repair_command == "take-over":
+                return handoffs.take_over(
+                    request_id=args.request, actor=actor, reason=args.reason
+                )
+            if args.host_handoff_repair_command == "prepare":
+                return handoffs.prepare(request_id=args.request, actor=actor)
+            raise SoloAIError(
+                f"Unknown host handoff repair command: {args.host_handoff_repair_command}"
+            )
+        raise SoloAIError(f"Unknown host handoff command: {args.host_handoff_command}")
     if args.command == "candidate":
         if args.candidate_command == "status":
             return CandidateBatchStore(repo).summary()
         if args.candidate_command == "repair":
-            return prepare_candidate_repair(repo, candidate_id=args.candidate)
+            return prepare_candidate_repair(
+                repo,
+                candidate_id=args.candidate,
+                host_origin=host_reference(args.host_kind, args.host_thread),
+            )
         if args.candidate_command == "withdraw":
             return withdraw_candidate(repo, candidate_id=args.candidate)
         raise SoloAIError(f"Unknown candidate command: {args.candidate_command}")
@@ -1508,9 +1630,15 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 repo,
                 candidate_ids=args.candidate,
                 after_failed_batch_id=args.after_failed_batch,
+                coordinator=host_reference(args.host_kind, args.host_thread),
             )
         if args.batch_command == "reconcile":
-            return reconcile_batches(repo, force=args.force, cause=args.cause)
+            return reconcile_batches(
+                repo,
+                force=args.force,
+                cause=args.cause,
+                coordinator=host_reference(args.host_kind, args.host_thread),
+            )
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
         if args.batch_command == "retire":

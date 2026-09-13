@@ -19,6 +19,7 @@ from .cleanup import (
     require_managed_directory_identity,
 )
 from .config import CommandSpec, load_repo_config, load_verification_config
+from .host_context import normalize_host_reference
 from .integration import integration_turn
 from .proof import require_approved_plan, require_exact_passed_proof, validate
 from .repo import GitRepo
@@ -45,7 +46,7 @@ from .util import (
     utc_timestamp,
 )
 
-POOL_SCHEMA = 4
+POOL_SCHEMA = 5
 ACTIVE_BATCH_STATES = {
     "sealed",
     "composing",
@@ -150,6 +151,11 @@ class CandidateBatchStore:
             policy.setdefault("tail_quiet_seconds", 90)
         for batch in value.get("batches", {}).values():
             batch.setdefault("runtime_cycle", 0)
+            batch.setdefault("host_coordinator", None)
+            coordinator = normalize_host_reference(batch.get("host_coordinator"))
+            batch["host_coordinator"] = coordinator
+            batch.setdefault("host_coordinator_revision", 1 if coordinator else 0)
+            batch.setdefault("host_coordinator_transfers", [])
             if batch.get("seal_intent_id"):
                 continue
             policy = batch.get("integration_policy") or LEGACY_EXPLICIT_POLICY
@@ -259,6 +265,7 @@ class CandidateBatchStore:
                 "kind": "full" if candidate_count >= batch_size else "tail",
                 "phase": batch_status or None,
                 "process": process,
+                "coordinator": copy.deepcopy(batch.get("host_coordinator")),
             }
             if batch
             else None,
@@ -332,6 +339,7 @@ class CandidateBatchStore:
         batch_size: int,
         trigger: str,
         after_failed_batch_id: str | None = None,
+        coordinator: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if not candidate_ids or len(candidate_ids) > batch_size:
             raise SoloAIError(
@@ -414,6 +422,9 @@ class CandidateBatchStore:
             "seal_intent_id": seal_intent_id,
             "status": "sealed",
             "trigger": trigger,
+            "host_coordinator": copy.deepcopy(coordinator),
+            "host_coordinator_revision": 1 if coordinator else 0,
+            "host_coordinator_transfers": [],
             "base_ref": base_ref,
             "base_before": base_before,
             "candidate_ids": list(candidate_ids),
@@ -558,6 +569,7 @@ class CandidateBatchStore:
                         [str(item["candidate_id"]) for item in eligible[:batch_size]],
                         batch_size=batch_size,
                         trigger="auto_full",
+                        coordinator=record.get("host_origin"),
                     )
             return {
                 "candidate": copy.deepcopy(
@@ -635,6 +647,7 @@ class CandidateBatchStore:
                         [str(item["candidate_id"]) for item in eligible[:batch_size]],
                         batch_size=batch_size,
                         trigger="auto_full",
+                        coordinator=candidate.get("host_origin"),
                     )
             return {
                 "candidate": copy.deepcopy(candidate),
@@ -649,7 +662,9 @@ class CandidateBatchStore:
         *,
         batch_size: int,
         after_failed_batch_id: str | None = None,
+        coordinator: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        coordinator = normalize_host_reference(coordinator)
         return self.mutate(
             lambda value: self._seal_in_value(
                 value,
@@ -657,6 +672,7 @@ class CandidateBatchStore:
                 batch_size=batch_size,
                 trigger="explicit_tail",
                 after_failed_batch_id=after_failed_batch_id,
+                coordinator=coordinator,
             )
         )
 
@@ -701,7 +717,9 @@ class CandidateBatchStore:
         force: bool = False,
         cause: str = "heartbeat",
         now_epoch: float | None = None,
+        coordinator: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        coordinator = normalize_host_reference(coordinator)
         observed_now = time.time() if now_epoch is None else now_epoch
 
         def timestamp_epoch(value: str | None) -> float | None:
@@ -764,6 +782,7 @@ class CandidateBatchStore:
                         candidate_ids[:batch_size],
                         batch_size=batch_size,
                         trigger="auto_full",
+                        coordinator=coordinator,
                     )
                     return {"status": "sealed", "batch": batch, "cause": cause}
                 snapshot = producer_snapshots.get(
@@ -792,6 +811,7 @@ class CandidateBatchStore:
                         candidate_ids,
                         batch_size=batch_size,
                         trigger="explicit_tail" if force else "quiet_tail",
+                        coordinator=coordinator,
                     )
                     return {"status": "sealed", "batch": batch, "cause": cause}
                 next_reconcile_at = None
@@ -839,6 +859,72 @@ class CandidateBatchStore:
         if not batch:
             raise SoloAIError(f"Unknown integration batch: {batch_id}")
         return copy.deepcopy(batch)
+
+    def assign_host_coordinator(
+        self,
+        batch_id: str,
+        *,
+        coordinator: dict[str, str],
+        expected_revision: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        """显式接续批次负责人，避免旧会话的迟到动作覆盖当前负责人。"""
+
+        normalized = normalize_host_reference(coordinator)
+        if normalized is None:
+            raise SoloAIError("Batch coordinator takeover requires a verified host")
+        if expected_revision < 0:
+            raise SoloAIError("Batch coordinator revision must not be negative")
+        if not reason or len(reason) > 512 or "\n" in reason or "\r" in reason:
+            raise SoloAIError(
+                "Batch coordinator takeover reason must be one line up to 512 characters"
+            )
+
+        def update(value: dict[str, Any]) -> dict[str, Any]:
+            batch = value["batches"].get(batch_id)
+            if not batch:
+                raise SoloAIError(f"Unknown integration batch: {batch_id}")
+            if batch.get("status") == "completed":
+                raise SoloAIError("A completed batch cannot change coordinator")
+            if batch.get("run_owner"):
+                raise SoloAIError(
+                    "Cannot change coordinator while the batch is running"
+                )
+            current = normalize_host_reference(batch.get("host_coordinator"))
+            current_revision = int(batch.get("host_coordinator_revision", 0))
+            transfers = batch.setdefault("host_coordinator_transfers", [])
+            if (
+                current == normalized
+                and current_revision == expected_revision + 1
+                and transfers
+                and transfers[-1].get("reason") == reason
+                and int(transfers[-1].get("previous_revision", -1)) == expected_revision
+            ):
+                return copy.deepcopy(batch)
+            if current_revision != expected_revision:
+                raise SoloAIError(
+                    f"Batch coordinator revision changed: expected {expected_revision}, current {current_revision}"
+                )
+            transfer = {
+                "from": current,
+                "to": normalized,
+                "reason": reason,
+                "previous_revision": current_revision,
+                "revision": current_revision + 1,
+                "at": utc_timestamp(),
+            }
+            transfers.append(transfer)
+            del transfers[:-20]
+            batch.update(
+                {
+                    "host_coordinator": copy.deepcopy(normalized),
+                    "host_coordinator_revision": current_revision + 1,
+                    "updated_at": utc_timestamp(),
+                }
+            )
+            return copy.deepcopy(batch)
+
+        return self.mutate(update)
 
     def update_batch(self, batch_id: str, **changes: Any) -> dict[str, Any]:
         def update(value: dict[str, Any]) -> dict[str, Any]:
@@ -1769,6 +1855,7 @@ def seal_batch(
     *,
     candidate_ids: list[str],
     after_failed_batch_id: str | None = None,
+    coordinator: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     from .lifecycle import _config_and_mode
 
@@ -1787,6 +1874,7 @@ def seal_batch(
                 frozen_policy.get("batch_size", config.integration.batch_size)
             ),
             after_failed_batch_id=after_failed_batch_id,
+            coordinator=coordinator,
         )
     return run_batch(repo, batch_id=str(batch["id"]))
 
@@ -1797,6 +1885,7 @@ def reconcile_batches(
     force: bool = False,
     cause: str = "heartbeat",
     now_epoch: float | None = None,
+    coordinator: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """仅用持久化候选与任务事实冻结一个可证明的批次。"""
 
@@ -1829,6 +1918,7 @@ def reconcile_batches(
             force=force,
             cause=cause,
             now_epoch=now_epoch,
+            coordinator=coordinator,
         )
     batch = result.get("batch")
     if not batch:
@@ -1899,6 +1989,16 @@ def _run_owned_batch(
             failure_kind=failure_kind,
             failed_candidate_id=failed_candidate_id,
         )
+        if failure_kind == "composition_conflict" and failed_candidate_id:
+            try:
+                from .host_handoffs import HostHandoffStore
+
+                HostHandoffStore(repo).ensure_composition_conflict(
+                    batch=failed,
+                    candidate=store.candidate(failed_candidate_id),
+                )
+            except (OSError, SoloAIError) as handoff_error:
+                store.update_batch(batch_id, host_handoff_error=str(handoff_error))
         if (
             failed.get("status") == "failed"
             and failed.get("worktree_mode") == "reusable"
@@ -1911,7 +2011,9 @@ def _run_owned_batch(
         raise
 
 
-def prepare_candidate_repair(repo: GitRepo, *, candidate_id: str) -> dict[str, Any]:
+def prepare_candidate_repair(
+    repo: GitRepo, *, candidate_id: str, host_origin: dict[str, str] | None = None
+) -> dict[str, Any]:
     """在最新基线上准备一次受管候选修复，保留可由代理解决的冲突现场。"""
 
     from .lifecycle import _config_and_mode, start
@@ -1942,6 +2044,7 @@ def prepare_candidate_repair(repo: GitRepo, *, candidate_id: str) -> dict[str, A
         base=base_ref,
         request_id=request_id,
         supersedes=candidate_id,
+        host_origin=host_origin,
     )
     worktree = Path(str(task["worktree"]))
     existing = task.get("repair_preparation")

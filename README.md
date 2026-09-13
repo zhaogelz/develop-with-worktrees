@@ -9,6 +9,7 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 - Exact-path commits and immutable verified candidates.
 - Automatic integration whenever two eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
+- After publishing a candidate, the developer task may end its round. The host that freezes its batch follows integration and can return an attributed merge conflict to the original task or explicitly hand it to a replacement.
 - Completed checks are saved individually. A fresh Full reuses only checks with complete, pure inputs; mutable environments and required build artifacts are not replaced by old success reports.
 - Batch Full runs the repository-declared integration scope: selected Ready checks plus a focused combined-path check. Wide regression is an explicit milestone (`dww verify --level full --complete` or CI); repeated recovery, high-concurrency, marketplace, and platform fault-injection checks stay under explicit Stress.
 
@@ -23,6 +24,8 @@ DWW is no longer a multi-AI task command center. The host's native task system d
 5. With fewer than two candidates, DWW freezes the exact pending tail only after the lane has no modifying producer for a stable 30 seconds, or after an explicit user, deployment, or downstream-dependency request.
 
 Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state; the host heartbeat merely wakes reconciliation at `next_reconcile_at`. A host without reliable scheduling cannot claim automatic quiet-tail support.
+
+Publishing a candidate ends the developer’s current round. The host that freezes its batch continues as the coordinator until it integrates or records a failure. For a conflict DWW can attribute to one candidate, it records a single repair handoff: the coordinator sends the returned native-task message, and the original task confirms or a replacement explicitly takes it over. DWW never guesses task identities or sends host messages itself.
 
 Releasing a task keeps its dependency caches, including normal package links. New repositories also reuse one integration workspace: ordinary successful or failed batches return it without deleting or hashing the entire dependency tree. Each fresh Full still recreates required runtime effects. Physical disk cleanup is separate maintenance; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
 

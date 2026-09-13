@@ -35,6 +35,7 @@ input_paths = [
   "pyproject.toml", "tests/conftest.py", "tests/unit/test_config.py",
   "tests/unit/test_proof.py", "tests/unit/test_routing.py",
   "tests/unit/test_safety.py", "tests/unit/test_task_context.py",
+  "tests/unit/test_host_context.py", "tests/unit/test_host_handoff_state.py",
   "tests/unit/test_test_layers.py", "uv.lock",
   "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
 ]
@@ -92,7 +93,8 @@ cross_task_reuse = false
 external_state = "unknown"
 input_paths = [
   "pyproject.toml", "tests/conftest.py", "tests/integration/test_cli.py",
-  "tests/integration/test_candidate_batches.py", "tests/unit/test_config.py",
+  "tests/integration/test_candidate_batches.py",
+  "tests/integration/test_host_handoffs.py", "tests/unit/test_config.py",
   "tests/unit/test_proof.py", "uv.lock",
   "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
 ]
@@ -103,7 +105,7 @@ resource_class = "heavy"
 level = "full"
 full_scope = "integration"
 commands = [
-  ["uv", "run", "pytest", "-q", "tests/integration/test_cli.py::test_cli_plan_and_verify_cover_registered_development_ready_full_and_stress_levels", "tests/integration/test_candidate_batches.py::test_finish_publishes_then_explicit_seal_integrates_exact_candidates", "tests/integration/test_candidate_batches.py::test_batch_validation_uses_integration_scope", "--durations=10"],
+  ["uv", "run", "pytest", "-q", "tests/integration/test_cli.py::test_cli_plan_and_verify_cover_registered_development_ready_full_and_stress_levels", "tests/integration/test_candidate_batches.py::test_finish_publishes_then_explicit_seal_integrates_exact_candidates", "tests/integration/test_candidate_batches.py::test_batch_validation_uses_integration_scope", "tests/integration/test_host_handoffs.py", "--durations=10"],
 ]
 
 # 宽回归是明确里程碑入口（dww verify --level full --complete 或 CI），不会
