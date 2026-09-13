@@ -352,7 +352,11 @@ def _parser() -> argparse.ArgumentParser:
     start_parser.add_argument(
         "--in-place",
         action="store_true",
-        help="use the current clean worktree for this one Codex session; no slot or branch is created",
+        help="use the current clean worktree for this one Codex session",
+    )
+    start_parser.add_argument(
+        "--bind-branch",
+        help="attach this exact task-prefixed branch only when a trusted linked worktree is detached",
     )
     start_parser.add_argument(
         "--session",
@@ -1454,6 +1458,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             name=args.name,
             base=args.base,
             in_place=args.in_place,
+            bind_branch=args.bind_branch,
             session_id=args.session,
             request_id=args.request_id,
             supersedes=args.supersedes,

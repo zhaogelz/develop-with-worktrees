@@ -84,6 +84,17 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert hashlib.sha256(installed_hook_definitions[0].read_bytes()).digest() == (
         hashlib.sha256(source_hook_definition.read_bytes()).digest()
     )
+    installed_hook_runners = [
+        path
+        for path in codex_home.rglob("worktree_guard.py")
+        if "develop-with-worktrees" in str(path).replace("\\", "/")
+        and path.parent.name == "hooks"
+    ]
+    assert installed_hook_runners, "installed plugin does not expose its Hook runner"
+    source_hook_runner = source / "hooks" / "worktree_guard.py"
+    assert hashlib.sha256(installed_hook_runners[0].read_bytes()).digest() == (
+        hashlib.sha256(source_hook_runner.read_bytes()).digest()
+    )
 
     runners = [
         path

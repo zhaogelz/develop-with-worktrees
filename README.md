@@ -7,12 +7,12 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 - One isolated worktree per modifying task.
 - A local task anchor that preserves the task's original purpose and baseline across continuation, handoff, and model changes; `anchor show/update` reads and saves checked context during an active task.
 - Exact-path commits and immutable verified candidates.
-- Automatic integration whenever five eligible candidates accumulate.
+- Automatic integration whenever two eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
 - Completed checks are saved individually. A fresh Full reuses only checks with complete, pure inputs; mutable environments and required build artifacts are not replaced by old success reports.
 - Batch Full runs the repository-declared integration scope: selected Ready checks plus a focused combined-path check. Wide regression is an explicit milestone (`dww verify --level full --complete` or CI); repeated recovery, high-concurrency, marketplace, and platform fault-injection checks stay under explicit Stress.
 
-The host's native task system still decides who does what and when. DWW owns only the Git safety lifecycle that carries completed work into the base branch.
+DWW is no longer a multi-AI task command center. The host's native task system decides who does what and when; DWW owns only the Git safety lifecycle that carries completed work into the base branch.
 
 ## Default flow
 
@@ -26,9 +26,9 @@ Users do not need to copy candidate IDs. DWW selects only immutable candidates a
 
 Releasing a task keeps its dependency caches, including normal package links. New repositories also reuse one integration workspace: ordinary successful or failed batches return it without deleting or hashing the entire dependency tree. Each fresh Full still recreates required runtime effects. Physical disk cleanup is separate maintenance; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
 
-## Why five and ten
+## Why two and ten
 
-Five candidates amortise combined validation while keeping conflicts reviewable. The pool holds ten nonterminal candidates by default, so one batch can integrate while the next accumulates. A full pool preserves the publishing task and asks it to retry; it never drops work.
+Two candidates keep combined validation close to development feedback while still catching cross-task conflicts. The pool holds ten nonterminal candidates by default, so one batch can integrate while the next accumulates. A full pool preserves the publishing task and asks it to retry; it never drops work.
 
 ## What DWW never does
 

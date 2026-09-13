@@ -909,6 +909,7 @@ def start(
     name: str,
     base: str | None = None,
     in_place: bool = False,
+    bind_branch: str | None = None,
     session_id: str | None = None,
     request_id: str | None = None,
     supersedes: str | None = None,
@@ -950,6 +951,10 @@ def start(
                     raise SoloAIError(
                         "In-place tasks require --session from the trusted Codex hook"
                     )
+                if bind_branch and not bind_branch.startswith(config.branch_prefix):
+                    raise SoloAIError(
+                        "--bind-branch must use this repository's configured task branch prefix"
+                    )
                 try:
                     owner = store.task_for_worktree(repo.root)
                 except SoloAIError:
@@ -959,8 +964,49 @@ def start(
                         "Cannot start an in-place task inside an active isolated task worktree"
                     )
                 branch = repo.branch(repo.root)
+                if branch is None and bind_branch:
+                    registered = next(
+                        (item for item in repo.worktrees() if item.path == repo.root), None
+                    )
+                    if registered is None or not registered.detached:
+                        raise SoloAIError(
+                            "--bind-branch is limited to a registered detached linked worktree"
+                        )
+                    if repo.root == repo.primary_path:
+                        raise SoloAIError(
+                            "--bind-branch cannot attach the primary worktree"
+                        )
+                    checked = repo.git(
+                        ["check-ref-format", "--branch", bind_branch], check=False
+                    )
+                    if checked.returncode != 0 or checked.stdout.strip() != bind_branch:
+                        raise SoloAIError("--bind-branch must be a valid local branch name")
+                    ref = f"refs/heads/{bind_branch}"
+                    if any(item.branch == ref for item in repo.worktrees()):
+                        raise SoloAIError(
+                            "--bind-branch is already checked out by another worktree"
+                        )
+                    head = repo.head(repo.root)
+                    existing = repo.ref_head(ref)
+                    if existing is not None and existing != head:
+                        raise SoloAIError(
+                            "--bind-branch already points at a different commit; preserve it"
+                        )
+                    switch_args = ["switch", bind_branch] if existing else ["switch", "-c", bind_branch]
+                    repo.git(switch_args, cwd=repo.root)
+                    branch = repo.branch(repo.root)
+                    if branch != bind_branch or repo.head(repo.root) != head:
+                        raise SoloAIError(
+                            "Detached worktree branch binding did not preserve its exact HEAD"
+                        )
+                elif bind_branch:
+                    raise SoloAIError(
+                        "--bind-branch is only valid while the current worktree is detached"
+                    )
                 if branch is None:
-                    raise SoloAIError("In-place tasks require an attached local branch")
+                    raise SoloAIError(
+                        "In-place tasks require an attached local branch; a trusted detached linked worktree may use --bind-branch <task-branch>"
+                    )
                 if not repo.is_clean(repo.root):
                     raise SoloAIError(
                         "In-place Start requires a clean Git worktree; ignored test data may remain, but tracked or untracked changes must be preserved and handled first"

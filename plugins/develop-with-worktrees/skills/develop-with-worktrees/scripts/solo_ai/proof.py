@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import fnmatch
 import os
 import platform
@@ -45,7 +46,9 @@ LOCKFILES = (
 )
 PROOF_SCHEMA = 3
 # 审批计划和验证收据的演进速度不同：前者描述可执行的策略，后者绑定现场证据。
-APPROVAL_PLAN_SCHEMA = 4
+# 5 将验证命令从本机审批记录中改为“脱敏展示 + 原始参数指纹”。
+# 旧计划可能含有原始命令参数，不能继续当作当前审批契约。
+APPROVAL_PLAN_SCHEMA = 5
 _EXECUTION_BASELINE = (
     "PATH",
     "SYSTEMROOT",
@@ -325,6 +328,66 @@ def _repo_config_policy(repo_config: Any) -> dict[str, Any]:
     }
 
 
+def _verification_policy(verification: VerificationConfig) -> dict[str, Any]:
+    """Serialize executable verification policy without persisting raw argv values."""
+    return {
+        "schema_version": verification.schema_version,
+        "static_only": verification.static_only,
+        "profiles": [
+            {
+                "id": profile.profile_id,
+                "paths": list(profile.paths),
+                "commands": [_command_policy(command) for command in profile.commands],
+                "cross_task_reuse": profile.cross_task_reuse,
+                "external_state": profile.external_state,
+                "input_paths": list(profile.input_paths),
+                "environment": list(profile.environment),
+                "input_closure": profile.input_closure,
+                "timeout_seconds": profile.timeout_seconds,
+                "resource_class": profile.resource_class,
+                "level": profile.level,
+                "frozen_base": profile.frozen_base,
+                "full_scope": profile.full_scope,
+            }
+            for profile in verification.profiles
+        ],
+    }
+
+
+def _redact_legacy_approval_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Remove raw argv values left by approval-plan schemas before version 5.
+
+    The raw values are only used to display a drift report.  Their digest preserves
+    the fact that a command changed, while the locally persisted report remains safe
+    to inspect or share.
+    """
+    sanitized = copy.deepcopy(plan)
+    configuration = sanitized.get("policy", {}).get("configuration", {})
+    verification = configuration.get("verification", {})
+    profiles = verification.get("profiles", []) if isinstance(verification, dict) else []
+    if not isinstance(profiles, list):
+        return sanitized
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        commands = profile.get("commands")
+        if not isinstance(commands, list):
+            continue
+        redacted: list[Any] = []
+        for command in commands:
+            if isinstance(command, list) and all(isinstance(value, str) for value in command):
+                redacted.append(
+                    {
+                        "argv": [redact_text(value) for value in command],
+                        "fingerprint": sha256_text(stable_json(command)),
+                    }
+                )
+            else:
+                redacted.append(command)
+        profile["commands"] = redacted
+    return sanitized
+
+
 def _approval_policy_inputs(
     shared: dict[str, Any], *, repo_config: Any, verification: VerificationConfig
 ) -> dict[str, Any]:
@@ -333,7 +396,7 @@ def _approval_policy_inputs(
         **{key: value for key, value in shared.items() if key != "config_hashes"},
         "configuration": {
             "repository": _repo_config_policy(repo_config),
-            "verification": verification.normalized(),
+            "verification": _verification_policy(verification),
         },
     }
 
@@ -560,6 +623,28 @@ def require_approved_plan(
     fingerprint = sha256_text(stable_json(plan))
     approvals = read_json(repo.local_dir / "approvals.json", {"accepted": {}})
     accepted = approvals.get("accepted", {})
+    if not isinstance(accepted, dict):
+        accepted = {}
+    # 清理旧版审批记录中的原始命令参数，即使本次审批尚未匹配也不继续
+    # 留存敏感值。保留原记录键，避免把清理动作伪装成一次新审批。
+    sanitized_accepted: dict[str, Any] = {}
+    approval_record_changed = False
+    for approved_fingerprint, record in accepted.items():
+        if not isinstance(record, dict):
+            sanitized_accepted[str(approved_fingerprint)] = record
+            continue
+        sanitized_record = copy.deepcopy(record)
+        approved_plan = sanitized_record.get("plan")
+        if isinstance(approved_plan, dict):
+            redacted_plan = _redact_legacy_approval_plan(approved_plan)
+            if redacted_plan != approved_plan:
+                sanitized_record["plan"] = redacted_plan
+                approval_record_changed = True
+        sanitized_accepted[str(approved_fingerprint)] = sanitized_record
+    if approval_record_changed:
+        approvals = {**approvals, "accepted": sanitized_accepted}
+        atomic_write_json(repo.local_dir / "approvals.json", approvals)
+    accepted = sanitized_accepted
     if fingerprint in accepted:
         return fingerprint
 

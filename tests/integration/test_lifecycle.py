@@ -445,6 +445,53 @@ def test_in_place_lifecycle_preserves_current_branch_and_uses_immutable_start_he
     assert StateStore(repo).task(task["id"])["status"] == "finished"
 
 
+def test_in_place_start_attaches_a_clean_detached_linked_worktree_to_exact_branch(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    repo = initialized(git_repo)
+    detached = tmp_path / "codex-host-worktree"
+    git(git_repo, "worktree", "add", "--detach", str(detached), "HEAD")
+    host = GitRepo(detached)
+    start_head = host.head(detached)
+
+    task = start(
+        host,
+        name="Codex detached host",
+        in_place=True,
+        session_id="codex-host-session",
+        bind_branch="codex/detached-host",
+    )
+
+    assert host.branch(detached) == "codex/detached-host"
+    assert host.head(detached) == start_head
+    assert task["branch"] == "codex/detached-host"
+    assert task["expected_head"] == start_head
+    assert repo.ref_head("refs/heads/codex/detached-host") == start_head
+
+
+def test_in_place_detached_binding_preserves_a_branch_at_different_head(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    repo = initialized(git_repo)
+    detached = tmp_path / "codex-host-worktree"
+    git(git_repo, "worktree", "add", "--detach", str(detached), "HEAD")
+    git(git_repo, "commit", "--allow-empty", "-m", "test: advance main")
+    git(git_repo, "branch", "codex/wrong-detached-head", "HEAD")
+    host = GitRepo(detached)
+
+    with pytest.raises(SoloAIError, match="different commit"):
+        start(
+            host,
+            name="preserve detached branch",
+            in_place=True,
+            session_id="codex-host-session",
+            bind_branch="codex/wrong-detached-head",
+        )
+
+    assert host.branch(detached) is None
+    assert repo.ref_head("refs/heads/codex/wrong-detached-head") == repo.head(git_repo)
+
+
 def test_in_place_session_mismatch_quarantines_without_cleaning_files(
     git_repo: Path,
 ) -> None:
@@ -2466,6 +2513,66 @@ commands = [["git", "diff", "--check"]]
     approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
     assert ready(repo, task_id=task["id"], lease=task["lease"])["status"] == "ready"
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_approval_record_and_drift_report_redact_verification_command_values(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    token = "sk-proj-dwwapprovalsecretvalue00000001"
+    verification_path = git_repo / ".solo-ai" / "verification.toml"
+    verification_path.write_text(
+        f'''schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "default"
+paths = ["**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["**"]
+environment = []
+commands = [["git", "diff", "--check", "{token}"]]
+''',
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/verification.toml")
+    git(git_repo, "commit", "-m", "test: add sensitive approval argument")
+    verification = load_verification_config(repo)
+    approval = approve(repo, verification)
+    approvals_path = repo.local_dir / "approvals.json"
+    assert token not in approvals_path.read_text(encoding="utf-8")
+    assert approval["plan"]["policy"]["configuration"]["verification"]["profiles"][0][
+        "commands"
+    ][0]["fingerprint"]
+    # 模拟 schema 4 在本机遗留的原始 argv；下一次计划检查必须清理它。
+    approvals = read_json(approvals_path, {"accepted": {}})
+    approvals["accepted"][approval["fingerprint"]]["plan"]["policy"][
+        "configuration"
+    ]["verification"]["profiles"][0]["commands"] = [
+        ["git", "diff", "--check", token]
+    ]
+    atomic_write_json(approvals_path, approvals)
+
+    changed = verification_path.read_text(encoding="utf-8").replace(
+        token, "sk-proj-dwwapprovalsecretvalue00000002"
+    )
+    verification_path.write_text(changed, encoding="utf-8")
+    git(git_repo, "add", ".solo-ai/verification.toml")
+    git(git_repo, "commit", "-m", "test: change sensitive approval argument")
+    with pytest.raises(SoloAIError, match="approval"):
+        proof_module.require_approved_plan(
+            repo,
+            cwd=git_repo,
+            verification=load_verification_config(repo),
+            message="approval drift",
+        )
+    reports = list((repo.local_dir / "approval-mismatches").glob("*.json"))
+    assert len(reports) == 1
+    report_text = reports[0].read_text(encoding="utf-8")
+    assert token not in report_text
+    assert "sk-proj-dwwapprovalsecretvalue00000002" not in report_text
+    assert token not in approvals_path.read_text(encoding="utf-8")
 
 
 def test_ready_uses_policy_after_default_branch_synchronization(git_repo: Path) -> None:

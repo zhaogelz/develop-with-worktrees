@@ -84,13 +84,15 @@ A published candidate is no longer an active leased task and is not abandoned th
 
 ## In-place compatibility
 
-`start --in-place --session` is explicit compatibility, not the ordinary current-task bypass. It requires one clean attached current worktree and trusted session identity, creates no slot or branch, and binds:
+`start --in-place --session` is explicit compatibility, not the ordinary current-task bypass. It requires one clean attached current worktree and trusted session identity, creates no slot, and binds:
 
 ```text
 base_worktree + branch + start_head + expected_head + session fingerprint + lease
 ```
 
 Commit, verify, Ready, Finish, and abandon recheck the same binding. In-place Finish writes a receipt and releases the task only; it does not merge, detach, reset, clean, or delete a branch. A mismatch quarantines and preserves files. `resume-in-place` transfers only an unchanged recorded identity with exact confirmation. In-place tasks also receive the standard DWW task anchor and remove it only on successful Finish or explicit clean abandonment.
+
+Codex may create a clean linked worktree in detached HEAD state even when the caller requested a branch. A trusted session may make that worktree usable through `start --in-place --session <session> --bind-branch <task-prefixed-branch>`. The worktree must be registered, non-primary, detached, clean, and free of an active isolated DWW task. The requested local branch must use the configured task prefix, must not be checked out elsewhere, and, if it already exists, must resolve to exactly the detached HEAD. DWW attaches or creates only that branch, rechecks the unchanged HEAD, then records the ordinary in-place binding. Any ambiguity leaves the detached worktree and branch untouched.
 
 ## Local-only boundary
 
