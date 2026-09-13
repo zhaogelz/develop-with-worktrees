@@ -399,7 +399,7 @@ def test_rejects_empty_declared_secret_scanner(git_repo: Path) -> None:
         load_repo_config(GitRepo(git_repo))
 
 
-def test_new_integration_defaults_are_batched_auto_full_with_five_and_ten(
+def test_new_integration_defaults_are_batched_auto_full_with_two_and_ten(
     git_repo: Path,
 ) -> None:
     config = git_repo / ".solo-ai"
@@ -409,11 +409,11 @@ def test_new_integration_defaults_are_batched_auto_full_with_five_and_ten(
     loaded = load_repo_config(GitRepo(git_repo))
 
     assert loaded.integration.mode == "batched"
-    assert loaded.integration.batch_size == 5
+    assert loaded.integration.batch_size == 2
     assert loaded.integration.candidate_capacity == 10
     assert loaded.integration.seal_policy == "auto_full"
     assert loaded.integration.tail_policy == "quiet_or_explicit"
-    assert loaded.integration.tail_quiet_seconds == 90
+    assert loaded.integration.tail_quiet_seconds == 30
     assert loaded.runtime_adapter.activate is None
     assert loaded.runtime_adapter.release is None
     assert loaded.runtime_adapter.batch_activate is None
@@ -536,7 +536,7 @@ def test_batched_table_without_seal_policy_preserves_legacy_explicit_mode(
     config = git_repo / ".solo-ai"
     config.mkdir()
     rendered = render_repo_config().replace(
-        ', seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90',
+        ', seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 30',
         "",
     )
     (config / "config.toml").write_text(rendered, encoding="utf-8")
@@ -553,7 +553,7 @@ def test_batched_table_without_seal_policy_preserves_legacy_explicit_mode(
     [
         ('mode = "automatic"', "integration.mode"),
         ("batch_size = 6", "batch_size"),
-        ("candidate_capacity = 4", "candidate_capacity"),
+        ("candidate_capacity = 1", "candidate_capacity"),
         ('seal_policy = "idle"', "seal_policy"),
         ('tail_policy = "idle"', "tail_policy"),
         ("tail_quiet_seconds = 0", "tail_quiet_seconds"),
@@ -568,7 +568,7 @@ def test_rejects_unsafe_integration_settings(
     if replacement.startswith("mode"):
         rendered = rendered.replace('mode = "batched"', replacement)
     elif replacement.startswith("batch_size"):
-        rendered = rendered.replace("batch_size = 5", replacement)
+        rendered = rendered.replace("batch_size = 2", replacement)
     elif replacement.startswith("candidate_capacity"):
         rendered = rendered.replace("candidate_capacity = 10", replacement)
     elif replacement.startswith("seal_policy"):
@@ -576,7 +576,7 @@ def test_rejects_unsafe_integration_settings(
     elif replacement.startswith("tail_policy"):
         rendered = rendered.replace('tail_policy = "quiet_or_explicit"', replacement)
     else:
-        rendered = rendered.replace("tail_quiet_seconds = 90", replacement)
+        rendered = rendered.replace("tail_quiet_seconds = 30", replacement)
     (config / "config.toml").write_text(rendered, encoding="utf-8")
 
     with pytest.raises(SoloAIError, match=message):

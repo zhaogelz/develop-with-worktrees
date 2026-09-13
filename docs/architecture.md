@@ -21,6 +21,18 @@ Integration policy
 
 The top seam is intentional: DWW does not compete with the host's task graph, worker dispatch, dependency management, or task UI. The legacy `solo-ai-orchestration` package remains only to drain already-created state. New work never creates a DWW controller identity or orchestration batch.
 
+## Development priorities
+
+DWW is built for fast AI-assisted development by individuals and small teams. After the user has authorized a task, the agent should keep moving through the in-scope investigation, implementation, checks, exact commits, locally permitted delivery, and deterministic recovery. Identity arguments such as `--confirm` verify an object; they are not a second request for user approval.
+
+This does not remove the boundaries that make the workflow dependable. The agent still stops when the current request and durable project contract leave a material product, permission, migration, deletion, security, or external-side-effect decision unresolved. It keeps exact candidate identity, required validation, and protection for unknown working-tree content. New persistent services, state, abstractions, or human gates need an observed failure mode and a reason existing mechanisms cannot cover it.
+
+## Approval and evidence
+
+Machine-local approval describes the executable lifecycle policy: normalized repository and verification configuration, declared commands and environment names, profile coverage and closure, tool and lockfile identity, and Runtime Adapter inputs. Formatting-only policy edits such as comments or line endings therefore keep an existing approval; any semantic command, scope, permission, runtime, or configuration change produces a new plan and an explicit drift report. Older approval records remain readable but cannot authorize a newer plan.
+
+Validation evidence has a separate, stricter identity. It continues to bind the exact configuration bytes, tracked inputs, lockfiles, tool facts, declared environment values, logs, candidate head, and applicable base. A harmless policy comment can skip a second approval, but it still invalidates any old proof and executes the affected validation again.
+
 ## Local state
 
 All lifecycle state stays under the repository's Git common directory:
@@ -34,7 +46,7 @@ solo-ai/*-receipts/                rebuildable completion projections
 solo-ai/runtime-adapter/           content-addressed Adapter evidence
 ```
 
-New tracked `.solo-ai/config.toml` defaults to candidate-first integration: full batches of five, a pool capacity of ten, and a 90-second `quiet_or_explicit` tail. Start, candidate activation, Abandon, and reconciliation share the admission lock. Exactly the oldest five eligible candidates in one base-and-policy lane freeze once; a smaller exact snapshot freezes only after the persisted lane is stably producer-free or an authorized explicit cause is supplied. There is no maximum-age auto-seal. Legacy repositories without an integration table remain direct; old batched policy without the new fields remains explicit.
+New tracked `.solo-ai/config.toml` defaults to candidate-first integration: full batches of two, a pool capacity of ten, and a 30-second `quiet_or_explicit` tail. Start, candidate activation, Abandon, and reconciliation share the admission lock. Exactly the oldest two eligible candidates in one base-and-policy lane freeze once; a smaller exact snapshot freezes only after the persisted lane is stably producer-free or an authorized explicit cause is supplied. There is no maximum-age auto-seal. Legacy repositories without an integration table remain direct; old batched policy without the new fields remains explicit.
 
 ## Task anchors
 

@@ -201,7 +201,8 @@ def test_only_complete_pure_checks_survive_new_full(
 
 
 @pytest.mark.parametrize(
-    "change", ["source", "command", "environment", "log", "missing-results"]
+    "change",
+    ["source", "command", "policy-comment", "environment", "log", "missing-results"],
 )
 def test_changed_or_damaged_evidence_cannot_skip_execution(
     git_repo: Path, monkeypatch, change
@@ -215,6 +216,12 @@ def test_changed_or_damaged_evidence_cannot_skip_execution(
     elif change == "command":
         policy.write_text(
             policy.read_text().replace("from pathlib", "import os; from pathlib")
+        )
+    elif change == "policy-comment":
+        policy.write_text(
+            "# The proof identity keeps byte-level configuration evidence.\n"
+            + policy.read_text(),
+            encoding="utf-8",
         )
     elif change == "environment":
         monkeypatch.setenv("DWW_FIXTURE_ENV", "changed")

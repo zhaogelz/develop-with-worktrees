@@ -530,6 +530,16 @@ def test_read_only_parser_accepts_quoted_search_text_and_limited_pipeline() -> N
         "Get-Content -LiteralPath 'README.md' -Encoding UTF8 | Select-Object -First 40"
     )
     assert HOOK._strict_read_only_bash("rg --no-config -n 'it''s|scope' README.md")
+    assert HOOK._strict_read_only_bash("rg --no-config -n -A 3 'anchor|scope' README.md")
+
+
+def test_read_only_parser_accepts_common_repository_enumeration() -> None:
+    assert HOOK._strict_read_only_bash("Get-Location")
+    assert HOOK._strict_read_only_bash("Get-ChildItem -Name")
+    assert HOOK._strict_read_only_bash("Get-ChildItem -LiteralPath docs -Name")
+    assert HOOK._strict_read_only_bash("git ls-files")
+    assert HOOK._strict_read_only_bash("git ls-files --cached --full-name")
+    assert HOOK._strict_read_only_bash("git worktree list --porcelain")
 
 
 def test_read_only_parser_rejects_writes_and_external_rg_preprocessors() -> None:
@@ -567,6 +577,9 @@ def test_read_only_parser_requires_rg_config_isolation_and_known_options() -> No
     assert not HOOK._strict_read_only_bash(
         "rg --no-config --pre helper needle README.md"
     )
+    assert "--no-config" in HOOK._read_only_rejection_reason(
+        "rg -n 'anchor|scope' README.md"
+    )
 
 
 def test_read_only_parser_limits_content_and_select_arguments() -> None:
@@ -577,3 +590,5 @@ def test_read_only_parser_limits_content_and_select_arguments() -> None:
     assert not HOOK._strict_read_only_bash(
         "Get-Content README.md | Select-Object -First 1_0"
     )
+    assert not HOOK._strict_read_only_bash("Get-ChildItem -Recurse")
+    assert not HOOK._strict_read_only_bash("git ls-files --with-tree=HEAD")

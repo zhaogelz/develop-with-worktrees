@@ -48,7 +48,11 @@ VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
 
 
 def initialized_batched(
-    path: Path, *, auto_full: bool = True, reusable: bool = False
+    path: Path,
+    *,
+    auto_full: bool = True,
+    reusable: bool = False,
+    batch_size: int | None = None,
 ) -> GitRepo:
     repo = GitRepo(path)
     initialize(repo, slots=3, commands=[VERIFY], accept=True, accept_static_only=False)
@@ -64,6 +68,8 @@ def initialized_batched(
         contents = contents.replace(
             'seal_policy = "auto_full"', 'seal_policy = "explicit"'
         )
+    if batch_size is not None:
+        contents = contents.replace("batch_size = 2", f"batch_size = {batch_size}")
     if contents != original:
         config.write_text(contents, encoding="utf-8")
         git(path, "add", ".solo-ai/config.toml")
@@ -1193,26 +1199,23 @@ def test_late_recreated_path_is_preserved_by_registration_removal(
 
 
 @pytest.mark.dww_stress
-def test_four_candidates_wait_and_fifth_finish_auto_integrates_oldest_five(
+def test_first_candidate_waits_and_second_finish_auto_integrates_oldest_two(
     git_repo: Path,
 ) -> None:
     repo = initialized_batched(git_repo)
     base_before = repo.head(git_repo)
-    published = [
-        publish(repo, name=f"candidate {index}", relative=f"{index}.txt")
-        for index in range(1, 5)
-    ]
+    first = publish(repo, name="candidate 1", relative="1.txt")
 
-    assert all(item["outcome"] == "candidate_published" for item in published)
+    assert first["outcome"] == "candidate_published"
     assert repo.head(git_repo) == base_before
     assert CandidateBatchStore(repo).summary()["batches"] == []
 
-    fifth = publish(repo, name="candidate 5", relative="5.txt")
+    second = publish(repo, name="candidate 2", relative="2.txt")
 
-    assert fifth["outcome"] == "batch_integrated"
-    assert fifth["candidate_count"] == 5
-    assert repo.head(git_repo) == fifth["integrated_head"]
-    assert all((git_repo / f"{index}.txt").is_file() for index in range(1, 6))
+    assert second["outcome"] == "batch_integrated"
+    assert second["candidate_count"] == 2
+    assert repo.head(git_repo) == second["integrated_head"]
+    assert all((git_repo / f"{index}.txt").is_file() for index in range(1, 3))
     pool = CandidateBatchStore(repo).summary()
     assert [item["trigger"] for item in pool["batches"]] == ["auto_full"]
     assert {item["status"] for item in pool["candidates"]} == {"integrated"}
@@ -1252,11 +1255,11 @@ def test_quiet_tail_waits_for_all_producers_and_the_full_stability_period(
         time.strptime(snapshot["quiet_since"], "%Y-%m-%dT%H:%M:%SZ")
     )
 
-    too_early = reconcile_batches(repo, cause="session-end", now_epoch=quiet_epoch + 89)
+    too_early = reconcile_batches(repo, cause="session-end", now_epoch=quiet_epoch + 29)
     assert too_early["status"] == "waiting"
     assert repo.head(git_repo) == base_before
 
-    completed = reconcile_batches(repo, cause="heartbeat", now_epoch=quiet_epoch + 90)
+    completed = reconcile_batches(repo, cause="heartbeat", now_epoch=quiet_epoch + 30)
     assert completed["status"] == "completed"
     assert completed["batch"]["trigger"] == "quiet_tail"
     assert completed["delivered"] is True
@@ -1497,7 +1500,7 @@ def test_status_projects_active_full_batch_and_abandon_refuses_its_candidate(
 def test_runtime_release_holds_the_fifth_candidate_until_adapter_success(
     git_repo: Path,
 ) -> None:
-    repo = initialized_batched(git_repo)
+    repo = initialized_batched(git_repo, batch_size=5)
     gate = repo.local_dir / "runtime-release-allowed"
     release_marker = repo.local_dir / "runtime-release-context.json"
     verify_marker = repo.local_dir / "runtime-verify-context.json"
@@ -1761,10 +1764,7 @@ def test_enabling_auto_full_does_not_capture_legacy_explicit_candidates(
         set(batch["candidate_ids"]) <= legacy_ids for batch in after_first["batches"]
     )
 
-    remaining_new = [
-        publish(repo, name=f"new {index}", relative=f"new-{index}.txt")
-        for index in range(2, 6)
-    ]
+    remaining_new = [publish(repo, name="new 2", relative="new-2.txt")]
 
     assert remaining_new[-1]["outcome"] == "batch_integrated"
     pool = CandidateBatchStore(repo).summary()

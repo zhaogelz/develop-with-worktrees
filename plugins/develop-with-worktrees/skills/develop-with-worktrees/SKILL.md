@@ -43,6 +43,8 @@ For a modifying task, read the hard rules, the route result, the active task anc
 
 Use one Start-created task and worktree for all phases of the same change. Validate each behavior in a tight order: syntax or static checks, new unit tests, affected focused regressions, then the relevant test group and DWW Ready/Finish gates. Do not rerun an unchanged failing command without changing the input, environment, or diagnosis. Keep the anchor current when scope, acceptance, phase results, or a material blocker changes.
 
+An explicit user request to start or continue work authorizes ordinary in-scope investigation, implementation, verification, exact lifecycle calls, and deterministic recovery until the work reaches its recorded boundary. Treat CLI values such as `--confirm`, `--accept`, and `--force` as identity or command safeguards, not as a reason to ask the user again. Ask only when the current request and repository contract cannot decide a material product, permission, migration, deletion, security, or external-side-effect choice.
+
 ## Task orchestration belongs to the host
 
 For multiple independently verifiable outcomes, use the host's native task, subagent, dependency, wait, and status facilities. Each writing worker still receives one routed DWW lifecycle task and its own worktree. DWW does not create a second DAG, controller identity, worker dashboard, or scheduling state.
@@ -123,11 +125,11 @@ Ready refuses a missing, linked, oversized, non-UTF-8, identity-mismatched, or o
 
 ## Candidate-first integration
 
-New repositories use `integration.mode = "batched"`, `worktree_mode = "reusable"`, `batch_size = 5`, `candidate_capacity = 10`, `seal_policy = "auto_full"`, `tail_policy = "quiet_or_explicit"`, and `tail_quiet_seconds = 90`:
+New repositories use `integration.mode = "batched"`, `worktree_mode = "reusable"`, `batch_size = 2`, `candidate_capacity = 10`, `seal_policy = "auto_full"`, `tail_policy = "quiet_or_explicit"`, and `tail_quiet_seconds = 30`:
 
 - An optional project Runtime Adapter may activate project-owned runtime identity after the isolated worktree is exact and before Start returns. DWW supplies the task, slot, base, worktree, and deterministic slot port block; the project still owns every concrete port, database, browser, and service decision.
 - Finish validates and creates one immutable candidate ref. A configured project runtime Adapter must release project-owned resources before the candidate becomes eligible; only then does Finish release the worktree slot, leave the base unchanged, and keep the anchor.
-- Publishing the configured fifth eligible candidate atomically freezes the oldest five candidates in that exact frozen-base-and-policy lane. That Finish then runs or waits for the persisted integration generation; no Hook or resident process is required.
+- Publishing the configured second eligible candidate atomically freezes the oldest two candidates in that exact frozen-base-and-policy lane. That Finish then runs or waits for the persisted integration generation; no Hook or resident process is required.
 - While one batch owns the integration turn, later Finish calls may keep publishing into the remaining bounded pool. A second batch does not freeze against the same stale base; `reconcile` resumes the existing batch first.
 - DWW composes the exact frozen tree differences in a dedicated integration worktree. A configured paired batch Runtime Adapter establishes project-owned Full-validation resources from the exact batch identity, positive persisted `runtime_cycle`, and dedicated port block, then releases them with the same cycle and recorded validation outcome before DWW may fail, retry, or fast-forward. An interrupted Adapter command retries that exact cycle; after a successful release, a later validation retry increments the cycle and must activate resources again. Adapter uncertainty preserves the batch and base for `batch recover`.
 - DWW runs the repository-declared combined integration scope only after batch activation, verifies successful release, the composed head, and the base snapshot again, then fast-forwards the clean base. A complete regression is an explicit `dww verify --level full --complete` or CI milestone, not a normal batch gate.

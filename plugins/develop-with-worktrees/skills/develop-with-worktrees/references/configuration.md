@@ -32,7 +32,7 @@ sensitive_allowlist = []
 
 # Empty by default. Each item is one exact top-level directory or file name.
 cleanup = { owned_paths = [] }
-integration = { mode = "batched", worktree_mode = "reusable", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }
+integration = { mode = "batched", worktree_mode = "reusable", batch_size = 2, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 30 }
 
 # Optional. DWW appends one JSON context-file path to each argv.
 [runtime_adapter]
@@ -53,7 +53,7 @@ Newly rendered policy uses batched candidate-first integration. Finish first cre
 
 Reusable batch Adapter contexts add `worktree_binding`: `mode`, `owner` (batch ID), positive integer `generation`, `worktree`, `worktree_resolved`, `worktree_identity`, `managed_root_resolved`, and `managed_root_identity`. Identity objects carry integer `device`, `inode`, and `mode`; preserve integer precision. DWW validates the live directory before/after operations. An Adapter may read the existing `integration_workspace` entry in Git-common-dir `solo-ai/candidate-batches.json` to compare current owner/generation/location before side effects; it must not mutate that state or invent its own owner registry. `runtime_cycle` remains the distinct resource-activation cycle within that workspace generation. Legacy dedicated contexts do not carry the binding.
 
-With `seal_policy = "auto_full"`, activating the fifth eligible candidate freezes the oldest configured full batch in one `base_ref + base_head + activation_epoch` lane, unless that base already has an active batch. `base_head` is the immutable task-start snapshot: automatic sealing never groups a historical candidate with a later-base candidate merely because both target the same branch. `batch_size` is 1–5 and defaults to 5. `candidate_capacity` must be at least the batch size and defaults to 10.
+With `seal_policy = "auto_full"`, activating the second eligible candidate freezes the oldest configured full batch in one `base_ref + base_head + activation_epoch` lane, unless that base already has an active batch. `base_head` is the immutable task-start snapshot: automatic sealing never groups a historical candidate with a later-base candidate merely because both target the same branch. `batch_size` is 1–5 and defaults to 2. `candidate_capacity` must be at least the batch size and defaults to 10.
 
 With `tail_policy = "quiet_or_explicit"`, `batch reconcile` freezes a 1–4 candidate tail only after DWW's persisted state shows zero modifying producers in the exact `base_ref + base_head + activation_epoch` lane for the complete `tail_quiet_seconds` period. The default is 90 seconds. Start, candidate activation, Abandon, and tail freeze share the candidate admission lock, so a new Start either blocks the freeze or begins after the immutable snapshot. Activity controls timing only: the candidate list still contains only already activated, unsealed, same-lane candidates. `SessionEnd`, Hook delivery, host idleness, and UI task counts may wake reconcile but never supply completion facts.
 

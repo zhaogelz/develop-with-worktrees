@@ -40,8 +40,10 @@ browser flows. Each fresh Full executes them again. Project build caches may
 accelerate the command, but DWW does not materialize missing outputs. A pure
 compiler check may reuse only when no later step needs its generated files.
 
-Global policy and lockfile invalidation remains conservative. This contract does
-not introduce selective policy hashing or weaken approval boundaries.
+Proof invalidation remains conservative for every policy byte and lockfile. Approval
+is a separate normalized execution-policy contract: comments and line-ending-only
+edits do not require a new approval, while any semantic policy change still does.
+This does not weaken the exact proof identity.
 
 ## Recovery is not a fresh Full
 

@@ -2398,6 +2398,30 @@ def test_sensitive_candidate_is_blocked_and_preserved(git_repo: Path) -> None:
     assert (worktree / ".env.production").exists()
 
 
+def test_comment_only_validation_policy_change_keeps_local_approval(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="comment-only validation change")
+    worktree = Path(task["worktree"])
+    verification = worktree / ".solo-ai" / "verification.toml"
+    verification.write_text(
+        "# This explanation does not change the executable validation policy.\n"
+        + verification.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="docs: explain validation policy",
+        paths=[".solo-ai/verification.toml"],
+    )
+
+    assert ready(repo, task_id=task["id"], lease=task["lease"])["status"] == "ready"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
 def test_validation_policy_change_requires_full_local_reapproval(
     git_repo: Path,
 ) -> None:
@@ -2435,7 +2459,7 @@ commands = [["git", "diff", "--check"]]
     assert report["difference_count"] == len(report["differences"])
     assert report["difference_count"] > 0
     assert any(
-        difference["path"].endswith(".solo-ai/verification.toml")
+        difference["path"].startswith("$.policy.configuration.verification")
         for difference in report["differences"]
     )
     assert str(reports[0]) in str(approval_error.value)

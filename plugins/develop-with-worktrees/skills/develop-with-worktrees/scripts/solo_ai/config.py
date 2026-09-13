@@ -837,8 +837,8 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # Only exact top-level paths explicitly declared here may be removed by prune-slot.
 # An empty list means no dependencies or caches are ever removed automatically.
 cleanup = {{ owned_paths = [] }}
-# 默认每满 5 个候选自动封批；尾批仅在生产者稳定归零或明确要求时封存。
-integration = {{ mode = "batched", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90, worktree_mode = "reusable" }}
+# 默认每满 2 个候选自动封批；尾批仅在生产者稳定归零或明确要求时封存。
+integration = {{ mode = "batched", batch_size = 2, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 30, worktree_mode = "reusable" }}
 
 # 可选项目运行时 Adapter；DWW 只传递上下文文件，不解释端口、数据库或浏览器语义。
 # [runtime_adapter]

@@ -44,6 +44,8 @@ LOCKFILES = (
     "go.sum",
 )
 PROOF_SCHEMA = 3
+# 审批计划和验证收据的演进速度不同：前者描述可执行的策略，后者绑定现场证据。
+APPROVAL_PLAN_SCHEMA = 4
 _EXECUTION_BASELINE = (
     "PATH",
     "SYSTEMROOT",
@@ -275,6 +277,67 @@ def _shared_inputs(
     }
 
 
+def _command_policy(command: CommandSpec | None) -> dict[str, Any] | None:
+    """Return a redacted command together with its identity for approval comparison."""
+    if command is None:
+        return None
+    return {"argv": command.redacted(), "fingerprint": command.fingerprint}
+
+
+def _repo_config_policy(repo_config: Any) -> dict[str, Any]:
+    """Normalize every repository setting that can change lifecycle execution."""
+    readiness = repo_config.readiness
+    integration = repo_config.integration
+    return {
+        "schema_version": repo_config.schema_version,
+        "mode": repo_config.mode,
+        "slots": repo_config.slots,
+        "branch_prefix": repo_config.branch_prefix,
+        "worktree_directory": repo_config.worktree_directory,
+        "port_base": repo_config.port_base,
+        "remote_policy": repo_config.remote_policy,
+        "sensitive_allowlist": list(repo_config.sensitive_allowlist),
+        "agents_file_created": repo_config.agents_file_created,
+        "secret_scanner": _command_policy(repo_config.secret_scanner),
+        "warm_commands": [
+            _command_policy(command) for command in repo_config.warm_commands
+        ],
+        "dev_start": _command_policy(repo_config.dev_start),
+        "readiness": (
+            {
+                "kind": readiness.kind,
+                "target": readiness.target,
+                "timeout_seconds": readiness.timeout_seconds,
+            }
+            if readiness is not None
+            else None
+        ),
+        "cleanup_owned_paths": list(repo_config.cleanup_owned_paths),
+        "integration": {
+            "mode": integration.mode,
+            "batch_size": integration.batch_size,
+            "candidate_capacity": integration.candidate_capacity,
+            "seal_policy": integration.seal_policy,
+            "tail_policy": integration.tail_policy,
+            "tail_quiet_seconds": integration.tail_quiet_seconds,
+            "worktree_mode": integration.worktree_mode,
+        },
+    }
+
+
+def _approval_policy_inputs(
+    shared: dict[str, Any], *, repo_config: Any, verification: VerificationConfig
+) -> dict[str, Any]:
+    """Keep semantic execution approval separate from byte-exact proof evidence."""
+    return {
+        **{key: value for key, value in shared.items() if key != "config_hashes"},
+        "configuration": {
+            "repository": _repo_config_policy(repo_config),
+            "verification": verification.normalized(),
+        },
+    }
+
+
 def _profile_inputs(
     profile: VerificationProfile,
     *,
@@ -373,9 +436,12 @@ def approval_plan(
     commands = [*verification.commands, *adapter_commands]
     shared = _shared_inputs(repo, cwd, commands, verification)
     return {
-        "schema_version": PROOF_SCHEMA,
+        "schema_version": APPROVAL_PLAN_SCHEMA,
+        "contract": "execution-policy-v1",
         "git_common_dir": sha256_text(str(repo.common_dir)),
-        "policy": shared,
+        "policy": _approval_policy_inputs(
+            shared, repo_config=repo_config, verification=verification
+        ),
         "profiles": [
             {
                 "id": profile.profile_id,

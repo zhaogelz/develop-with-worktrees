@@ -393,6 +393,8 @@ def _safe_rg(tokens: list[_ReadToken]) -> bool:
         return False
     flags = {
         "--files",
+        "-a",
+        "--text",
         "-n",
         "--line-number",
         "-l",
@@ -411,21 +413,21 @@ def _safe_rg(tokens: list[_ReadToken]) -> bool:
         "--regexp",
         "-g",
         "--glob",
-        "-a",
+        "-A",
         "--after-context",
-        "-b",
+        "-B",
         "--before-context",
-        "-c",
+        "-C",
         "--context",
         "-m",
         "--max-count",
     }
     numeric = {
-        "-a",
+        "-A",
         "--after-context",
-        "-b",
+        "-B",
         "--before-context",
-        "-c",
+        "-C",
         "--context",
         "-m",
         "--max-count",
@@ -510,6 +512,55 @@ def _safe_get_content(tokens: list[_ReadToken]) -> bool:
     return path_seen
 
 
+def _safe_get_child_item(tokens: list[_ReadToken]) -> bool:
+    """Allow the small directory-listing subset used for repository inspection."""
+    options_with_values = {"-literalpath", "-path"}
+    flags = {"-name", "-file", "-directory"}
+    seen: set[str] = set()
+    path_seen = False
+    index = 1
+    while index < len(tokens):
+        argument = tokens[index].value
+        lowered = argument.lower()
+        if lowered in options_with_values:
+            if lowered in seen or index + 1 >= len(tokens):
+                return False
+            value = tokens[index + 1].value
+            if path_seen or value.startswith("-"):
+                return False
+            path_seen = True
+            seen.add(lowered)
+            index += 2
+            continue
+        if lowered in flags:
+            if lowered in seen:
+                return False
+            seen.add(lowered)
+            index += 1
+            continue
+        if argument.startswith("-") or path_seen:
+            return False
+        path_seen = True
+        index += 1
+    return True
+
+
+def _safe_git_ls_files(tokens: list[_ReadToken]) -> bool:
+    """Keep Git file enumeration read-only without accepting Git config injection."""
+    allowed = {
+        "--cached",
+        "--modified",
+        "--deleted",
+        "--others",
+        "--exclude-standard",
+        "--full-name",
+        "--deduplicate",
+        "--directory",
+        "--no-empty-directory",
+    }
+    return all(argument.value.lower() in allowed for argument in tokens[2:])
+
+
 def _safe_select(tokens: list[_ReadToken]) -> bool:
     if len(tokens) < 3 or _command_name(tokens[0]) != "select-object":
         return False
@@ -533,12 +584,14 @@ def _safe_read_only_command(tokens: list[_ReadToken]) -> bool:
     if not tokens:
         return False
     name = _command_name(tokens[0])
-    if name in {"ls", "dir", "pwd"}:
+    if name in {"ls", "dir", "pwd", "get-location"}:
         return len(tokens) == 1
     if name == "rg":
         return _safe_rg(tokens)
     if name == "get-content":
         return _safe_get_content(tokens)
+    if name == "get-childitem":
+        return _safe_get_child_item(tokens)
     if name in {"where", "get-command", "test-path"}:
         return len(tokens) > 1
     if name != "git" or len(tokens) < 2:
@@ -566,10 +619,11 @@ def _safe_read_only_command(tokens: list[_ReadToken]) -> bool:
             argument.value.lower() in {"--show-current", "--list", "-a", "-r", "-v"}
             for argument in tokens[2:]
         )
-    return (
-        subcommand == "worktree"
-        and [token.value for token in tokens[2:3]] == ["list"]
-        and len(tokens) == 3
+    if subcommand == "ls-files":
+        return _safe_git_ls_files(tokens)
+    return subcommand == "worktree" and [token.value for token in tokens[2:]] in (
+        ["list"],
+        ["list", "--porcelain"],
     )
 
 
@@ -606,6 +660,10 @@ def _read_only_rejection_reason(command: str) -> str:
     ]
     if len(pipes) > 1 or (pipes and not _safe_select(tokens[pipes[0] + 1 :])):
         return "Bash command uses an unsupported pipeline or query form; use a direct read-only command or Get-Content/rg | Select-Object with numeric line options."
+    if _command_name(tokens[0]) == "rg" and not any(
+        token.value == "--no-config" for token in tokens
+    ):
+        return "rg read-only queries must include --no-config; for example: rg --no-config --files."
     if not _safe_read_only_command(tokens):
         return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."
     return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."

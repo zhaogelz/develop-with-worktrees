@@ -47,7 +47,7 @@ Do not copy chat transcripts, hidden reasoning, credentials, leases, or unrelate
 
 Direct user instructions and repository hard rules remain authoritative. Within those boundaries, the current task anchor is the source for the active goal, scope, and acceptance criteria. Executable facts in code, tests, schema, and configuration remain authoritative for implemented behavior; stale proposals and archived material do not override either.
 
-After context compression, a model change, handoff, or later continuation, re-read the anchor before the next modifying action. Update its progress while the task remains active. If it conflicts with a current hard rule or the user's latest direction, stop and resolve that conflict rather than silently rewriting the anchor.
+After context compression, a model change, handoff, or later continuation, re-read the anchor before the next modifying action. Update its progress while the task remains active. Continue without interruption when the current request, hard rules, and executable facts determine one compatible result. Stop only when they conflict or leave materially different product, permission, migration, deletion, security, or validation outcomes open; do not silently rewrite the anchor.
 
 ## Durable-document boundary
 

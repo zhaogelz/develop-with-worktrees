@@ -13,8 +13,8 @@ agents_file_created = true
 # Optional serial preparation commands for an idle slot. No environment is copied.
 # warm = [["uv", "sync"]]
 
-# 每满 5 个候选自动封批；尾批只在通道稳定归零或明确要求时封存，无最长等待。
-integration = { mode = "batched", worktree_mode = "reusable", batch_size = 5, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 90 }
+# 每满 2 个候选自动封批；尾批只在通道稳定归零或明确要求时封存，无最长等待。
+integration = { mode = "batched", worktree_mode = "reusable", batch_size = 2, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 30 }
 
 [lifecycle]
 # dev_start = ["npm", "run", "dev", "--", "--port", "{port}"]

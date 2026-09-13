@@ -219,8 +219,8 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "hooks/hooks.json" in text
     assert 'integration.mode = "batched"' in text
     assert 'seal_policy = "auto_full"' in text
-    assert "Every five candidates" in text
-    assert "每满 5 个候选" in text
+    assert "Every two candidates" in text
+    assert "每满 2 个候选" in text
     assert "batch seal" in text
     assert "candidate_capacity = 10" in text
     assert "task anchor" in text
