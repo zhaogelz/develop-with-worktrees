@@ -2064,6 +2064,7 @@ def _restore_orphaned_ready_proof(
         profiles = proof.get("profile_proofs") or []
         if not isinstance(profiles, list):
             continue
+        allowed_reuse_scopes = {f"task:{task['id']}", "cross-task"}
         if any(
             read_json(
                 repo.local_dir / "profile-proofs" / f"{item.get('fingerprint')}.json",
@@ -2071,7 +2072,7 @@ def _restore_orphaned_ready_proof(
             )
             .get("inputs", {})
             .get("reuse_scope")
-            != f"task:{task['id']}"
+            not in allowed_reuse_scopes
             for item in profiles
             if isinstance(item, dict) and item.get("fingerprint")
         ):

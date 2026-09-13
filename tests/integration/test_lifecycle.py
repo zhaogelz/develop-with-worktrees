@@ -342,6 +342,53 @@ def test_recover_restores_one_task_scoped_orphaned_ready_proof(git_repo: Path) -
     assert restored["recovered_ready_proof"] is True
 
 
+def test_recover_restores_orphaned_ready_proof_with_cross_task_profile_reuse(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="restore cross-task reused ready proof")
+    commit_one(repo, task, "cross-task.txt", "cross-task\n", "test: reused proof")
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+    aggregate = read_json(
+        repo.local_dir / "proofs" / f"{prepared['ready_proof']}.json", {}
+    )
+    profile = aggregate["profile_proofs"][0]
+    profile_path = repo.local_dir / "profile-proofs" / f"{profile['fingerprint']}.json"
+    stored_profile = read_json(profile_path, {})
+    stored_profile["inputs"]["reuse_scope"] = "cross-task"
+    atomic_write_json(profile_path, stored_profile)
+    StateStore(repo).update_task(task["id"], status="active", ready_proof=None)
+
+    restored = recover(repo, task_id=task["id"])
+
+    assert restored["status"] == "ready"
+    assert restored["ready_proof"] == prepared["ready_proof"]
+    assert restored["recovered_ready_proof"] is True
+
+
+def test_recover_rejects_orphaned_ready_proof_with_unrelated_profile_scope(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="reject unrelated reused ready proof")
+    commit_one(repo, task, "unrelated.txt", "unrelated\n", "test: reject proof")
+    prepared = ready(repo, task_id=task["id"], lease=task["lease"])
+    aggregate = read_json(
+        repo.local_dir / "proofs" / f"{prepared['ready_proof']}.json", {}
+    )
+    profile = aggregate["profile_proofs"][0]
+    profile_path = repo.local_dir / "profile-proofs" / f"{profile['fingerprint']}.json"
+    stored_profile = read_json(profile_path, {})
+    stored_profile["inputs"]["reuse_scope"] = "task:another-task"
+    atomic_write_json(profile_path, stored_profile)
+    StateStore(repo).update_task(task["id"], status="active", ready_proof=None)
+
+    result = recover(repo, task_id=task["id"])
+
+    assert result["status"] == "active"
+    assert StateStore(repo).task(task["id"])["ready_proof"] is None
+
+
 def test_full_validation_reuses_the_exact_ready_profile_before_heavy_work(
     git_repo: Path,
 ) -> None:
