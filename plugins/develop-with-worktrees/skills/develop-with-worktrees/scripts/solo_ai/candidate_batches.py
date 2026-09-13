@@ -137,7 +137,7 @@ class CandidateBatchStore:
                 )
             value["next_publication_sequence"] = sequence
             value["schema_version"] = POOL_SCHEMA
-        elif value.get("schema_version") in {2, 3}:
+        elif value.get("schema_version") in {2, 3, 4}:
             value["schema_version"] = POOL_SCHEMA
         elif value.get("schema_version") != POOL_SCHEMA:
             raise SoloAIError("Unsupported candidate-pool state schema")

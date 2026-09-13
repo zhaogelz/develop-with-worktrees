@@ -2667,6 +2667,27 @@ def test_batch_metrics_separate_legacy_weak_proofs_from_current_missing_full_pro
     assert metrics["missing_full_proofs"] == 2
 
 
+def test_candidate_pool_schema_4_migrates_on_next_write(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    store = CandidateBatchStore(repo)
+    atomic_write_json(
+        store.path,
+        {
+            "schema_version": 4,
+            "next_publication_sequence": 1,
+            "updated_at": "2026-09-12T00:00:00Z",
+            "candidates": {},
+            "batches": {},
+        },
+    )
+
+    assert (
+        store.mutate(lambda value: value["schema_version"]) == batch_module.POOL_SCHEMA
+    )
+
+    assert read_json(store.path, {})["schema_version"] == batch_module.POOL_SCHEMA
+
+
 def test_batch_runtime_release_failure_blocks_promotion_and_recovery_reuses_full(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
