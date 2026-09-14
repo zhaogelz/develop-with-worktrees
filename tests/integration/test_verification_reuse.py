@@ -200,6 +200,45 @@ def test_only_complete_pure_checks_survive_new_full(
     assert (git_repo / ".tmp/count").read_text() == str(expected)
 
 
+def test_complete_pure_profile_reuses_between_tasks_when_its_declared_inputs_match(
+    git_repo: Path,
+):
+    """批次重跑时，未受后续候选影响的检查应直接复用已有收据。"""
+    repo = configure(git_repo, COUNT)
+    (git_repo / "src").mkdir()
+    (git_repo / "src/checked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    policy = git_repo / ".solo-ai/verification.toml"
+    policy.write_text(
+        policy.read_text(encoding="utf-8").replace(
+            'input_paths = ["**"]', 'input_paths = ["src/**"]'
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "src/checked.py", ".solo-ai/verification.toml")
+    git(git_repo, "commit", "-m", "test: declare the check input boundary")
+    first = validate(repo)
+
+    (git_repo / "README.md").write_text("unrelated candidate\n", encoding="utf-8")
+    git(git_repo, "add", "README.md")
+    git(git_repo, "commit", "-m", "test: add unrelated candidate")
+    second = proof.validate(
+        repo,
+        cwd=repo.root,
+        base="main",
+        task_id="next-batch",
+        verification=load_verification_config(repo),
+        level="full",
+        expected_candidate_head=repo.head(repo.root),
+    )
+
+    assert (
+        first["profile_proofs"][0]["fingerprint"]
+        == second["profile_proofs"][0]["fingerprint"]
+    )
+    assert second["profile_proofs"][0]["reused"] is True
+    assert (git_repo / ".tmp/count").read_text() == "1"
+
+
 @pytest.mark.parametrize(
     "change",
     ["source", "command", "policy-comment", "environment", "log", "missing-results"],
@@ -260,7 +299,7 @@ commands = [["git", "status"]]
 
     validate(repo)
 
-    assert (git_repo / ".tmp/count").read_text() == "2"
+    assert (git_repo / ".tmp/count").read_text() == "1"
 
 
 def test_partial_success_receipts_cannot_skip_unrecorded_commands(git_repo: Path):

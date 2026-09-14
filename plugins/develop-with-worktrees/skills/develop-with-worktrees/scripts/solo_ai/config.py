@@ -43,6 +43,7 @@ class IntegrationSpec:
     batch_size: int
     candidate_capacity: int
     seal_policy: str
+    candidate_validation: str
     tail_policy: str
     tail_quiet_seconds: float
     worktree_mode: str = "dedicated"
@@ -382,6 +383,18 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         raise SoloAIError(
             'integration.seal_policy = "auto_full" requires mode = "batched"'
         )
+    candidate_validation = _string(
+        # 未声明该字段的仓库来自候选发布仍要求 Ready 的旧契约，不能在升级时
+        # 静默放宽；新模板会显式写入 batch。
+        integration_raw.get("candidate_validation", "ready"),
+        field="integration.candidate_validation",
+    )
+    if candidate_validation not in {"ready", "batch"}:
+        raise SoloAIError('integration.candidate_validation must be "ready" or "batch"')
+    if integration_mode == "direct" and candidate_validation != "ready":
+        raise SoloAIError(
+            'integration.candidate_validation = "batch" requires mode = "batched"'
+        )
     tail_policy = _string(
         integration_raw.get("tail_policy", "explicit"),
         field="integration.tail_policy",
@@ -406,6 +419,7 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
     if not integration_declared:
         integration_mode = "direct"
         seal_policy = "explicit"
+        candidate_validation = "ready"
         tail_policy = "explicit"
     runtime_adapter_raw = data.get("runtime_adapter", {})
     if not isinstance(runtime_adapter_raw, dict):
@@ -528,6 +542,7 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
             batch_size=batch_size,
             candidate_capacity=candidate_capacity,
             seal_policy=seal_policy,
+            candidate_validation=candidate_validation,
             tail_policy=tail_policy,
             tail_quiet_seconds=tail_quiet_seconds,
             worktree_mode=worktree_mode,
@@ -837,8 +852,9 @@ agents_file_created = {"true" if agents_file_created else "false"}
 # Only exact top-level paths explicitly declared here may be removed by prune-slot.
 # An empty list means no dependencies or caches are ever removed automatically.
 cleanup = {{ owned_paths = [] }}
-# 默认每满 2 个候选自动封批；尾批仅在生产者稳定归零或明确要求时封存。
-integration = {{ mode = "batched", batch_size = 2, candidate_capacity = 10, seal_policy = "auto_full", tail_policy = "quiet_or_explicit", tail_quiet_seconds = 30, worktree_mode = "reusable" }}
+# 默认每满 3 个候选自动封批。候选保存只固定源码；项目检查在组合后的
+# 批次中按影响运行。收尾候选由宿主明确封存，不依赖静默计时。
+integration = {{ mode = "batched", batch_size = 3, candidate_capacity = 10, seal_policy = "auto_full", candidate_validation = "batch", tail_policy = "explicit", tail_quiet_seconds = 30, worktree_mode = "reusable" }}
 
 # 可选项目运行时 Adapter；DWW 只传递上下文文件，不解释端口、数据库或浏览器语义。
 # [runtime_adapter]

@@ -430,7 +430,8 @@ def _parser() -> argparse.ArgumentParser:
     root_anchor_sub.add_parser("list", help="list local open root anchors")
 
     candidate = sub.add_parser(
-        "candidate", help="inspect or withdraw verified candidates in batched mode"
+        "candidate",
+        help="inspect or withdraw immutable source candidates in batched mode",
     )
     candidate_sub = candidate.add_subparsers(dest="candidate_command", required=True)
     candidate_sub.add_parser("status", help="show the local candidate pool")
@@ -463,7 +464,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_host_reference_arguments(batch_seal, role="integration batch")
     batch_reconcile = batch_sub.add_parser(
         "reconcile",
-        help="freeze one full or proven quiet tail batch from persisted facts",
+        help="freeze one full or explicitly requested tail batch from persisted facts",
     )
     batch_reconcile.add_argument(
         "--force",
@@ -1946,9 +1947,12 @@ def _human(command: str, result: dict[str, Any]) -> str:
             )
         if result.get("outcome") == "candidate_published":
             next_step = (
-                "It will join the next full automatic batch. A smaller tail is eligible "
-                "only after its persisted producer lane stays quiet, or after an explicit "
-                "user, deployment, or dependency request."
+                "It will join the next full automatic batch. To integrate a smaller tail, "
+                "explicitly end the round with batch reconcile --force --cause user."
+                if result.get("seal_policy") == "auto_full"
+                and result.get("tail_policy") == "explicit"
+                else "It will join the next full automatic batch. A smaller tail follows "
+                "the repository's retained compatibility policy."
                 if result.get("seal_policy") == "auto_full"
                 else "This legacy policy requires an explicit exact candidate batch."
             )

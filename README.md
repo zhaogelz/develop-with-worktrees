@@ -6,37 +6,37 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 
 - One isolated worktree per modifying task.
 - A local task anchor that preserves the task's original purpose and baseline across continuation, handoff, and model changes; `anchor show/update` reads and saves checked context during an active task.
-- Exact-path commits and immutable verified candidates.
-- Automatic integration whenever two eligible candidates accumulate.
+- Exact-path commits and immutable source candidates.
+- Automatic integration whenever three eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
 - After publishing a candidate, the developer task may end its round. The host that freezes its batch follows integration and can return an attributed merge conflict to the original task or explicitly hand it to a replacement.
-- Completed checks are saved individually. A fresh Full reuses only checks with complete, pure inputs; mutable environments and required build artifacts are not replaced by old success reports.
-- Batch Full runs the repository-declared integration scope: selected Ready checks plus a focused combined-path check. Wide regression is an explicit milestone (`dww verify --level full --complete` or CI); repeated recovery, high-concurrency, marketplace, and platform fault-injection checks stay under explicit Stress.
+- Completed checks are saved individually. A later batch reuses a check when its declared inputs, environment, and tool versions still match; mutable environments and required build artifacts are never replaced by an old success report.
+- Batch Full runs only the repository-declared checks affected by the combined changes. Broad regression and stress checks are manual diagnostic tools, not periodic or release gates.
 
 DWW is no longer a multi-AI task command center. The host's native task system decides who does what and when; DWW owns only the Git safety lifecycle that carries completed work into the base branch.
 
 ## Default flow
 
 1. `Start` creates the exact task anchor and isolated worktree, then lets an optional project Runtime Adapter establish project runtime identity before returning it as active.
-2. The agent edits only there, commits exact paths, and runs `ready`.
-3. `Finish` publishes a verified candidate and releases the task worktree without moving the base.
-4. Every two candidates, DWW freezes the oldest eligible two and composes them in a dedicated integration worktree. An optional paired batch Adapter establishes and releases project-owned Full-validation resources before DWW may advance the base.
-5. With fewer than two candidates, DWW freezes the exact pending tail only after the lane has no modifying producer for a stable 30 seconds, or after an explicit user, deployment, or downstream-dependency request.
+2. The agent edits only there, commits exact paths, and runs development checks when they help it work safely.
+3. `Finish` publishes the exact source candidate and releases the task worktree without moving the base or requiring a separate project test gate.
+4. Every three candidates, DWW freezes the oldest eligible three and composes them in an integration worktree. It then runs the affected combined checks, reusing valid individual results.
+5. With fewer than three candidates, the host ends the round or requests immediate integration with `batch reconcile --force --cause user`; DWW freezes that exact pending tail.
 
-Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state; the host heartbeat merely wakes reconciliation at `next_reconcile_at`. A host without reliable scheduling cannot claim automatic quiet-tail support.
+Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state. It never guesses that an idle host means the round is over.
 
 Publishing a candidate ends the developer’s current round. The host that freezes its batch continues as the coordinator until it integrates or records a failure. For a conflict DWW can attribute to one candidate, it records a single repair handoff: the coordinator sends the returned native-task message, and the original task confirms or a replacement explicitly takes it over. DWW never guesses task identities or sends host messages itself.
 
 Releasing a task keeps its dependency caches, including normal package links. New repositories also reuse one integration workspace: ordinary successful or failed batches return it without deleting or hashing the entire dependency tree. Each fresh Full still recreates required runtime effects. Physical disk cleanup is separate maintenance; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
 
-## Why two and ten
+## Why three and ten
 
-Two candidates keep combined validation close to development feedback while still catching cross-task conflicts. The pool holds ten nonterminal candidates by default, so one batch can integrate while the next accumulates. A full pool preserves the publishing task and asks it to retry; it never drops work.
+Three candidates avoid turning each finished task into an integration wait while still catching cross-task conflicts quickly. The pool holds ten nonterminal candidates by default, so one batch can integrate while the next accumulates. A full pool preserves the publishing task and asks it to retry; it never drops work.
 
 ## What DWW never does
 
 - It never guesses candidate identity from UI task counts, raw worktree counts, Hooks, or session end; those signals may only wake reconciliation.
-- It has no candidate-age or longest-wait auto-seal. Active modifying work keeps a tail open unless an explicit user, deployment, or dependency request forces the current exact snapshot.
+- It has no candidate-age, quiet-period, or longest-wait auto-seal. A tail stays pending until the host explicitly ends the round or asks to integrate it.
 - It does not replace native task decomposition, dependencies, or worker scheduling.
 - It never fetches, pulls, pushes, opens PRs, deploys, rebases, squashes, amends, or rewrites history.
 - It does not absorb repository-specific ports, databases, browsers, test selection, or deployment rules.

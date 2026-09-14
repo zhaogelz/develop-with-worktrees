@@ -24,7 +24,7 @@ from .util import (
     utc_timestamp,
 )
 
-STATE_SCHEMA = 8
+STATE_SCHEMA = 9
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 IN_PLACE_MODE = "in-place"
 
@@ -149,6 +149,14 @@ class StateStore:
             for task in state.get("tasks", {}).values():
                 task.setdefault("host_origin", None)
             state["schema_version"] = STATE_SCHEMA
+        elif version == 8:
+            # 已经启动的旧任务仍必须保留 Ready 作为候选发布门禁；新策略只
+            # 对新建的 schema 3 policy 生效，不能在活动现场热替换语义。
+            for task in state.get("tasks", {}).values():
+                policy = task.get("integration_policy")
+                if isinstance(policy, dict):
+                    policy.setdefault("candidate_validation", "ready")
+            state["schema_version"] = STATE_SCHEMA
         elif version != STATE_SCHEMA:
             raise SoloAIError(
                 "Unsupported local state schema; run doctor before changing this repository"
@@ -159,6 +167,9 @@ class StateStore:
             task.setdefault("integration_policy", None)
             task.setdefault("root_anchor_file", None)
             task.setdefault("host_origin", None)
+            policy = task.get("integration_policy")
+            if isinstance(policy, dict):
+                policy.setdefault("candidate_validation", "ready")
         state.setdefault("pending_operation_outcomes", {})
         self._apply_guard_quarantines(state)
         return state
@@ -174,20 +185,26 @@ class StateStore:
         tail_policy = "explicit" if legacy_explicit else config.integration.tail_policy
         if mode == "direct":
             tail_policy = "explicit"
+        candidate_validation = (
+            "ready"
+            if legacy_explicit or mode == "direct"
+            else config.integration.candidate_validation
+        )
         identity = (
-            f"candidate-policy-v2:{mode}:{config.integration.batch_size}:"
+            f"candidate-policy-v3:{mode}:{config.integration.batch_size}:"
             f"{config.integration.candidate_capacity}:{seal_policy}:"
-            f"{tail_policy}:{config.integration.tail_quiet_seconds:g}"
+            f"{candidate_validation}:{tail_policy}:{config.integration.tail_quiet_seconds:g}"
         )
         worktree_mode = config.integration.worktree_mode
         if worktree_mode == "reusable":
             identity += ":worktree-reusable-v1"
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "mode": mode,
             "batch_size": config.integration.batch_size,
             "candidate_capacity": config.integration.candidate_capacity,
             "seal_policy": seal_policy,
+            "candidate_validation": candidate_validation,
             "tail_policy": tail_policy,
             "tail_quiet_seconds": config.integration.tail_quiet_seconds,
             "worktree_mode": worktree_mode,
@@ -768,8 +785,17 @@ class StateStore:
     ) -> dict[str, Any]:
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
-            if not task or task.get("status") not in {"ready", "publishing"}:
-                raise SoloAIError("Only a ready task can publish a candidate")
+            policy = task.get("integration_policy") if task else {}
+            source_candidate = (
+                isinstance(policy, dict)
+                and policy.get("mode") == "batched"
+                and policy.get("candidate_validation") == "batch"
+            )
+            allowed_statuses = {"ready", "publishing"}
+            if source_candidate:
+                allowed_statuses.add("active")
+            if not task or task.get("status") not in allowed_statuses:
+                raise SoloAIError("Only an eligible task can publish a candidate")
             active = task.get("active_operation") or {}
             if active.get("id") != operation_id or active.get("kind") != "finish":
                 raise SoloAIError("Candidate publication lost its Finish operation")

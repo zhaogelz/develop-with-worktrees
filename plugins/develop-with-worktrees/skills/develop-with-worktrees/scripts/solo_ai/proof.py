@@ -183,12 +183,41 @@ def _tool(command: CommandSpec, cwd: Path) -> dict[str, str | None]:
         result = run([resolved, "--version"], cwd=cwd, check=False, timeout=10)
         output = result.stdout or result.stderr
         version = redact_text(output.splitlines()[0][:300]) if output else None
-    return {
+    fact = {
         "argv_digest": command.fingerprint,
         "executable": redact_text(executable),
         "path": str(Path(resolved).resolve()) if resolved else None,
         "version": version,
     }
+    # uv/uvx 是运行器而非真正执行检查的工具；记录可安全识别的直接子命令，
+    # 让 pytest、ruff 等实际版本参与证明身份。复杂包装命令仍保守地只复用
+    # 已完整声明输入的 profile。
+    invoked: list[str] | None = None
+    if (
+        resolved
+        and executable == "uv"
+        and len(command.argv) >= 3
+        and command.argv[1] == "run"
+        and not command.argv[2].startswith("-")
+    ):
+        invoked = [resolved, "run", command.argv[2], "--version"]
+    elif (
+        resolved
+        and executable == "uvx"
+        and len(command.argv) >= 2
+        and not command.argv[1].startswith("-")
+    ):
+        invoked = [resolved, command.argv[1], "--version"]
+    if invoked:
+        result = run(invoked, cwd=cwd, check=False, timeout=10)
+        output = result.stdout or result.stderr
+        fact["invoked_tool"] = redact_text(
+            command.argv[2] if executable == "uv" else command.argv[1]
+        )
+        fact["invoked_version"] = (
+            redact_text(output.splitlines()[0][:300]) if output else None
+        )
+    return fact
 
 
 def _tracked(repo: GitRepo, cwd: Path) -> list[str]:
@@ -216,6 +245,8 @@ def _shared_inputs(
     commands: list[CommandSpec],
     verification: VerificationConfig,
     tool_cache: dict[tuple[Any, ...], dict[str, str | None]] | None = None,
+    *,
+    include_policy: bool = True,
 ) -> dict[str, Any]:
     tracked = _tracked(repo, cwd)
     tool_specs = [CommandSpec(("git",)), CommandSpec(("uv",)), *commands]
@@ -246,6 +277,18 @@ def _shared_inputs(
             tool_cache[key] = _tool(command, cwd)
         return tool_cache[key]
 
+    result: dict[str, Any] = {
+        "tools": [tool_facts(command) for command in unique.values()],
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+        },
+    }
+    if not include_policy:
+        return result
+
     def normalized_file_hash(path: Path) -> str:
         # 策略的意义不能随平台检出时的 LF/CRLF 转换改变；其余文本变化仍是
         # 审批与证明复用的有效输入。
@@ -264,18 +307,12 @@ def _shared_inputs(
             normalized_file_hash(stress_config)
         )
     return {
+        **result,
         "config_hashes": config_hashes,
         "lockfiles": {
             relative: sha256_file(cwd / relative)
             for relative in tracked
             if Path(relative).name in LOCKFILES and (cwd / relative).is_file()
-        },
-        "tools": [tool_facts(command) for command in unique.values()],
-        "platform": {
-            "system": platform.system(),
-            "release": platform.release(),
-            "machine": platform.machine(),
-            "python": platform.python_version(),
         },
     }
 
@@ -321,6 +358,7 @@ def _repo_config_policy(repo_config: Any) -> dict[str, Any]:
             "batch_size": integration.batch_size,
             "candidate_capacity": integration.candidate_capacity,
             "seal_policy": integration.seal_policy,
+            "candidate_validation": integration.candidate_validation,
             "tail_policy": integration.tail_policy,
             "tail_quiet_seconds": integration.tail_quiet_seconds,
             "worktree_mode": integration.worktree_mode,
@@ -416,7 +454,7 @@ def _profile_inputs(
     return {
         **shared,
         # 旧证明未执行单元输入前后复核，不能作为新复用契约的成功证明。
-        "reuse_contract": 1,
+        "reuse_contract": 2,
         "profile_id": profile.profile_id,
         "paths": list(profile.paths),
         "command_digests": [command.fingerprint for command in profile.commands],
@@ -722,6 +760,8 @@ def proof_inputs(
     )
     commands = [command for profile in profiles for command in profile.commands]
     tracked = _tracked(repo, cwd)
+    # 汇总证明保留完整的运行计划，便于审计；单个 profile 的复用身份只包含
+    # 它自己声明的输入，避免无关检查、锁文件或策略修改使已验证的检查失效。
     shared = _shared_inputs(repo, cwd, commands, verification, tool_cache)
     candidate_head = repo.head(cwd)
     candidate_tree = repo.tree(cwd=cwd)
@@ -731,16 +771,24 @@ def proof_inputs(
             profile,
             cwd=cwd,
             tracked=tracked,
-            shared=shared,
+            shared=_shared_inputs(
+                repo,
+                cwd,
+                list(profile.commands),
+                verification,
+                tool_cache,
+                include_policy=False,
+            ),
             validation_environment=_profile_validation_environment(
                 profile, frozen_environment
             ),
         )
-        # 同一任务可在输入闭包未变时复用；跨任务复用仍需显式闭包和无外部状态。
+        # 输入闭包完整且没有外部状态的检查，天然可在任务和批次之间复用；
+        # 其余检查仍固定在当前任务（或无任务时的当前候选）上。
         if force_task_scope and task_id:
             scope = f"task:{task_id}"
-        elif profile.cross_task_reuse and profile.external_state == "none":
-            scope = "cross-task"
+        elif profile.external_state == "none" and profile.input_closure == "complete":
+            scope = "repository"
         elif task_id:
             scope = f"task:{task_id}"
         else:
@@ -825,16 +873,22 @@ def _require_profile_inputs(
     profile: VerificationProfile,
     inputs: dict[str, Any],
     verification: VerificationConfig,
-    commands: list[CommandSpec],
     tool_cache: dict[tuple[Any, ...], dict[str, str | None]],
     validation_environment: dict[str, str],
 ) -> None:
-    """HEAD未变不足以证明输入稳定；同时复核文件、配置、工具和环境。"""
+    """HEAD未变不足以证明输入稳定；复核该检查声明的输入、工具和环境。"""
     current = _profile_inputs(
         profile,
         cwd=cwd,
         tracked=_tracked(repo, cwd),
-        shared=_shared_inputs(repo, cwd, commands, verification, tool_cache),
+        shared=_shared_inputs(
+            repo,
+            cwd,
+            list(profile.commands),
+            verification,
+            tool_cache,
+            include_policy=False,
+        ),
         validation_environment=_profile_validation_environment(
             profile, validation_environment
         ),
@@ -1107,7 +1161,6 @@ def validate(
     proof_path = repo.local_dir / "proofs" / f"{fingerprint}.json"
     existing = read_json(proof_path, {})
     _require_stored_proof_identity(existing, fingerprint=fingerprint, inputs=inputs)
-    commands = [command for profile, _, _ in records for command in profile.commands]
     if existing.get("result") == "passed" and _logs_exist(existing):
         _require_expected_candidate_head(
             repo, cwd=cwd, expected_candidate_head=expected_candidate_head
@@ -1119,7 +1172,6 @@ def validate(
                 profile=profile,
                 inputs=profile_inputs,
                 verification=verification,
-                commands=commands,
                 tool_cache=tool_cache,
                 validation_environment=validation_environment,
             )
@@ -1138,7 +1190,6 @@ def validate(
                 profile=profile,
                 inputs=profile_inputs,
                 verification=verification,
-                commands=commands,
                 tool_cache=tool_cache,
                 validation_environment=validation_environment,
             )
@@ -1200,7 +1251,6 @@ def validate(
             profile=profile,
             inputs=profile_inputs,
             verification=verification,
-            commands=commands,
             tool_cache=tool_cache,
             validation_environment=_profile_validation_environment(
                 profile, validation_environment

@@ -13,6 +13,7 @@ from conftest import git
 from solo_ai import candidate_batches as batch_module
 from solo_ai import cleanup as cleanup_module
 from solo_ai import lifecycle as lifecycle_module
+from solo_ai import validation_queue
 from solo_ai.cli import _status
 from solo_ai.candidate_batches import (
     CandidateBatchStore,
@@ -48,12 +49,22 @@ from solo_ai.util import atomic_write_json, read_json
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
 
 
+@pytest.fixture(autouse=True)
+def isolated_validation_machine(tmp_path: Path):
+    """用独立 patch 保持机器队列隔离，不受测试自身 monkeypatch.undo() 影响。"""
+    patch = pytest.MonkeyPatch()
+    patch.setattr(validation_queue, "_machine_root", lambda: tmp_path / "machine")
+    yield
+    patch.undo()
+
+
 def initialized_batched(
     path: Path,
     *,
     auto_full: bool = True,
     reusable: bool = False,
-    batch_size: int | None = None,
+    batch_size: int | None = 2,
+    tail_policy: str | None = "quiet_or_explicit",
 ) -> GitRepo:
     repo = GitRepo(path)
     initialize(repo, slots=3, commands=[VERIFY], accept=True, accept_static_only=False)
@@ -70,7 +81,11 @@ def initialized_batched(
             'seal_policy = "auto_full"', 'seal_policy = "explicit"'
         )
     if batch_size is not None:
-        contents = contents.replace("batch_size = 2", f"batch_size = {batch_size}")
+        contents = contents.replace("batch_size = 3", f"batch_size = {batch_size}")
+    if tail_policy is not None:
+        contents = contents.replace(
+            'tail_policy = "explicit"', f'tail_policy = "{tail_policy}"'
+        )
     if contents != original:
         config.write_text(contents, encoding="utf-8")
         git(path, "add", ".solo-ai/config.toml")
@@ -129,6 +144,7 @@ def publish(
     name: str,
     relative: str,
     host_origin: dict[str, str] | None = None,
+    run_ready: bool = True,
 ) -> dict[str, str]:
     task = start(repo, name=name, host_origin=host_origin)
     worktree = Path(task["worktree"])
@@ -140,8 +156,89 @@ def publish(
         message=f"test: {name}",
         paths=[relative],
     )
-    ready(repo, task_id=task["id"], lease=task["lease"])
+    if run_ready:
+        ready(repo, task_id=task["id"], lease=task["lease"])
     return finish(repo, task_id=task["id"], lease=task["lease"])
+
+
+def test_new_default_publishes_source_candidates_without_ready_then_tests_combined_batch(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """快速默认把项目检查留到三个候选组成的批次，候选本身仍被精确固定。"""
+    from solo_ai import validation_queue
+
+    monkeypatch.setattr(
+        validation_queue, "_machine_root", lambda: git_repo.parent / "machine"
+    )
+    repo = initialized_batched(git_repo, batch_size=None, tail_policy=None)
+    original_validate = lifecycle_module.validate
+
+    def fail_if_candidate_runs_project_checks(*args, **kwargs):
+        raise AssertionError("候选发布不应执行项目验证")
+
+    monkeypatch.setattr(
+        lifecycle_module, "validate", fail_if_candidate_runs_project_checks
+    )
+    first = publish(
+        repo,
+        name="unchecked 1",
+        relative="unchecked-1.txt",
+        run_ready=False,
+    )
+    second = publish(
+        repo,
+        name="unchecked 2",
+        relative="unchecked-2.txt",
+        run_ready=False,
+    )
+
+    pending = CandidateBatchStore(repo).summary()
+    assert pending["batches"] == []
+    assert all(
+        item["proof"] is None and item["candidate_validation"] == "batch"
+        for item in pending["candidates"]
+    )
+
+    # 第三个候选触发组合验证；恢复原函数后，批次必须正常完成。
+    monkeypatch.setattr(lifecycle_module, "validate", original_validate)
+    third = publish(
+        repo,
+        name="unchecked 3",
+        relative="unchecked-3.txt",
+        run_ready=False,
+    )
+
+    batches = CandidateBatchStore(repo).summary()["batches"]
+    assert len(batches) == 1
+    assert batches[0]["status"] == "completed"
+    assert batches[0]["trigger"] == "auto_full"
+    assert set(batches[0]["candidate_ids"]) == {
+        first["candidate_id"],
+        second["candidate_id"],
+        third["candidate_id"],
+    }
+    assert batches[0]["proof"]
+
+
+def test_new_default_keeps_a_short_tail_until_an_explicit_round_end(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from solo_ai import validation_queue
+
+    monkeypatch.setattr(
+        validation_queue, "_machine_root", lambda: git_repo.parent / "machine"
+    )
+    repo = initialized_batched(git_repo, batch_size=None, tail_policy=None)
+    candidate = publish(repo, name="tail", relative="tail.txt")
+
+    waiting = reconcile_batches(repo, cause="heartbeat", now_epoch=time.time() + 3600)
+    assert waiting["status"] == "waiting"
+    assert CandidateBatchStore(repo).summary()["batches"] == []
+
+    completed = reconcile_batches(repo, force=True, cause="user")
+    assert completed["status"] == "completed"
+    assert completed["batch"]["trigger"] == "explicit_tail"
+    assert completed["batch"]["candidate_ids"] == [candidate["candidate_id"]]
 
 
 def test_candidate_handoff_records_source_and_auto_batch_coordinator(

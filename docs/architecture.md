@@ -10,12 +10,12 @@ DWW lifecycle router
   managed → task identity + anchor + isolated worktree → Adapter activate
                     ↓
 Git safety and evidence
-  exact Commit → Ready proof → Finish
+  exact Commit → optional development proof → Finish
                     ↓
 Integration policy
   candidate-first → held → Adapter release → immutable pending pool
-                  → auto full batch / quiet-or-explicit exact tail
-                  → combined Full proof → protected fast-forward
+                  → auto three-candidate batch / explicit exact tail
+                  → affected combined proof → protected fast-forward
   legacy direct   → exact local fast-forward
 ```
 
@@ -31,7 +31,7 @@ This does not remove the boundaries that make the workflow dependable. The agent
 
 Machine-local approval describes the executable lifecycle policy: normalized repository and verification configuration, declared commands and environment names, profile coverage and closure, tool and lockfile identity, and Runtime Adapter inputs. Formatting-only policy edits such as comments or line endings therefore keep an existing approval; any semantic command, scope, permission, runtime, or configuration change produces a new plan and an explicit drift report. Older approval records remain readable but cannot authorize a newer plan.
 
-Validation evidence has a separate, stricter identity. It continues to bind the exact configuration bytes, tracked inputs, lockfiles, tool facts, declared environment values, logs, candidate head, and applicable base. A harmless policy comment can skip a second approval, but it still invalidates any old proof and executes the affected validation again.
+Validation evidence has a separate, profile-scoped identity. Each check binds its own declared inputs, profile definition, tool facts, declared environment values, logs, and applicable frozen base. The aggregate receipt keeps the complete plan for audit, while an unrelated profile or formatting-only policy change does not rerun a check whose own inputs still match.
 
 ## Local state
 
@@ -46,7 +46,7 @@ solo-ai/*-receipts/                rebuildable completion projections
 solo-ai/runtime-adapter/           content-addressed Adapter evidence
 ```
 
-New tracked `.solo-ai/config.toml` defaults to candidate-first integration: full batches of two, a pool capacity of ten, and a 30-second `quiet_or_explicit` tail. Start, candidate activation, Abandon, and reconciliation share the admission lock. Exactly the oldest two eligible candidates in one base-and-policy lane freeze once; a smaller exact snapshot freezes only after the persisted lane is stably producer-free or an authorized explicit cause is supplied. There is no maximum-age auto-seal. Legacy repositories without an integration table remain direct; old batched policy without the new fields remains explicit.
+New tracked `.solo-ai/config.toml` defaults to candidate-first integration: source-only candidates, full batches of three, a pool capacity of ten, and an explicit tail. Start, candidate activation, Abandon, and reconciliation share the admission lock. Exactly the oldest three eligible candidates in one base-and-policy lane freeze once; a smaller exact snapshot freezes only after an explicit round-end or immediate-integration request. There is no age or quiet-period auto-seal. Legacy repositories without an integration table remain direct, and old batched policies retain Ready-gated candidate publication.
 
 ## Task anchors
 
@@ -58,13 +58,13 @@ Before changing a base ref, Finish freezes task, slot, worktree path and file id
 
 ## Candidate publication
 
-Batched Finish records a publication transaction before Git cleanup. It creates one exact `refs/dww/candidates/<id>` ref and persists a `held` candidate identity and proof. The optional project Runtime Adapter must release project-owned resources successfully without changing the task tree. DWW then detaches the worktree, deletes only the exact task branch, releases the slot with its directory identity, and activates the candidate as pending. Adapter failure or pool exhaustion leaves a recoverable publishing task and does not touch the base.
+Batched Finish records a publication transaction before Git cleanup. The default policy creates one exact `refs/dww/candidates/<id>` source identity without forcing a project test; legacy Ready-gated policies keep their existing proof. The optional project Runtime Adapter must release project-owned resources successfully without changing the task tree. DWW then detaches the worktree, deletes only the exact task branch, releases the slot with its directory identity, and activates the candidate as pending. Adapter failure or pool exhaustion leaves a recoverable publishing task and does not touch the base.
 
 ## Candidate batch transaction
 
-Automatic full sealing snapshots the oldest configured pending candidate count. `batch reconcile` may snapshot a smaller tail only after the exact base-and-policy lane has zero persisted modifying producers continuously for its quiet period, or after `--force --cause user|deploy|dependency`. `next_reconcile_at` is a host heartbeat contract, not a completion fact. UI worker counts, raw worktree counts, Hook delivery, or SessionEnd never choose candidates. `batch seal` remains the exact-list compatibility and recovery interface. The ordered candidates, base, and policy epoch form an idempotent seal intent, so wake-up cause and retries cannot duplicate a generation. A reviewed unchanged-candidate successor additionally names its exact failed predecessor; each explicit predecessor can therefore identify at most one successor generation.
+Automatic full sealing snapshots the oldest configured pending candidate count. `batch reconcile --force --cause user` snapshots a smaller tail only when the host explicitly ends a round or asks to integrate now. UI worker counts, raw worktree counts, Hook delivery, SessionEnd, and elapsed time never choose candidates. `batch seal` remains the exact-list compatibility and recovery interface. The ordered candidates, base, and policy epoch form an idempotent seal intent, so retries cannot duplicate a generation. A reviewed unchanged-candidate successor additionally names its exact failed predecessor; each explicit predecessor can therefore identify at most one successor generation.
 
-The batch uses a dedicated detached worktree. For each frozen candidate it applies the exact binary tree difference from that candidate's recorded base and commits the composed result. If the project configures the paired batch Runtime Adapter, DWW passes the exact generation identity, persisted positive `runtime_cycle`, and a dedicated non-slot port block to `batch_activate`, runs the repository's Ready plus Full profiles only after activation succeeds, then calls `batch_release` with the same cycle and persisted validation outcome. Activation and release receipts are content-addressed recovery facts; uncertainty within one command reuses that cycle, but a retry after successful release increments the cycle and cannot reuse a stale activation receipt. Uncertainty retains sole batch ownership and blocks promotion. DWW then rechecks the clean composed head, confirms the base still equals the sealed snapshot, and fast-forwards the one clean worktree that owns the target branch. Heavy database, complete-build, authentication, and browser profiles are Full-only and remain project-owned.
+The batch uses an isolated integration worktree. For each frozen candidate it applies the exact binary tree difference from that candidate's recorded base and commits the composed result. If the project configures the paired batch Runtime Adapter, DWW passes the exact generation identity, persisted positive `runtime_cycle`, and a dedicated non-slot port block to `batch_activate`, runs only the Ready and integration Full profiles selected by the composed changes after activation succeeds, then calls `batch_release` with the same cycle and persisted validation outcome. Pure profiles with complete declared inputs reuse their valid receipts from development or earlier candidates; mutable profiles run again. Activation and release receipts are content-addressed recovery facts; uncertainty within one command reuses that cycle, but a retry after successful release increments the cycle and cannot reuse a stale activation receipt. Uncertainty retains sole batch ownership and blocks promotion. DWW then rechecks the composed head, confirms the base still equals the sealed snapshot, and fast-forwards the one clean worktree that owns the target branch. Broad regression and pressure profiles are manual project diagnostics, not lifecycle gates.
 
 Failure before promotion releases any configured batch runtime, records a failed generation, and preserves the base. Release uncertainty remains a nonfailed recoverable phase and cannot advance the base. Its candidates become retained and cannot be automatically selected again. A repair publishes a new candidate and the coordinating task may reuse unchanged exact candidates in a new generation. An interruption leaves a nonfailed recorded phase; `batch recover` resumes only that generation. A failed generation's exact clean detached worktree may be removed by an intent-first idempotent `batch retire` without deleting candidate refs or audit history. Read-only `batch metrics` derives full/tail rates, candidate wait, and executed Full cost from existing facts rather than adding policy state. Promotion is followed by idempotent worktree/ref cleanup, candidate completion, and anchor deletion.
 

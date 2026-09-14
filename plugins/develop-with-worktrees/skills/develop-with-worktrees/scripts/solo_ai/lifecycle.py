@@ -1176,6 +1176,16 @@ def _is_in_place(task: dict[str, Any]) -> bool:
     return StateStore.mode(task) == IN_PLACE_MODE
 
 
+def _candidate_requires_ready(task: dict[str, Any]) -> bool:
+    """旧任务和直接集成保留 Ready；新批次只在组合后验收。"""
+
+    policy = task.get("integration_policy") or {}
+    return (
+        policy.get("mode") != "batched"
+        or policy.get("candidate_validation", "ready") != "batch"
+    )
+
+
 def _verification_base(task: dict[str, Any]) -> str:
     """直改分支会前进，验证必须始终相对不可变的起点。"""
     return str(task.get("start_head") if _is_in_place(task) else task["base_ref"])
@@ -1982,7 +1992,7 @@ def _prepare_candidate_publication(
     *,
     store: StateStore,
     task: dict[str, Any],
-    proof: dict[str, Any],
+    proof: dict[str, Any] | None,
 ) -> dict[str, Any]:
     active = task.get("active_operation") or {}
     operation_id = str(active.get("id") or "")
@@ -1992,7 +2002,7 @@ def _prepare_candidate_publication(
     worktree = Path(str(task["worktree"])).absolute()
     managed_root = worktree.parent
     publication = {
-        "schema_version": 1,
+        "schema_version": 2,
         "phase": "prepared",
         "candidate_id": candidate_id,
         "ref": f"refs/dww/candidates/{candidate_id}",
@@ -2010,8 +2020,9 @@ def _prepare_candidate_publication(
         "base_head": task["base_head"],
         "base_worktree": task["base_worktree"],
         "head": task["candidate_head"],
-        "proof": proof["fingerprint"],
-        "proof_kind": proof["kind"],
+        "proof": proof["fingerprint"] if proof else None,
+        "proof_kind": proof["kind"] if proof else "source-candidate",
+        "candidate_validation": "ready" if proof else "batch",
         "supersedes": task.get("supersedes"),
         "integration_policy": task.get("integration_policy"),
         "host_origin": task.get("host_origin"),
@@ -2100,6 +2111,11 @@ def _resume_candidate_publication(
     from .candidate_batches import CandidateBatchStore
 
     publication = task.get("candidate_publication") or {}
+    policy = publication.get("integration_policy") or {}
+    candidate_validation = str(
+        publication.get("candidate_validation")
+        or policy.get("candidate_validation", "ready")
+    )
     required = (
         "candidate_id",
         "ref",
@@ -2109,15 +2125,18 @@ def _resume_candidate_publication(
         "base_ref",
         "base_head",
         "head",
-        "proof",
         "worktree_identity",
         "managed_root_identity",
         "integration_policy",
     )
-    if publication.get("schema_version") != 1 or any(
+    if publication.get("schema_version") not in {1, 2} or any(
         not publication.get(key) for key in required
     ):
         raise SoloAIError("Candidate publication identity is incomplete")
+    if candidate_validation not in {"ready", "batch"}:
+        raise SoloAIError("Candidate publication has an unknown validation mode")
+    if candidate_validation == "ready" and not publication.get("proof"):
+        raise SoloAIError("Ready-gated candidate publication lacks its proof")
     exact = {
         "task_id": task["id"],
         "worktree": task["worktree"],
@@ -2125,7 +2144,7 @@ def _resume_candidate_publication(
         "base_ref": task["base_ref"],
         "base_head": task["base_head"],
         "head": task["candidate_head"],
-        "proof": task["ready_proof"],
+        "proof": task.get("ready_proof"),
     }
     for key, value in exact.items():
         if publication.get(key) != value:
@@ -2156,7 +2175,6 @@ def _resume_candidate_publication(
             + "\n".join(f"- {item}" for item in unknown[:20])
         )
     load_repo_config(repo, cwd=worktree)
-    policy = publication.get("integration_policy") or {}
     if policy.get("mode") != "batched":
         raise SoloAIError("Candidate publication requires a batched task policy")
     batch_store = CandidateBatchStore(repo)
@@ -2261,6 +2279,7 @@ def _resume_candidate_publication(
             else None
         ),
         "seal_policy": policy["seal_policy"],
+        "tail_policy": policy["tail_policy"],
     }
 
 
@@ -2285,7 +2304,12 @@ def finish(
             )
             delete_anchor(repo, task_id)
             return result
-        if active_task.get("status") not in {"ready", "finishing", "publishing"}:
+        candidate_requires_ready = _candidate_requires_ready(active_task)
+        allowed_statuses = {"finishing", "publishing"}
+        allowed_statuses.update(
+            {"ready"} if candidate_requires_ready else {"active", "ready"}
+        )
+        if active_task.get("status") not in allowed_statuses:
             raise SoloAIError("Finish requires a successful Ready")
         turn = (
             integration_turn(repo, task_id)
@@ -2324,17 +2348,20 @@ def finish(
                 delete_anchor(repo, task_id)
                 return result
             else:
-                if task.get("status") != "ready":
+                candidate_requires_ready = _candidate_requires_ready(task)
+                if candidate_requires_ready and task.get("status") != "ready":
                     raise SoloAIError("Finish requires a successful Ready")
                 _recorded_base_worktree(repo, task)
                 worktree = Path(str(task["worktree"]))
-                _assert_exact_candidate(
-                    repo, task, candidate_head=str(task["candidate_head"])
-                )
-                task = _sync_base(repo, task)
+                if candidate_requires_ready:
+                    _assert_exact_candidate(
+                        repo, task, candidate_head=str(task["candidate_head"])
+                    )
+                    task = _sync_base(repo, task)
                 candidate_head = repo.head(worktree)
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
-                # Freeze the exact candidate before policy, safety, and validation gates.
+                # 候选固定前仍核验配置、机密与工作区安全；项目检查由新批次
+                # 在组合后的源码上统一执行，旧策略保留 Ready 验收。
                 candidate_config = load_repo_config(repo, cwd=worktree)
                 store.require_slot_layout(candidate_config)
                 verification = load_verification_config(repo, cwd=worktree)
@@ -2350,16 +2377,18 @@ def finish(
                     allowlist=candidate_config.sensitive_allowlist,
                 )
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
-                proof = validate(
-                    repo,
-                    cwd=worktree,
-                    base=str(task["base_ref"]),
-                    verification=verification,
-                    task_id=task_id,
-                    expected_base_head=str(task["base_head"]),
-                    expected_candidate_head=candidate_head,
-                    validation_base_ref=str(task["base_ref"]),
-                )
+                proof: dict[str, Any] | None = None
+                if candidate_requires_ready:
+                    proof = validate(
+                        repo,
+                        cwd=worktree,
+                        base=str(task["base_ref"]),
+                        verification=verification,
+                        task_id=task_id,
+                        expected_base_head=str(task["base_head"]),
+                        expected_candidate_head=candidate_head,
+                        validation_base_ref=str(task["base_ref"]),
+                    )
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
                 if unknown := _unknown_ignored(repo, worktree):
                     raise SoloAIError(
@@ -2372,7 +2401,7 @@ def finish(
                     task_id,
                     candidate_head=candidate_head,
                     base_head=task["base_head"],
-                    ready_proof=proof["fingerprint"],
+                    ready_proof=proof["fingerprint"] if proof else None,
                 )
                 if policy.get("mode") == "batched":
                     prepared = _prepare_candidate_publication(

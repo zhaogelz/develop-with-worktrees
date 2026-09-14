@@ -843,6 +843,35 @@ def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
     assert read_json(state_path, {})["schema_version"] == STATE_SCHEMA
 
 
+def test_schema_eight_batched_task_keeps_ready_gate_during_upgrade(
+    git_repo: Path,
+) -> None:
+    """升级中的活动任务不能因新增快速默认而跳过它原有的 Ready。"""
+    repo = initialized(git_repo)
+    task = start(repo, name="preserve old candidate gate")
+    store = StateStore(repo)
+    state = store.read()
+    state["schema_version"] = 8
+    state["tasks"][task["id"]]["integration_policy"] = {
+        "schema_version": 2,
+        "mode": "batched",
+        "batch_size": 2,
+        "candidate_capacity": 10,
+        "seal_policy": "auto_full",
+        "tail_policy": "quiet_or_explicit",
+        "tail_quiet_seconds": 30,
+        "worktree_mode": "dedicated",
+        "activation_epoch": "legacy-policy",
+    }
+    atomic_write_json(store.path, state)
+
+    restored = StateStore(repo).task(task["id"])
+
+    assert restored["integration_policy"]["candidate_validation"] == "ready"
+    store.mutate(lambda current: current)
+    assert read_json(store.path, {})["schema_version"] == STATE_SCHEMA
+
+
 def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
     git_repo: Path,
 ) -> None:

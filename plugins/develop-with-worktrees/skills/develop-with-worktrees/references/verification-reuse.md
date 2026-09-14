@@ -21,10 +21,12 @@ in two repositories do not make their proofs interchangeable.
 
 ## Reuse is a conservative declaration
 
-A fresh Full may reuse a check only when `external_state = "none"` and
-`input_closure = "complete"`, and its existing scope and all proof inputs match.
-`cross_task_reuse = true` additionally allows reuse between tasks within the same
-repository. It never enables cross-repository reuse.
+A batch or explicit verification may reuse a check when `external_state = "none"`
+and `input_closure = "complete"`, and its declared inputs, environment, tool
+facts, frozen base (when used), and logs still match. Such a proof is reusable
+between tasks and batches in the same repository by default; it never enables
+cross-repository reuse. `cross_task_reuse` remains accepted for older policy
+files but is no longer needed to opt into this safe case.
 
 Complete inputs include all relevant source, tests, fixtures, invoked scripts,
 configuration, lockfiles, tools, and declared environment variables. DWW cannot
@@ -40,10 +42,12 @@ browser flows. Each fresh Full executes them again. Project build caches may
 accelerate the command, but DWW does not materialize missing outputs. A pure
 compiler check may reuse only when no later step needs its generated files.
 
-Proof invalidation remains conservative for every policy byte and lockfile. Approval
-is a separate normalized execution-policy contract: comments and line-ending-only
-edits do not require a new approval, while any semantic policy change still does.
-This does not weaken the exact proof identity.
+The aggregate receipt keeps the whole execution plan for audit. A profile proof
+does not include unrelated profiles, unrelated lockfiles, or formatting-only
+policy bytes, so those changes do not repeat an unaffected check. Its own
+declared inputs and tool facts remain exact. Approval is a separate normalized
+execution-policy contract: comments and line-ending-only edits do not require a
+new approval, while any semantic policy change still does.
 
 ## Recovery is not a fresh Full
 
@@ -78,7 +82,6 @@ paths = ["**"]
 input_paths = ["**"]
 input_closure = "complete"
 external_state = "none"
-cross_task_reuse = true
 environment = ["PYTHONUTF8"]
 commands = [["uv", "run", "pytest", "tests/unit"]]
 ```

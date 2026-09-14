@@ -46,7 +46,7 @@ from .util import (
     utc_timestamp,
 )
 
-POOL_SCHEMA = 5
+POOL_SCHEMA = 6
 ACTIVE_BATCH_STATES = {
     "sealed",
     "composing",
@@ -66,6 +66,7 @@ LEGACY_EXPLICIT_POLICY = {
     "batch_size": 5,
     "candidate_capacity": 10,
     "seal_policy": "explicit",
+    "candidate_validation": "ready",
     "tail_policy": "explicit",
     "tail_quiet_seconds": 90,
     "activation_epoch": "legacy-explicit",
@@ -137,7 +138,7 @@ class CandidateBatchStore:
                 )
             value["next_publication_sequence"] = sequence
             value["schema_version"] = POOL_SCHEMA
-        elif value.get("schema_version") in {2, 3, 4}:
+        elif value.get("schema_version") in {2, 3, 4, 5}:
             value["schema_version"] = POOL_SCHEMA
         elif value.get("schema_version") != POOL_SCHEMA:
             raise SoloAIError("Unsupported candidate-pool state schema")
@@ -147,10 +148,15 @@ class CandidateBatchStore:
             policy = candidate.setdefault(
                 "integration_policy", copy.deepcopy(LEGACY_EXPLICIT_POLICY)
             )
+            policy.setdefault("candidate_validation", "ready")
             policy.setdefault("tail_policy", "explicit")
             policy.setdefault("tail_quiet_seconds", 90)
         for batch in value.get("batches", {}).values():
             batch.setdefault("runtime_cycle", 0)
+            policy = batch.setdefault(
+                "integration_policy", copy.deepcopy(LEGACY_EXPLICIT_POLICY)
+            )
+            policy.setdefault("candidate_validation", "ready")
             batch.setdefault("host_coordinator", None)
             coordinator = normalize_host_reference(batch.get("host_coordinator"))
             batch["host_coordinator"] = coordinator
@@ -158,7 +164,6 @@ class CandidateBatchStore:
             batch.setdefault("host_coordinator_transfers", [])
             if batch.get("seal_intent_id"):
                 continue
-            policy = batch.get("integration_policy") or LEGACY_EXPLICIT_POLICY
             batch["seal_intent_id"] = self._seal_intent(
                 base_ref=str(batch.get("base_ref")),
                 activation_epoch=str(
