@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import getpass
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -37,6 +39,88 @@ _DWW_FAST_MODULES = frozenset(
     }
 )
 _TEST_ROOT = Path(__file__).parents[1].resolve()
+
+
+def _managed_worktree_root() -> Path:
+    """返回本仓库 DWW 受管工作树的共同目录。"""
+
+    return GitRepo(_TEST_ROOT).primary_path / ".worktrees"
+
+
+def _is_within(path: Path | str, directory: Path) -> bool:
+    """同时按原始和解析路径判断，避免链接绕过临时目录边界。"""
+
+    path = Path(path)
+    for candidate in (path.absolute(), path.resolve()):
+        try:
+            candidate.relative_to(directory.resolve())
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _pytest_fallback_temp_root() -> Path:
+    """默认系统临时目录不可用或不安全时的受管工作树外回退位置。"""
+
+    return GitRepo(_TEST_ROOT).primary_path / ".tmp" / "pytest-runs"
+
+
+def _is_usable_pytest_temp_root(root: Path) -> bool:
+    """确认 pytest 的用户子目录可创建且可扫描。"""
+
+    try:
+        user = getpass.getuser() or "unknown"
+    except OSError:
+        user = "unknown"
+    pytest_root = root / f"pytest-of-{user}"
+    try:
+        pytest_root.mkdir(parents=True, exist_ok=True)
+        with os.scandir(pytest_root):
+            pass
+    except OSError:
+        return False
+    return True
+
+
+def _default_pytest_temp_root() -> Path:
+    """选择 pytest 编号临时目录的上级，不创建或清理任何目录。"""
+
+    configured = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+    try:
+        candidate = Path(configured) if configured else Path(tempfile.gettempdir())
+    except OSError:
+        return _pytest_fallback_temp_root()
+    if _is_within(candidate, _managed_worktree_root()):
+        return _pytest_fallback_temp_root()
+    if not _is_usable_pytest_temp_root(candidate):
+        return _pytest_fallback_temp_root()
+    return candidate
+
+
+def _configure_pytest_temp_root(basetemp: Path | str | None) -> None:
+    """在 pytest 创建临时目录前拒绝不安全显式路径或设置安全回退。"""
+
+    if basetemp is not None:
+        if _is_within(basetemp, _managed_worktree_root()):
+            raise pytest.UsageError(
+                f"--basetemp must be outside DWW managed worktrees: {basetemp}"
+            )
+        return
+    selected = _default_pytest_temp_root()
+    if selected == _pytest_fallback_temp_root():
+        if not _is_usable_pytest_temp_root(selected):
+            raise pytest.UsageError(
+                f"Cannot create a safe pytest temporary directory: {selected}"
+            )
+        os.environ["PYTEST_DEBUG_TEMPROOT"] = str(selected)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """让内置临时目录工厂始终在受管工作树之外创建测试产物。"""
+
+    _configure_pytest_temp_root(config.option.basetemp)
 
 
 def dww_test_layer(path: Path) -> str:

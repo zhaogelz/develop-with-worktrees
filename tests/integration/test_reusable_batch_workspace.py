@@ -9,6 +9,7 @@ import pytest
 from conftest import git
 
 from solo_ai import candidate_batches as batches
+from solo_ai import batch_workspace
 from solo_ai.config import load_repo_config, load_verification_config
 from solo_ai.lifecycle import approve, initialize
 from solo_ai.repo import GitRepo
@@ -27,6 +28,28 @@ def reusable_repo(root: Path):
     git(root, "add", ".gitignore")
     git(root, "commit", "-m", "test: ignored reusable dependencies")
     return initialized_batched(root, auto_full=False, reusable=True)
+
+
+def test_workspace_retention_error_preserves_specific_reason(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """保留待恢复状态时，调用者仍能看到具体受阻原因和路径。"""
+
+    repo = reusable_repo(git_repo)
+    reason = "Cleanup content is a link or junction: .tmp/test-artifact"
+
+    def unreadable_inventory(*args, **kwargs):
+        raise SoloAIError(reason)
+
+    monkeypatch.setattr(batch_workspace, "inspect_untracked", unreadable_inventory)
+    with pytest.raises(
+        batch_workspace.BatchWorkspacePending,
+        match="Workspace retention facts are unreadable: Cleanup content is a link or junction",
+    ) as raised:
+        batch_workspace.require_retained_contents(repo, git_repo)
+
+    assert str(raised.value).endswith(reason)
+    assert isinstance(raised.value.__cause__, SoloAIError)
 
 
 def test_reusable_batches_resolve_one_workspace(git_repo: Path) -> None:

@@ -54,7 +54,9 @@ def require_retained_contents(repo: GitRepo, worktree: Path) -> None:
     try:
         inventory = inspect_untracked(repo, cwd=worktree, expand_dependencies=False)
     except (OSError, SoloAIError) as exc:
-        raise BatchWorkspacePending("Workspace retention facts are unreadable") from exc
+        raise BatchWorkspacePending(
+            f"Workspace retention facts are unreadable: {exc}"
+        ) from exc
     blocked = sorted(
         {
             *inventory["keep"],
