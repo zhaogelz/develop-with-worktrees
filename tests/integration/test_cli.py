@@ -226,7 +226,8 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert "task anchor" in text
     assert "任务锚点" in text
     assert "root-anchor" in text
-    assert "cross-phase" in text
+    assert "complete plan" in text
+    assert "root-anchor accept" in text
     assert "不再是多 AI 任务指挥中心" in text
     assert "Dual-run rules" in text
     assert "delegated revoke" in text

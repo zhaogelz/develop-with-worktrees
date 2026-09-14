@@ -73,8 +73,12 @@ def test_managed_policy_separates_local_lifecycle_from_explicit_publish() -> Non
     assert "ordinary non-force push" in policy
     assert "separate from DWW" in policy
     assert "batch reconcile" in policy
-    assert "There is no candidate-age auto-seal" in policy
+    assert "There is no candidate-age or quiet-period auto-seal" in policy
     assert "Candidate publication is not delivery" in policy
+    assert "complete plan" in policy
+    assert "root-anchor accept" in policy
+    assert "finish directly from `active`" in policy
+    assert "quiet-period auto-seal" in policy
 
 
 def test_rejects_schema_two_verification_policy(git_repo: Path) -> None:

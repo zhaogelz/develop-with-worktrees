@@ -36,6 +36,7 @@ from solo_ai.lifecycle import (
     initialize,
     ready,
     recover,
+    show_task_anchor,
     start,
 )
 from solo_ai.repo import GitRepo
@@ -144,9 +145,17 @@ def publish(
     name: str,
     relative: str,
     host_origin: dict[str, str] | None = None,
+    root_anchor_id: str | None = None,
+    root_anchor_file: Path | None = None,
     run_ready: bool = True,
 ) -> dict[str, str]:
-    task = start(repo, name=name, host_origin=host_origin)
+    task = start(
+        repo,
+        name=name,
+        host_origin=host_origin,
+        root_anchor_id=root_anchor_id,
+        root_anchor_file=root_anchor_file,
+    )
     worktree = Path(task["worktree"])
     (worktree / relative).write_text(f"{name}\n", encoding="utf-8")
     commit_task(
@@ -3182,6 +3191,44 @@ def test_interruption_after_batch_release_reuses_exact_release_receipt(
     assert completed["status"] == "completed"
     assert completed["runtime_cycle"] == 1
     assert release_count.read_text(encoding="utf-8") == "1"
+
+
+def test_candidate_repair_inherits_the_source_root_anchor(git_repo: Path) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    root = create_root_task_anchor(
+        repo,
+        purpose="repair remains governed by one objective",
+        target="inherit the source root anchor",
+        scope="candidate repair lineage only",
+        acceptance="a repair reads the same objective as its source candidate",
+    )
+    candidate = publish(
+        repo,
+        name="rooted candidate conflict",
+        relative="rooted-conflict.txt",
+        root_anchor_id=root["root_id"],
+    )
+    (git_repo / "rooted-conflict.txt").write_text("main change\n", encoding="utf-8")
+    git(git_repo, "add", "rooted-conflict.txt")
+    git(git_repo, "commit", "-m", "test: advance rooted conflict")
+
+    with pytest.raises(SoloAIError, match="conflicts with the sealed batch"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    repair = prepare_candidate_repair(repo, candidate_id=candidate["candidate_id"])
+    stored = StateStore(repo).task(repair["id"])
+    assert stored["root_anchor_id"] == root["root_id"]
+    assert (
+        f"- Root anchor: `{root['root_id']}`"
+        in show_task_anchor(repo, task_id=repair["id"])["content"]
+    )
+
+    repo.git(["merge", "--abort"], cwd=Path(repair["worktree"]))
+    abandon(repo, task_id=repair["id"], lease=repair["lease"], confirm=repair["id"])
+    withdraw_candidate(repo, candidate_id=candidate["candidate_id"])
+    assert close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
 
 
 @pytest.mark.parametrize("reusable", [False, True])

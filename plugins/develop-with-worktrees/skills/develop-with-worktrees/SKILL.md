@@ -56,21 +56,25 @@ Do not confuse task orchestration with candidate integration batches:
 - native orchestration answers “who works on which outcome and when?”;
 - DWW candidate batches answer “which exact verified Git candidates are intentionally combined and promoted together?”.
 
-## Cross-phase coordinator anchors
+## Confirmed-objective root anchors
 
-For a user-confirmed implementation that spans multiple independently managed writing tasks, the host coordinator may first create one durable local contract:
+When the user explicitly confirms a complete implementation plan, says to set that plan as the objective, or asks to proceed with it, create one root anchor before the first related child `Start`. This applies even when the first child may later turn out to be the only task: the point is to preserve the confirmed objective, not to predict task count. Put the complete final plan in a UTF-8 file below the repository, then create the root idempotently with the host's stable request identifier:
 
 ```text
 uv run --script <DWW> --repo <repository-or-worktree> root-anchor create \
   --purpose <original-objective> --target <implementation-target> \
-  --scope <explicit-boundary> --acceptance <acceptance-criteria>
+  --scope <explicit-boundary> --acceptance <acceptance-criteria> \
+  --plan-file <complete-confirmed-plan.md> --plan-source <user-confirmation> \
+  --request-id <stable-host-request-id>
 ```
 
-Use this only for confirmed cross-phase work that is likely to survive handoffs, context compression, or several child lifecycles. Do not create it for discussion, read-only analysis, or an ordinary one-candidate change. The host decides whether the condition is met; DWW validates and preserves the resulting contract but does not infer hidden intent.
+The root keeps the full confirmed plan verbatim, including its own Markdown headings and code examples, together with immutable purpose/baseline facts, a plan version, explicit user-confirmed amendments, current progress, and the final overall outcome. The input file is only a safe handoff into DWW; after creation the root is the local source of truth. Do not create a root merely for discussion, read-only investigation, or a small request that has no separately confirmed plan. The host decides whether confirmation happened; DWW does not infer it from chat.
 
-The root anchor is stored under the originating repository Git common-dir and records the immutable original purpose and baseline plus the current target, scope, acceptance, and progress. It is not committed and never creates a `scope_id`, candidate group, task DAG, worker schedule, batch boundary, or cross-worktree atomicity. A child in that repository starts with `start --root-anchor <root-id>`. A child in another repository must bind the same single root explicitly with `start --root-anchor <root-id> --root-anchor-file <absolute-root-anchor-path>`; DWW accepts only the exact non-linked `solo-ai/root-anchors/<root-id>.md` file, persists its locator in the child state, and records that child’s exact DWW state locator in the root. It never searches other repositories or creates a duplicate root.
+An explicit user amendment replaces the effective plan with `root-anchor amend --plan-file ... --source ... --summary ... --expected-sha256 ...`; it advances the plan version and preserves the earlier amendment record. Use `root-anchor progress` only for execution state. Technical choices that do not change the user's purpose, boundaries, or acceptance criteria stay in the child task anchor and code; they are not a silent root-plan rewrite. Do not copy a full root plan into every child anchor.
 
-After any continuation, first read both the root anchor and the active child anchor. Update the root only with reviewed coordinator facts; DWW alone maintains the exact external-child registry. The root-anchor close command rejects any local or registered external nonterminal child and fails closed on a missing or ambiguous child state. It also rejects a candidate-published child until its exact candidate lineage has reached integration into its base or explicit withdrawal; candidate publication, host idleness, and task counts never count as delivery. Before closing it, the coordinator must still record the checked acceptance outcome.
+The root is stored under the originating repository Git common-dir. It is not committed and never creates a `scope_id`, candidate group, task DAG, worker schedule, batch boundary, or cross-worktree atomicity. A child in that repository starts with `start --root-anchor <root-id>`. A child in another repository binds the same root with `start --root-anchor <root-id> --root-anchor-file <absolute-root-anchor-path>`. Candidate repair inherits the source task's root binding automatically. DWW accepts only the exact non-linked `solo-ai/root-anchors/<root-id>.md` file, persists its locator in the child state, and records that child’s exact DWW state locator in the root. It never searches repositories or creates a duplicate root.
+
+After a continuation, handoff, context loss, or repair, read `anchor show --task <task-id> --with-root`, then persist the reviewed version and digest with `anchor acknowledge-root`. DWW alone maintains the external-child registry. `root-anchor close` rejects nonterminal children, ambiguous/missing child state, and candidate-published children whose exact lineage has not been integrated or explicitly withdrawn. For a confirmed-plan root it also rejects closure until `root-anchor accept --status accepted|cancelled --evidence-file ...` records the overall checked outcome. Candidate publication, host idleness, and task counts never count as delivery.
 
 ## First modifying intent in an unchosen repository
 

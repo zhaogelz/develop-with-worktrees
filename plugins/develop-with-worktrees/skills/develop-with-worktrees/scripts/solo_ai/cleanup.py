@@ -173,7 +173,24 @@ def _ignored_inventory(
                 result.add(relative)
                 continue
             # 枚举使用扩展路径，库存仍保留原逻辑路径，不能把前缀写入持久身份。
-            children = [path / child.name for child in filesystem_path(path).iterdir()]
+            try:
+                children = [
+                    path / child.name for child in filesystem_path(path).iterdir()
+                ]
+            except PermissionError as exc:
+                # `.tmp`、`.cache` 等已知保留根本来就不会被 DWW 删除；
+                # Windows 上测试或其他工具留下的拒绝访问子目录，不应让
+                # 交付门禁在清点阶段以原始 traceback 终止。根外的未知
+                # 忽略目录仍必须显式拒绝，不能借此绕过链接与数据保护。
+                if any(
+                    part.casefold() in KNOWN_RETAINED_ROOTS
+                    for part in Path(relative).parts
+                ):
+                    result.add(relative)
+                    continue
+                raise SoloAIError(
+                    f"Cannot safely inspect ignored path: {relative}"
+                ) from exc
             if children:
                 pending.extend(children)
             else:

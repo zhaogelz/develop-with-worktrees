@@ -249,6 +249,38 @@ def test_retaining_dependency_root_does_not_walk_it(
     assert inventory["retained"] == ["node_modules"]
 
 
+@pytest.mark.parametrize(
+    ("root_name", "expect_retained"),
+    [(".tmp", True), ("unknown", False)],
+)
+def test_inaccessible_ignored_child_is_only_retained_inside_known_root(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_name: str,
+    expect_retained: bool,
+) -> None:
+    """已知保留根的拒绝访问子目录不应使 Finish 崩溃，未知根仍拒绝。"""
+    repo = ignore(git_repo, f"{root_name}/")
+    denied = git_repo / root_name / "access-denied"
+    denied.mkdir(parents=True)
+    original = Path.iterdir
+
+    def deny_child(path: Path):
+        # Windows 的 filesystem_path 可能带扩展路径前缀，不能按完整路径比较。
+        if path.name == denied.name:
+            raise PermissionError("fixture access denied")
+        return original(path)
+
+    monkeypatch.setattr(Path, "iterdir", deny_child)
+    if expect_retained:
+        inventory = cleanup.inspect_untracked(repo, cwd=git_repo)
+        assert inventory["retained"] == [f"{root_name}/access-denied"]
+        assert inventory["unknown_ignored"] == []
+    else:
+        with pytest.raises(SoloAIError, match="Cannot safely inspect ignored path"):
+            cleanup.inspect_untracked(repo, cwd=git_repo)
+
+
 def test_dependency_inventory_and_delete_never_walk_link_target(
     git_repo: Path, tmp_path: Path, directory_link, monkeypatch: pytest.MonkeyPatch
 ) -> None:

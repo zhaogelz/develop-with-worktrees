@@ -25,6 +25,7 @@ _ROOT_FIELDS = (
     "Acceptance criteria",
     "Current progress",
 )
+_PLAN_VERSION_FIELD = "Plan version"
 _IMMUTABLE_FIELDS = ("Root ID", "Original purpose", "Reference baseline")
 _ROOT_ID_PATTERN = re.compile(r"root-[A-Za-z0-9][A-Za-z0-9-]*\Z")
 _FIELD_HEADER = re.compile(
@@ -39,6 +40,21 @@ _CHILD_RECORD = re.compile(r"^- Child state: (?P<value>[^\r\n]+)$")
 _TASK_ID_PATTERN = re.compile(r"task-[A-Za-z0-9][A-Za-z0-9-]*\Z")
 MAX_CHILD_STATE_BYTES = 2 * 1024 * 1024
 MAX_CHILD_CANDIDATE_BATCHES_BYTES = 2 * 1024 * 1024
+_PLAN_HEADING = "## Confirmed plan"
+_CHANGES_HEADING = "## User-confirmed changes"
+_ACCEPTANCE_HEADING = "## Overall acceptance"
+_PLAN_START = "<!-- dww-confirmed-plan:start -->"
+_PLAN_END = "<!-- dww-confirmed-plan:end -->"
+_CHANGES_START = "<!-- dww-user-changes:start -->"
+_CHANGES_END = "<!-- dww-user-changes:end -->"
+_ACCEPTANCE_START = "<!-- dww-overall-acceptance:start -->"
+_ACCEPTANCE_END = "<!-- dww-overall-acceptance:end -->"
+_SECTION_MARKERS = {
+    _PLAN_HEADING: (_PLAN_START, _PLAN_END),
+    _CHANGES_HEADING: (_CHANGES_START, _CHANGES_END),
+    _ACCEPTANCE_HEADING: (_ACCEPTANCE_START, _ACCEPTANCE_END),
+}
+_REQUEST_COMMENT = re.compile(r"<!-- dww-root-request:([0-9a-f]{64}) -->")
 
 
 def root_anchor_path(repo: GitRepo, root_id: str) -> Path:
@@ -133,10 +149,26 @@ def _read_plain_input(repo: GitRepo, path: Path) -> str:
         raise SoloAIError("Root anchor update input must be valid UTF-8") from exc
 
 
+def read_root_plan_input(repo: GitRepo, path: Path) -> str:
+    """读取完整已确认方案；输入文件只作为创建或修订的来源。"""
+
+    content = _read_plain_input(repo, path).strip()
+    if not content:
+        raise SoloAIError("Confirmed plan input must not be empty")
+    return content
+
+
+def _metadata_prefix(content: str) -> str:
+    """新格式只从正文前的元数据读取字段，方案正文可自由使用列表和代码。"""
+
+    marker = re.search(r"(?m)^## Confirmed plan\s*$", content)
+    return content[: marker.start()] if marker else content
+
+
 def _validated_fields(content: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     in_fence = False
-    for line in content.splitlines():
+    for line in _metadata_prefix(content).splitlines():
         stripped = line.strip()
         if stripped.startswith(("```", "~~~")):
             in_fence = not in_fence
@@ -162,6 +194,140 @@ def _validated_fields(content: str) -> dict[str, str]:
     if fields["Acceptance criteria"].lower().startswith("fill before"):
         raise SoloAIError("Root anchor acceptance criteria is still a placeholder")
     return fields
+
+
+def _metadata_value(content: str, field: str) -> str | None:
+    pattern = re.compile(rf"^- {re.escape(field)}:(?P<value>[^\r\n]*)$", re.MULTILINE)
+    matches = list(pattern.finditer(_metadata_prefix(content)))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise SoloAIError(f"Root anchor must contain at most one '{field}' field")
+    value = matches[0].group("value").strip()
+    if not value:
+        raise SoloAIError(f"Root anchor '{field}' must not be empty")
+    return value
+
+
+def _plan_version(content: str) -> int | None:
+    raw = _metadata_value(content, _PLAN_VERSION_FIELD)
+    if raw is None:
+        return None
+    if not raw.isdecimal() or int(raw) < 1:
+        raise SoloAIError("Root anchor plan version must be a positive integer")
+    return int(raw)
+
+
+def _section(content: str, heading: str) -> str | None:
+    matches = list(re.finditer(rf"(?m)^{re.escape(heading)}\s*$", content))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise SoloAIError(f"Root anchor must contain at most one '{heading}' section")
+    markers = _SECTION_MARKERS.get(heading)
+    if markers is None:
+        raise SoloAIError(
+            f"Root anchor has no registered section markers for '{heading}'"
+        )
+    start_marker, end_marker = markers
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), content)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), content)]
+    if not starts and not ends and _plan_version(content) is None:
+        # 旧根锚点可能把这个普通 Markdown 标题作为附注；不能因此失去可读性。
+        return None
+    if len(starts) != 1 or len(ends) != 1:
+        raise SoloAIError(f"Root anchor must contain one marker pair for '{heading}'")
+    start = starts[0]
+    end = ends[0]
+    if start < matches[0].end() or end <= start:
+        raise SoloAIError(f"Root anchor section markers are malformed for '{heading}'")
+    body_start = start + len(start_marker)
+    return content[body_start:end].strip()
+
+
+def _require_structured_plan(content: str) -> tuple[int, str, str, str]:
+    version = _plan_version(content)
+    plan = _section(content, _PLAN_HEADING)
+    changes = _section(content, _CHANGES_HEADING)
+    acceptance = _section(content, _ACCEPTANCE_HEADING)
+    if version is None or not plan or not changes or not acceptance:
+        raise SoloAIError(
+            "Structured root anchors require a plan version, confirmed plan, user-confirmed changes, and overall acceptance"
+        )
+    return version, plan, changes, acceptance
+
+
+def _replace_metadata_value(content: str, field: str, value: str) -> str:
+    prefix = _metadata_prefix(content)
+    pattern = re.compile(rf"^- {re.escape(field)}:[^\r\n]*$", re.MULTILINE)
+    replacement = f"- {field}: {value}"
+    if pattern.search(prefix):
+        return pattern.sub(replacement, content, count=1)
+    insertion = prefix.rstrip() + "\n" + replacement + "\n"
+    return insertion + content[len(prefix) :].lstrip("\r\n")
+
+
+def _replace_section(content: str, heading: str, body: str) -> str:
+    matches = list(re.finditer(rf"(?m)^{re.escape(heading)}\s*$", content))
+    if len(matches) != 1:
+        raise SoloAIError(f"Root anchor must contain exactly one '{heading}' section")
+    start_marker, end_marker = _SECTION_MARKERS[heading]
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), content)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), content)]
+    if (
+        len(starts) != 1
+        or len(ends) != 1
+        or starts[0] < matches[0].end()
+        or ends[0] <= starts[0]
+    ):
+        raise SoloAIError(f"Root anchor section markers are malformed for '{heading}'")
+    replacement = f"{heading}\n\n{start_marker}\n{body.strip()}\n{end_marker}\n\n"
+    return (
+        content[: matches[0].start()]
+        + replacement
+        + content[ends[0] + len(end_marker) :].lstrip("\r\n")
+    )
+
+
+def _contract_without_progress_or_outcome(content: str) -> str:
+    normalized = _replace_metadata_value(
+        content, "Current progress", "<current-progress>"
+    )
+    if _section(normalized, _ACCEPTANCE_HEADING) is not None:
+        normalized = _replace_section(
+            normalized, _ACCEPTANCE_HEADING, "<overall-acceptance>"
+        )
+    return normalized
+
+
+def _request_fingerprint(request_id: str) -> str:
+    value = request_id.strip()
+    if not value or len(value) > 512:
+        raise SoloAIError("Root anchor request id must be between 1 and 512 characters")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def root_id_for_request(request_id: str) -> str:
+    return "root-" + _request_fingerprint(request_id)[:24]
+
+
+def _normalized_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _acceptance_status(content: str) -> str | None:
+    section = _section(content, _ACCEPTANCE_HEADING)
+    if section is None:
+        return None
+    matches = list(re.finditer(r"(?m)^- Status: (?P<value>[^\r\n]+)$", section))
+    if len(matches) != 1:
+        raise SoloAIError("Overall acceptance must contain exactly one status")
+    value = matches[0].group("value").strip()
+    if value not in {"pending", "accepted", "cancelled"}:
+        raise SoloAIError(
+            "Overall acceptance status must be pending, accepted, or cancelled"
+        )
+    return value
 
 
 def _identity_value(value: str) -> str:
@@ -244,12 +410,16 @@ def _shown_root_anchor(
     if _identity_value(fields["Root ID"]) != root_id:
         raise SoloAIError("Root anchor identity does not match its path")
     _, children = _linked_children(content)
+    plan_version = _plan_version(content)
     return {
         "root_id": root_id,
         "root_anchor_path": str(path.resolve()),
         "content": content,
         "sha256": hashlib.sha256(raw).hexdigest(),
         "linked_child_tasks": children,
+        "plan_version": plan_version,
+        "confirmed_plan": _section(content, _PLAN_HEADING),
+        "overall_acceptance_status": _acceptance_status(content),
     }
 
 
@@ -298,19 +468,77 @@ def create_root_anchor(
     base_head: str,
     scope: str,
     acceptance: str,
+    confirmed_plan: str | None = None,
+    plan_source: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     if not _ROOT_ID_PATTERN.fullmatch(root_id):
         raise SoloAIError("Root anchor id is not safe")
     values = (purpose, target, base_ref, base_head, scope, acceptance)
     if any(not value.strip() for value in values):
         raise SoloAIError("Root anchor creation requires non-empty contract fields")
+    if (confirmed_plan is None) != (plan_source is None):
+        raise SoloAIError("Confirmed plan and its source must be provided together")
+    if confirmed_plan is not None and not confirmed_plan.strip():
+        raise SoloAIError("Confirmed plan must not be empty")
+    if confirmed_plan is not None and request_id is None:
+        raise SoloAIError("Confirmed plan roots require a stable request id")
+    if confirmed_plan is not None and any(
+        marker in confirmed_plan
+        for marker in (
+            _PLAN_START,
+            _PLAN_END,
+            _CHANGES_START,
+            _CHANGES_END,
+            _ACCEPTANCE_START,
+            _ACCEPTANCE_END,
+        )
+    ):
+        raise SoloAIError(
+            "Confirmed plan must not contain reserved root anchor markers"
+        )
+    if plan_source is not None and (
+        not plan_source.strip() or "\r" in plan_source or "\n" in plan_source
+    ):
+        raise SoloAIError("Confirmed plan source must be a non-empty single line")
+    request_marker = (
+        f"<!-- dww-root-request:{_request_fingerprint(request_id)} -->"
+        if request_id is not None
+        else ""
+    )
     path = root_anchor_path(repo, root_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     if is_link_or_junction(path.parent) or not path.parent.is_dir():
         raise SoloAIError("Root anchor directory is not a plain local directory")
     if path.exists():
-        return show_root_anchor(repo, root_id=root_id)
-    content = f"""# Root task anchor: {purpose}
+        shown = show_root_anchor(repo, root_id=root_id)
+        existing_content = str(shown["content"])
+        existing = _validated_fields(existing_content)
+        request_matches = _REQUEST_COMMENT.findall(_metadata_prefix(existing_content))
+        expected_request = _request_fingerprint(request_id) if request_id else None
+        initial_change = f"- Version 1: initial confirmed plan. Source: {plan_source}"
+        if (
+            existing["Original purpose"] != purpose
+            or existing["Implementation target"] != target
+            or existing["Reference baseline"] != f"`{base_ref}` at `{base_head}`"
+            or existing["Scope boundary"] != scope
+            or existing["Acceptance criteria"] != acceptance
+            or (expected_request is not None and request_matches != [expected_request])
+            or (
+                confirmed_plan is not None
+                and (
+                    shown.get("confirmed_plan") is None
+                    or _normalized_newlines(str(shown["confirmed_plan"]))
+                    != _normalized_newlines(confirmed_plan)
+                    or initial_change
+                    not in (_section(existing_content, _CHANGES_HEADING) or "")
+                )
+            )
+        ):
+            raise SoloAIError("Root anchor request conflicts with the existing root")
+        return shown
+    if confirmed_plan is None:
+        content = f"""# Root task anchor: {purpose}
 
 - Root ID: `{root_id}`
 - Original purpose: {purpose}
@@ -322,6 +550,43 @@ def create_root_anchor(
 
 This local file is not committed. It is the coordinator's durable execution contract. Child tasks may read its current facts but do not alter candidate, batch, or scheduler ownership.
 """
+    else:
+        content = f"""# Root task anchor: {purpose}
+
+- Root ID: `{root_id}`
+- Original purpose: {purpose}
+- Implementation target: {target}
+- Reference baseline: `{base_ref}` at `{base_head}`
+- Scope boundary: {scope}
+- Acceptance criteria: {acceptance}
+- Plan version: 1
+- Current progress: root anchor created at {utc_timestamp()}
+
+{request_marker}
+
+## Confirmed plan
+
+{_PLAN_START}
+{confirmed_plan.strip()}
+{_PLAN_END}
+
+## User-confirmed changes
+
+{_CHANGES_START}
+- Version 1: initial confirmed plan. Source: {plan_source}
+{_CHANGES_END}
+
+## Overall acceptance
+
+{_ACCEPTANCE_START}
+- Status: pending
+- Evidence: not checked
+{_ACCEPTANCE_END}
+
+This local file is not committed. It is the objective's durable execution contract. Child tasks may read its current facts but do not alter candidate, batch, or scheduler ownership.
+"""
+    if len(content.encode("utf-8")) > MAX_ROOT_ANCHOR_BYTES:
+        raise SoloAIError("Root anchor exceeds the 64 KiB safety limit")
     atomic_write_text(path, content)
     return show_root_anchor(repo, root_id=root_id)
 
@@ -346,26 +611,219 @@ def update_root_anchor(
         raise SoloAIError("Root anchor exceeds the 64 KiB safety limit")
     path = root_anchor_path(repo, root_id)
     with root_anchor_lock(path):
+        return _write_root_update_locked(
+            repo,
+            root_id=root_id,
+            content=content,
+            expected_sha256=expected_sha256,
+        )
+
+
+def _write_root_update_locked(
+    repo: GitRepo, *, root_id: str, content: str, expected_sha256: str
+) -> dict[str, Any]:
+    """在根锚点锁已持有时验证并原子写入一份完整文档。"""
+
+    path = root_anchor_path(repo, root_id)
+    if len(content.encode("utf-8")) > MAX_ROOT_ANCHOR_BYTES:
+        raise SoloAIError("Root anchor exceeds the 64 KiB safety limit")
+    current = show_root_anchor(repo, root_id=root_id)
+    previous = _validated_fields(str(current["content"]))
+    updated = _validated_fields(content)
+    if _identity_value(updated["Root ID"]) != root_id:
+        raise SoloAIError("Root anchor identity does not match the requested root")
+    for field in _IMMUTABLE_FIELDS:
+        if updated[field] != previous[field]:
+            raise SoloAIError(f"Root anchor field cannot be changed: {field}")
+    previous_registry, _ = _linked_children(str(current["content"]))
+    updated_registry, _ = _linked_children(content)
+    if updated_registry != previous_registry:
+        raise SoloAIError("Root anchor child registry is managed only by DWW Start")
+    if _REQUEST_COMMENT.findall(
+        _metadata_prefix(str(current["content"]))
+    ) != _REQUEST_COMMENT.findall(_metadata_prefix(content)):
+        raise SoloAIError("Root anchor request identity cannot be changed")
+    previous_version = _plan_version(str(current["content"]))
+    updated_version = _plan_version(content)
+    if previous_version is not None or updated_version is not None:
+        if previous_version is None or updated_version is None:
+            raise SoloAIError(
+                "Structured root anchors cannot silently drop plan versioning"
+            )
+        _require_structured_plan(str(current["content"]))
+        _, _, updated_changes, _ = _require_structured_plan(content)
+        previous_contract = _contract_without_progress_or_outcome(
+            str(current["content"])
+        )
+        updated_contract = _contract_without_progress_or_outcome(content)
+        if previous_contract == updated_contract:
+            if updated_version != previous_version:
+                raise SoloAIError(
+                    "Progress or outcome updates must not change plan version"
+                )
+        else:
+            if updated_version != previous_version + 1:
+                raise SoloAIError(
+                    "Plan changes must increment plan version by exactly one"
+                )
+            if f"- Version {updated_version}:" not in updated_changes:
+                raise SoloAIError(
+                    "Plan changes must record a user-confirmed change entry"
+                )
+    raw = content.encode("utf-8")
+    sha256 = hashlib.sha256(raw).hexdigest()
+    if sha256 == current["sha256"]:
+        return {**current, "changed": False}
+    if current["sha256"] != expected_sha256:
+        raise SoloAIError("Root anchor changed since it was read; fetch it again")
+    atomic_write_text(path, content)
+    return {**show_root_anchor(repo, root_id=root_id), "changed": True}
+
+
+def amend_root_anchor(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    confirmed_plan: str,
+    source: str,
+    summary: str,
+    expected_sha256: str,
+    target: str | None = None,
+    scope: str | None = None,
+    acceptance: str | None = None,
+) -> dict[str, Any]:
+    """按用户已确认的修订替换有效方案，并保留版本化来源记录。"""
+
+    if (
+        not source.strip()
+        or "\r" in source
+        or "\n" in source
+        or not summary.strip()
+        or "\r" in summary
+        or "\n" in summary
+    ):
+        raise SoloAIError(
+            "Plan amendment source and summary must be non-empty single lines"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256 or ""):
+        raise SoloAIError("Expected root anchor SHA-256 must be lowercase hexadecimal")
+    if not confirmed_plan.strip():
+        raise SoloAIError("Confirmed plan must not be empty")
+    if any(
+        marker in confirmed_plan
+        for marker in (
+            _PLAN_START,
+            _PLAN_END,
+            _CHANGES_START,
+            _CHANGES_END,
+            _ACCEPTANCE_START,
+            _ACCEPTANCE_END,
+        )
+    ):
+        raise SoloAIError(
+            "Confirmed plan must not contain reserved root anchor markers"
+        )
+    path = root_anchor_path(repo, root_id)
+    with root_anchor_lock(path):
         current = show_root_anchor(repo, root_id=root_id)
-        previous = _validated_fields(str(current["content"]))
-        updated = _validated_fields(content)
-        if _identity_value(updated["Root ID"]) != root_id:
-            raise SoloAIError("Root anchor identity does not match the requested root")
-        for field in _IMMUTABLE_FIELDS:
-            if updated[field] != previous[field]:
-                raise SoloAIError(f"Root anchor field cannot be changed: {field}")
-        previous_registry, _ = _linked_children(str(current["content"]))
-        updated_registry, _ = _linked_children(content)
-        if updated_registry != previous_registry:
-            raise SoloAIError("Root anchor child registry is managed only by DWW Start")
-        raw = content.encode("utf-8")
-        sha256 = hashlib.sha256(raw).hexdigest()
-        if sha256 == current["sha256"]:
-            return {**current, "changed": False}
         if current["sha256"] != expected_sha256:
             raise SoloAIError("Root anchor changed since it was read; fetch it again")
-        atomic_write_text(path, content)
-        return {**show_root_anchor(repo, root_id=root_id), "changed": True}
+        content = str(current["content"])
+        version, _, changes, _ = _require_structured_plan(content)
+        next_version = version + 1
+        updated = _replace_metadata_value(
+            content, _PLAN_VERSION_FIELD, str(next_version)
+        )
+        if target is not None:
+            updated = _replace_metadata_value(
+                updated, "Implementation target", target.strip()
+            )
+        if scope is not None:
+            updated = _replace_metadata_value(updated, "Scope boundary", scope.strip())
+        if acceptance is not None:
+            updated = _replace_metadata_value(
+                updated, "Acceptance criteria", acceptance.strip()
+            )
+        updated = _replace_section(updated, _PLAN_HEADING, confirmed_plan)
+        updated = _replace_section(
+            updated,
+            _CHANGES_HEADING,
+            changes
+            + f"\n- Version {next_version}: {summary.strip()}. Source: {source.strip()}",
+        )
+        updated = _replace_section(
+            updated,
+            _ACCEPTANCE_HEADING,
+            "- Status: pending\n- Evidence: plan changed; overall acceptance must be checked again",
+        )
+        updated = _replace_metadata_value(
+            updated,
+            "Current progress",
+            f"plan version {next_version} recorded at {utc_timestamp()}",
+        )
+        return _write_root_update_locked(
+            repo,
+            root_id=root_id,
+            content=updated,
+            expected_sha256=expected_sha256,
+        )
+
+
+def update_root_progress(
+    repo: GitRepo, *, root_id: str, progress: str, expected_sha256: str
+) -> dict[str, Any]:
+    if not progress.strip() or "\r" in progress or "\n" in progress:
+        raise SoloAIError("Root progress must be a non-empty single line")
+    path = root_anchor_path(repo, root_id)
+    with root_anchor_lock(path):
+        current = show_root_anchor(repo, root_id=root_id)
+        updated = _replace_metadata_value(
+            str(current["content"]), "Current progress", progress.strip()
+        )
+        return _write_root_update_locked(
+            repo,
+            root_id=root_id,
+            content=updated,
+            expected_sha256=expected_sha256,
+        )
+
+
+def record_root_acceptance(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    status: str,
+    evidence: str,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    if status not in {"accepted", "cancelled"}:
+        raise SoloAIError("Overall acceptance result must be accepted or cancelled")
+    if not evidence.strip():
+        raise SoloAIError("Overall acceptance evidence must not be empty")
+    path = root_anchor_path(repo, root_id)
+    with root_anchor_lock(path):
+        current = show_root_anchor(repo, root_id=root_id)
+        content = str(current["content"])
+        if _plan_version(content) is None:
+            raise SoloAIError(
+                "Legacy root anchors cannot record structured overall acceptance"
+            )
+        updated = _replace_section(
+            content,
+            _ACCEPTANCE_HEADING,
+            f"- Status: {status}\n- Evidence: {evidence.strip()}",
+        )
+        updated = _replace_metadata_value(
+            updated,
+            "Current progress",
+            f"overall acceptance recorded as {status} at {utc_timestamp()}",
+        )
+        return _write_root_update_locked(
+            repo,
+            root_id=root_id,
+            content=updated,
+            expected_sha256=expected_sha256,
+        )
 
 
 def delete_root_anchor(repo: GitRepo, *, root_id: str, locked: bool = False) -> None:

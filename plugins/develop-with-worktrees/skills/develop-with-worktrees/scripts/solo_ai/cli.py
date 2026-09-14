@@ -36,11 +36,14 @@ from .delegated import (
     revoke_delegated,
 )
 from .lifecycle import (
+    acknowledge_root_plan,
+    amend_root_task_anchor,
     abandon,
     adopt_task_anchor,
     approve,
     close_root_task_anchor,
     create_root_task_anchor,
+    record_root_task_acceptance,
     show_task_anchor,
     update_task_anchor,
     choose,
@@ -64,6 +67,7 @@ from .lifecycle import (
     start,
     show_root_task_anchor,
     update_root_task_anchor,
+    update_root_task_progress,
     warm_slot,
 )
 from .orchestration import BatchStore
@@ -398,7 +402,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_host_reference_arguments(start_parser, role="development task")
 
     root_anchor = sub.add_parser(
-        "root-anchor", help="manage one local cross-phase coordinator anchor"
+        "root-anchor", help="manage one local durable objective anchor"
     )
     root_anchor_sub = root_anchor.add_subparsers(
         dest="root_anchor_command", required=True
@@ -412,6 +416,17 @@ def _parser() -> argparse.ArgumentParser:
     root_create.add_argument("--scope", required=True)
     root_create.add_argument("--acceptance", required=True)
     root_create.add_argument("--base")
+    root_create.add_argument(
+        "--plan-file",
+        type=Path,
+        help="UTF-8 file containing the complete confirmed plan",
+    )
+    root_create.add_argument(
+        "--plan-source", help="concise source for the user-confirmed plan"
+    )
+    root_create.add_argument(
+        "--request-id", help="stable caller id; repeated creation returns the same root"
+    )
     root_show = root_anchor_sub.add_parser(
         "show", help="read one root anchor and its byte SHA-256"
     )
@@ -422,6 +437,33 @@ def _parser() -> argparse.ArgumentParser:
     root_update.add_argument("--root", required=True)
     root_update.add_argument("--file", type=Path, required=True)
     root_update.add_argument("--expected-sha256", required=True)
+    root_amend = root_anchor_sub.add_parser(
+        "amend",
+        help="replace the effective plan after an explicit user-confirmed change",
+    )
+    root_amend.add_argument("--root", required=True)
+    root_amend.add_argument("--plan-file", type=Path, required=True)
+    root_amend.add_argument("--source", required=True)
+    root_amend.add_argument("--summary", required=True)
+    root_amend.add_argument("--expected-sha256", required=True)
+    root_amend.add_argument("--target")
+    root_amend.add_argument("--scope")
+    root_amend.add_argument("--acceptance")
+    root_progress = root_anchor_sub.add_parser(
+        "progress", help="record root progress without changing the confirmed plan"
+    )
+    root_progress.add_argument("--root", required=True)
+    root_progress.add_argument("--progress", required=True)
+    root_progress.add_argument("--expected-sha256", required=True)
+    root_acceptance = root_anchor_sub.add_parser(
+        "accept", help="record the checked overall objective result"
+    )
+    root_acceptance.add_argument("--root", required=True)
+    root_acceptance.add_argument(
+        "--status", choices=("accepted", "cancelled"), required=True
+    )
+    root_acceptance.add_argument("--evidence-file", type=Path, required=True)
+    root_acceptance.add_argument("--expected-sha256", required=True)
     root_close = root_anchor_sub.add_parser(
         "close", help="delete a root anchor after every child task is terminal"
     )
@@ -598,6 +640,11 @@ def _parser() -> argparse.ArgumentParser:
         "show", help="read one task anchor and its byte SHA-256"
     )
     anchor_show.add_argument("--task", required=True)
+    anchor_show.add_argument(
+        "--with-root",
+        action="store_true",
+        help="include the bound root plan and review state",
+    )
     anchor_update = anchor_sub.add_parser(
         "update", help="atomically update one task anchor from a UTF-8 file"
     )
@@ -614,6 +661,14 @@ def _parser() -> argparse.ArgumentParser:
     anchor_adopt.add_argument("--scope", required=True)
     anchor_adopt.add_argument("--acceptance", required=True)
     anchor_adopt.add_argument("--confirm", required=True)
+    anchor_acknowledge = anchor_sub.add_parser(
+        "acknowledge-root",
+        help="record that this task reviewed one exact root plan version",
+    )
+    anchor_acknowledge.add_argument("--task", required=True)
+    anchor_acknowledge.add_argument("--lease", required=True)
+    anchor_acknowledge.add_argument("--root-version", type=int, required=True)
+    anchor_acknowledge.add_argument("--root-sha256", required=True)
 
     commit = sub.add_parser(
         "commit", help="stage only an exact reviewed task path list and commit it"
@@ -1576,6 +1631,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 scope=args.scope,
                 acceptance=args.acceptance,
                 base=args.base,
+                plan_input_path=args.plan_file,
+                plan_source=args.plan_source,
+                request_id=args.request_id,
             )
         if args.root_anchor_command == "show":
             return show_root_task_anchor(repo, root_id=args.root)
@@ -1584,6 +1642,33 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 repo,
                 root_id=args.root,
                 input_path=args.file,
+                expected_sha256=args.expected_sha256,
+            )
+        if args.root_anchor_command == "amend":
+            return amend_root_task_anchor(
+                repo,
+                root_id=args.root,
+                plan_input_path=args.plan_file,
+                source=args.source,
+                summary=args.summary,
+                expected_sha256=args.expected_sha256,
+                target=args.target,
+                scope=args.scope,
+                acceptance=args.acceptance,
+            )
+        if args.root_anchor_command == "progress":
+            return update_root_task_progress(
+                repo,
+                root_id=args.root,
+                progress=args.progress,
+                expected_sha256=args.expected_sha256,
+            )
+        if args.root_anchor_command == "accept":
+            return record_root_task_acceptance(
+                repo,
+                root_id=args.root,
+                status=args.status,
+                evidence_input_path=args.evidence_file,
                 expected_sha256=args.expected_sha256,
             )
         if args.root_anchor_command == "close":
@@ -1682,7 +1767,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         raise SoloAIError(f"Unknown runtime command: {args.runtime_command}")
     if args.command == "anchor":
         if args.anchor_command == "show":
-            return show_task_anchor(repo, task_id=args.task)
+            return show_task_anchor(repo, task_id=args.task, with_root=args.with_root)
         if args.anchor_command == "update":
             return update_task_anchor(
                 repo,
@@ -1690,6 +1775,14 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 lease=args.lease,
                 input_path=args.file,
                 expected_sha256=args.expected_sha256,
+            )
+        if args.anchor_command == "acknowledge-root":
+            return acknowledge_root_plan(
+                repo,
+                task_id=args.task,
+                lease=args.lease,
+                root_version=args.root_version,
+                root_sha256=args.root_sha256,
             )
         if args.anchor_command == "adopt":
             return adopt_task_anchor(

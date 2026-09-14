@@ -24,6 +24,8 @@ from solo_ai.cli import _prune
 from solo_ai.candidate_batches import seal_batch
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
+    acknowledge_root_plan,
+    amend_root_task_anchor,
     abandon,
     adopt_task_anchor,
     approve,
@@ -40,6 +42,7 @@ from solo_ai.lifecycle import (
     initialize,
     local_enabled,
     ready,
+    record_root_task_acceptance,
     recover,
     resume_in_place,
     show_task_anchor,
@@ -129,6 +132,96 @@ def test_root_anchor_binds_child_task_and_closes_only_after_terminal_child(
     plain = start(repo, name="ordinary task")
     assert "Root anchor:" not in show_task_anchor(repo, task_id=plain["id"])["content"]
     abandon(repo, task_id=plain["id"], lease=plain["lease"], confirm=plain["id"])
+
+
+def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    plan = git_repo / "confirmed-plan.md"
+    plan.write_text(
+        "# 最终确认方案\n\n- 保留完整正文。\n- 后续修订必须可追溯。\n",
+        encoding="utf-8",
+    )
+    kwargs = {
+        "purpose": "durable user-confirmed objective",
+        "target": "preserve the exact confirmed plan",
+        "scope": "root and child anchor lifecycle only",
+        "acceptance": "the plan is readable after handoff and needs explicit overall acceptance",
+        "plan_input_path": plan,
+        "plan_source": "user said to proceed with the confirmed plan",
+        "request_id": "confirmed-plan-root-test",
+    }
+    root = create_root_task_anchor(repo, **kwargs)
+    retried = create_root_task_anchor(repo, **kwargs)
+    assert retried["root_id"] == root["root_id"]
+    assert (
+        retried["confirmed_plan"].replace("\r\n", "\n")
+        == plan.read_text(encoding="utf-8").strip()
+    )
+    plan.write_text("# 被替换的方案\n", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="conflicts with the existing root"):
+        create_root_task_anchor(repo, **kwargs)
+    plan.write_text(
+        "# 最终确认方案\n\n- 保留完整正文。\n- 后续修订必须可追溯。\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(SoloAIError, match="conflicts with the existing root"):
+        create_root_task_anchor(repo, **{**kwargs, "target": "silently altered target"})
+
+    task = start(repo, name="confirmed plan child", root_anchor_id=root["root_id"])
+    context = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    assert context["root_plan_review"]["requires_review"] is True
+    assert context["root_anchor"]["plan_version"] == 1
+    acknowledge_root_plan(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_version=1,
+        root_sha256=context["root_anchor"]["sha256"],
+    )
+    reviewed = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    assert reviewed["root_plan_review"]["requires_review"] is False
+
+    plan.write_text(
+        "# 最终确认方案\n\n- 保留完整正文。\n- 这是一项明确的用户修订。\n",
+        encoding="utf-8",
+    )
+    amended = amend_root_task_anchor(
+        repo,
+        root_id=root["root_id"],
+        plan_input_path=plan,
+        source="user explicitly changed the plan",
+        summary="add a recoverable amendment",
+        expected_sha256=reviewed["root_anchor"]["sha256"],
+    )
+    after_amendment = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    assert after_amendment["root_plan_review"]["requires_review"] is True
+    acknowledge_root_plan(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_version=amended["plan_version"],
+        root_sha256=amended["sha256"],
+    )
+
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    with pytest.raises(SoloAIError, match="overall acceptance"):
+        close_root_task_anchor(repo, root_id=root["root_id"], confirm=root["root_id"])
+
+    evidence = git_repo / "overall-acceptance.md"
+    evidence.write_text("验收已按最终确认方案完成核对。", encoding="utf-8")
+    shown = show_root_task_anchor(repo, root_id=root["root_id"])
+    record_root_task_acceptance(
+        repo,
+        root_id=root["root_id"],
+        status="accepted",
+        evidence_input_path=evidence,
+        expected_sha256=shown["sha256"],
+    )
+    assert close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
 
 
 def test_root_child_refuses_a_missing_root_anchor(git_repo: Path) -> None:

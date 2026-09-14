@@ -6,6 +6,7 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 
 - One isolated worktree per modifying task.
 - A local task anchor that preserves the task's original purpose and baseline across continuation, handoff, and model changes; `anchor show/update` reads and saves checked context during an active task.
+- When you confirm a complete plan, one local objective anchor keeps that exact plan through resumed tasks and conflict repairs; DWW records the checked overall result before the objective closes.
 - Exact-path commits and immutable source candidates.
 - Automatic integration whenever three eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
@@ -17,7 +18,7 @@ DWW is no longer a multi-AI task command center. The host's native task system d
 
 ## Default flow
 
-1. `Start` creates the exact task anchor and isolated worktree, then lets an optional project Runtime Adapter establish project runtime identity before returning it as active.
+1. When you have confirmed a complete plan, the host first saves it in one local objective anchor. `Start` then creates the exact task anchor and isolated worktree, and lets an optional project Runtime Adapter establish project runtime identity before returning it as active.
 2. The agent edits only there, commits exact paths, and runs development checks when they help it work safely.
 3. `Finish` publishes the exact source candidate and releases the task worktree without moving the base or requiring a separate project test gate.
 4. Every three candidates, DWW freezes the oldest eligible three and composes them in an integration worktree. It then runs the affected combined checks, reusing valid individual results.

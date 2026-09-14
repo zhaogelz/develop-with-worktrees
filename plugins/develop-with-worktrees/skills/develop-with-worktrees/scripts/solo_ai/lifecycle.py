@@ -5,6 +5,7 @@ import fnmatch
 import json
 import os
 import platform
+import re
 import secrets
 import shutil
 import signal
@@ -59,17 +60,22 @@ from .proof import (
 )
 from .repo import GitRepo
 from .root_context import (
+    amend_root_anchor,
     create_root_anchor,
     delete_root_anchor,
     list_root_anchors,
     nonterminal_external_root_children,
     require_candidate_delivery_terminal,
+    read_root_plan_input,
+    record_root_acceptance,
     register_external_root_child,
     resolve_root_anchor,
     root_anchor_path,
     root_anchor_lock,
+    root_id_for_request,
     show_root_anchor,
     update_root_anchor,
+    update_root_progress,
 )
 from .routing import decide_route, detect_existing_workflows
 from .safety import require_safe
@@ -651,13 +657,76 @@ def adopt_task_anchor(
         return {"task_id": task_id, "anchor_path": str(path.resolve())}
 
 
-def show_task_anchor(repo: GitRepo, *, task_id: str) -> dict[str, Any]:
+def show_task_anchor(
+    repo: GitRepo, *, task_id: str, with_root: bool = False
+) -> dict[str, Any]:
     _require_managed_mode(repo)
     task = StateStore(repo).task(task_id)
     _require_anchor_caller(repo, task)
     result = read_anchor(repo, task)
     result["status"] = task.get("status")
+    if with_root and task.get("root_anchor_id"):
+        root = resolve_root_anchor(
+            repo,
+            root_id=str(task["root_anchor_id"]),
+            external_path=(
+                Path(str(task["root_anchor_file"]))
+                if task.get("root_anchor_file")
+                else None
+            ),
+        )
+        current_version = root.get("plan_version")
+        reviewed_version = task.get("reviewed_root_plan_version")
+        result["root_anchor"] = root
+        result["root_plan_review"] = {
+            "current_version": current_version,
+            "reviewed_version": reviewed_version,
+            "requires_review": current_version is not None
+            and current_version != reviewed_version,
+        }
     return result
+
+
+def acknowledge_root_plan(
+    repo: GitRepo, *, task_id: str, lease: str, root_version: int, root_sha256: str
+) -> dict[str, Any]:
+    _require_managed_mode(repo)
+    if root_version < 1 or not re.fullmatch(r"[0-9a-f]{64}", root_sha256 or ""):
+        raise SoloAIError("Root plan acknowledgement identity is invalid")
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "root-plan-acknowledge") as task:
+        _require_anchor_caller(repo, task)
+        if task.get("status") not in {"active", "ready"}:
+            raise SoloAIError(
+                "Only an active or ready task can acknowledge its root plan"
+            )
+        root_id = task.get("root_anchor_id")
+        if not root_id:
+            raise SoloAIError("Task is not bound to a root anchor")
+        root = resolve_root_anchor(
+            repo,
+            root_id=str(root_id),
+            external_path=(
+                Path(str(task["root_anchor_file"]))
+                if task.get("root_anchor_file")
+                else None
+            ),
+        )
+        if (
+            root.get("plan_version") != root_version
+            or root.get("sha256") != root_sha256
+        ):
+            raise SoloAIError("Root plan changed before acknowledgement; read it again")
+        store.update_task(
+            task_id,
+            reviewed_root_plan_version=root_version,
+            reviewed_root_plan_sha256=root_sha256,
+        )
+        return {
+            "task_id": task_id,
+            "root_id": root_id,
+            "reviewed_root_plan_version": root_version,
+        }
 
 
 def update_task_anchor(
@@ -1737,6 +1806,9 @@ def create_root_task_anchor(
     scope: str,
     acceptance: str,
     base: str | None = None,
+    plan_input_path: Path | None = None,
+    plan_source: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """创建主会话长期执行合同；它不领取工作树也不创建候选。"""
 
@@ -1748,7 +1820,16 @@ def create_root_task_anchor(
         base_head = repo.ref_head(f"refs/heads/{base_ref}")
         if not base_head:
             raise SoloAIError("Root anchor base branch no longer exists")
-        root_id = f"root-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+        confirmed_plan = (
+            read_root_plan_input(repo, plan_input_path)
+            if plan_input_path is not None
+            else None
+        )
+        root_id = (
+            root_id_for_request(request_id)
+            if request_id is not None
+            else f"root-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+        )
         return create_root_anchor(
             repo,
             root_id=root_id,
@@ -1758,6 +1839,9 @@ def create_root_task_anchor(
             base_head=base_head,
             scope=scope,
             acceptance=acceptance,
+            confirmed_plan=confirmed_plan,
+            plan_source=plan_source,
+            request_id=request_id,
         )
 
 
@@ -1783,6 +1867,65 @@ def update_root_task_anchor(
         )
 
 
+def amend_root_task_anchor(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    plan_input_path: Path,
+    source: str,
+    summary: str,
+    expected_sha256: str,
+    target: str | None = None,
+    scope: str | None = None,
+    acceptance: str | None = None,
+) -> dict[str, Any]:
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        return amend_root_anchor(
+            repo,
+            root_id=root_id,
+            confirmed_plan=read_root_plan_input(repo, plan_input_path),
+            source=source,
+            summary=summary,
+            expected_sha256=expected_sha256,
+            target=target,
+            scope=scope,
+            acceptance=acceptance,
+        )
+
+
+def update_root_task_progress(
+    repo: GitRepo, *, root_id: str, progress: str, expected_sha256: str
+) -> dict[str, Any]:
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        return update_root_progress(
+            repo,
+            root_id=root_id,
+            progress=progress,
+            expected_sha256=expected_sha256,
+        )
+
+
+def record_root_task_acceptance(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    status: str,
+    evidence_input_path: Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        return record_root_acceptance(
+            repo,
+            root_id=root_id,
+            status=status,
+            evidence=read_root_plan_input(repo, evidence_input_path),
+            expected_sha256=expected_sha256,
+        )
+
+
 def close_root_task_anchor(
     repo: GitRepo, *, root_id: str, confirm: str
 ) -> dict[str, Any]:
@@ -1792,7 +1935,7 @@ def close_root_task_anchor(
     with maintenance_lock(repo):
         root_path = root_anchor_path(repo, root_id)
         with root_anchor_lock(root_path):
-            show_root_anchor(repo, root_id=root_id)
+            shown_root = show_root_anchor(repo, root_id=root_id)
             root_tasks = [
                 task
                 for task in StateStore(repo).read()["tasks"].values()
@@ -1829,6 +1972,12 @@ def close_root_task_anchor(
                 raise SoloAIError(
                     "Root anchor still has nonterminal child tasks:\n"
                     + "\n".join(f"- {task_id}" for task_id in sorted(set(active)))
+                )
+            if shown_root.get("plan_version") is not None and shown_root.get(
+                "overall_acceptance_status"
+            ) not in {"accepted", "cancelled"}:
+                raise SoloAIError(
+                    "Root anchor requires a recorded overall acceptance result before closing"
                 )
             delete_root_anchor(repo, root_id=root_id, locked=True)
             return {"root_id": root_id, "status": "closed"}

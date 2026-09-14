@@ -2046,12 +2046,17 @@ def prepare_candidate_repair(
 
     attempt = int(source.get("repair_attempt", 0)) + 1
     request_id = f"candidate-repair:{candidate_id}:{base_head}"
+    source_task = StateStore(repo).task(str(source["task_id"]))
+    root_anchor_id = source_task.get("root_anchor_id")
+    root_anchor_file = source_task.get("root_anchor_file")
     task = start(
         repo,
         name=f"repair {candidate_id}",
         base=base_ref,
         request_id=request_id,
         supersedes=candidate_id,
+        root_anchor_id=str(root_anchor_id) if root_anchor_id else None,
+        root_anchor_file=Path(str(root_anchor_file)) if root_anchor_file else None,
         host_origin=host_origin,
     )
     worktree = Path(str(task["worktree"]))
@@ -2060,13 +2065,18 @@ def prepare_candidate_repair(
         return {**task, **copy.deepcopy(existing), "request_reused": True}
 
     anchor = require_anchor(repo, task)
+    root_line = (
+        f"- Root anchor: `{task['root_anchor_id']}`\n"
+        if task.get("root_anchor_id")
+        else ""
+    )
     atomic_write_text(
         anchor,
         f"""# Task anchor: repair {candidate_id}
 
 - Task ID: `{task["id"]}`
 - Original purpose: {task["anchor_origin"]["original_purpose"]}
-- Implementation target: replay candidate `{source["head"]}` onto `{base_ref}` at `{base_head}` and preserve its verified intent
+{root_line}- Implementation target: replay candidate `{source["head"]}` onto `{base_ref}` at `{base_head}` and preserve its verified intent
 - Reference baseline: {task["anchor_origin"]["reference_baseline"]}
 - Scope boundary: change only the source candidate's intent and the minimum conflict resolution; do not choose between competing product, permission, migration, deletion, or security rules
 - Acceptance criteria: resolve every recorded conflict, review the exact path manifest, run Commit/Ready/Finish, then explicitly seal the replacement candidate and prove it is in the base
