@@ -29,7 +29,6 @@ from solo_ai.config import (
     load_verification_config,
 )
 from solo_ai.lifecycle import (
-    acknowledge_root_plan,
     amend_root_task_anchor,
     abandon,
     adopt_task_anchor,
@@ -49,6 +48,7 @@ from solo_ai.lifecycle import (
     local_enabled,
     ready,
     record_root_task_acceptance,
+    refresh_root_context,
     recover,
     resume_in_place,
     show_task_anchor,
@@ -254,9 +254,8 @@ def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
     root = create_root_task_anchor(repo, **kwargs)
     retried = create_root_task_anchor(repo, **kwargs)
     assert retried["root_id"] == root["root_id"]
-    assert (
-        retried["confirmed_plan"].replace("\r\n", "\n")
-        == plan.read_text(encoding="utf-8").strip()
+    assert plan.read_text(encoding="utf-8").strip() in retried["content"].replace(
+        "\r\n", "\n"
     )
     plan.write_text("# 被替换的方案\n", encoding="utf-8")
     with pytest.raises(SoloAIError, match="conflicts with the existing root"):
@@ -270,16 +269,10 @@ def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
 
     task = start(repo, name="confirmed plan child", root_anchor_id=root["root_id"])
     context = show_task_anchor(repo, task_id=task["id"], with_root=True)
-    assert context["root_plan_review"]["requires_review"] is True
+    assert context["root_plan_review"]["requires_review"] is False
+    assert task["root_plan_review"]["record_kind"] == "read"
     assert context["root_anchor"]["plan_version"] == 1
-    acknowledge_root_plan(
-        repo,
-        task_id=task["id"],
-        lease=task["lease"],
-        root_version=1,
-        root_sha256=context["root_anchor"]["sha256"],
-    )
-    reviewed = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    reviewed = context
     assert reviewed["root_plan_review"]["requires_review"] is False
 
     plan.write_text(
@@ -299,13 +292,9 @@ def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
     assert (history_directory / f"{root['root_id']}.v1.md").exists()
     after_amendment = show_task_anchor(repo, task_id=task["id"], with_root=True)
     assert after_amendment["root_plan_review"]["requires_review"] is True
-    acknowledge_root_plan(
-        repo,
-        task_id=task["id"],
-        lease=task["lease"],
-        root_version=amended["plan_version"],
-        root_sha256=amended["sha256"],
-    )
+    refreshed = refresh_root_context(repo, task_id=task["id"], lease=task["lease"])
+    assert refreshed["root_plan_review"]["requires_review"] is False
+    assert refreshed["root_plan_review"]["current_version"] == amended["plan_version"]
 
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     with pytest.raises(SoloAIError, match="overall acceptance"):
@@ -348,29 +337,15 @@ def test_structured_root_review_recovers_automatically_before_commit_and_ready(
     worktree = Path(task["worktree"])
     (worktree / "review-gated.txt").write_text("content\n", encoding="utf-8")
 
-    with pytest.raises(SoloAIError, match="Automatically recover"):
-        commit_task(
-            repo,
-            task_id=task["id"],
-            lease=task["lease"],
-            message="test: require current root review",
-            paths=["review-gated.txt"],
-        )
-    first_view = show_task_anchor(repo, task_id=task["id"], with_root=True)
-    acknowledge_root_plan(
-        repo,
-        task_id=task["id"],
-        lease=task["lease"],
-        root_version=1,
-        root_sha256=first_view["root_anchor"]["sha256"],
-    )
     commit_task(
         repo,
         task_id=task["id"],
         lease=task["lease"],
-        message="test: record reviewed root version",
+        message="test: automatically refresh the root before commit",
         paths=["review-gated.txt"],
     )
+    first_view = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    assert first_view["root_plan_review"]["requires_review"] is False
 
     change = git_repo / "review-gated-change.md"
     change.write_text("用户确认的 V2 原文。\n", encoding="utf-8")
@@ -384,19 +359,16 @@ def test_structured_root_review_recovers_automatically_before_commit_and_ready(
         expected_sha256=first_view["root_anchor"]["sha256"],
     )
     change.unlink()
-    assert "用户确认的 V2 原文。" in amended["confirmed_plan"]
+    assert "用户确认的 V2 原文。" in amended["content"]
 
-    with pytest.raises(SoloAIError, match="Automatically recover"):
+    with pytest.raises(SoloAIError, match="host one-step root-context refresh"):
         ready(repo, task_id=task["id"], lease=task["lease"])
-    second_view = show_task_anchor(repo, task_id=task["id"], with_root=True)
-    acknowledge_root_plan(
-        repo,
-        task_id=task["id"],
-        lease=task["lease"],
-        root_version=2,
-        root_sha256=second_view["root_anchor"]["sha256"],
-    )
+    refreshed = refresh_root_context(repo, task_id=task["id"], lease=task["lease"])
+    assert refreshed["root_plan_review"]["record_kind"] == "read"
     ready(repo, task_id=task["id"], lease=task["lease"])
+    second_view = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    assert second_view["root_plan_review"]["requires_review"] is False
+    assert second_view["root_plan_review"]["current_version"] == amended["plan_version"]
     assert (
         finish(repo, task_id=task["id"], lease=task["lease"])["status"] == "completed"
     )
@@ -4567,7 +4539,13 @@ timeout_seconds = 0.2
 
 def test_anchor_show_and_update_uses_lease_and_digest(git_repo: Path) -> None:
     repo = initialized(git_repo)
-    task = start(repo, name="anchor update")
+    task = start(
+        repo,
+        name="anchor update",
+        target="initial lifecycle target",
+        scope="initial lifecycle scope",
+        acceptance="initial lifecycle acceptance",
+    )
     shown = show_task_anchor(repo, task_id=task["id"])
     assert task["anchor_origin"]["original_purpose"] == "anchor update"
     assert task["anchor_origin"]["reference_baseline"] == (
@@ -4577,15 +4555,15 @@ def test_anchor_show_and_update_uses_lease_and_digest(git_repo: Path) -> None:
     input_path = Path(task["worktree"]) / "anchor-update.md"
     content = shown["content"]
     content = content.replace(
-        "- Implementation target: fill before editing",
+        "- Implementation target: initial lifecycle target",
         "- Implementation target: lifecycle anchor update",
     )
     content = content.replace(
-        "- Scope boundary: fill before editing",
+        "- Scope boundary: initial lifecycle scope",
         "- Scope boundary: direct lifecycle tests only",
     )
     content = content.replace(
-        "- Acceptance criteria: fill before Ready",
+        "- Acceptance criteria: initial lifecycle acceptance",
         "- Acceptance criteria: show and update tests pass",
     )
     content = content.replace(
@@ -4620,6 +4598,75 @@ def test_anchor_show_and_update_uses_lease_and_digest(git_repo: Path) -> None:
         )
 
 
+def test_start_writes_and_reuses_the_initial_anchor_contract(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    kwargs = {
+        "name": "first anchor contract",
+        "request_id": "first-anchor-contract-request",
+        "target": "Start parameters and task-anchor rendering",
+        "scope": "initial task anchor only",
+        "acceptance": "the active task starts with reviewed facts",
+    }
+
+    task = start(repo, **kwargs)
+    content = show_task_anchor(repo, task_id=task["id"])["content"]
+    assert "fill before" not in content
+    assert "Start parameters and task-anchor rendering" in content
+    assert "initial task anchor only" in content
+    assert "the active task starts with reviewed facts" in content
+    assert start(repo, **kwargs)["id"] == task["id"]
+
+    with pytest.raises(SoloAIError, match="different task"):
+        start(repo, **{**kwargs, "scope": "a conflicting scope"})
+
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_root_content_is_returned_once_for_a_bound_task(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    plan = git_repo / "root-content-once.md"
+    plan.write_text("# Confirmed plan\n\nKeep this text once.", encoding="utf-8")
+    root = create_root_task_anchor(
+        repo,
+        purpose="return the root body once",
+        target="anchor response rendering",
+        scope="root and one child task",
+        acceptance="callers read one full root body",
+        plan_input_path=plan,
+        plan_source="user confirmed the plan",
+        request_id="root-content-once",
+    )
+    plan.unlink()
+    task = start(repo, name="read root once", root_anchor_id=root["root_id"])
+
+    assert task["root_plan_review"]["requires_review"] is False
+    assert task["root_plan_review"]["record_kind"] == "read"
+    assert task["root_anchor"]["content"].count("Keep this text once.") == 1
+    assert StateStore(repo).task(task["id"])["reviewed_root_plan_version"] == 1
+    root_view = show_root_task_anchor(repo, root_id=root["root_id"])
+    assert "content" in root_view
+    assert "confirmed_plan" not in root_view
+    context = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    assert "confirmed_plan" not in context["root_anchor"]
+    assert context["root_anchor"]["content"].count("Keep this text once.") == 1
+
+    amended_plan = git_repo / "root-content-v2.md"
+    amended_plan.write_text("# Confirmed plan\n\nKeep V2 once.", encoding="utf-8")
+    amended = amend_root_task_anchor(
+        repo,
+        root_id=root["root_id"],
+        plan_input_path=amended_plan,
+        change_input_path=None,
+        source="user changed the complete plan",
+        summary="replace the effective root plan",
+        expected_sha256=context["root_anchor"]["sha256"],
+    )
+    refreshed = refresh_root_context(repo, task_id=task["id"], lease=task["lease"])
+    assert refreshed["root_plan_review"]["current_version"] == amended["plan_version"]
+    assert refreshed["root_anchor"]["content"].count("Keep V2 once.") == 1
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
 def test_legacy_anchor_adoption_persists_the_reviewed_origin(git_repo: Path) -> None:
     repo = initialized(git_repo)
     task = start(repo, name="legacy anchor")
@@ -4648,26 +4695,15 @@ def test_legacy_anchor_adoption_preserves_verified_original_baseline_after_retar
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
-    task = start(repo, name="legacy original baseline")
-    worktree = Path(task["worktree"])
-    anchor = Path(task["anchor_path"])
-    original_baseline = f"`{task['base_ref']}` at `{task['base_head']}`"
-    content = anchor.read_text(encoding="utf-8")
-    content = (
-        content.replace(
-            "- Implementation target: fill before editing",
-            "- Implementation target: legacy lifecycle test",
-        )
-        .replace(
-            "- Scope boundary: fill before editing",
-            "- Scope boundary: only this integration test",
-        )
-        .replace(
-            "- Acceptance criteria: fill before Ready",
-            "- Acceptance criteria: anchor can be verified",
-        )
+    task = start(
+        repo,
+        name="legacy original baseline",
+        target="legacy lifecycle test",
+        scope="only this integration test",
+        acceptance="anchor can be verified",
     )
-    anchor.write_text(content, encoding="utf-8", newline="\n")
+    worktree = Path(task["worktree"])
+    original_baseline = f"`{task['base_ref']}` at `{task['base_head']}`"
     (git_repo / "advanced-base.txt").write_text("advance\n", encoding="utf-8")
     git(git_repo, "add", "advanced-base.txt")
     git(git_repo, "commit", "-m", "test: advance base")

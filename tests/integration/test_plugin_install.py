@@ -190,7 +190,17 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     root_id = json.loads(created_root.stdout)["result"]["root_id"]
     root_plan.unlink()
     started = run_runner(
-        "start", "--name", "installed artifact smoke", "--root-anchor", root_id
+        "start",
+        "--name",
+        "installed artifact smoke",
+        "--target",
+        "initial installed target",
+        "--scope",
+        "initial installed scope",
+        "--acceptance",
+        "initial installed acceptance",
+        "--root-anchor",
+        root_id,
     )
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
@@ -217,7 +227,7 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert amended_root.returncode == 0, amended_root.stderr
     root_change.unlink()
     amended_payload = json.loads(amended_root.stdout)["result"]
-    assert "Installed V2 exact correction." in amended_payload["confirmed_plan"]
+    assert "Installed V2 exact correction." in amended_payload["content"]
     root_context = run_runner(
         "--json",
         "anchor",
@@ -254,15 +264,15 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     anchor_input = worktree / "anchor-input.md"
     anchor_content = shown_anchor_payload["content"]
     anchor_content = anchor_content.replace(
-        "- Implementation target: fill before editing",
+        "- Implementation target: initial installed target",
         "- Implementation target: installed anchor update",
     )
     anchor_content = anchor_content.replace(
-        "- Scope boundary: fill before editing",
+        "- Scope boundary: initial installed scope",
         "- Scope boundary: plugin install smoke test",
     )
     anchor_content = anchor_content.replace(
-        "- Acceptance criteria: fill before Ready",
+        "- Acceptance criteria: initial installed acceptance",
         "- Acceptance criteria: installed show and update pass",
     )
     anchor_content = anchor_content.replace(

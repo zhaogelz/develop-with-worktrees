@@ -15,7 +15,10 @@ from solo_ai.config import (
     render_repo_config,
     render_verification_config,
 )
-from solo_ai.config import _legacy_managed_block
+from solo_ai.config import (
+    _legacy_managed_block,
+    _pre_refresh_root_context_managed_block,
+)
 from solo_ai.repo import GitRepo
 from solo_ai.util import SoloAIError
 
@@ -121,6 +124,19 @@ def test_immediately_previous_released_managed_block_can_be_upgraded() -> None:
     existing = "# User instructions\n\n" + released + "\nKeep this.\n"
 
     assert managed_agents_status(existing) == "known-legacy-root-review"
+    upgraded = render_agents(existing)
+    assert managed_agents_status(upgraded) == "current"
+    assert upgraded.endswith("\nKeep this.\n")
+
+
+def test_pre_refresh_root_context_managed_block_can_be_upgraded() -> None:
+    existing = (
+        "# User instructions\n\n"
+        + _pre_refresh_root_context_managed_block()
+        + "\nKeep this.\n"
+    )
+
+    assert managed_agents_status(existing) == "known-legacy-root-context-refresh"
     upgraded = render_agents(existing)
     assert managed_agents_status(upgraded) == "current"
     assert upgraded.endswith("\nKeep this.\n")

@@ -139,6 +139,42 @@ def test_legacy_root_with_an_incidental_plan_heading_remains_readable(
     assert shown["confirmed_plan"] is None
 
 
+def test_legacy_root_first_complete_amendment_becomes_structured_without_losing_it(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    created = _create(repo)
+    legacy_content = str(created["content"])
+
+    structured = amend_root_anchor(
+        repo,
+        root_id=str(created["root_id"]),
+        confirmed_plan="# Confirmed V1\n\nKeep the complete plan.",
+        change_text=None,
+        source="user confirmed the complete plan",
+        summary="record the initial complete plan",
+        expected_sha256=str(created["sha256"]),
+    )
+
+    assert structured["plan_version"] == 1
+    assert structured["confirmed_plan"] == "# Confirmed V1\n\nKeep the complete plan."
+    history_directory = Path(structured["history_directory"])
+    legacy_snapshot = history_directory / f"{created['root_id']}.legacy.md"
+    assert legacy_snapshot.read_text(encoding="utf-8") == legacy_content
+
+    amended = amend_root_anchor(
+        repo,
+        root_id=str(created["root_id"]),
+        confirmed_plan="# Confirmed V2\n",
+        change_text=None,
+        source="user confirmed a correction",
+        summary="replace the effective plan",
+        expected_sha256=str(structured["sha256"]),
+    )
+    assert amended["plan_version"] == 2
+    assert (history_directory / f"{created['root_id']}.v1.md").exists()
+
+
 def test_structured_root_keeps_complete_plan_and_versions_user_amendments(
     git_repo: Path,
 ) -> None:

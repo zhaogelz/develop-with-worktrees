@@ -78,6 +78,12 @@ def root_anchor_history_path(repo: GitRepo, *, root_id: str, version: int) -> Pa
     return root_anchor_history_directory(repo, root_id) / f"{root_id}.v{version}.md"
 
 
+def _legacy_root_anchor_history_path(repo: GitRepo, *, root_id: str) -> Path:
+    """保留从旧式引导根首次升级前的原文，不占用已确认方案版本号。"""
+
+    return root_anchor_history_directory(repo, root_id) / f"{root_id}.legacy.md"
+
+
 def _external_root_anchor_path(path: Path, *, root_id: str) -> tuple[Path, Path]:
     """验证一个显式外部根锚点的固定 DWW 本地布局。"""
 
@@ -790,6 +796,102 @@ def _snapshot_root_anchor_version(
     return True
 
 
+def _snapshot_legacy_root_anchor(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    source_path: Path,
+    source_sha256: str,
+) -> bool:
+    """首次结构化前保存旧式根，避免与随后真正的 V1 方案冲突。"""
+
+    directory = _require_plain_directory(
+        root_anchor_history_directory(repo, root_id),
+        root=repo.local_dir,
+        label="Root anchor history directory",
+        create=True,
+    )
+    path = _legacy_root_anchor_history_path(repo, root_id=root_id)
+    if path.exists():
+        _require_plain_file(path, root=directory, label="Root anchor legacy history")
+        if sha256_file(path) != source_sha256:
+            raise SoloAIError(
+                "Root anchor legacy history conflicts with the current root content"
+            )
+        return False
+    atomic_copy_file(source_path, path)
+    if sha256_file(path) != source_sha256:
+        raise SoloAIError(
+            "Root anchor legacy history copy did not match the current root"
+        )
+    return True
+
+
+def _bootstrap_structured_root_content(
+    content: str,
+    *,
+    confirmed_plan: str,
+    source: str,
+    summary: str,
+    target: str | None,
+    scope: str | None,
+    acceptance: str | None,
+) -> str:
+    """将已确认的完整方案首次写入旧式根，同时保持原根可从历史精确恢复。"""
+
+    fields = _validated_fields(content)
+    request_matches = _REQUEST_COMMENT.findall(_metadata_prefix(content))
+    if len(request_matches) > 1:
+        raise SoloAIError("Root anchor must contain at most one request identity")
+    child_registry, children = _linked_children(content)
+    implementation_target = (
+        target.strip() if target is not None else fields["Implementation target"]
+    )
+    scope_boundary = scope.strip() if scope is not None else fields["Scope boundary"]
+    acceptance_criteria = (
+        acceptance.strip() if acceptance is not None else fields["Acceptance criteria"]
+    )
+    request_marker = (
+        f"\n<!-- dww-root-request:{request_matches[0]} -->" if request_matches else ""
+    )
+    updated = f"""# Root task anchor: {fields["Original purpose"]}
+
+- Root ID: {fields["Root ID"]}
+- Original purpose: {fields["Original purpose"]}
+- Implementation target: {implementation_target}
+- Reference baseline: {fields["Reference baseline"]}
+- Scope boundary: {scope_boundary}
+- Acceptance criteria: {acceptance_criteria}
+- Plan version: 1
+- Current progress: plan version 1 recorded at {utc_timestamp()}
+{request_marker}
+
+## Confirmed plan
+
+{_PLAN_START}
+{confirmed_plan.strip()}
+{_PLAN_END}
+
+## User-confirmed changes
+
+{_CHANGES_START}
+- Version 1: {summary.strip()}. Source: {source.strip()}
+{_CHANGES_END}
+
+## Overall acceptance
+
+{_ACCEPTANCE_START}
+- Status: pending
+- Evidence: not checked
+{_ACCEPTANCE_END}
+
+This local file is not committed. It is the objective's durable execution contract. Child tasks may read its current facts but do not alter candidate, batch, or scheduler ownership.
+"""
+    if child_registry is not None:
+        updated = _render_linked_children(updated, children)
+    return updated
+
+
 def update_root_anchor(
     repo: GitRepo,
     *,
@@ -953,6 +1055,35 @@ def amend_root_anchor(
         if current["sha256"] != expected_sha256:
             raise SoloAIError("Root anchor changed since it was read; fetch it again")
         content = str(current["content"])
+        version = _plan_version(content)
+        if version is None:
+            if change_text is not None:
+                raise SoloAIError(
+                    "An unstructured root requires one complete confirmed plan for its first amendment"
+                )
+            updated = _bootstrap_structured_root_content(
+                content,
+                confirmed_plan=str(confirmed_plan),
+                source=source,
+                summary=summary,
+                target=target,
+                scope=scope,
+                acceptance=acceptance,
+            )
+            _shown_root_anchor(
+                path=path,
+                root_id=root_id,
+                raw=updated.encode("utf-8"),
+                content=updated,
+            )
+            _snapshot_legacy_root_anchor(
+                repo,
+                root_id=root_id,
+                source_path=path,
+                source_sha256=str(current["sha256"]),
+            )
+            atomic_write_text(path, updated)
+            return {**show_root_anchor(repo, root_id=root_id), "changed": True}
         version, current_plan, changes, _ = _require_structured_plan(content)
         next_version = version + 1
         effective_plan = (

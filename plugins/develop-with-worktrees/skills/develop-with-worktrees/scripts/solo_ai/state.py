@@ -395,6 +395,7 @@ class StateStore:
         base_head: str,
         base_ref: str,
         base_worktree: Path,
+        anchor_contract: dict[str, str],
         request_id: str | None = None,
         supersedes: str | None = None,
         root_anchor_id: str | None = None,
@@ -419,6 +420,8 @@ class StateStore:
                         or existing.get("root_anchor_id") != root_anchor_id
                         or existing.get("root_anchor_file") != root_anchor_file
                         or existing.get("host_origin") != host_origin
+                        or existing.get("anchor_contract", anchor_contract)
+                        != anchor_contract
                     ):
                         raise SoloAIError(
                             "The request id is already bound to a different task"
@@ -457,6 +460,7 @@ class StateStore:
                     "original_purpose": name,
                     "reference_baseline": f"`{base_ref}` at `{base_head}`",
                 },
+                "anchor_contract": copy.deepcopy(anchor_contract),
                 "root_anchor_id": root_anchor_id,
                 "root_anchor_file": root_anchor_file,
                 "host_origin": copy.deepcopy(host_origin),
@@ -503,6 +507,7 @@ class StateStore:
         head: str,
         base_worktree: Path,
         session_id: str,
+        anchor_contract: dict[str, str],
         root_anchor_id: str | None = None,
         root_anchor_file: str | None = None,
     ) -> dict[str, Any]:
@@ -546,6 +551,7 @@ class StateStore:
                     "original_purpose": name,
                     "reference_baseline": f"`{branch}` at `{head}`",
                 },
+                "anchor_contract": copy.deepcopy(anchor_contract),
                 "root_anchor_id": root_anchor_id,
                 "root_anchor_file": root_anchor_file,
                 "candidate_head": head,

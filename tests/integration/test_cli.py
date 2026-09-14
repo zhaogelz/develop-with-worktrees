@@ -181,7 +181,7 @@ def test_hook_definition_remains_the_stable_trust_contract() -> None:
 
     assert (
         hashlib.sha256(hook_definition.read_bytes()).hexdigest()
-        == "f05bfe3e90b2fbf93a7ae7003caaf840e38166a86df8bbbaf0b7d9b427d7e606"
+        == "7d587007506da7db3f1a82de1bb27befa7a59b38d141e1ce533e8bc9e89cec3d"
     )
 
 
@@ -1216,24 +1216,34 @@ def test_anchor_cli_roundtrip_through_uv_script(git_repo: Path) -> None:
         return json.loads(completed.stdout)["result"]
 
     call_json("init", "--accept", "--verify", '["git","diff","--check","main...HEAD"]')
-    started = call("start", "--name", "cli anchor")
+    started = call(
+        "start",
+        "--name",
+        "cli anchor",
+        "--target",
+        "initial CLI target",
+        "--scope",
+        "initial CLI scope",
+        "--acceptance",
+        "initial CLI acceptance",
+    )
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
     task_id, lease = values["Task"], values["Lease"]
     worktree = Path(values["Worktree"])
 
-    shown = call_json("anchor", "show", "--task", task_id)
+    shown = call_json("anchor", "show", "--task", task_id, "--content")
     input_path = worktree / "anchor-input.md"
     content = shown["content"]
     content = content.replace(
-        "- Implementation target: fill before editing",
+        "- Implementation target: initial CLI target",
         "- Implementation target: CLI anchor roundtrip",
     )
     content = content.replace(
-        "- Scope boundary: fill before editing", "- Scope boundary: CLI test only"
+        "- Scope boundary: initial CLI scope", "- Scope boundary: CLI test only"
     )
     content = content.replace(
-        "- Acceptance criteria: fill before Ready",
+        "- Acceptance criteria: initial CLI acceptance",
         "- Acceptance criteria: show and update succeed",
     )
     content = content.replace(
@@ -1253,7 +1263,7 @@ def test_anchor_cli_roundtrip_through_uv_script(git_repo: Path) -> None:
         shown["sha256"],
     )
     assert updated["changed"] is True
-    refreshed = call_json("anchor", "show", "--task", task_id)
+    refreshed = call_json("anchor", "show", "--task", task_id, "--content")
     assert refreshed["content"] == content
     rejected = call(
         "--json",

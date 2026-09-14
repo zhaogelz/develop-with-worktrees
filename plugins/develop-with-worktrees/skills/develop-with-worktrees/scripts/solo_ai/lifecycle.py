@@ -95,6 +95,7 @@ from .task_context import (
     bind_root_reference,
     create_anchor,
     delete_anchor,
+    initial_anchor_contract,
     read_anchor,
     read_anchor_update,
     require_anchor,
@@ -710,10 +711,54 @@ def _anchor_view(value: dict[str, Any], *, include_content: bool) -> dict[str, A
     """默认返回轻量身份摘要，正文只在调用者明确需要时保留。"""
 
     result = dict(value)
-    if not include_content:
+    if include_content:
+        # 完整锚点正文已含确认方案，不能再用独立字段重复传输同一大段内容。
+        result.pop("confirmed_plan", None)
+    else:
         result.pop("content", None)
         result.pop("confirmed_plan", None)
     return result
+
+
+def _read_root_context(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any]:
+    """返回一次完整根正文，并把这次读取记为连续工作的内部事实。"""
+
+    root_id = task.get("root_anchor_id")
+    if not root_id:
+        return {}
+    root = resolve_root_anchor(
+        repo,
+        root_id=str(root_id),
+        external_path=(
+            Path(str(task["root_anchor_file"]))
+            if task.get("root_anchor_file")
+            else None
+        ),
+    )
+    version = root.get("plan_version")
+    sha256 = str(root["sha256"])
+    if version is not None and (
+        task.get("reviewed_root_plan_version") != version
+        or task.get("reviewed_root_plan_sha256") != sha256
+    ):
+        store.update_task(
+            str(task["id"]),
+            reviewed_root_plan_version=version,
+            reviewed_root_plan_sha256=sha256,
+        )
+    return {
+        "root_anchor": _anchor_view(root, include_content=True),
+        "root_plan_review": {
+            "current_version": version,
+            "reviewed_version": version,
+            "requires_review": False,
+            "record_kind": "read",
+        },
+        "reviewed_root_plan_version": version,
+        "reviewed_root_plan_sha256": sha256 if version is not None else None,
+    }
 
 
 def show_task_anchor(
@@ -804,6 +849,7 @@ def bind_task_root_anchor(
             "root_anchor_path": str(root["root_anchor_path"]),
             "anchor_path": anchor["anchor_path"],
             "status": status,
+            **_read_root_context(repo, store=store, task=task),
         }
 
 
@@ -849,6 +895,27 @@ def acknowledge_root_plan(
         }
 
 
+def refresh_root_context(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
+    """供宿主续作时一次读取并登记根方案，免除搬运版本和摘要参数。"""
+
+    _require_managed_mode(repo)
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "root-context-refresh") as task:
+        _require_anchor_caller(repo, task)
+        if task.get("status") not in {"active", "ready"}:
+            raise SoloAIError(
+                "Only an active or ready task can refresh its root context"
+            )
+        context = _read_root_context(repo, store=store, task=task)
+        if not context:
+            raise SoloAIError("Task is not bound to a root anchor")
+        return {
+            "task_id": task_id,
+            "root_id": task["root_anchor_id"],
+            **context,
+        }
+
+
 def _require_current_structured_root_review(
     repo: GitRepo, task: dict[str, Any]
 ) -> None:
@@ -873,10 +940,8 @@ def _require_current_structured_root_review(
         return
     raise SoloAIError(
         "The bound structured root plan has not been reviewed at its current version. "
-        "Automatically recover by reading `anchor show --task <task> --with-root "
-        "--content --root-content`, then record that exact version with "
-        "`anchor acknowledge-root`; this preserves the task and does not require "
-        "a new user confirmation."
+        "Automatically recover through the host one-step root-context refresh; it reads "
+        "and records the current version without a new user confirmation."
     )
 
 
@@ -1025,6 +1090,7 @@ def _complete_runtime_activation(
         "anchor_path": str(anchor.resolve()),
         "runtime_activation": runtime_activation,
         "request_reused": request_reused,
+        **_read_root_context(repo, store=store, task=activated),
     }
 
 
@@ -1143,11 +1209,20 @@ def start(
     supersedes: str | None = None,
     root_anchor_id: str | None = None,
     root_anchor_file: Path | None = None,
+    target: str | None = None,
+    scope: str | None = None,
+    acceptance: str | None = None,
     host_origin: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     with maintenance_lock(repo):
         config, _, _ = _config_and_mode(repo)
         host_origin = normalize_host_reference(host_origin)
+        anchor_contract = initial_anchor_contract(
+            name=name,
+            target=target,
+            scope=scope,
+            acceptance=acceptance,
+        )
         store = StateStore(repo)
         store.ensure_slots(config)
         if root_anchor_file is not None and root_anchor_id is None:
@@ -1255,11 +1330,16 @@ def start(
                         head=repo.head(repo.root),
                         base_worktree=repo.root,
                         session_id=session_id,
+                        anchor_contract=anchor_contract,
                         root_anchor_id=root_anchor_id,
                         root_anchor_file=external_root_file,
                     )
                 anchor = create_anchor(repo, task)
-                return {**task, "anchor_path": str(anchor.resolve())}
+                return {
+                    **task,
+                    "anchor_path": str(anchor.resolve()),
+                    **_read_root_context(repo, store=store, task=task),
+                }
         if supersedes and config.integration.mode != "batched":
             raise SoloAIError("--supersedes requires integration.mode = batched")
         with candidate_admission_lock(repo):
@@ -1272,6 +1352,7 @@ def start(
                 base_head=base_head,
                 base_ref=base_ref,
                 base_worktree=base_worktree,
+                anchor_contract=anchor_contract,
                 request_id=request_id,
                 supersedes=supersedes,
                 root_anchor_id=root_anchor_id,
@@ -1310,7 +1391,11 @@ def start(
                 create_anchor(repo, task)
                 return _complete_runtime_activation(repo, store=store, task=task)
             anchor = require_anchor(repo, task)
-            return {**task, "anchor_path": str(anchor.resolve())}
+            return {
+                **task,
+                "anchor_path": str(anchor.resolve()),
+                **_read_root_context(repo, store=store, task=task),
+            }
         worktree = ensure_within(
             Path(task["worktree"]), repo.primary_path / config.worktree_directory
         )
@@ -1990,7 +2075,7 @@ def create_root_task_anchor(
             if request_id is not None
             else f"root-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         )
-        return create_root_anchor(
+        result = create_root_anchor(
             repo,
             root_id=root_id,
             purpose=purpose,
@@ -2003,6 +2088,7 @@ def create_root_task_anchor(
             plan_source=plan_source,
             request_id=request_id,
         )
+        return _anchor_view(result, include_content=True)
 
 
 def show_root_task_anchor(
@@ -2053,7 +2139,7 @@ def amend_root_task_anchor(
 ) -> dict[str, Any]:
     _config_and_mode(repo)
     with maintenance_lock(repo):
-        return amend_root_anchor(
+        result = amend_root_anchor(
             repo,
             root_id=root_id,
             confirmed_plan=(
@@ -2073,6 +2159,7 @@ def amend_root_task_anchor(
             scope=scope,
             acceptance=acceptance,
         )
+        return _anchor_view(result, include_content=True)
 
 
 def update_root_task_progress(

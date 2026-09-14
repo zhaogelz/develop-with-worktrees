@@ -46,6 +46,7 @@ from .lifecycle import (
     close_root_task_anchor,
     create_root_task_anchor,
     record_root_task_acceptance,
+    refresh_root_context,
     show_task_anchor,
     update_task_anchor,
     choose,
@@ -382,6 +383,18 @@ def _parser() -> argparse.ArgumentParser:
     start_parser = sub.add_parser("start", help="claim a slot and create a task branch")
     start_parser.add_argument("--name", required=True)
     start_parser.add_argument(
+        "--target",
+        help="implementation target written into the first task anchor",
+    )
+    start_parser.add_argument(
+        "--scope",
+        help="scope boundary written into the first task anchor",
+    )
+    start_parser.add_argument(
+        "--acceptance",
+        help="acceptance criteria written into the first task anchor",
+    )
+    start_parser.add_argument(
         "--base",
         help="local branch to use as the task base; defaults to the invocation worktree's current branch",
     )
@@ -709,6 +722,12 @@ def _parser() -> argparse.ArgumentParser:
     anchor_acknowledge.add_argument("--lease", required=True)
     anchor_acknowledge.add_argument("--root-version", type=int, required=True)
     anchor_acknowledge.add_argument("--root-sha256", required=True)
+    anchor_refresh = anchor_sub.add_parser(
+        "refresh-root",
+        help="read and record the current root context in one host operation",
+    )
+    anchor_refresh.add_argument("--task", required=True)
+    anchor_refresh.add_argument("--lease", required=True)
     anchor_bind_root = anchor_sub.add_parser(
         "bind-root",
         help="bind an existing active or ready task to one exact root anchor",
@@ -1688,6 +1707,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             supersedes=args.supersedes,
             root_anchor_id=args.root_anchor,
             root_anchor_file=args.root_anchor_file,
+            target=args.target,
+            scope=args.scope,
+            acceptance=args.acceptance,
             host_origin=host_reference(args.host_kind, args.host_thread),
         )
     if args.command == "root-anchor":
@@ -1865,6 +1887,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 lease=args.lease,
                 root_version=args.root_version,
                 root_sha256=args.root_sha256,
+            )
+        if args.anchor_command == "refresh-root":
+            return refresh_root_context(
+                repo,
+                task_id=args.task,
+                lease=args.lease,
             )
         if args.anchor_command == "bind-root":
             return bind_task_root_anchor(

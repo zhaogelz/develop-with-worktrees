@@ -253,6 +253,29 @@ def test_new_default_keeps_a_short_tail_until_an_explicit_round_end(
     assert completed["batch"]["candidate_ids"] == [candidate["candidate_id"]]
 
 
+def test_default_explicit_tail_freezes_only_the_current_pending_candidates(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from solo_ai import validation_queue
+
+    monkeypatch.setattr(
+        validation_queue, "_machine_root", lambda: git_repo.parent / "machine"
+    )
+    repo = initialized_batched(git_repo, batch_size=None, tail_policy=None)
+    first = publish(repo, name="tail first", relative="tail-first.txt")
+    second = publish(repo, name="tail second", relative="tail-second.txt")
+
+    assert reconcile_batches(repo, cause="heartbeat")["status"] == "waiting"
+    completed = reconcile_batches(repo, force=True, cause="user")
+
+    assert completed["status"] == "completed"
+    assert completed["batch"]["trigger"] == "explicit_tail"
+    assert completed["batch"]["candidate_ids"] == [
+        first["candidate_id"],
+        second["candidate_id"],
+    ]
+
+
 def test_candidate_handoff_records_source_and_auto_batch_coordinator(
     git_repo: Path,
 ) -> None:

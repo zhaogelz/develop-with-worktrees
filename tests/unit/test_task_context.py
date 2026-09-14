@@ -9,6 +9,8 @@ from solo_ai.repo import GitRepo
 from solo_ai.root_context import create_root_anchor
 from solo_ai.task_context import (
     anchor_path,
+    create_anchor,
+    initial_anchor_contract,
     read_anchor,
     read_anchor_update,
     require_anchor,
@@ -62,6 +64,35 @@ def test_read_and_update_anchor_returns_byte_sha_and_preserves_extra_text(
     assert reread["content"] == changed
     assert "Details stay here." in reread["content"]
     assert reread["sha256"] == hashlib.sha256(changed.encode("utf-8")).hexdigest()
+
+
+def test_create_anchor_writes_start_contract_without_template_fields(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    task_id = "task-20260911034700-start-contract"
+    task: dict[str, object] = {
+        "id": task_id,
+        "name": "write the first anchor contract",
+        "base_ref": "main",
+        "base_head": repo.head(repo.root),
+        "anchor_contract": initial_anchor_contract(
+            name="write the first anchor contract",
+            target="Start task metadata",
+            scope="task-anchor creation only",
+            acceptance="the first anchor needs no follow-up template replacement",
+        ),
+    }
+
+    path = create_anchor(repo, task)
+    content = path.read_text(encoding="utf-8")
+    assert "fill before" not in content
+    assert "- Implementation target: Start task metadata" in content
+    assert "- Scope boundary: task-anchor creation only" in content
+    assert (
+        "- Acceptance criteria: the first anchor needs no follow-up template replacement"
+        in content
+    )
 
 
 def test_task_anchor_and_update_input_accept_more_than_four_mebibytes(
@@ -168,6 +199,25 @@ def test_anchor_cli_parser_exposes_show_and_update() -> None:
     assert show.anchor_command == "show"
     assert update.anchor_command == "update"
     assert update.expected_sha256 == "a" * 64
+
+    start = parser.parse_args(
+        [
+            "--repo",
+            ".",
+            "start",
+            "--name",
+            "first contract",
+            "--target",
+            "task-anchor rendering",
+            "--scope",
+            "anchor fields only",
+            "--acceptance",
+            "no template values remain",
+        ]
+    )
+    assert start.target == "task-anchor rendering"
+    assert start.scope == "anchor fields only"
+    assert start.acceptance == "no template values remain"
 
 
 def test_anchor_fields_inside_code_fence_do_not_satisfy_identity(

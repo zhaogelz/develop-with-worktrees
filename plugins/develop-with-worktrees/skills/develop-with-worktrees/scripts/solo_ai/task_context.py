@@ -27,6 +27,64 @@ _LEGACY_REPAIR_REFERENCE_BASELINE = re.compile(
     r"`(?P<repair_base_ref>[^`\r\n]+)` at "
     r"`(?P<repair_base_head>[0-9a-fA-F]{40,64})`"
 )
+_DEFAULT_SCOPE_BOUNDARY = "仅实施原始目的所需的最小改动"
+_DEFAULT_ACCEPTANCE_CRITERIA = "完成原始目的并通过受影响验证"
+
+
+def initial_anchor_contract(
+    *,
+    name: str,
+    target: str | None = None,
+    scope: str | None = None,
+    acceptance: str | None = None,
+) -> dict[str, str]:
+    """规范化 Start 首次写入任务锚点所需的简明合同字段。"""
+
+    values = {
+        "implementation_target": (target if target is not None else name).strip(),
+        "scope_boundary": (
+            scope if scope is not None else _DEFAULT_SCOPE_BOUNDARY
+        ).strip(),
+        "acceptance_criteria": (
+            acceptance if acceptance is not None else _DEFAULT_ACCEPTANCE_CRITERIA
+        ).strip(),
+    }
+    for key, value in values.items():
+        if not value:
+            raise SoloAIError(f"Task anchor contract field cannot be empty: {key}")
+        if "\r" in value or "\n" in value:
+            raise SoloAIError(
+                f"Task anchor contract field must be a single line: {key}"
+            )
+        if value.lower().startswith("fill before"):
+            raise SoloAIError(
+                f"Task anchor contract field is still a template placeholder: {key}"
+            )
+    return values
+
+
+def task_anchor_contract(task: dict[str, Any]) -> dict[str, str]:
+    """读取新任务已保存的首写合同，并兼容尚未保存该字段的旧任务。"""
+
+    stored = task.get("anchor_contract")
+    if stored is None:
+        return initial_anchor_contract(name=str(task.get("name") or ""))
+    if not isinstance(stored, dict):
+        raise SoloAIError("Task anchor contract record is invalid")
+    return initial_anchor_contract(
+        name=str(task.get("name") or ""),
+        target=(
+            str(stored["implementation_target"])
+            if "implementation_target" in stored
+            else None
+        ),
+        scope=(str(stored["scope_boundary"]) if "scope_boundary" in stored else None),
+        acceptance=(
+            str(stored["acceptance_criteria"])
+            if "acceptance_criteria" in stored
+            else None
+        ),
+    )
 
 
 def anchor_origin(task: dict[str, Any]) -> dict[str, str]:
@@ -439,6 +497,7 @@ def create_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:
         require_anchor(repo, task)
         return path
     origin = anchor_origin(task)
+    contract = task_anchor_contract(task)
     root_reference = task.get("root_anchor_id")
     if root_reference is not None:
         if not isinstance(root_reference, str) or not root_reference:
@@ -458,10 +517,10 @@ def create_anchor(repo: GitRepo, task: dict[str, Any]) -> Path:
 
 - Task ID: `{task["id"]}`
 - Original purpose: {origin["original_purpose"]}
-{root_line}- Implementation target: fill before editing
+{root_line}- Implementation target: {contract["implementation_target"]}
 - Reference baseline: {origin["reference_baseline"]}
-- Scope boundary: fill before editing
-- Acceptance criteria: fill before Ready
+- Scope boundary: {contract["scope_boundary"]}
+- Acceptance criteria: {contract["acceptance_criteria"]}
 - Current progress: task started at {utc_timestamp()}
 
 This local file is not committed. Keep it current, and reread it after context loss or continuation.
