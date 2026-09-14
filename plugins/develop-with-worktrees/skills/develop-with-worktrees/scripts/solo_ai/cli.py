@@ -41,6 +41,7 @@ from .lifecycle import (
     abandon,
     adopt_task_anchor,
     approve,
+    bind_task_root_anchor,
     close_root_task_anchor,
     create_root_task_anchor,
     record_root_task_acceptance,
@@ -428,9 +429,15 @@ def _parser() -> argparse.ArgumentParser:
         "--request-id", help="stable caller id; repeated creation returns the same root"
     )
     root_show = root_anchor_sub.add_parser(
-        "show", help="read one root anchor and its byte SHA-256"
+        "show", help="show one root anchor summary; use --content for its full body"
     )
     root_show.add_argument("--root", required=True)
+    root_show.add_argument(
+        "--version", type=int, help="read one exact historical plan version"
+    )
+    root_show.add_argument(
+        "--content", action="store_true", help="include the complete UTF-8 anchor body"
+    )
     root_update = root_anchor_sub.add_parser(
         "update", help="atomically update one root anchor from a UTF-8 file"
     )
@@ -637,13 +644,21 @@ def _parser() -> argparse.ArgumentParser:
     anchor = sub.add_parser("anchor", help="read or update the active task anchor")
     anchor_sub = anchor.add_subparsers(dest="anchor_command", required=True)
     anchor_show = anchor_sub.add_parser(
-        "show", help="read one task anchor and its byte SHA-256"
+        "show", help="show one task anchor summary; use --content for its full body"
     )
     anchor_show.add_argument("--task", required=True)
     anchor_show.add_argument(
         "--with-root",
         action="store_true",
         help="include the bound root plan and review state",
+    )
+    anchor_show.add_argument(
+        "--content", action="store_true", help="include the complete task-anchor body"
+    )
+    anchor_show.add_argument(
+        "--root-content",
+        action="store_true",
+        help="with --with-root, include the complete root-anchor body",
     )
     anchor_update = anchor_sub.add_parser(
         "update", help="atomically update one task anchor from a UTF-8 file"
@@ -669,6 +684,18 @@ def _parser() -> argparse.ArgumentParser:
     anchor_acknowledge.add_argument("--lease", required=True)
     anchor_acknowledge.add_argument("--root-version", type=int, required=True)
     anchor_acknowledge.add_argument("--root-sha256", required=True)
+    anchor_bind_root = anchor_sub.add_parser(
+        "bind-root",
+        help="bind an existing active or ready task to one exact root anchor",
+    )
+    anchor_bind_root.add_argument("--task", required=True)
+    anchor_bind_root.add_argument("--lease", required=True)
+    anchor_bind_root.add_argument("--root", required=True)
+    anchor_bind_root.add_argument(
+        "--root-anchor-file",
+        type=Path,
+        help="explicit absolute external root-anchor file for a cross-repository root",
+    )
 
     commit = sub.add_parser(
         "commit", help="stage only an exact reviewed task path list and commit it"
@@ -1636,7 +1663,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 request_id=args.request_id,
             )
         if args.root_anchor_command == "show":
-            return show_root_task_anchor(repo, root_id=args.root)
+            return show_root_task_anchor(
+                repo,
+                root_id=args.root,
+                version=args.version,
+                include_content=args.content,
+            )
         if args.root_anchor_command == "update":
             return update_root_task_anchor(
                 repo,
@@ -1767,7 +1799,15 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         raise SoloAIError(f"Unknown runtime command: {args.runtime_command}")
     if args.command == "anchor":
         if args.anchor_command == "show":
-            return show_task_anchor(repo, task_id=args.task, with_root=args.with_root)
+            if args.root_content and not args.with_root:
+                raise SoloAIError("--root-content requires --with-root")
+            return show_task_anchor(
+                repo,
+                task_id=args.task,
+                with_root=args.with_root,
+                include_content=args.content,
+                include_root_content=args.root_content,
+            )
         if args.anchor_command == "update":
             return update_task_anchor(
                 repo,
@@ -1783,6 +1823,14 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 lease=args.lease,
                 root_version=args.root_version,
                 root_sha256=args.root_sha256,
+            )
+        if args.anchor_command == "bind-root":
+            return bind_task_root_anchor(
+                repo,
+                task_id=args.task,
+                lease=args.lease,
+                root_id=args.root,
+                root_anchor_file=args.root_anchor_file,
             )
         if args.anchor_command == "adopt":
             return adopt_task_anchor(

@@ -378,6 +378,46 @@ def atomic_write_text(path: Path, value: str) -> None:
         raise
 
 
+def atomic_copy_file(source: Path, destination: Path) -> None:
+    """分块复制一个文件，再以原子替换发布完整副本。"""
+
+    source_path = filesystem_path(source)
+    destination_path = filesystem_path(destination)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination_path.parent / f".w-{uuid.uuid4().hex[:16]}"
+    try:
+        with source_path.open("rb") as source_handle, temporary.open("wb") as target:
+            shutil.copyfileobj(source_handle, target, length=1024 * 1024)
+            target.flush()
+            os.fsync(target.fileno())
+        deadline = time.monotonic() + 1.0
+        delay = 0.01
+        while True:
+            try:
+                os.replace(temporary, destination_path)
+                return
+            except OSError as error:
+                if sys.platform != "win32" or getattr(error, "winerror", None) not in {
+                    5,
+                    32,
+                    33,
+                }:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 0.1)
+    except BaseException as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            error.add_note(
+                "Temporary atomic-copy cleanup failed: " + str(cleanup_error)
+            )
+        raise
+
+
 def atomic_write_json(path: Path, value: Any) -> None:
     atomic_write_text(
         path, json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

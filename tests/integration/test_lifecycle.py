@@ -29,6 +29,7 @@ from solo_ai.lifecycle import (
     abandon,
     adopt_task_anchor,
     approve,
+    bind_task_root_anchor,
     close_root_task_anchor,
     create_root_task_anchor,
     choose,
@@ -134,6 +135,76 @@ def test_root_anchor_binds_child_task_and_closes_only_after_terminal_child(
     abandon(repo, task_id=plain["id"], lease=plain["lease"], confirm=plain["id"])
 
 
+def test_active_and_ready_task_can_bind_one_existing_root_idempotently(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    root = create_root_task_anchor(
+        repo,
+        purpose="restore a missed objective binding",
+        target="bind an already started task",
+        scope="one active or ready task only",
+        acceptance="same binding retries and a different root is rejected",
+    )
+    conflicting_root = create_root_task_anchor(
+        repo,
+        purpose="separate objective",
+        target="prove root conflicts are explicit",
+        scope="separate durable objective",
+        acceptance="a child cannot silently move here",
+    )
+    task = start(repo, name="started before root binding")
+    StateStore(repo).update_task(
+        task["id"], status="ready", ready_proof="ready-proof-for-binding"
+    )
+
+    bound = bind_task_root_anchor(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_id=root["root_id"],
+    )
+    assert bound["status"] == "ready"
+    assert StateStore(repo).task(task["id"])["ready_proof"] == "ready-proof-for-binding"
+    summary = show_task_anchor(
+        repo,
+        task_id=task["id"],
+        with_root=True,
+        include_content=False,
+        include_root_content=False,
+    )
+    assert "content" not in summary
+    assert "content" not in summary["root_anchor"]
+    assert summary["size_bytes"] > 0
+    assert summary["root_anchor"]["size_bytes"] > 0
+    assert "Root anchor" in show_task_anchor(repo, task_id=task["id"])["content"]
+
+    retried = bind_task_root_anchor(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_id=root["root_id"],
+    )
+    assert retried["root_id"] == root["root_id"]
+    with pytest.raises(SoloAIError, match="different root anchor"):
+        bind_task_root_anchor(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            root_id=conflicting_root["root_id"],
+        )
+
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
+    assert close_root_task_anchor(
+        repo,
+        root_id=conflicting_root["root_id"],
+        confirm=conflicting_root["root_id"],
+    ) == {"root_id": conflicting_root["root_id"], "status": "closed"}
+
+
 def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
     git_repo: Path,
 ) -> None:
@@ -195,6 +266,8 @@ def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
         summary="add a recoverable amendment",
         expected_sha256=reviewed["root_anchor"]["sha256"],
     )
+    history_directory = Path(amended["history_directory"])
+    assert (history_directory / f"{root['root_id']}.v1.md").exists()
     after_amendment = show_task_anchor(repo, task_id=task["id"], with_root=True)
     assert after_amendment["root_plan_review"]["requires_review"] is True
     acknowledge_root_plan(
@@ -222,6 +295,7 @@ def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
     assert close_root_task_anchor(
         repo, root_id=root["root_id"], confirm=root["root_id"]
     ) == {"root_id": root["root_id"], "status": "closed"}
+    assert not history_directory.exists()
 
 
 def test_root_child_refuses_a_missing_root_anchor(git_repo: Path) -> None:
@@ -294,6 +368,67 @@ def test_external_root_anchor_binds_one_cross_repository_child_and_closes_safely
     StateStore(child).update_task(task["id"], root_anchor_file=root["root_anchor_path"])
 
     abandon(child, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert close_root_task_anchor(
+        owner, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
+
+
+def test_external_bind_and_root_close_accept_large_child_and_candidate_state(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    owner = initialized(git_repo)
+    root = create_root_task_anchor(
+        owner,
+        purpose="recover a cross-repository child",
+        target="bind after Start without size quotas",
+        scope="one external child and its close-time state",
+        acceptance="large exact state remains readable while closing the root",
+    )
+    child_path = tmp_path / "large-state-child"
+    child_path.mkdir()
+    git(child_path, "init", "-b", "main")
+    git(child_path, "config", "user.name", "Test User")
+    git(child_path, "config", "user.email", "test@example.invalid")
+    (child_path / "README.md").write_text("# Child\n", encoding="utf-8")
+    git(child_path, "add", "README.md")
+    git(child_path, "commit", "-m", "initial")
+    child = initialized(child_path)
+    task = start(child, name="unbound external child")
+
+    bind_task_root_anchor(
+        child,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_id=root["root_id"],
+        root_anchor_file=Path(root["root_anchor_path"]),
+    )
+    abandon(child, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+    state_path = child.local_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["padding"] = "x" * (4 * 1024 * 1024 + 17)
+    state["tasks"][task["id"]]["status"] = "candidate-published"
+    state_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    candidate_path = child.local_dir / "candidate-batches.json"
+    candidate_path.write_text(
+        json.dumps(
+            {
+                "padding": "x" * (4 * 1024 * 1024 + 17),
+                "candidates": {
+                    "candidate-large": {
+                        "candidate_id": "candidate-large",
+                        "task_id": task["id"],
+                        "status": "integrated",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
     assert close_root_task_anchor(
         owner, root_id=root["root_id"], confirm=root["root_id"]
     ) == {"root_id": root["root_id"], "status": "closed"}

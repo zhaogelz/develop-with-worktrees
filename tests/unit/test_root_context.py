@@ -8,10 +8,13 @@ from solo_ai.repo import GitRepo
 from solo_ai.root_context import (
     amend_root_anchor,
     create_root_anchor,
+    delete_root_anchor,
     record_root_acceptance,
     require_candidate_delivery_terminal,
+    root_anchor_history_path,
     root_anchor_path,
     show_root_anchor,
+    show_root_anchor_history,
     update_root_progress,
     update_root_anchor,
 )
@@ -208,6 +211,119 @@ def test_structured_root_keeps_complete_plan_and_versions_user_amendments(
     assert accepted["overall_acceptance_status"] == "accepted"
 
 
+def test_large_structured_root_keeps_full_history_for_amend_and_generic_update(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    large_body = "内容" + "x" * (4 * 1024 * 1024 + 17)
+    original_plan = f"# 完整方案 V1\n\n{large_body}\n"
+    created = create_root_anchor(
+        repo,
+        root_id="root-20260912000000-unlimited",
+        purpose="keep an unrestricted complete plan",
+        target="exercise large anchor reads and updates",
+        base_ref="main",
+        base_head=repo.head(repo.root),
+        scope="root size and full-history behavior",
+        acceptance="every full prior plan remains readable",
+        confirmed_plan=original_plan,
+        plan_source="user confirmed a large plan",
+        request_id="unlimited-root-test",
+    )
+    assert created["size_bytes"] > 4 * 1024 * 1024
+    assert created["confirmed_plan"] == original_plan.strip()
+
+    progressed = update_root_progress(
+        repo,
+        root_id=str(created["root_id"]),
+        progress="large plan is being implemented",
+        expected_sha256=str(created["sha256"]),
+    )
+    assert not root_anchor_history_path(
+        repo, root_id=str(created["root_id"]), version=1
+    ).exists()
+
+    amended_plan = "# 完整方案 V2\n\n新的完整依据。\n"
+    amended = amend_root_anchor(
+        repo,
+        root_id=str(created["root_id"]),
+        confirmed_plan=amended_plan,
+        source="user changed the confirmed plan",
+        summary="replace the effective plan",
+        expected_sha256=str(progressed["sha256"]),
+    )
+    history_v1 = show_root_anchor_history(
+        repo, root_id=str(created["root_id"]), version=1
+    )
+    assert history_v1["content"] == progressed["content"]
+    assert history_v1["size_bytes"] > 4 * 1024 * 1024
+
+    generic = str(amended["content"])
+    generic = generic.replace("- Plan version: 2", "- Plan version: 3", 1)
+    generic = generic.replace("# 完整方案 V2", "# 完整方案 V3", 1)
+    generic = generic.replace(
+        "<!-- dww-user-changes:end -->",
+        "- Version 3: update the effective plan through generic update. Source: user confirmed it\n"
+        "<!-- dww-user-changes:end -->",
+        1,
+    )
+    update = git_repo / "large-generic-update.md"
+    update.write_text(generic, encoding="utf-8", newline="\n")
+    updated = update_root_anchor(
+        repo,
+        root_id=str(created["root_id"]),
+        input_path=update,
+        expected_sha256=str(amended["sha256"]),
+    )
+    assert (
+        show_root_anchor_history(repo, root_id=str(created["root_id"]), version=2)[
+            "content"
+        ]
+        == amended["content"]
+    )
+
+    after_progress = update_root_progress(
+        repo,
+        root_id=str(created["root_id"]),
+        progress="generic update checked",
+        expected_sha256=str(updated["sha256"]),
+    )
+    assert after_progress["plan_version"] == 3
+    assert not root_anchor_history_path(
+        repo, root_id=str(created["root_id"]), version=3
+    ).exists()
+
+
+def test_deleting_a_root_removes_its_complete_history(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    created = create_root_anchor(
+        repo,
+        root_id="root-20260912000000-delete-history",
+        purpose="remove terminal root history",
+        target="exercise terminal cleanup",
+        base_ref="main",
+        base_head=repo.head(repo.root),
+        scope="root and its own history only",
+        acceptance="both local records are removed together",
+        confirmed_plan="# V1\n",
+        plan_source="user confirmed it",
+        request_id="delete-history-test",
+    )
+    amended = amend_root_anchor(
+        repo,
+        root_id=str(created["root_id"]),
+        confirmed_plan="# V2\n",
+        source="user changed it",
+        summary="advance the plan",
+        expected_sha256=str(created["sha256"]),
+    )
+    history = root_anchor_history_path(repo, root_id=str(created["root_id"]), version=1)
+    assert history.exists()
+    delete_root_anchor(repo, root_id=str(amended["root_id"]))
+    assert not root_anchor_path(repo, str(created["root_id"])).exists()
+    assert not history.parent.exists()
+
+
 @pytest.mark.parametrize("status", ["held", "pending", "sealed", "retained"])
 def test_root_candidate_delivery_rejects_nonterminal_candidate_states(
     status: str,
@@ -285,9 +401,39 @@ def test_cli_exposes_root_anchor_and_child_binding() -> None:
             "C:\\example\\.git\\solo-ai\\root-anchors\\root-1.md",
         ]
     )
+    root_show = parser.parse_args(
+        [
+            "--repo",
+            ".",
+            "root-anchor",
+            "show",
+            "--root",
+            "root-1",
+            "--version",
+            "2",
+            "--content",
+        ]
+    )
+    bind = parser.parse_args(
+        [
+            "--repo",
+            ".",
+            "anchor",
+            "bind-root",
+            "--task",
+            "task-1",
+            "--lease",
+            "lease",
+            "--root",
+            "root-1",
+        ]
+    )
 
     assert create.root_anchor_command == "create"
     assert create.plan_source == "user confirmed it"
     assert create.request_id == "host-request-1"
     assert child.root_anchor == "root-1"
     assert str(child.root_anchor_file).endswith("root-1.md")
+    assert root_show.version == 2
+    assert root_show.content is True
+    assert bind.anchor_command == "bind-root"

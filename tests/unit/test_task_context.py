@@ -64,6 +64,26 @@ def test_read_and_update_anchor_returns_byte_sha_and_preserves_extra_text(
     assert reread["sha256"] == hashlib.sha256(changed.encode("utf-8")).hexdigest()
 
 
+def test_task_anchor_and_update_input_accept_more_than_four_mebibytes(
+    git_repo: Path,
+) -> None:
+    repo, task = _task(git_repo)
+    shown = read_anchor(repo, task)
+    large_detail = "\n\n## 完整执行依据\n\n" + "x" * (4 * 1024 * 1024 + 17)
+    changed = str(shown["content"]) + large_detail
+    result = update_anchor(
+        repo, task, content=changed, expected_sha256=str(shown["sha256"])
+    )
+    reread = read_anchor(repo, task)
+    assert result["changed"] is True
+    assert reread["content"] == changed
+    assert reread["size_bytes"] > 4 * 1024 * 1024
+
+    update_input = git_repo / "large-anchor-input.md"
+    update_input.write_text(changed, encoding="utf-8", newline="\n")
+    assert read_anchor_update(repo, update_input) == changed
+
+
 def test_update_anchor_accepts_identical_retry_before_stale_digest_check(
     git_repo: Path,
 ) -> None:

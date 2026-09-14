@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -10,12 +11,13 @@ from .repo import GitRepo
 from .util import (
     DirectoryLock,
     SoloAIError,
+    atomic_copy_file,
     atomic_write_text,
     is_link_or_junction,
+    sha256_file,
     utc_timestamp,
 )
 
-MAX_ROOT_ANCHOR_BYTES = 64 * 1024
 _ROOT_FIELDS = (
     "Root ID",
     "Original purpose",
@@ -38,8 +40,6 @@ _CHILDREN_START = "<!-- dww-root-children:start -->"
 _CHILDREN_END = "<!-- dww-root-children:end -->"
 _CHILD_RECORD = re.compile(r"^- Child state: (?P<value>[^\r\n]+)$")
 _TASK_ID_PATTERN = re.compile(r"task-[A-Za-z0-9][A-Za-z0-9-]*\Z")
-MAX_CHILD_STATE_BYTES = 2 * 1024 * 1024
-MAX_CHILD_CANDIDATE_BATCHES_BYTES = 2 * 1024 * 1024
 _PLAN_HEADING = "## Confirmed plan"
 _CHANGES_HEADING = "## User-confirmed changes"
 _ACCEPTANCE_HEADING = "## Overall acceptance"
@@ -61,6 +61,20 @@ def root_anchor_path(repo: GitRepo, root_id: str) -> Path:
     if not _ROOT_ID_PATTERN.fullmatch(root_id):
         raise SoloAIError("Root anchor id is not safe")
     return repo.local_dir / "root-anchors" / f"{root_id}.md"
+
+
+def root_anchor_history_directory(repo: GitRepo, root_id: str) -> Path:
+    """返回一个根锚点的完整旧版本目录，不枚举或读取其内容。"""
+
+    if not _ROOT_ID_PATTERN.fullmatch(root_id):
+        raise SoloAIError("Root anchor id is not safe")
+    return repo.local_dir / "root-anchor-history" / root_id
+
+
+def root_anchor_history_path(repo: GitRepo, *, root_id: str, version: int) -> Path:
+    if version < 1:
+        raise SoloAIError("Root anchor history version must be positive")
+    return root_anchor_history_directory(repo, root_id) / f"{root_id}.v{version}.md"
 
 
 def _external_root_anchor_path(path: Path, *, root_id: str) -> tuple[Path, Path]:
@@ -108,13 +122,41 @@ def _require_plain_file(path: Path, *, root: Path, label: str) -> Path:
     return raw_path
 
 
+def _require_plain_directory(
+    path: Path, *, root: Path, label: str, create: bool = False
+) -> Path:
+    """确认或逐级创建一个不经链接逃逸的本地目录。"""
+
+    raw_root = root.absolute()
+    raw_path = path.absolute()
+    if is_link_or_junction(raw_root) or not raw_root.is_dir():
+        raise SoloAIError(f"{label} root is not a plain local directory")
+    try:
+        relative = raw_path.relative_to(raw_root)
+    except ValueError as exc:
+        raise SoloAIError(f"{label} is outside the allowed local directory") from exc
+    current = raw_root
+    for part in relative.parts:
+        current = current / part
+        if current.exists():
+            if is_link_or_junction(current) or not current.is_dir():
+                raise SoloAIError(f"{label} must be a plain local directory")
+        elif create:
+            current.mkdir()
+        else:
+            raise SoloAIError(f"{label} is missing")
+    try:
+        raw_path.resolve().relative_to(raw_root.resolve())
+    except ValueError as exc:
+        raise SoloAIError(f"{label} escaped the allowed local directory") from exc
+    return raw_path
+
+
 def _read_plain_root_anchor(repo: GitRepo, path: Path) -> tuple[bytes, str]:
     if not path.exists():
         raise SoloAIError(f"Root anchor is missing: {path}")
     plain_path = _require_plain_file(path, root=repo.local_dir, label="Root anchor")
     raw = plain_path.read_bytes()
-    if len(raw) > MAX_ROOT_ANCHOR_BYTES:
-        raise SoloAIError("Root anchor exceeds the 64 KiB safety limit")
     try:
         return raw, raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -126,8 +168,6 @@ def _read_external_root_anchor(path: Path, *, root_id: str) -> tuple[bytes, str]
     raw = _require_plain_file(
         raw_path, root=common_dir, label="External root anchor"
     ).read_bytes()
-    if len(raw) > MAX_ROOT_ANCHOR_BYTES:
-        raise SoloAIError("Root anchor exceeds the 64 KiB safety limit")
     try:
         return raw, raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -141,8 +181,6 @@ def _read_plain_input(repo: GitRepo, path: Path) -> str:
         path, root=repo.root, label="Root anchor update input"
     )
     raw = plain_path.read_bytes()
-    if len(raw) > MAX_ROOT_ANCHOR_BYTES:
-        raise SoloAIError("Root anchor update input exceeds the 64 KiB safety limit")
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -411,9 +449,16 @@ def _shown_root_anchor(
         raise SoloAIError("Root anchor identity does not match its path")
     _, children = _linked_children(content)
     plan_version = _plan_version(content)
+    local_dir = (
+        path.parent.parent
+        if path.parent.name == "root-anchors"
+        else path.parent.parent.parent
+    )
     return {
         "root_id": root_id,
         "root_anchor_path": str(path.resolve()),
+        "history_directory": str(local_dir / "root-anchor-history" / root_id),
+        "size_bytes": len(raw),
         "content": content,
         "sha256": hashlib.sha256(raw).hexdigest(),
         "linked_child_tasks": children,
@@ -585,8 +630,6 @@ This local file is not committed. It is the coordinator's durable execution cont
 
 This local file is not committed. It is the objective's durable execution contract. Child tasks may read its current facts but do not alter candidate, batch, or scheduler ownership.
 """
-    if len(content.encode("utf-8")) > MAX_ROOT_ANCHOR_BYTES:
-        raise SoloAIError("Root anchor exceeds the 64 KiB safety limit")
     atomic_write_text(path, content)
     return show_root_anchor(repo, root_id=root_id)
 
@@ -595,6 +638,50 @@ def show_root_anchor(repo: GitRepo, *, root_id: str) -> dict[str, Any]:
     path = root_anchor_path(repo, root_id)
     raw, content = _read_plain_root_anchor(repo, path)
     return _shown_root_anchor(path=path, root_id=root_id, raw=raw, content=content)
+
+
+def show_root_anchor_history(
+    repo: GitRepo, *, root_id: str, version: int
+) -> dict[str, Any]:
+    """按确定版本读取一份历史根锚点；不会枚举全部历史。"""
+
+    path = root_anchor_history_path(repo, root_id=root_id, version=version)
+    if not path.exists():
+        raise SoloAIError(f"Root anchor history version is missing: {path}")
+    raw, content = _read_plain_root_anchor(repo, path)
+    shown = _shown_root_anchor(path=path, root_id=root_id, raw=raw, content=content)
+    shown["history_version"] = version
+    return shown
+
+
+def _snapshot_root_anchor_version(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    version: int,
+    source_path: Path,
+    source_sha256: str,
+) -> bool:
+    """在覆盖当前根前持久化精确旧版本；同一重试只能复用同一副本。"""
+
+    directory = _require_plain_directory(
+        root_anchor_history_directory(repo, root_id),
+        root=repo.local_dir,
+        label="Root anchor history directory",
+        create=True,
+    )
+    path = root_anchor_history_path(repo, root_id=root_id, version=version)
+    if path.exists():
+        _require_plain_file(path, root=directory, label="Root anchor history")
+        if sha256_file(path) != source_sha256:
+            raise SoloAIError(
+                "Root anchor history version conflicts with the current root content"
+            )
+        return False
+    atomic_copy_file(source_path, path)
+    if sha256_file(path) != source_sha256:
+        raise SoloAIError("Root anchor history copy did not match the current root")
+    return True
 
 
 def update_root_anchor(
@@ -607,8 +694,6 @@ def update_root_anchor(
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256 or ""):
         raise SoloAIError("Expected root anchor SHA-256 must be lowercase hexadecimal")
     content = _read_plain_input(repo, input_path)
-    if len(content.encode("utf-8")) > MAX_ROOT_ANCHOR_BYTES:
-        raise SoloAIError("Root anchor exceeds the 64 KiB safety limit")
     path = root_anchor_path(repo, root_id)
     with root_anchor_lock(path):
         return _write_root_update_locked(
@@ -625,8 +710,6 @@ def _write_root_update_locked(
     """在根锚点锁已持有时验证并原子写入一份完整文档。"""
 
     path = root_anchor_path(repo, root_id)
-    if len(content.encode("utf-8")) > MAX_ROOT_ANCHOR_BYTES:
-        raise SoloAIError("Root anchor exceeds the 64 KiB safety limit")
     current = show_root_anchor(repo, root_id=root_id)
     previous = _validated_fields(str(current["content"]))
     updated = _validated_fields(content)
@@ -645,6 +728,7 @@ def _write_root_update_locked(
         raise SoloAIError("Root anchor request identity cannot be changed")
     previous_version = _plan_version(str(current["content"]))
     updated_version = _plan_version(content)
+    contract_changed = False
     if previous_version is not None or updated_version is not None:
         if previous_version is None or updated_version is None:
             raise SoloAIError(
@@ -656,6 +740,7 @@ def _write_root_update_locked(
             str(current["content"])
         )
         updated_contract = _contract_without_progress_or_outcome(content)
+        contract_changed = previous_contract != updated_contract
         if previous_contract == updated_contract:
             if updated_version != previous_version:
                 raise SoloAIError(
@@ -676,6 +761,15 @@ def _write_root_update_locked(
         return {**current, "changed": False}
     if current["sha256"] != expected_sha256:
         raise SoloAIError("Root anchor changed since it was read; fetch it again")
+    if contract_changed:
+        assert previous_version is not None
+        _snapshot_root_anchor_version(
+            repo,
+            root_id=root_id,
+            version=previous_version,
+            source_path=path,
+            source_sha256=str(current["sha256"]),
+        )
     atomic_write_text(path, content)
     return {**show_root_anchor(repo, root_id=root_id), "changed": True}
 
@@ -833,7 +927,21 @@ def delete_root_anchor(repo: GitRepo, *, root_id: str, locked: bool = False) -> 
             delete_root_anchor(repo, root_id=root_id, locked=True)
         return
     _read_plain_root_anchor(repo, path)
+    history = root_anchor_history_directory(repo, root_id)
+    if history.exists():
+        _require_plain_directory(
+            history,
+            root=repo.local_dir,
+            label="Root anchor history directory",
+        )
+        for child in history.rglob("*"):
+            if is_link_or_junction(child):
+                raise SoloAIError(
+                    "Root anchor history must not contain links or junctions"
+                )
     path.unlink()
+    if history.exists():
+        shutil.rmtree(history)
 
 
 def register_external_root_child(
@@ -892,8 +1000,6 @@ def _registered_child_task(
         raw_path, root=common_dir, label="Registered child state"
     )
     raw = plain_path.read_bytes()
-    if len(raw) > MAX_CHILD_STATE_BYTES:
-        raise SoloAIError("Registered child state exceeds the 2 MiB safety limit")
     try:
         state = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -981,10 +1087,6 @@ def _require_registered_child_candidate_delivery(
         label="Registered child candidate state",
     )
     raw = plain_path.read_bytes()
-    if len(raw) > MAX_CHILD_CANDIDATE_BATCHES_BYTES:
-        raise SoloAIError(
-            "Registered child candidate state exceeds the 2 MiB safety limit"
-        )
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

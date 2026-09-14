@@ -9,7 +9,6 @@ from .repo import GitRepo
 from .root_context import resolve_root_anchor
 from .util import SoloAIError, atomic_write_text, is_link_or_junction, utc_timestamp
 
-MAX_ANCHOR_BYTES = 64 * 1024
 _ANCHOR_FIELDS = (
     "Task ID",
     "Original purpose",
@@ -110,8 +109,6 @@ def _read_plain_anchor(repo: GitRepo, path: Path) -> tuple[bytes, str]:
         raise SoloAIError(f"Task anchor is missing: {path}. Restore it before Ready.")
     plain_path = _require_plain_file(path, root=repo.local_dir, label="Task anchor")
     raw = plain_path.read_bytes()
-    if len(raw) > MAX_ANCHOR_BYTES:
-        raise SoloAIError("Task anchor exceeds the 64 KiB safety limit")
     try:
         return raw, raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -123,8 +120,6 @@ def _read_plain_input(repo: GitRepo, path: Path) -> str:
         raise SoloAIError(f"Anchor update input is missing: {path}")
     plain_path = _require_plain_file(path, root=repo.root, label="Anchor update input")
     raw = plain_path.read_bytes()
-    if len(raw) > MAX_ANCHOR_BYTES:
-        raise SoloAIError("Anchor update input exceeds the 64 KiB safety limit")
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -269,8 +264,6 @@ def _validate_update_content(
     previous_content: str,
     progress_only: bool,
 ) -> dict[str, str]:
-    if len(content.encode("utf-8")) > MAX_ANCHOR_BYTES:
-        raise SoloAIError("Task anchor exceeds the 64 KiB safety limit")
     fields, progress_span = _validated_anchor(content)
     if _identity_value(fields["Task ID"]) != task_id:
         raise SoloAIError("Task anchor identity does not match the active task")
@@ -329,6 +322,7 @@ def read_anchor(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
     return {
         "task_id": str(task["id"]),
         "anchor_path": str(path.resolve()),
+        "size_bytes": len(raw),
         "content": content,
         "sha256": hashlib.sha256(raw).hexdigest(),
         "origin_verified": origin_verified,
@@ -337,6 +331,50 @@ def read_anchor(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
 
 def read_anchor_update(repo: GitRepo, path: Path) -> str:
     return _read_plain_input(repo, path)
+
+
+def bind_root_reference(repo: GitRepo, task: dict[str, Any]) -> dict[str, Any]:
+    """把已写入任务状态的根身份补入任务锚点，可安全重试。"""
+
+    root_id = task.get("root_anchor_id")
+    if not isinstance(root_id, str) or not root_id:
+        raise SoloAIError("Task is not bound to a root anchor in task state")
+    external_root = task.get("root_anchor_file")
+    if external_root is not None and (
+        not isinstance(external_root, str) or not external_root
+    ):
+        raise SoloAIError("Task root anchor file reference is invalid")
+    resolve_root_anchor(
+        repo,
+        root_id=root_id,
+        external_path=Path(external_root) if external_root else None,
+    )
+    path = anchor_path(repo, str(task["id"]))
+    _raw, content = _read_plain_anchor(repo, path)
+    previous = _validated_fields(content)
+    if not _origin_is_verified(task, previous):
+        raise SoloAIError(
+            "Task anchor origin is unverified; adopt it before binding a root anchor"
+        )
+    recorded = _root_reference(content)
+    if recorded is not None:
+        if recorded != root_id:
+            raise SoloAIError("Task anchor already refers to a different root anchor")
+        _require_root_reference(repo, task, content)
+        return read_anchor(repo, task)
+    if _identity_value(previous["Task ID"]) != str(task["id"]):
+        raise SoloAIError("Task anchor identity does not match the active task")
+    task_line = re.compile(r"(?m)^- Task ID:[^\r\n]*(?:\r?\n|$)")
+    if len(task_line.findall(content)) != 1:
+        raise SoloAIError("Task anchor must contain exactly one Task ID line")
+    updated = task_line.sub(
+        lambda match: match.group(0) + f"- Root anchor: `{root_id}`\n",
+        content,
+        count=1,
+    )
+    _require_root_reference(repo, task, updated)
+    atomic_write_text(path, updated)
+    return read_anchor(repo, task)
 
 
 def update_anchor(

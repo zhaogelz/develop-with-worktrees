@@ -74,6 +74,7 @@ from .root_context import (
     root_anchor_lock,
     root_id_for_request,
     show_root_anchor,
+    show_root_anchor_history,
     update_root_anchor,
     update_root_progress,
 )
@@ -88,6 +89,7 @@ from .state import (
 )
 from .task_context import (
     adopt_legacy_anchor,
+    bind_root_reference,
     create_anchor,
     delete_anchor,
     read_anchor,
@@ -657,8 +659,23 @@ def adopt_task_anchor(
         return {"task_id": task_id, "anchor_path": str(path.resolve())}
 
 
+def _anchor_view(value: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
+    """默认返回轻量身份摘要，正文只在调用者明确需要时保留。"""
+
+    result = dict(value)
+    if not include_content:
+        result.pop("content", None)
+        result.pop("confirmed_plan", None)
+    return result
+
+
 def show_task_anchor(
-    repo: GitRepo, *, task_id: str, with_root: bool = False
+    repo: GitRepo,
+    *,
+    task_id: str,
+    with_root: bool = False,
+    include_content: bool = True,
+    include_root_content: bool = True,
 ) -> dict[str, Any]:
     _require_managed_mode(repo)
     task = StateStore(repo).task(task_id)
@@ -677,14 +694,70 @@ def show_task_anchor(
         )
         current_version = root.get("plan_version")
         reviewed_version = task.get("reviewed_root_plan_version")
-        result["root_anchor"] = root
+        result["root_anchor"] = _anchor_view(root, include_content=include_root_content)
         result["root_plan_review"] = {
             "current_version": current_version,
             "reviewed_version": reviewed_version,
             "requires_review": current_version is not None
             and current_version != reviewed_version,
         }
-    return result
+    return _anchor_view(result, include_content=include_content)
+
+
+def bind_task_root_anchor(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    lease: str,
+    root_id: str,
+    root_anchor_file: Path | None = None,
+) -> dict[str, Any]:
+    """为已启动任务补齐一个精确主锚点绑定；重复调用可收敛。"""
+
+    _require_managed_mode(repo)
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "root-anchor-bind") as task:
+        _require_anchor_caller(repo, task)
+        status = str(task.get("status"))
+        if status not in {"active", "ready"}:
+            raise SoloAIError(
+                "Only an active or ready task can bind a root anchor "
+                f"(current status: {status})"
+            )
+        root = resolve_root_anchor(
+            repo, root_id=root_id, external_path=root_anchor_file
+        )
+        external_root_file = (
+            str(root["root_anchor_path"]) if root_anchor_file is not None else None
+        )
+        existing_id = task.get("root_anchor_id")
+        existing_file = task.get("root_anchor_file")
+        if existing_id is not None:
+            if existing_id != root_id or existing_file != external_root_file:
+                raise SoloAIError("Task is already bound to a different root anchor")
+        else:
+            task = store.update_task(
+                task_id,
+                root_anchor_id=root_id,
+                root_anchor_file=external_root_file,
+                reviewed_root_plan_version=None,
+                reviewed_root_plan_sha256=None,
+            )
+        if external_root_file is not None:
+            register_external_root_child(
+                root_id=root_id,
+                root_anchor_file=Path(external_root_file),
+                task_id=task_id,
+                child_state_path=store.path,
+            )
+        anchor = bind_root_reference(repo, task)
+        return {
+            "task_id": task_id,
+            "root_id": root_id,
+            "root_anchor_path": str(root["root_anchor_path"]),
+            "anchor_path": anchor["anchor_path"],
+            "status": status,
+        }
 
 
 def acknowledge_root_plan(
@@ -1845,9 +1918,20 @@ def create_root_task_anchor(
         )
 
 
-def show_root_task_anchor(repo: GitRepo, *, root_id: str) -> dict[str, Any]:
+def show_root_task_anchor(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    version: int | None = None,
+    include_content: bool = True,
+) -> dict[str, Any]:
     _config_and_mode(repo)
-    return show_root_anchor(repo, root_id=root_id)
+    result = (
+        show_root_anchor_history(repo, root_id=root_id, version=version)
+        if version is not None
+        else show_root_anchor(repo, root_id=root_id)
+    )
+    return _anchor_view(result, include_content=include_content)
 
 
 def update_root_task_anchor(

@@ -5,8 +5,8 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 ## What it gives you
 
 - One isolated worktree per modifying task.
-- A local task anchor that preserves the task's original purpose and baseline across continuation, handoff, and model changes; `anchor show/update` reads and saves checked context during an active task.
-- When you confirm a complete plan, one local objective anchor keeps that exact plan through resumed tasks and conflict repairs; DWW records the checked overall result before the objective closes.
+- A local task anchor that preserves the task's original purpose and baseline across continuation, handoff, and model changes; `anchor show/update` reads and saves checked context during an active task, without a DWW content-size quota.
+- When you confirm a complete plan, one local objective anchor keeps that exact plan through resumed tasks and conflict repairs. Plan-changing revisions retain the complete prior version, while normal status remains compact; DWW records the checked overall result before the objective closes.
 - Exact-path commits and immutable source candidates.
 - Automatic integration whenever three eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
