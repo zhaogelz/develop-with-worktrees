@@ -917,6 +917,43 @@ def test_protected_ignored_content_blocks_promotion_until_exact_recovery(
     assert repo.head(git_repo) == completed["integrated_head"]
 
 
+def test_promotion_block_records_redacted_git_failure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(
+        repo, name="record fast-forward failure", relative="candidate.txt"
+    )
+    base_before = repo.head(git_repo)
+    original_git = repo.git
+
+    def fail_fast_forward(args: list[str], **kwargs: object):
+        if args[:2] == ["merge", "--ff-only"]:
+            raise SoloAIError(
+                "Command failed (128): git merge --ff-only <integration-head>\n"
+                "fatal: synthetic fast-forward failure"
+            )
+        return original_git(args, **kwargs)
+
+    monkeypatch.setattr(repo, "git", fail_fast_forward)
+    with pytest.raises(
+        batch_module.BatchPromotionPending, match="synthetic fast-forward failure"
+    ):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    blocked = CandidateBatchStore(repo).summary()["batches"][0]
+    assert blocked["status"] == "promotion_blocked"
+    assert blocked["validation_outcome"] == "passed"
+    assert "Command failed (128)" in blocked["promotion_blocked_error"]
+    assert "fatal: synthetic fast-forward failure" in blocked["promotion_blocked_error"]
+    assert repo.head(git_repo) == base_before
+
+    monkeypatch.setattr(repo, "git", original_git)
+    completed = batch_module.recover_batch(repo, batch_id=blocked["id"])
+    assert completed["status"] == "completed"
+    assert repo.head(git_repo) == completed["integrated_head"]
+
+
 def test_promotion_blocked_by_base_garbage_recovers_without_repeating_full(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

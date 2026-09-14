@@ -1753,9 +1753,12 @@ def _promote(
     try:
         repo.git(["merge", "--ff-only", integration_head], cwd=base_worktree)
     except SoloAIError as exc:
-        raise BatchPromotionPending(
-            "Batch promotion could not complete with otherwise exact facts"
-        ) from exc
+        # Git 命令错误已脱敏；保留底层原因，便于审查并恢复晋升现场。
+        detail = str(exc).strip()
+        message = "Batch promotion could not complete with otherwise exact facts"
+        if detail:
+            message = f"{message}: {detail}"
+        raise BatchPromotionPending(message) from exc
     observed = repo.head(base_worktree)
     if observed != integration_head:
         raise SoloAIError(
