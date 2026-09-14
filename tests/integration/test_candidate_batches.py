@@ -18,6 +18,7 @@ from solo_ai.candidate_batches import (
     CandidateBatchStore,
     prepare_candidate_repair,
     reconcile_batches,
+    reopen_prevalidation_batch,
     retire_failed_batch,
     seal_batch,
     withdraw_candidate,
@@ -2096,6 +2097,107 @@ def test_batch_runtime_activation_failure_is_recoverable_without_unsealing(
 
     assert completed["status"] == "completed"
     assert completed["runtime_cycle"] == 1
+
+
+def test_prevalidation_adapter_failure_can_reopen_exact_candidates(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, reusable=True)
+    activate_script = "raise SystemExit(1)"
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script=activate_script,
+        batch_release_script="pass",
+    )
+    candidate = publish(
+        repo, name="activation reopen", relative="activation-reopen.txt"
+    )
+    candidate_before = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+    base_before = repo.head(git_repo)
+    validation_calls = 0
+
+    def count_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal validation_calls
+        validation_calls += 1
+        return {"fingerprint": "unexpected"}
+
+    monkeypatch.setattr(batch_module, "validate", count_validation)
+    with pytest.raises(batch_module.BatchRuntimePending, match="activation is pending"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    reopened = reopen_prevalidation_batch(
+        repo,
+        batch_id=pending["id"],
+        runtime_not_started_confirmation=pending["id"],
+    )
+    restored = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+    pool = CandidateBatchStore(repo).read()
+
+    assert reopened["status"] == "failed"
+    assert reopened["failure_kind"] == "runtime_activation_prevalidation_failed"
+    assert reopened["runtime_activation_error"]
+    assert reopened["worktree_released_at"]
+    assert restored["status"] == "pending"
+    assert restored["sealed_batch"] is None
+    assert restored["head"] == candidate_before["head"]
+    assert restored["ref"] == candidate_before["ref"]
+    assert restored["proof"] == candidate_before["proof"]
+    assert pending["id"] in restored["reopened_prevalidation_batches"]
+    assert pool["integration_workspace"]["owner"] is None
+    assert pool["integration_workspace"]["head"] == pending["integration_head"]
+    assert repo.ref_head(reopened["integration_ref"]) == pending["integration_head"]
+    assert repo.head(git_repo) == base_before
+    assert validation_calls == 0
+    assert (
+        reopen_prevalidation_batch(
+            repo,
+            batch_id=pending["id"],
+            runtime_not_started_confirmation=pending["id"],
+        )
+        == reopened
+    )
+
+
+def test_prevalidation_reopen_rejects_batch_with_activation_receipt(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, reusable=True)
+    install_runtime_adapter(
+        repo,
+        release_script="pass",
+        verify_script="pass",
+        batch_activate_script="raise SystemExit(1)",
+        batch_release_script="pass",
+    )
+    candidate = publish(repo, name="activated batch", relative="activated-batch.txt")
+    with pytest.raises(batch_module.BatchRuntimePending, match="activation is pending"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    CandidateBatchStore(repo).update_batch(
+        pending["id"],
+        runtime_activation={"configured": True, "result": "passed", "exit_code": 0},
+        runtime_activation_error=None,
+    )
+
+    with pytest.raises(SoloAIError, match="unactivated, prevalidation"):
+        reopen_prevalidation_batch(
+            repo,
+            batch_id=pending["id"],
+            runtime_not_started_confirmation=pending["id"],
+        )
+
+    assert (
+        CandidateBatchStore(repo).candidate(candidate["candidate_id"])["status"]
+        == "sealed"
+    )
+    assert (
+        CandidateBatchStore(repo).read()["integration_workspace"]["owner"]
+        == pending["id"]
+    )
 
 
 def test_batch_validation_failure_releases_runtime_before_failed_closed(

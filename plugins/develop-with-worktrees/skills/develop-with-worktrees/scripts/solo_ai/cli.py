@@ -14,6 +14,7 @@ from .candidate_batches import (
     prepare_candidate_repair,
     reconcile_batches,
     recover_batch,
+    reopen_prevalidation_batch,
     retire_failed_batch,
     seal_batch,
     withdraw_candidate,
@@ -488,6 +489,21 @@ def _parser() -> argparse.ArgumentParser:
         help="resume an interrupted sealed generation from recorded Git facts",
     )
     batch_recover.add_argument("--batch", required=True)
+    batch_reopen = batch_sub.add_parser(
+        "reopen",
+        help="reopen only an unactivated, prevalidation Adapter-failed reusable batch",
+    )
+    batch_reopen.add_argument("--batch", required=True)
+    batch_reopen.add_argument(
+        "--confirm",
+        required=True,
+        help="repeat the exact batch id to acknowledge that its candidates will return to pending",
+    )
+    batch_reopen.add_argument(
+        "--confirm-no-runtime-started",
+        required=True,
+        help="repeat the exact batch id after verifying the failed Adapter did not start runtime resources",
+    )
     batch_retire = batch_sub.add_parser(
         "retire",
         help="idempotently remove one exact failed batch worktree while preserving candidates",
@@ -1641,6 +1657,19 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             )
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
+        if args.batch_command == "reopen":
+            if (
+                args.confirm != args.batch
+                or args.confirm_no_runtime_started != args.batch
+            ):
+                raise SoloAIError(
+                    "Batch reopen confirmation must exactly match --batch"
+                )
+            return reopen_prevalidation_batch(
+                repo,
+                batch_id=args.batch,
+                runtime_not_started_confirmation=args.confirm_no_runtime_started,
+            )
         if args.batch_command == "retire":
             return retire_failed_batch(repo, batch_id=args.batch, fast=args.fast)
         if args.batch_command == "metrics":

@@ -2135,6 +2135,161 @@ def recover_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
     return run_batch(repo, batch_id=batch_id)
 
 
+def reopen_prevalidation_batch(
+    repo: GitRepo, *, batch_id: str, runtime_not_started_confirmation: str
+) -> dict[str, Any]:
+    """终结一次尚未进入 Full 的 Adapter 激活失败，并原样归还候选。
+
+    这不是通用失败重试：仅适用于可复用批次工作树、运行时从未成功激活且
+    Full 从未开始的确定性 Adapter 前置失败。候选 ref、提交和 Ready 证明不变，
+    只解除这一次批次持有权，使修复 Adapter 后能组成新的精确批次。DWW 无法从
+    外部命令退出码证明其未产生副作用；调用者必须先按 Adapter 语义核验运行时从
+    未启动，并重复精确批次 ID 作为持久化人工确认。
+    """
+
+    from .lifecycle import _config_and_mode
+
+    _config_and_mode(repo)
+    if runtime_not_started_confirmation != batch_id:
+        raise SoloAIError(
+            "Prevalidation reopen requires the exact batch id as the no-runtime-started confirmation"
+        )
+    store = CandidateBatchStore(repo)
+    run_lock = repo.local_dir / "locks" / f"batch-{sha256_text(batch_id)[:24]}.lock"
+    with DirectoryLock(run_lock, wait=True):
+        with integration_turn(repo, batch_id):
+            batch = store.batch(batch_id)
+            failure_kind = "runtime_activation_prevalidation_failed"
+
+            # 成功返回同一个终态记录；不能让重试改变候选或共享工作树事实。
+            if (
+                batch.get("status") == "failed"
+                and batch.get("failure_kind") == failure_kind
+            ):
+                candidates = [
+                    store.candidate(str(item)) for item in batch["candidate_ids"]
+                ]
+                if (
+                    batch.get("worktree_released_at")
+                    and (batch.get("runtime_start_attestation") or {}).get("batch_id")
+                    == batch_id
+                    and all(
+                        candidate.get("status") == "pending"
+                        and candidate.get("sealed_batch") is None
+                        and batch_id
+                        in candidate.get("reopened_prevalidation_batches", [])
+                        for candidate in candidates
+                    )
+                ):
+                    return batch
+                raise SoloAIError(
+                    "Prevalidation reopen receipt disagrees with candidate ownership"
+                )
+
+            if batch.get("worktree_mode") != "reusable":
+                raise SoloAIError(
+                    "Prevalidation reopen is limited to the reusable integration workspace"
+                )
+            if batch.get("status") != "runtime_activation_pending":
+                raise SoloAIError(
+                    "Only a pending runtime activation can be reopened before validation"
+                )
+            if (
+                int(batch.get("runtime_cycle", 0)) < 1
+                or batch.get("runtime_activation") is not None
+                or batch.get("runtime_release") is not None
+                or batch.get("validation_outcome") is not None
+                or batch.get("proof") is not None
+                or not batch.get("runtime_activation_error")
+                or batch.get("run_owner") is not None
+            ):
+                raise SoloAIError(
+                    "Batch is not an unactivated, prevalidation Adapter failure"
+                )
+            if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch.get(
+                "base_before"
+            ):
+                raise SoloAIError("Batch base advanced; candidates were preserved")
+
+            # 目录、登记、代次和 Git 身份均必须仍是这一个批次的精确现场。
+            _assert_batch_worktree_unchanged(repo, batch)
+            workspace = batch_workspace.require_owner(repo, store, batch)
+            integration_ref = batch_workspace.remember_head(
+                repo, batch, str(batch["integration_head"])
+            )
+
+            def reopen(value: dict[str, Any]) -> dict[str, Any]:
+                current = value["batches"].get(batch_id)
+                if current != batch:
+                    raise SoloAIError("Batch changed before prevalidation reopen")
+                current_workspace = value.get("integration_workspace")
+                if current_workspace != workspace:
+                    raise SoloAIError(
+                        "Integration workspace owner changed before reopen"
+                    )
+                if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch.get(
+                    "base_before"
+                ):
+                    raise SoloAIError("Batch base advanced; candidates were preserved")
+                for candidate_id in batch["candidate_ids"]:
+                    candidate = value["candidates"].get(candidate_id)
+                    if (
+                        not isinstance(candidate, dict)
+                        or candidate.get("status") != "sealed"
+                        or candidate.get("sealed_batch") != batch_id
+                        or candidate.get("integrated_batch") is not None
+                        or repo.ref_head(str(candidate.get("ref") or ""))
+                        != candidate.get("head")
+                    ):
+                        raise SoloAIError(
+                            "Candidate ownership or immutable reference changed before reopen"
+                        )
+
+                current_workspace.update(
+                    {
+                        "owner": None,
+                        "head": batch["integration_head"],
+                        "head_ref": integration_ref,
+                    }
+                )
+                now = utc_timestamp()
+                current.update(
+                    {
+                        "status": "failed",
+                        "failure_kind": failure_kind,
+                        "error": batch["runtime_activation_error"],
+                        "failed_at": now,
+                        "integration_ref": integration_ref,
+                        "runtime_start_attestation": {
+                            "kind": "explicit-no-runtime-started",
+                            "batch_id": batch_id,
+                            "asserted_at": now,
+                        },
+                        "worktree_released_at": now,
+                        "prevalidation_reopened_at": now,
+                    }
+                )
+                for candidate_id in batch["candidate_ids"]:
+                    candidate = value["candidates"][candidate_id]
+                    reopened = candidate.setdefault(
+                        "reopened_prevalidation_batches", []
+                    )
+                    if batch_id not in reopened:
+                        reopened.append(batch_id)
+                    candidate.update(
+                        {
+                            "status": "pending",
+                            "sealed_batch": None,
+                            "last_prevalidation_batch": batch_id,
+                            "last_prevalidation_failure_kind": failure_kind,
+                            "reopened_at": now,
+                        }
+                    )
+                return copy.deepcopy(current)
+
+            return store.mutate(reopen)
+
+
 def retire_failed_batch(
     repo: GitRepo, *, batch_id: str, fast: bool = False
 ) -> dict[str, Any]:
