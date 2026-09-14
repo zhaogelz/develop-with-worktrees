@@ -188,10 +188,48 @@ def _read_plain_input(repo: GitRepo, path: Path) -> str:
         raise SoloAIError("Root anchor update input must be valid UTF-8") from exc
 
 
+def _read_external_plan_input(path: Path) -> str:
+    """读取用户显式指定的方案来源，不把来源目录当作受管状态。"""
+
+    if not path.is_absolute():
+        raise SoloAIError("External plan input path must be absolute")
+    raw_path = path.absolute()
+    anchor = Path(raw_path.anchor)
+    if not anchor.is_dir() or is_link_or_junction(anchor):
+        raise SoloAIError("External plan input root is not a plain local directory")
+    try:
+        relative = raw_path.relative_to(anchor)
+    except ValueError as exc:
+        raise SoloAIError("External plan input escaped its local root") from exc
+    current = anchor
+    for part in relative.parts:
+        current = current / part
+        if is_link_or_junction(current):
+            raise SoloAIError("External plan input must not be a link or junction")
+    if not raw_path.is_file():
+        raise SoloAIError("External plan input must be a regular local UTF-8 file")
+    try:
+        raw = raw_path.read_bytes()
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SoloAIError("External plan input must be valid UTF-8") from exc
+
+
+def _read_plan_input(repo: GitRepo, path: Path) -> str:
+    """根方案可由受管工作树内或用户明确的外部普通文件提供。"""
+
+    if path.is_absolute():
+        try:
+            path.absolute().relative_to(repo.root.absolute())
+        except ValueError:
+            return _read_external_plan_input(path)
+    return _read_plain_input(repo, path)
+
+
 def read_root_plan_input(repo: GitRepo, path: Path) -> str:
     """读取完整已确认方案；输入文件只作为创建或修订的来源。"""
 
-    content = _read_plain_input(repo, path).strip()
+    content = _read_plan_input(repo, path).strip()
     if not content:
         raise SoloAIError("Confirmed plan input must not be empty")
     return content
@@ -200,15 +238,56 @@ def read_root_plan_input(repo: GitRepo, path: Path) -> str:
 def read_root_change_input(repo: GitRepo, path: Path) -> str:
     """读取一份将逐字附加到现行方案的用户修订。"""
 
-    content = _read_plain_input(repo, path)
+    content = _read_plan_input(repo, path)
     if not content.strip():
         raise SoloAIError("Confirmed plan change input must not be empty")
     return content
 
 
+def read_root_acceptance_evidence_input(repo: GitRepo, path: Path) -> str:
+    """验收证据继续只能来自当前受管工作目录，不能随方案来源放宽。"""
+
+    return _read_plain_input(repo, path)
+
+
+def _marker_pair(content: str, heading: str) -> tuple[int, int] | None:
+    start_marker, end_marker = _SECTION_MARKERS[heading]
+    starts = [match.start() for match in re.finditer(re.escape(start_marker), content)]
+    ends = [match.start() for match in re.finditer(re.escape(end_marker), content)]
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
+        raise SoloAIError(f"Root anchor section markers are malformed for '{heading}'")
+    return starts[0], ends[0]
+
+
+def _structural_section_bounds(
+    content: str, heading: str
+) -> tuple[int, int, int] | None:
+    """只把紧邻专用开始标记的标题视为结构，正文标题保持自由。"""
+
+    markers = _marker_pair(content, heading)
+    if markers is None:
+        return None
+    start, end = markers
+    matches = [
+        match
+        for match in re.finditer(rf"(?m)^{re.escape(heading)}\s*$", content)
+        if match.end() <= start and not content[match.end() : start].strip()
+    ]
+    if len(matches) != 1:
+        raise SoloAIError(
+            f"Root anchor must contain one structural '{heading}' section"
+        )
+    return matches[0].start(), start, end
+
+
 def _metadata_prefix(content: str) -> str:
     """新格式只从正文前的元数据读取字段，方案正文可自由使用列表和代码。"""
 
+    bounds = _structural_section_bounds(content, _PLAN_HEADING)
+    if bounds is not None:
+        return content[: bounds[0]]
     marker = re.search(r"(?m)^## Confirmed plan\s*$", content)
     return content[: marker.start()] if marker else content
 
@@ -267,28 +346,18 @@ def _plan_version(content: str) -> int | None:
 
 
 def _section(content: str, heading: str) -> str | None:
-    matches = list(re.finditer(rf"(?m)^{re.escape(heading)}\s*$", content))
-    if not matches:
-        return None
-    if len(matches) != 1:
-        raise SoloAIError(f"Root anchor must contain at most one '{heading}' section")
-    markers = _SECTION_MARKERS.get(heading)
-    if markers is None:
+    if heading not in _SECTION_MARKERS:
         raise SoloAIError(
             f"Root anchor has no registered section markers for '{heading}'"
         )
-    start_marker, end_marker = markers
-    starts = [match.start() for match in re.finditer(re.escape(start_marker), content)]
-    ends = [match.start() for match in re.finditer(re.escape(end_marker), content)]
-    if not starts and not ends and _plan_version(content) is None:
+    bounds = _structural_section_bounds(content, heading)
+    if bounds is None and _plan_version(content) is None:
         # 旧根锚点可能把这个普通 Markdown 标题作为附注；不能因此失去可读性。
         return None
-    if len(starts) != 1 or len(ends) != 1:
+    if bounds is None:
         raise SoloAIError(f"Root anchor must contain one marker pair for '{heading}'")
-    start = starts[0]
-    end = ends[0]
-    if start < matches[0].end() or end <= start:
-        raise SoloAIError(f"Root anchor section markers are malformed for '{heading}'")
+    _, start, end = bounds
+    start_marker, _ = _SECTION_MARKERS[heading]
     body_start = start + len(start_marker)
     return content[body_start:end].strip()
 
@@ -316,24 +385,16 @@ def _replace_metadata_value(content: str, field: str, value: str) -> str:
 
 
 def _replace_section(content: str, heading: str, body: str) -> str:
-    matches = list(re.finditer(rf"(?m)^{re.escape(heading)}\s*$", content))
-    if len(matches) != 1:
+    bounds = _structural_section_bounds(content, heading)
+    if bounds is None:
         raise SoloAIError(f"Root anchor must contain exactly one '{heading}' section")
+    heading_start, start, end = bounds
     start_marker, end_marker = _SECTION_MARKERS[heading]
-    starts = [match.start() for match in re.finditer(re.escape(start_marker), content)]
-    ends = [match.start() for match in re.finditer(re.escape(end_marker), content)]
-    if (
-        len(starts) != 1
-        or len(ends) != 1
-        or starts[0] < matches[0].end()
-        or ends[0] <= starts[0]
-    ):
-        raise SoloAIError(f"Root anchor section markers are malformed for '{heading}'")
     replacement = f"{heading}\n\n{start_marker}\n{body.strip()}\n{end_marker}\n\n"
     return (
-        content[: matches[0].start()]
+        content[:heading_start]
         + replacement
-        + content[ends[0] + len(end_marker) :].lstrip("\r\n")
+        + content[end + len(end_marker) :].lstrip("\r\n")
     )
 
 
@@ -667,6 +728,14 @@ This local file is not committed. It is the coordinator's durable execution cont
 
 This local file is not committed. It is the objective's durable execution contract. Child tasks may read its current facts but do not alter candidate, batch, or scheduler ownership.
 """
+    # 在落盘前按读取路径完整校验。这样用户方案中合法的同名 Markdown 标题
+    # 不会生成一个之后无法读取或重试的根锚点。
+    _shown_root_anchor(
+        path=path,
+        root_id=root_id,
+        raw=content.encode("utf-8"),
+        content=content,
+    )
     atomic_write_text(path, content)
     return show_root_anchor(repo, root_id=root_id)
 

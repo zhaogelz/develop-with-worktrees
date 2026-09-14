@@ -130,6 +130,57 @@ def test_hook_defers_to_existing_workflow_without_writing(git_repo: Path) -> Non
     assert not (git_repo / ".solo-ai").exists()
 
 
+def test_hook_parses_actual_apply_patch_payload_and_all_move_targets(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    external = tmp_path / "draft.md"
+    raw_patch = "\n".join(
+        (
+            "*** Begin Patch",
+            f"*** Add File: {external}",
+            "+draft",
+            "*** End Patch",
+        )
+    )
+    payload = {
+        "cwd": str(git_repo),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_input": raw_patch,
+    }
+
+    assert HOOK.patch_from(payload) == raw_patch
+    assert HOOK._apply_patch_scope(payload, git_repo) == "external"
+    assert HOOK.decide(payload) is None
+    completed = subprocess.run(
+        ["uv", "run", "--script", str(HOOK_PATH)],
+        input=json.dumps(payload),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+
+    move_patch = "\n".join(
+        (
+            "*** Begin Patch",
+            f"*** Update File: {external}",
+            "*** Move to: README.md",
+            "@@",
+            "-draft",
+            "+moved",
+            "*** End Patch",
+        )
+    )
+    mixed = {**payload, "tool_input": move_patch}
+    assert HOOK._apply_patch_scope(mixed, git_repo) is None
+    assert HOOK.decide(mixed)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_hook_steps_aside_only_for_an_approved_delegated_adapter(
     git_repo: Path,
 ) -> None:

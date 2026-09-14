@@ -969,6 +969,32 @@ For every task that may modify repository files, use the installed `develop-with
 """
 
 
+def _released_root_review_managed_block() -> str:
+    """e73bc6b 发布过的完整托管块，只用于无歧义迁移。"""
+
+    released_base = _legacy_managed_block()
+    old_sentence = (
+        "The root is the single durable objective: it keeps the complete final plan, "
+        "explicit user amendments, progress, and the checked overall result; children "
+        "bind it but do not duplicate it. On continuation or candidate repair, read "
+        "`anchor show --with-root` and acknowledge the reviewed plan version before editing."
+    )
+    if released_base.count(old_sentence) != 1:
+        raise RuntimeError("Known legacy managed block no longer has its release text")
+    released_sentence = (
+        "The root is the single durable objective: it keeps the complete final plan, "
+        "full prior versions of plan-changing amendments, explicit user amendments, "
+        "progress, and the checked overall result; children bind it but do not duplicate "
+        "it. Anchors, plan inputs, historical versions, and exact cross-repository closure "
+        "state have no DWW content-size quota. On continuation or candidate repair, read "
+        "the complete execution basis with `anchor show --with-root --content --root-content` "
+        "when needed; `acknowledge-root` is an optional review record, not a per-operation "
+        "gate. For a pre-existing active or ready task that missed the normal path, use "
+        "idempotent `anchor bind-root` rather than recreating the task."
+    )
+    return released_base.replace(old_sentence, released_sentence)
+
+
 def _managed_region(existing: str) -> tuple[int, int]:
     if existing.count(MANAGED_START) != 1 or existing.count(MANAGED_END) != 1:
         raise SoloAIError(
@@ -990,6 +1016,8 @@ def managed_agents_status(existing: str) -> str:
         return "current"
     if block == _legacy_managed_block():
         return "known-legacy-0.5.0-beta.1"
+    if block == _released_root_review_managed_block():
+        return "known-legacy-root-review"
     raise SoloAIError(
         "AGENTS.md managed block contains user changes or an unknown version; refusing to overwrite it"
     )

@@ -66,6 +66,7 @@ from .root_context import (
     delete_root_anchor,
     list_root_anchors,
     nonterminal_external_root_children,
+    read_root_acceptance_evidence_input,
     require_candidate_delivery_terminal,
     read_root_change_input,
     read_root_plan_input,
@@ -2101,7 +2102,7 @@ def record_root_task_acceptance(
             repo,
             root_id=root_id,
             status=status,
-            evidence=read_root_plan_input(repo, evidence_input_path),
+            evidence=read_root_acceptance_evidence_input(repo, evidence_input_path),
             expected_sha256=expected_sha256,
         )
 
@@ -3514,11 +3515,12 @@ def _ready(kind: str, target: str | None, *, port: int) -> bool:
 
 
 def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
-    config, _, _ = _config_and_mode(repo)
+    config, verification, policy = _config_and_mode(repo)
     if not config.dev_start or not config.readiness:
         raise SoloAIError(
             "No lifecycle.dev_start plus readiness configuration is declared"
         )
+    require_approval(repo, verification, cwd=policy)
     store = StateStore(repo)
     with store.operation(task_id, lease, "dev-start") as task:
         if _is_in_place(task):
@@ -3615,9 +3617,11 @@ def dev_stop(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
 
 def warm_slot(repo: GitRepo, *, slot_id: str) -> dict[str, Any]:
     with maintenance_lock(repo):
-        config, _, _ = _config_and_mode(repo)
+        config, verification, policy = _config_and_mode(repo)
         if slot_id not in {f"{number:02d}" for number in range(1, config.slots + 1)}:
             raise SoloAIError("WarmSlot requires an active configured slot id")
+        if config.warm_commands:
+            require_approval(repo, verification, cwd=policy)
         store = StateStore(repo)
         state = store.ensure_slots(config)
         slot = state["slots"][slot_id]

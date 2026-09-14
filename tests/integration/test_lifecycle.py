@@ -234,9 +234,10 @@ def test_active_and_ready_task_can_bind_one_existing_root_idempotently(
 
 def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
     git_repo: Path,
+    tmp_path: Path,
 ) -> None:
     repo = initialized(git_repo)
-    plan = git_repo / "confirmed-plan.md"
+    plan = tmp_path / "confirmed-plan.md"
     plan.write_text(
         "# 最终确认方案\n\n- 保留完整正文。\n- 后续修订必须可追溯。\n",
         encoding="utf-8",
@@ -4454,6 +4455,57 @@ def test_dev_supervisor_owns_and_stops_tcp_process_tree(git_repo: Path) -> None:
     assert not StateStore(repo).task(task["id"])["processes"]
     with socket.socket() as connection:
         assert connection.connect_ex(("127.0.0.1", started["port"])) != 0
+
+
+def test_configured_dev_and_warm_commands_require_current_approval(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    config = git_repo / ".solo-ai" / "config.toml"
+    dev_command = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; Path('dev-command-ran.txt').write_text('ran', encoding='utf-8')",
+    ]
+    warm_command = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; Path('warm-command-ran.txt').write_text('ran', encoding='utf-8')",
+    ]
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "\n[lifecycle]\n",
+            f"\nwarm = [{json.dumps(warm_command)}]\n\n[lifecycle]\n",
+        )
+        + f"""\ndev_start = [{json.dumps(sys.executable)}, "-c", {json.dumps(dev_command[2])}]
+
+[lifecycle.readiness]
+kind = "tcp"
+target = "127.0.0.1:{{port}}"
+timeout_seconds = 1
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: configure local command approval")
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name="reject stale local command approval")
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "dev-command-ran.txt", "changed-dev-command-ran.txt"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SoloAIError, match="approval"):
+        dev_start(repo, task_id=task["id"], lease=task["lease"])
+    with pytest.raises(SoloAIError, match="approval"):
+        warm_slot(repo, slot_id="01")
+
+    worktree = Path(task["worktree"])
+    assert not (worktree / "dev-command-ran.txt").exists()
+    assert not (worktree / "warm-command-ran.txt").exists()
+    assert StateStore(repo).task(task["id"])["processes"] == []
 
 
 @pytest.mark.parametrize("status", ["finishing", "abandoning"])

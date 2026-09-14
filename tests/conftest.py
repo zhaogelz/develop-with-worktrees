@@ -128,9 +128,9 @@ def _configure_pytest_temp_root(basetemp: Path | str | None) -> Path | None:
             )
         # pytest 默认会在调试临时根下再添加用户名和轮次目录。插件安装后的
         # Python 模块路径较深，Windows 非 long-path 环境会因此无法导入模块。
-        # 使用该受管回退根内唯一的短 basetemp，既不触及 worktree，也保留
-        # pytest 对本次测试临时内容的常规清理责任。
-        return selected / "p"
+        # 每个 pytest 进程都取一个短且唯一的 basetemp。pytest 会在启动时清理
+        # 自己的 basetemp；共享固定路径会让并发进程删掉对方仍在使用的目录。
+        return Path(tempfile.mkdtemp(prefix="p", dir=selected))
     os.environ["PYTEST_DEBUG_TEMPROOT"] = str(selected)
     return None
 

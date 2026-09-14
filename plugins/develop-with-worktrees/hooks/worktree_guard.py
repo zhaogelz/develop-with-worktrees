@@ -228,13 +228,17 @@ def patch_from(payload: dict[str, Any]) -> str:
         or payload.get("input")
         or {}
     )
+    if isinstance(tool_input, str):
+        return tool_input
     if not isinstance(tool_input, dict):
         return ""
     value = tool_input.get("patch")
     return value if isinstance(value, str) else ""
 
 
-_PATCH_TARGET = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (?P<path>.+?)\s*$")
+_PATCH_TARGET = re.compile(
+    r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (?P<path>.+?)\s*$"
+)
 
 
 def _nearest_existing_directory(path: Path) -> Path | None:
@@ -261,6 +265,7 @@ def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
         return None
     base = root.resolve()
     external = False
+    protected = False
     for raw_target in targets:
         if not raw_target:
             return None
@@ -276,7 +281,13 @@ def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
                 return None
             external = True
         else:
-            return "protected"
+            protected = True
+    # 一个补丁只能在受保护工作树内，或只修改一个明确的仓库外文件；混合目标
+    # 会让隔离任务借内部路径越过外部写入判断，因此保守拒绝。
+    if protected and external:
+        return None
+    if protected:
+        return "protected"
     return "external" if external else None
 
 

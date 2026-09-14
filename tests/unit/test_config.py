@@ -99,6 +99,33 @@ def test_known_legacy_managed_block_can_be_upgraded_or_removed_without_touching_
     )
 
 
+def test_immediately_previous_released_managed_block_can_be_upgraded() -> None:
+    legacy_sentence = (
+        "The root is the single durable objective: it keeps the complete final plan, "
+        "explicit user amendments, progress, and the checked overall result; children "
+        "bind it but do not duplicate it. On continuation or candidate repair, read "
+        "`anchor show --with-root` and acknowledge the reviewed plan version before editing."
+    )
+    released_sentence = (
+        "The root is the single durable objective: it keeps the complete final plan, "
+        "full prior versions of plan-changing amendments, explicit user amendments, "
+        "progress, and the checked overall result; children bind it but do not duplicate "
+        "it. Anchors, plan inputs, historical versions, and exact cross-repository closure "
+        "state have no DWW content-size quota. On continuation or candidate repair, read "
+        "the complete execution basis with `anchor show --with-root --content --root-content` "
+        "when needed; `acknowledge-root` is an optional review record, not a per-operation "
+        "gate. For a pre-existing active or ready task that missed the normal path, use "
+        "idempotent `anchor bind-root` rather than recreating the task."
+    )
+    released = _legacy_managed_block().replace(legacy_sentence, released_sentence)
+    existing = "# User instructions\n\n" + released + "\nKeep this.\n"
+
+    assert managed_agents_status(existing) == "known-legacy-root-review"
+    upgraded = render_agents(existing)
+    assert managed_agents_status(upgraded) == "current"
+    assert upgraded.endswith("\nKeep this.\n")
+
+
 def test_user_edited_managed_block_is_not_overwritten() -> None:
     edited = _legacy_managed_block().replace(
         "Read-only analysis does not claim a slot.",

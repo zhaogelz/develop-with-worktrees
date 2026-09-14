@@ -10,6 +10,9 @@ from solo_ai.root_context import (
     create_root_anchor,
     delete_root_anchor,
     record_root_acceptance,
+    read_root_acceptance_evidence_input,
+    read_root_change_input,
+    read_root_plan_input,
     require_candidate_delivery_terminal,
     root_anchor_history_path,
     root_anchor_path,
@@ -148,6 +151,15 @@ def test_structured_root_keeps_complete_plan_and_versions_user_amendments(
 
 - 用户方案可以自由使用二级标题，不能被锚点格式截断。
 - Root ID: 这行属于方案正文，不能被当成锚点元数据。
+## Confirmed plan
+
+- 这不是锚点的结构标题。
+## User-confirmed changes
+
+- 这不是锚点的修订区。
+## Overall acceptance
+
+- 这不是锚点的验收区。
 ```text
 - Acceptance criteria: 这行也属于示例。
 ```
@@ -211,6 +223,23 @@ def test_structured_root_keeps_complete_plan_and_versions_user_amendments(
     )
     assert accepted["overall_acceptance_status"] == "accepted"
     assert accepted["overall_acceptance_plan_version"] == 2
+
+
+def test_root_plan_inputs_allow_an_explicit_external_plain_file_only(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    repo = GitRepo(git_repo)
+    source = tmp_path / "user-confirmed-plan.md"
+    source.write_text("# 外部方案\n\n保留原文。\n", encoding="utf-8")
+
+    assert read_root_plan_input(repo, source).replace("\r\n", "\n") == (
+        "# 外部方案\n\n保留原文。"
+    )
+    assert read_root_change_input(repo, source).replace("\r\n", "\n") == (
+        "# 外部方案\n\n保留原文。\n"
+    )
+    with pytest.raises(SoloAIError, match="outside the allowed local directory"):
+        read_root_acceptance_evidence_input(repo, source)
 
 
 def test_incremental_amendment_appends_the_exact_change_and_resets_acceptance(
