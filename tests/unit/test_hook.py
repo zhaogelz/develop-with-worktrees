@@ -37,9 +37,14 @@ SPEC.loader.exec_module(HOOK)
 
 
 def _payload(
-    repo: Path, *, tool: str, command: str = "", session: str = ""
+    repo: Path,
+    *,
+    tool: str,
+    command: str = "",
+    patch: str = "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch",
+    session: str = "",
 ) -> dict[str, object]:
-    tool_input = {"command": command} if tool == "Bash" else {"patch": "x"}
+    tool_input = {"command": command} if tool == "Bash" else {"patch": patch}
     return {
         "cwd": str(repo),
         "hook_event_name": "PreToolUse",
@@ -355,8 +360,56 @@ def test_hook_hard_denies_adopted_base_write_and_allows_isolated_task(
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     task = start(repo, name="isolated")
-    allowed = HOOK.decide(_payload(Path(task["worktree"]), tool="apply_patch"))
+    task_patch = (
+        "*** Begin Patch\n"
+        "*** Add File: task-local.md\n"
+        "+isolated task content\n"
+        "*** End Patch"
+    )
+    allowed = HOOK.decide(
+        _payload(Path(task["worktree"]), tool="apply_patch", patch=task_patch)
+    )
     assert allowed is None
+
+
+def test_hook_uses_actual_apply_patch_targets_for_external_structural_files(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    _initialized(git_repo)
+    external_plan = tmp_path / "confirmed-plan.md"
+    external_patch = (
+        "*** Begin Patch\n"
+        f"*** Add File: {external_plan}\n"
+        "+# Confirmed plan\n"
+        "*** End Patch"
+    )
+    assert (
+        HOOK.decide(_payload(git_repo, tool="apply_patch", patch=external_patch))
+        is None
+    )
+
+    protected_patch = (
+        "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch"
+    )
+    denied = HOOK.decide(_payload(git_repo, tool="apply_patch", patch=protected_patch))
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    unknown = HOOK.decide(_payload(git_repo, tool="apply_patch", patch="x"))
+    assert unknown["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    foreign = tmp_path / "foreign-repository"
+    foreign.mkdir()
+    git(foreign, "init")
+    foreign_patch = (
+        "*** Begin Patch\n"
+        f"*** Add File: {foreign / 'report.md'}\n"
+        "+must stay protected\n"
+        "*** End Patch"
+    )
+    foreign_denied = HOOK.decide(
+        _payload(git_repo, tool="apply_patch", patch=foreign_patch)
+    )
+    assert foreign_denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_hook_allows_only_bound_in_place_session_and_quarantines_mismatch(

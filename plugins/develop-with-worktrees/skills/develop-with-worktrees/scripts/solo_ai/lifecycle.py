@@ -35,11 +35,12 @@ from .config import (
     discover_validation_commands,
     load_repo_config,
     load_verification_config,
-    managed_block,
+    read_verification_config_file,
     remove_managed_agents_block,
     render_agents,
     render_repo_config,
     render_verification_config,
+    verification_config_from_text,
 )
 from .delegated import inspect_delegated
 from .integration import (
@@ -66,6 +67,7 @@ from .root_context import (
     list_root_anchors,
     nonterminal_external_root_children,
     require_candidate_delivery_terminal,
+    read_root_change_input,
     read_root_plan_input,
     record_root_acceptance,
     register_external_root_child,
@@ -261,6 +263,7 @@ def choose(
     mode: str,
     slots: int,
     commands: list[CommandSpec] | None,
+    verification_file: Path | None = None,
     session_id: str | None = None,
     delegation_code: str | None = None,
 ) -> dict[str, Any]:
@@ -297,6 +300,7 @@ def choose(
         repo,
         slots=slots,
         commands=commands,
+        verification_file=verification_file,
         accept=True,
         accept_static_only=True,
     )
@@ -375,24 +379,34 @@ def _require_no_lifecycle_lock(repo: GitRepo) -> None:
 
 
 def _initialization_plan(
-    repo: GitRepo, commands: list[CommandSpec], *, slots: int
+    repo: GitRepo,
+    verification: VerificationConfig,
+    *,
+    slots: int,
+    validation_source: str,
 ) -> dict[str, Any]:
     return {
         "slots": slots,
         "profiles": (
             [
                 {
-                    "id": "default",
-                    "paths": ["**"],
-                    "commands": [command.redacted() for command in commands],
-                    "cross_task_reuse": False,
-                    "external_state": "unknown",
+                    "id": profile.profile_id,
+                    "paths": list(profile.paths),
+                    "commands": [command.redacted() for command in profile.commands],
+                    "cross_task_reuse": profile.cross_task_reuse,
+                    "external_state": profile.external_state,
+                    "input_paths": list(profile.input_paths),
+                    "input_closure": profile.input_closure,
+                    "level": profile.level,
+                    "full_scope": profile.full_scope,
                 }
+                for profile in verification.profiles
             ]
-            if commands
+            if verification.profiles
             else []
         ),
-        "static_only": not commands,
+        "static_only": verification.static_only,
+        "validation_source": validation_source,
         "dependency_inputs": [
             name for name in LOCKFILE_NAMES if (repo.root / name).exists()
         ],
@@ -419,6 +433,7 @@ def initialize(
     accept: bool,
     accept_static_only: bool,
     decline: bool = False,
+    verification_file: Path | None = None,
 ) -> dict[str, Any]:
     """Create an isolated policy commit, never touching dirty primary content."""
     if decline:
@@ -434,6 +449,8 @@ def initialize(
         )
     if not 1 <= slots <= 32:
         raise SoloAIError("--slots must be between 1 and 32")
+    if commands is not None and verification_file is not None:
+        raise SoloAIError("--verify cannot be combined with --verification-file")
     existing = detect_existing_workflows(repo.root)
     if existing:
         # Do this before acquiring a local lifecycle lock: defer mode must not
@@ -457,12 +474,35 @@ def initialize(
                 "Repository is already adopted or has a pending bootstrap; run doctor"
             )
         primary, default = repo.ensure_primary_default()
-        selected = (
-            commands
-            if commands is not None
-            else discover_validation_commands(repo.root)
-        )
-        static_only = not selected
+        if verification_file is not None:
+            source, rendered_verification, verification = read_verification_config_file(
+                verification_file
+            )
+            selected = list(verification.commands)
+            static_only = verification.static_only
+            validation_source = f"reviewed verification file: {source}"
+        else:
+            selected = (
+                commands
+                if commands is not None
+                else discover_validation_commands(repo.root)
+            )
+            static_only = not selected
+            discovery_fallback = commands is None
+            rendered_verification = render_verification_config(
+                selected,
+                static_only=static_only,
+                discovery_fallback=discovery_fallback,
+            )
+            verification = verification_config_from_text(
+                rendered_verification,
+                source=repo.root / ".solo-ai" / "verification.toml",
+            )
+            validation_source = (
+                "automatic command discovery; generated conservative integration Full profile"
+                if discovery_fallback
+                else "explicit --verify command argv"
+            )
         if static_only and not accept_static_only and accept:
             raise SoloAIError(
                 "No validation command was discovered. Re-run with --accept-static-only only after reviewing the limitation."
@@ -470,7 +510,12 @@ def initialize(
         if (selected and not accept) or (static_only and not accept_static_only):
             return {
                 "decision": "needs-approval",
-                "plan": _initialization_plan(repo, selected, slots=slots),
+                "plan": _initialization_plan(
+                    repo,
+                    verification,
+                    slots=slots,
+                    validation_source=validation_source,
+                ),
             }
         bootstrap_id = uuid.uuid4().hex[:8]
         branch = f"solo-ai/bootstrap-{bootstrap_id}"
@@ -487,7 +532,7 @@ def initialize(
                 newline="\n",
             )
             (config_dir / "verification.toml").write_text(
-                render_verification_config(selected, static_only=static_only),
+                rendered_verification,
                 encoding="utf-8",
                 newline="\n",
             )
@@ -612,11 +657,12 @@ def _require_anchor_caller(repo: GitRepo, task: dict[str, Any]) -> None:
 
 
 def _config_and_mode(repo: GitRepo) -> tuple[Any, VerificationConfig, Path]:
+    """读取受管配置，不把纯读取或锚点维护误当成一次验证执行。"""
+
     _require_managed_mode(repo)
     policy = repo.policy_path()
     config = load_repo_config(repo, cwd=policy)
     verification = load_verification_config(repo, cwd=policy)
-    require_approval(repo, verification, cwd=policy)
     return config, verification, policy
 
 
@@ -802,6 +848,37 @@ def acknowledge_root_plan(
         }
 
 
+def _require_current_structured_root_review(
+    repo: GitRepo, task: dict[str, Any]
+) -> None:
+    """关键动作前只核验已记录的根方案版本，不把它变成人工批准。"""
+
+    root_id = task.get("root_anchor_id")
+    if not root_id:
+        return
+    root = resolve_root_anchor(
+        repo,
+        root_id=str(root_id),
+        external_path=(
+            Path(str(task["root_anchor_file"]))
+            if task.get("root_anchor_file")
+            else None
+        ),
+    )
+    current_version = root.get("plan_version")
+    if current_version is None:
+        return
+    if task.get("reviewed_root_plan_version") == current_version:
+        return
+    raise SoloAIError(
+        "The bound structured root plan has not been reviewed at its current version. "
+        "Automatically recover by reading `anchor show --task <task> --with-root "
+        "--content --root-content`, then record that exact version with "
+        "`anchor acknowledge-root`; this preserves the task and does not require "
+        "a new user confirmation."
+    )
+
+
 def update_task_anchor(
     repo: GitRepo,
     *,
@@ -923,6 +1000,13 @@ def _complete_runtime_activation(
         store.quarantine(str(task["id"]), str(exc))
         raise
     from .runtime_adapter import activate_task_runtime
+
+    worktree = Path(str(task["worktree"]))
+    activation_config = load_repo_config(repo, cwd=worktree)
+    if activation_config.runtime_adapter.activate is not None:
+        require_approval(
+            repo, load_verification_config(repo, cwd=worktree), cwd=worktree
+        )
 
     runtime_activation = activate_task_runtime(repo, task=task)
     refreshed = store.task(str(task["id"]))
@@ -1416,6 +1500,7 @@ def commit_task(
             raise SoloAIError(
                 "Commit requires a task whose runtime activation has completed"
             )
+        _require_current_structured_root_review(repo, task)
         if repo.branch(worktree) != task["branch"]:
             raise SoloAIError(
                 "Task branch identity no longer matches its recorded task"
@@ -1661,6 +1746,7 @@ def ready(
             raise SoloAIError(f"Task cannot enter Ready from {task.get('status')}")
         if _is_in_place(task):
             _assert_in_place_binding(repo, store, task, session_id=session_id)
+        _require_current_structured_root_review(repo, task)
         if not repo.is_clean(worktree):
             raise SoloAIError("Commit all task changes before Ready")
         convergence_retries = 0
@@ -1955,7 +2041,8 @@ def amend_root_task_anchor(
     repo: GitRepo,
     *,
     root_id: str,
-    plan_input_path: Path,
+    plan_input_path: Path | None,
+    change_input_path: Path | None,
     source: str,
     summary: str,
     expected_sha256: str,
@@ -1968,7 +2055,16 @@ def amend_root_task_anchor(
         return amend_root_anchor(
             repo,
             root_id=root_id,
-            confirmed_plan=read_root_plan_input(repo, plan_input_path),
+            confirmed_plan=(
+                read_root_plan_input(repo, plan_input_path)
+                if plan_input_path is not None
+                else None
+            ),
+            change_text=(
+                read_root_change_input(repo, change_input_path)
+                if change_input_path is not None
+                else None
+            ),
             source=source,
             summary=summary,
             expected_sha256=expected_sha256,
@@ -2062,6 +2158,12 @@ def close_root_task_anchor(
             ) not in {"accepted", "cancelled"}:
                 raise SoloAIError(
                     "Root anchor requires a recorded overall acceptance result before closing"
+                )
+            if shown_root.get("plan_version") is not None and shown_root.get(
+                "overall_acceptance_plan_version"
+            ) != shown_root.get("plan_version"):
+                raise SoloAIError(
+                    "Root anchor acceptance must be recorded for the current plan version before closing"
                 )
             delete_root_anchor(repo, root_id=root_id, locked=True)
             return {"root_id": root_id, "status": "closed"}
@@ -2581,6 +2683,8 @@ def finish(
                 delete_anchor(repo, task_id)
                 return result
             else:
+                if policy.get("mode") == "batched":
+                    _require_current_structured_root_review(repo, task)
                 candidate_requires_ready = _candidate_requires_ready(task)
                 if candidate_requires_ready and task.get("status") != "ready":
                     raise SoloAIError("Finish requires a successful Ready")
@@ -3619,10 +3723,6 @@ def _deinit_locked(repo: GitRepo, *, confirm: str, message: str) -> dict[str, An
     agents = repo.root / "AGENTS.md"
     existing = agents.read_text(encoding="utf-8") if agents.exists() else ""
     cleaned_agents = remove_managed_agents_block(existing)
-    if managed_block() not in existing.replace("\r\n", "\n"):
-        raise SoloAIError(
-            "Managed AGENTS.md block differs; deinit refuses to remove ambiguous policy text"
-        )
     # 先检查全部槽位；任何一个不安全都不得创建或合入策略删除提交。
     slots_to_remove = _preflight_deinit_slots(repo, config=config, state=state)
     # 在临时分支准备策略删除，但只在槽位全部安全释放后才合入默认分支。

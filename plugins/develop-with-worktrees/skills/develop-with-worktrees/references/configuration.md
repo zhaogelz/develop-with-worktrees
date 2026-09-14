@@ -14,6 +14,23 @@ AGENTS.md managed block        Codex lifecycle reminder
 
 `preferences.json` in the Git common directory is the machine-local long-term choice for this repository. `enabled = false` means normal current-directory development and never changes tracked files. `session-overrides.json` contains only hashed current-task session authorizations and delegated capability hashes; it contains neither raw session identifiers nor delegation codes and never enters version control.
 
+## Onboarding validation policy
+
+Use a project-reviewed schema-3 policy when one already exists:
+
+```text
+dww init --verification-file <reviewed-verification.toml> --accept
+dww choose --mode isolated --verification-file <reviewed-verification.toml>
+```
+
+`--verification-file` and `--verify` are mutually exclusive. DWW parses the supplied file with the same schema as tracked `.solo-ai/verification.toml`, shows its redacted profile plan before ordinary acceptance, and copies that exact reviewed text into the adoption commit. It does not infer a second cache or reuse policy from the file: cross-task reuse remains available only for profiles that explicitly declare `external_state = "none"`, `input_closure = "complete"`, and matching inputs, environment, and tools.
+
+Without either option, DWW discovers conventional commands and renders one conservative `level = "full"`, `full_scope = "integration"` profile that covers all paths, keeps `cross_task_reuse = false`, and declares external state as unknown. This fallback provides a real combined validation gate without pretending that it understands the project. Explicit `--verify` continues to create the compatible Ready-level profile. When no command is found, static-only remains an explicit limitation. The initialization preview records which of these sources produced the policy.
+
+## Managed rule-block upgrades
+
+`dww doctor` reports the managed `AGENTS.md` block as `current`, one exact known legacy version, or `unknown-or-user-edited`. A plugin update never writes a user repository by itself. When the user asks to synchronize rules, perform the work in a normal isolated DWW task and replace only the recognized complete legacy block with the current complete block, then commit and deliver it through the usual lifecycle. Missing markers, duplicate markers, or any user-edited/unknown block stay protected and require review; deinitialization follows the same rule and never deletes ambiguous policy text.
+
 `dww route --json` is a compact read-only lifecycle-owner query. It returns one action: `defer`, `delegated`, `disabled`, `current-task`, `managed`, or `ask`. A detected mature workflow normally returns `defer`; existing preference and session files are left untouched but inactive while that workflow marker remains, and DWW creates no lifecycle, anchor, candidate, or integration-batch state. It returns `delegated` only when `.solo-ai/delegated.toml` is valid and its exact contract-plus-input fingerprint has been approved in local Git-common-dir state. See [Delegated adapter contract](delegated-adapters.md).
 
 State-changing lifecycle commands linearize at route admission; DWW is not a background watcher and cannot lock files owned by another workflow. A command whose admission observes `defer` performs no DWW state write. New task orchestration uses the host's native task/subagent system. The old `orchestrate` state remains only for draining existing batches and is not created for new work.
@@ -115,7 +132,7 @@ fields; they do not add a second cache or orchestration contract.
 
 `batch_activate` and `batch_release` are an optional pair around combined Full validation in the dedicated integration worktree. Their immutable contexts include the exact batch and ordered candidate ids, a positive persisted `runtime_cycle`, absolute worktree, frozen base ref/head, composed integration head, Adapter input hashes, and one inclusive 100-port block at `port_base + 3200`; this block is disjoint from all 32 task-slot blocks. `batch_release` receives the same cycle plus `validation_outcome = passed|failed|interrupted` and the recorded error when present. Full never starts before activation succeeds. Promotion never starts before release succeeds and the composed Git identity is rechecked. Activation or release uncertainty keeps the sealed generation active and recoverable; `batch recover` reuses only a successful receipt with identical command, inputs, context, and cycle. If validation was interrupted after resources were released, recovery increments `runtime_cycle` and invokes activation again before rerunning Full, so a stale successful activation receipt cannot stand in for released resources. Validation failure and interruption still run release before the generation is failed or retried. Projects may create ignored runtime metadata, databases, services, or browser state, but concrete resource semantics remain entirely project-owned.
 
-When the current normalized validation or Adapter plan is not approved, DWW fails before execution and writes an exact field-level comparison with the nearest accepted plan under `<git-common-dir>/solo-ai/approval-mismatches/`. The report is diagnostic evidence only; it never broadens or renews approval automatically.
+When the current normalized validation or Adapter plan is not approved, DWW fails before executing validation or an Adapter and writes an exact field-level comparison with the nearest accepted plan under `<git-common-dir>/solo-ai/approval-mismatches/`. Pure `show`/`list` calls and root/task-anchor reads or maintenance do not execute project commands and do not require that approval. The report is diagnostic evidence only; it never broadens or renews approval automatically.
 
 `verify_effective` never substitutes for Git delivery: `runtime verify --candidate <id>` is allowed only after that candidate's batch is contained in the current base, and each explicit check runs again because external runtime state may change. DWW records context, redacted log, digest, duration, and result under Git-common-dir state; it does not persist leases or environment values there.
 

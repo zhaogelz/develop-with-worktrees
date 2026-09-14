@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -218,6 +219,65 @@ def command_from(payload: dict[str, Any]) -> str:
         return ""
     value = tool_input.get("command")
     return value if isinstance(value, str) else ""
+
+
+def patch_from(payload: dict[str, Any]) -> str:
+    tool_input = (
+        payload.get("tool_input")
+        or payload.get("toolInput")
+        or payload.get("input")
+        or {}
+    )
+    if not isinstance(tool_input, dict):
+        return ""
+    value = tool_input.get("patch")
+    return value if isinstance(value, str) else ""
+
+
+_PATCH_TARGET = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (?P<path>.+?)\s*$")
+
+
+def _nearest_existing_directory(path: Path) -> Path | None:
+    current = path if path.is_dir() else path.parent
+    while current != current.parent:
+        if current.exists():
+            return current if current.is_dir() else current.parent
+        current = current.parent
+    return current if current.exists() and current.is_dir() else None
+
+
+def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
+    """区分补丁实际目标，避免把仓库外的方案/报告误判为基线写入。"""
+
+    patch = patch_from(payload)
+    if not patch or "*** Begin Patch" not in patch or "*** End Patch" not in patch:
+        return None
+    targets = [
+        match.group("path").strip()
+        for line in patch.splitlines()
+        if (match := _PATCH_TARGET.fullmatch(line))
+    ]
+    if not targets:
+        return None
+    base = root.resolve()
+    external = False
+    for raw_target in targets:
+        if not raw_target:
+            return None
+        target = Path(raw_target)
+        resolved = (target if target.is_absolute() else root / target).resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            parent = _nearest_existing_directory(resolved)
+            # 允许由宿主权限已授权的、非仓库中的方案/报告目标；不能借此
+            # 改写另一个仓库或让路径无法判断的补丁通过。
+            if parent is None or git_root(str(parent)) is not None:
+                return None
+            external = True
+        else:
+            return "protected"
+    return "external" if external else None
 
 
 def _session(payload: dict[str, Any]) -> str:
@@ -772,7 +832,7 @@ def _session_context(
 ) -> str:
     session = _session(payload)
     base = (
-        "Repository adopts develop-with-worktrees. For ordinary modifications, proactively use Start → exact-path Commit → Ready → Finish in the returned worktree. "
+        "Repository adopts develop-with-worktrees. For ordinary modifications, proactively use Start → exact-path Commit → useful development checks → Finish in the returned worktree; new default batched tasks may Finish directly from active after the exact commit. Follow the applicable batch or explicit tail until the requested work is delivered. "
         "The trusted Codex hook hard-denies writes in the current base worktree unless a task has explicit authorization."
     )
     if session:
@@ -867,6 +927,15 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
                 "Detected tracked or untracked changes in a protected base worktree. The files were preserved; do not continue, reset, clean, or move them automatically. Review dww doctor for the recorded paths and ask the user how to proceed.",
             )
         return None
+    if tool.lower() == "apply_patch":
+        patch_scope = _apply_patch_scope(payload, root)
+        if patch_scope == "external":
+            return None
+        if patch_scope is None:
+            return _deny(
+                "apply_patch target paths could not be determined safely, or include another repository. "
+                "Protected base-worktree writes remain blocked."
+            )
     dww_command = _dww_subcommand(command, root) if tool == "Bash" else None
     if tool == "Bash" and _strict_read_only_bash(command):
         return None

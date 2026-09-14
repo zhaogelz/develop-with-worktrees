@@ -49,6 +49,7 @@ _CHANGES_START = "<!-- dww-user-changes:start -->"
 _CHANGES_END = "<!-- dww-user-changes:end -->"
 _ACCEPTANCE_START = "<!-- dww-overall-acceptance:start -->"
 _ACCEPTANCE_END = "<!-- dww-overall-acceptance:end -->"
+_ACCEPTANCE_VERSION_FIELD = "Accepted plan version"
 _SECTION_MARKERS = {
     _PLAN_HEADING: (_PLAN_START, _PLAN_END),
     _CHANGES_HEADING: (_CHANGES_START, _CHANGES_END),
@@ -193,6 +194,15 @@ def read_root_plan_input(repo: GitRepo, path: Path) -> str:
     content = _read_plain_input(repo, path).strip()
     if not content:
         raise SoloAIError("Confirmed plan input must not be empty")
+    return content
+
+
+def read_root_change_input(repo: GitRepo, path: Path) -> str:
+    """读取一份将逐字附加到现行方案的用户修订。"""
+
+    content = _read_plain_input(repo, path)
+    if not content.strip():
+        raise SoloAIError("Confirmed plan change input must not be empty")
     return content
 
 
@@ -368,6 +378,32 @@ def _acceptance_status(content: str) -> str | None:
     return value
 
 
+def _acceptance_plan_version(content: str) -> int | None:
+    section = _section(content, _ACCEPTANCE_HEADING)
+    if section is None:
+        return None
+    matches = list(
+        re.finditer(
+            rf"(?m)^- {re.escape(_ACCEPTANCE_VERSION_FIELD)}: (?P<value>[^\r\n]+)$",
+            section,
+        )
+    )
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise SoloAIError(
+            "Overall acceptance must contain at most one accepted plan version"
+        )
+    value = matches[0].group("value").strip()
+    if not value.isdecimal() or int(value) < 1:
+        raise SoloAIError("Overall acceptance accepted plan version must be positive")
+    return int(value)
+
+
+def _pending_acceptance() -> str:
+    return "- Status: pending\n- Evidence: plan changed; overall acceptance must be checked again"
+
+
 def _identity_value(value: str) -> str:
     return value.strip().removeprefix("`").removesuffix("`")
 
@@ -465,6 +501,7 @@ def _shown_root_anchor(
         "plan_version": plan_version,
         "confirmed_plan": _section(content, _PLAN_HEADING),
         "overall_acceptance_status": _acceptance_status(content),
+        "overall_acceptance_plan_version": _acceptance_plan_version(content),
     }
 
 
@@ -705,7 +742,12 @@ def update_root_anchor(
 
 
 def _write_root_update_locked(
-    repo: GitRepo, *, root_id: str, content: str, expected_sha256: str
+    repo: GitRepo,
+    *,
+    root_id: str,
+    content: str,
+    expected_sha256: str,
+    allow_acceptance_update: bool = False,
 ) -> dict[str, Any]:
     """在根锚点锁已持有时验证并原子写入一份完整文档。"""
 
@@ -755,6 +797,18 @@ def _write_root_update_locked(
                 raise SoloAIError(
                     "Plan changes must record a user-confirmed change entry"
                 )
+        current_acceptance = _section(str(current["content"]), _ACCEPTANCE_HEADING)
+        updated_acceptance = _section(content, _ACCEPTANCE_HEADING)
+        if contract_changed:
+            # 所有会改变结构化目标的入口统一使既有总体验收失效；调用者
+            # 不能借 generic update 保留或伪造 accepted/cancelled 状态。
+            content = _replace_section(
+                content, _ACCEPTANCE_HEADING, _pending_acceptance()
+            )
+        elif not allow_acceptance_update and updated_acceptance != current_acceptance:
+            raise SoloAIError(
+                "Only root-anchor accept may change structured overall acceptance"
+            )
     raw = content.encode("utf-8")
     sha256 = hashlib.sha256(raw).hexdigest()
     if sha256 == current["sha256"]:
@@ -778,7 +832,8 @@ def amend_root_anchor(
     repo: GitRepo,
     *,
     root_id: str,
-    confirmed_plan: str,
+    confirmed_plan: str | None,
+    change_text: str | None,
     source: str,
     summary: str,
     expected_sha256: str,
@@ -786,7 +841,7 @@ def amend_root_anchor(
     scope: str | None = None,
     acceptance: str | None = None,
 ) -> dict[str, Any]:
-    """按用户已确认的修订替换有效方案，并保留版本化来源记录。"""
+    """按用户已确认的修订替换或原文附加有效方案，并保留版本化来源记录。"""
 
     if (
         not source.strip()
@@ -801,10 +856,16 @@ def amend_root_anchor(
         )
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256 or ""):
         raise SoloAIError("Expected root anchor SHA-256 must be lowercase hexadecimal")
-    if not confirmed_plan.strip():
-        raise SoloAIError("Confirmed plan must not be empty")
+    if (confirmed_plan is None) == (change_text is None):
+        raise SoloAIError(
+            "Provide exactly one complete plan or incremental plan change"
+        )
+    plan_input = confirmed_plan if confirmed_plan is not None else change_text
+    assert plan_input is not None
+    if not plan_input.strip():
+        raise SoloAIError("Confirmed plan input must not be empty")
     if any(
-        marker in confirmed_plan
+        marker in plan_input
         for marker in (
             _PLAN_START,
             _PLAN_END,
@@ -823,8 +884,17 @@ def amend_root_anchor(
         if current["sha256"] != expected_sha256:
             raise SoloAIError("Root anchor changed since it was read; fetch it again")
         content = str(current["content"])
-        version, _, changes, _ = _require_structured_plan(content)
+        version, current_plan, changes, _ = _require_structured_plan(content)
         next_version = version + 1
+        effective_plan = (
+            confirmed_plan
+            if confirmed_plan is not None
+            else (
+                current_plan
+                + f"\n\n---\n\n## User-confirmed amendment (version {next_version})\n\n"
+                + str(change_text)
+            )
+        )
         updated = _replace_metadata_value(
             content, _PLAN_VERSION_FIELD, str(next_version)
         )
@@ -838,17 +908,12 @@ def amend_root_anchor(
             updated = _replace_metadata_value(
                 updated, "Acceptance criteria", acceptance.strip()
             )
-        updated = _replace_section(updated, _PLAN_HEADING, confirmed_plan)
+        updated = _replace_section(updated, _PLAN_HEADING, str(effective_plan))
         updated = _replace_section(
             updated,
             _CHANGES_HEADING,
             changes
             + f"\n- Version {next_version}: {summary.strip()}. Source: {source.strip()}",
-        )
-        updated = _replace_section(
-            updated,
-            _ACCEPTANCE_HEADING,
-            "- Status: pending\n- Evidence: plan changed; overall acceptance must be checked again",
         )
         updated = _replace_metadata_value(
             updated,
@@ -898,14 +963,15 @@ def record_root_acceptance(
     with root_anchor_lock(path):
         current = show_root_anchor(repo, root_id=root_id)
         content = str(current["content"])
-        if _plan_version(content) is None:
+        plan_version = _plan_version(content)
+        if plan_version is None:
             raise SoloAIError(
                 "Legacy root anchors cannot record structured overall acceptance"
             )
         updated = _replace_section(
             content,
             _ACCEPTANCE_HEADING,
-            f"- Status: {status}\n- Evidence: {evidence.strip()}",
+            f"- Status: {status}\n- {_ACCEPTANCE_VERSION_FIELD}: {plan_version}\n- Evidence: {evidence.strip()}",
         )
         updated = _replace_metadata_value(
             updated,
@@ -917,6 +983,7 @@ def record_root_acceptance(
             root_id=root_id,
             content=updated,
             expected_sha256=expected_sha256,
+            allow_acceptance_update=True,
         )
 
 

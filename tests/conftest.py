@@ -66,6 +66,19 @@ def _pytest_fallback_temp_root() -> Path:
     return GitRepo(_TEST_ROOT).primary_path / ".tmp" / "pytest-runs"
 
 
+def _pytest_machine_state_root() -> Path:
+    """测试进程专用的机器级状态目录，绝不复用开发者用户配置。"""
+
+    return GitRepo(_TEST_ROOT).primary_path / ".tmp" / "pytest-machine-state"
+
+
+def _configure_pytest_machine_state() -> None:
+    """隔离 Windows 机器级验证队列，避免测试写入用户 AppData。"""
+
+    if os.name == "nt":
+        os.environ["LOCALAPPDATA"] = str(_pytest_machine_state_root())
+
+
 def _is_usable_pytest_temp_root(root: Path) -> bool:
     """确认 pytest 的用户子目录可创建且可扫描。"""
 
@@ -98,29 +111,38 @@ def _default_pytest_temp_root() -> Path:
     return candidate
 
 
-def _configure_pytest_temp_root(basetemp: Path | str | None) -> None:
-    """在 pytest 创建临时目录前拒绝不安全显式路径或设置安全回退。"""
+def _configure_pytest_temp_root(basetemp: Path | str | None) -> Path | None:
+    """拒绝不安全显式目录；回退时返回供 pytest 直接使用的短基目录。"""
 
     if basetemp is not None:
         if _is_within(basetemp, _managed_worktree_root()):
             raise pytest.UsageError(
                 f"--basetemp must be outside DWW managed worktrees: {basetemp}"
             )
-        return
+        return None
     selected = _default_pytest_temp_root()
     if selected == _pytest_fallback_temp_root():
         if not _is_usable_pytest_temp_root(selected):
             raise pytest.UsageError(
                 f"Cannot create a safe pytest temporary directory: {selected}"
             )
-        os.environ["PYTEST_DEBUG_TEMPROOT"] = str(selected)
+        # pytest 默认会在调试临时根下再添加用户名和轮次目录。插件安装后的
+        # Python 模块路径较深，Windows 非 long-path 环境会因此无法导入模块。
+        # 使用该受管回退根内唯一的短 basetemp，既不触及 worktree，也保留
+        # pytest 对本次测试临时内容的常规清理责任。
+        return selected / "p"
+    os.environ["PYTEST_DEBUG_TEMPROOT"] = str(selected)
+    return None
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config) -> None:
     """让内置临时目录工厂始终在受管工作树之外创建测试产物。"""
 
-    _configure_pytest_temp_root(config.option.basetemp)
+    _configure_pytest_machine_state()
+    fallback_basetemp = _configure_pytest_temp_root(config.option.basetemp)
+    if fallback_basetemp is not None:
+        config.option.basetemp = str(fallback_basetemp)
 
 
 def dww_test_layer(path: Path) -> str:

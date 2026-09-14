@@ -151,6 +151,22 @@ def _read_toml(path: Path) -> dict[str, Any]:
         raise SoloAIError(f"Invalid TOML: {path}: {exc}") from exc
 
 
+def _read_verification_file(path: Path) -> tuple[Path, str]:
+    """一次读取经人工审阅的验证策略，避免检查与复制使用不同版本。"""
+
+    try:
+        source = path.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise SoloAIError(f"Cannot read verification policy: {path}: {exc}") from exc
+    if not source.is_file():
+        raise SoloAIError(f"Verification policy must be a regular file: {source}")
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SoloAIError(f"Cannot read verification policy: {source}: {exc}") from exc
+    return source, text
+
+
 def _command(raw: Any, *, field: str) -> CommandSpec:
     if (
         not isinstance(raw, list)
@@ -736,6 +752,25 @@ def load_verification_config(
     return VerificationConfig(primary.schema_version, False, profiles)
 
 
+def verification_config_from_text(text: str, *, source: Path) -> VerificationConfig:
+    """按与已跟踪策略相同的 schema 解析一次 UTF-8 TOML 文本。"""
+
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SoloAIError(f"Invalid verification TOML: {source}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SoloAIError(f"Invalid verification TOML: {source}: root must be a table")
+    return _parse_verification_config(data, source=source)
+
+
+def read_verification_config_file(path: Path) -> tuple[Path, str, VerificationConfig]:
+    """读取单个可交付的 schema-3 策略文件，供首次采用时原样提交。"""
+
+    source, text = _read_verification_file(path)
+    return source, text, verification_config_from_text(text, source=source)
+
+
 def _package_json_commands(root: Path) -> list[CommandSpec]:
     path = root / "package.json"
     if not path.exists():
@@ -876,7 +911,7 @@ integration = {{ mode = "batched", batch_size = 3, candidate_capacity = 10, seal
 
 
 def render_verification_config(
-    commands: list[CommandSpec], *, static_only: bool
+    commands: list[CommandSpec], *, static_only: bool, discovery_fallback: bool = False
 ) -> str:
     lines = [
         f"schema_version = {VERIFICATION_SCHEMA}",
@@ -896,7 +931,8 @@ def render_verification_config(
                 'input_closure = "declared"',
                 "timeout_seconds = 2700",
                 'resource_class = "normal"',
-                'level = "ready"',
+                f"level = {quote_toml('full' if discovery_fallback else 'ready')}",
+                *(('full_scope = "integration"',) if discovery_fallback else ()),
                 "commands = [",
             )
         )
@@ -914,28 +950,66 @@ def managed_block() -> str:
 ## Isolated coding tasks
 
 For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in the returned worktree, and stage an exact reviewed path list with `commit`. Run `ready` when useful development evidence or a legacy task requires it, then `finish`; new default batched tasks may finish directly from `active` after the exact commit. Read-only analysis does not claim a slot. Do not bypass a failed gate. The DWW lifecycle is local-only and must not fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After a successful Finish, an explicit user request may be fulfilled with an ordinary non-force push of the current branch from the clean base worktree; that publishing step is separate from DWW.
+Before proposing or choosing an implementation, do not overdesign. Start from current evidence and the requested outcome; choose the simplest design that can meet the acceptance criteria, preserves existing user work and contracts, and remains easy to understand and maintain. Add a persistent layer, abstraction, workflow, or human gate only when an observed requirement cannot be met by the existing mechanism; state that reason and its verification. Do not expand product scope merely because a more general system could be built.
+`Start` creates the local task anchor; keep it current and reread it after continuation or context loss. When the user has explicitly confirmed a complete plan or asked to set it as the objective, create one DWW `root-anchor` before the first child Start with the full plan file, its source, and a stable request id. The root is the single durable objective: it keeps the complete final plan, full prior versions of plan-changing amendments, explicit user amendments, progress, and the checked overall result; children bind it but do not duplicate it. Anchors, plan inputs, historical versions, and exact cross-repository closure state have no DWW content-size quota. On continuation, model/context recovery, first execution after `bind-root`, a root-plan version change, or candidate repair, the host automatically reads `anchor show --with-root --content --root-content` and records that version with `acknowledge-root` once for the continuous work; it does not ask the user or claim that the record proves understanding. Before Commit, actual Ready, or Finish candidate publication, a bound structured root must have that current reviewed version; recover by reading, acknowledging, and retrying without losing work. This is not a gate on every edit. For a pre-existing active or ready task that missed the normal path, use idempotent `anchor bind-root` rather than recreating the task. A structured root closes only after every child is terminal and `root-anchor accept` records accepted or cancelled evidence for its current plan version. A child in another repository uses the same root only through explicit `--root-anchor-file <absolute-path>`, never a duplicated root. DWW verifies and records that exact non-linked root locator and its child-state locator, but it never searches repositories or becomes a `scope_id`, candidate group, DAG, scheduler, or batch boundary. A configured project Adapter may establish project runtime identity only after the exact isolated task exists and before Start returns it as active. New repositories publish exact source candidates, release project resources through the same Adapter, then release the task worktree. Each configured full batch freezes automatically; an exact smaller tail freezes only after the host explicitly ends the round or requests immediate integration. Host heartbeat may wake `batch reconcile` but cannot choose candidates; UI task counts, raw worktree counts, Hook delivery, and session end never prove completion. There is no candidate-age or quiet-period auto-seal. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only. Candidate publication is not delivery; only integration into the current base is delivery. Explicit legacy direct policy remains upgrade compatibility only.
+The host remains responsible for the whole requested delivery, not only for one candidate or one task transition. After `Finish`, follow the applicable full batch or explicit tail through integration, inspect a recorded failure, and continue a deterministic repair or request a user decision only when the stated boundaries leave materially different outcomes.
+{MANAGED_END}
+"""
+
+
+def _legacy_managed_block() -> str:
+    """0.5.0-beta.1 已发布的完整托管块，只用于无歧义迁移。"""
+
+    return f"""{MANAGED_START}
+## Isolated coding tasks
+
+For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in the returned worktree, and stage an exact reviewed path list with `commit`. Run `ready` when useful development evidence or a legacy task requires it, then `finish`; new default batched tasks may finish directly from `active` after the exact commit. Read-only analysis does not claim a slot. Do not bypass a failed gate. The DWW lifecycle is local-only and must not fetch, pull, push, create PRs, rebase, squash, amend, or rewrite history. After a successful Finish, an explicit user request may be fulfilled with an ordinary non-force push of the current branch from the clean base worktree; that publishing step is separate from DWW.
 `Start` creates the local task anchor; keep it current and reread it after continuation or context loss. When the user has explicitly confirmed a complete plan or asked to set it as the objective, create one DWW `root-anchor` before the first child Start with the full plan file, its source, and a stable request id. The root is the single durable objective: it keeps the complete final plan, explicit user amendments, progress, and the checked overall result; children bind it but do not duplicate it. On continuation or candidate repair, read `anchor show --with-root` and acknowledge the reviewed plan version before editing. A structured root closes only after every child is terminal and `root-anchor accept` records accepted or cancelled evidence. A child in another repository uses the same root only through explicit `--root-anchor-file <absolute-path>`, never a duplicated root. DWW verifies and records that exact non-linked root locator and its child-state locator, but it never searches repositories or becomes a `scope_id`, candidate group, DAG, scheduler, or batch boundary. A configured project Adapter may establish project runtime identity only after the exact isolated task exists and before Start returns it as active. New repositories publish exact source candidates, release project resources through the same Adapter, then release the task worktree. Each configured full batch freezes automatically; an exact smaller tail freezes only after the host explicitly ends the round or requests immediate integration. Host heartbeat may wake `batch reconcile` but cannot choose candidates; UI task counts, raw worktree counts, Hook delivery, and session end never prove completion. There is no candidate-age or quiet-period auto-seal. Use the host's native task/subagent system for task orchestration; legacy `dww orchestrate` state is drain-only. Candidate publication is not delivery; only integration into the current base is delivery. Explicit legacy direct policy remains upgrade compatibility only.
 {MANAGED_END}
 """
 
 
+def _managed_region(existing: str) -> tuple[int, int]:
+    if existing.count(MANAGED_START) != 1 or existing.count(MANAGED_END) != 1:
+        raise SoloAIError(
+            "AGENTS.md must contain exactly one develop-with-worktrees managed block"
+        )
+    start = existing.index(MANAGED_START)
+    end = existing.index(MANAGED_END, start) + len(MANAGED_END)
+    return start, end
+
+
+def managed_agents_status(existing: str) -> str:
+    """识别可安全同步的版本；用户改写的内容保持失败关闭。"""
+
+    start, end = _managed_region(existing)
+    # 区间精确止于结束标记；模板字符串惯例上带一个最终换行，不能把
+    # 文件中块后的空行误当成托管内容，也不能因此误判历史生成块。
+    block = existing[start:end].replace("\r\n", "\n") + "\n"
+    if block == managed_block():
+        return "current"
+    if block == _legacy_managed_block():
+        return "known-legacy-0.5.0-beta.1"
+    raise SoloAIError(
+        "AGENTS.md managed block contains user changes or an unknown version; refusing to overwrite it"
+    )
+
+
 def render_agents(existing: str) -> str:
     if MANAGED_START in existing or MANAGED_END in existing:
-        raise SoloAIError(
-            "AGENTS.md already contains a managed block; refusing to overwrite it"
-        )
+        start, end = _managed_region(existing)
+        managed_agents_status(existing)
+        replacement = managed_block()
+        if existing[end:].startswith(("\r\n", "\n")):
+            replacement = replacement.rstrip("\n")
+        return existing[:start] + replacement + existing[end:]
     prefix = existing.rstrip()
     return (prefix + "\n\n" if prefix else "") + managed_block()
 
 
 def remove_managed_agents_block(existing: str) -> str:
-    start = existing.find(MANAGED_START)
-    end = existing.find(MANAGED_END)
-    if start < 0 or end < 0 or end < start:
-        raise SoloAIError(
-            "AGENTS.md does not contain one exact develop-with-worktrees managed block"
-        )
-    end += len(MANAGED_END)
+    start, end = _managed_region(existing)
+    managed_agents_status(existing)
     before = existing[:start].rstrip()
     after = existing[end:].lstrip("\r\n")
     return ((before + "\n\n") if before and after else before) + after

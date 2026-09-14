@@ -182,6 +182,7 @@ def test_structured_root_keeps_complete_plan_and_versions_user_amendments(
         repo,
         root_id=str(created["root_id"]),
         confirmed_plan=amended_plan,
+        change_text=None,
         source="user explicitly changed the requirement",
         summary="add the amendment history requirement",
         expected_sha256=str(progressed["sha256"]),
@@ -209,6 +210,107 @@ def test_structured_root_keeps_complete_plan_and_versions_user_amendments(
         expected_sha256=str(amended["sha256"]),
     )
     assert accepted["overall_acceptance_status"] == "accepted"
+    assert accepted["overall_acceptance_plan_version"] == 2
+
+
+def test_incremental_amendment_appends_the_exact_change_and_resets_acceptance(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    created = create_root_anchor(
+        repo,
+        root_id="root-20260912000000-incremental",
+        purpose="preserve incremental user words",
+        target="append one confirmed correction",
+        base_ref="main",
+        base_head=repo.head(repo.root),
+        scope="root amendment only",
+        acceptance="every amendment is versioned and checked again",
+        confirmed_plan="# V1\n\nKeep this text.",
+        plan_source="user confirmed v1",
+        request_id="incremental-root-test",
+    )
+    accepted = record_root_acceptance(
+        repo,
+        root_id=str(created["root_id"]),
+        status="accepted",
+        evidence="V1 was checked",
+        expected_sha256=str(created["sha256"]),
+    )
+    exact_change = "用户原文第一行。\n\n```text\n  保留缩进和代码。\n```\n"
+    amended = amend_root_anchor(
+        repo,
+        root_id=str(created["root_id"]),
+        confirmed_plan=None,
+        change_text=exact_change,
+        source="user supplied a local correction",
+        summary="append the exact correction",
+        expected_sha256=str(accepted["sha256"]),
+    )
+
+    assert amended["plan_version"] == 2
+    assert "# V1\n\nKeep this text." in str(amended["confirmed_plan"])
+    assert exact_change.rstrip("\n") in str(amended["confirmed_plan"])
+    assert amended["overall_acceptance_status"] == "pending"
+    assert amended["overall_acceptance_plan_version"] is None
+    assert "Version 2: append the exact correction" in str(amended["content"])
+
+
+def test_generic_structured_update_resets_acceptance_and_cannot_grant_it(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    created = create_root_anchor(
+        repo,
+        root_id="root-20260912000000-generic-reset",
+        purpose="reset acceptance on a generic plan update",
+        target="protect the current plan version",
+        base_ref="main",
+        base_head=repo.head(repo.root),
+        scope="structured root write path",
+        acceptance="only accept records a checked outcome",
+        confirmed_plan="# V1\n",
+        plan_source="user confirmed v1",
+        request_id="generic-reset-root-test",
+    )
+    accepted = record_root_acceptance(
+        repo,
+        root_id=str(created["root_id"]),
+        status="accepted",
+        evidence="V1 was checked",
+        expected_sha256=str(created["sha256"]),
+    )
+    direct_outcome = str(accepted["content"]).replace(
+        "- Status: accepted", "- Status: cancelled", 1
+    )
+    update = git_repo / "generic-root-update.md"
+    update.write_text(direct_outcome, encoding="utf-8", newline="\n")
+    with pytest.raises(SoloAIError, match="Only root-anchor accept"):
+        update_root_anchor(
+            repo,
+            root_id=str(created["root_id"]),
+            input_path=update,
+            expected_sha256=str(accepted["sha256"]),
+        )
+
+    next_plan = direct_outcome.replace("- Plan version: 1", "- Plan version: 2", 1)
+    next_plan = next_plan.replace("# V1", "# V2", 1)
+    next_plan = next_plan.replace(
+        "<!-- dww-user-changes:end -->",
+        "- Version 2: generic update. Source: user confirmed it\n"
+        "<!-- dww-user-changes:end -->",
+        1,
+    )
+    update.write_text(next_plan, encoding="utf-8", newline="\n")
+    updated = update_root_anchor(
+        repo,
+        root_id=str(created["root_id"]),
+        input_path=update,
+        expected_sha256=str(accepted["sha256"]),
+    )
+    assert updated["plan_version"] == 2
+    assert updated["overall_acceptance_status"] == "pending"
+    assert updated["overall_acceptance_plan_version"] is None
 
 
 def test_large_structured_root_keeps_full_history_for_amend_and_generic_update(
@@ -248,6 +350,7 @@ def test_large_structured_root_keeps_full_history_for_amend_and_generic_update(
         repo,
         root_id=str(created["root_id"]),
         confirmed_plan=amended_plan,
+        change_text=None,
         source="user changed the confirmed plan",
         summary="replace the effective plan",
         expected_sha256=str(progressed["sha256"]),
@@ -313,6 +416,7 @@ def test_deleting_a_root_removes_its_complete_history(git_repo: Path) -> None:
         repo,
         root_id=str(created["root_id"]),
         confirmed_plan="# V2\n",
+        change_text=None,
         source="user changed it",
         summary="advance the plan",
         expected_sha256=str(created["sha256"]),
@@ -428,6 +532,24 @@ def test_cli_exposes_root_anchor_and_child_binding() -> None:
             "root-1",
         ]
     )
+    amendment = parser.parse_args(
+        [
+            "--repo",
+            ".",
+            "root-anchor",
+            "amend",
+            "--root",
+            "root-1",
+            "--change-file",
+            ".tmp\\user-change.md",
+            "--source",
+            "user confirmed the correction",
+            "--summary",
+            "append the exact correction",
+            "--expected-sha256",
+            "a" * 64,
+        ]
+    )
 
     assert create.root_anchor_command == "create"
     assert create.plan_source == "user confirmed it"
@@ -437,3 +559,5 @@ def test_cli_exposes_root_anchor_and_child_binding() -> None:
     assert root_show.version == 2
     assert root_show.content is True
     assert bind.anchor_command == "bind-root"
+    assert amendment.plan_file is None
+    assert str(amendment.change_file).endswith("user-change.md")

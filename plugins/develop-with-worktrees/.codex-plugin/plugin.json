@@ -1,7 +1,7 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.5.0-beta.1+codex.20260913090000",
+  "version": "0.5.0-beta.1+codex.20260914090000",
   "description": "A host-neutral Git safety lifecycle for isolated worktrees, task anchors, verified candidates, and safe candidate-first integration.",
   "skills": "./skills/",
   "author": {
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Develop with Worktrees",
     "shortDescription": "Safe worktrees and automatic verified candidate batches.",
-    "longDescription": "Route repository lifecycle ownership, isolate modifying tasks, keep a local task anchor, validate exact candidates, and integrate locally without remote side effects. New repositories automatically freeze each full candidate batch; a smaller exact tail freezes only after its persisted producer lane stays quiet or after an explicit user, deployment, or dependency request. Native host task/subagent tools own task orchestration, and Codex hooks remain optional hardening.",
+    "longDescription": "Plan repository changes without overdesign, route lifecycle ownership, isolate modifying tasks, keep a local task anchor, validate exact candidates, and carry local delivery through integration without remote side effects. New repositories automatically freeze each full candidate batch; a smaller exact tail freezes only when the host explicitly ends a round or requests integration. Native host task/subagent tools own task orchestration, and Codex hooks remain optional hardening.",
     "developerName": "develop-with-worktrees contributors",
     "category": "developer-tools",
     "capabilities": [
@@ -18,15 +18,16 @@
       "Exact locally approved mature-workflow delegation",
       "First-class local task anchors",
       "Bounded immutable candidate pool",
-      "Automatic full batches and exact quiet or explicit tails",
+      "Automatic full batches and exact explicit tails",
+      "Conservative validation-policy onboarding",
       "Session-bound one-task direct-development choice",
       "Local validation and integration gates",
       "Safe local lifecycle cleanup",
       "Optional Codex write guard"
     ],
     "defaultPrompt": [
-      "Use $develop-with-worktrees to route and safely complete this Git change.",
-      "Use $develop-with-worktrees to publish verified candidates, auto-integrate full batches, and close the exact final tail."
+      "Use $develop-with-worktrees to plan, route, and safely complete this Git change.",
+      "Use $develop-with-worktrees to integrate verified candidates and close the exact final tail."
     ]
   },
   "license": "MIT",

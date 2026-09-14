@@ -37,7 +37,15 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     shutil.copy2(marketplace_source, marketplace_dir / "marketplace.json")
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
-    environment = {**os.environ, "CODEX_HOME": str(codex_home)}
+    local_app_data = tmp_path / "local-app-data"
+    local_app_data.mkdir()
+    environment = {
+        **os.environ,
+        "CODEX_HOME": str(codex_home),
+        # 安装后的 `version` 会读取机器验证队列。真实安装测试必须隔离该
+        # 机器级状态，避免访问或污染运行测试的用户配置目录。
+        "LOCALAPPDATA": str(local_app_data),
+    }
 
     # The desktop AppX executable may reject direct child-process launching on
     # Windows; the npm command shim is the portable CLI entry point here.
@@ -157,14 +165,89 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert version_payload["plugin_version"] == expected_version
     assert version_payload["verification_schema"] == 3
     assert version_payload["state_schema"] == STATE_SCHEMA
-    started = run_runner("start", "--name", "installed artifact smoke")
+    root_plan = smoke_repo / "installed-root-plan.md"
+    root_plan.write_text("# Installed plan V1\n", encoding="utf-8")
+    created_root = run_runner(
+        "--json",
+        "root-anchor",
+        "create",
+        "--purpose",
+        "exercise the installed structured root lifecycle",
+        "--target",
+        "verify an installed runner appends and reviews a root plan",
+        "--scope",
+        "temporary installation smoke repository only",
+        "--acceptance",
+        "the installed runner publishes and closes against the current plan version",
+        "--plan-file",
+        str(root_plan),
+        "--plan-source",
+        "installed test confirmed v1",
+        "--request-id",
+        "installed-runner-root-smoke",
+    )
+    assert created_root.returncode == 0, created_root.stderr
+    root_id = json.loads(created_root.stdout)["result"]["root_id"]
+    root_plan.unlink()
+    started = run_runner(
+        "start", "--name", "installed artifact smoke", "--root-anchor", root_id
+    )
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
     task_id = values["Task"]
     lease = values["Lease"]
     worktree = Path(values["Worktree"])
+    root_change = smoke_repo / "installed-root-change.md"
+    root_change.write_text("Installed V2 exact correction.\n", encoding="utf-8")
+    amended_root = run_runner(
+        "--json",
+        "root-anchor",
+        "amend",
+        "--root",
+        root_id,
+        "--change-file",
+        str(root_change),
+        "--source",
+        "installed test confirmed v2",
+        "--summary",
+        "append the installed exact correction",
+        "--expected-sha256",
+        json.loads(created_root.stdout)["result"]["sha256"],
+    )
+    assert amended_root.returncode == 0, amended_root.stderr
+    root_change.unlink()
+    amended_payload = json.loads(amended_root.stdout)["result"]
+    assert "Installed V2 exact correction." in amended_payload["confirmed_plan"]
+    root_context = run_runner(
+        "--json",
+        "anchor",
+        "show",
+        "--task",
+        task_id,
+        "--with-root",
+        "--content",
+        "--root-content",
+        cwd=worktree,
+    )
+    assert root_context.returncode == 0, root_context.stderr
+    root_payload = json.loads(root_context.stdout)["result"]["root_anchor"]
+    acknowledged = run_runner(
+        "--json",
+        "anchor",
+        "acknowledge-root",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--root-version",
+        str(root_payload["plan_version"]),
+        "--root-sha256",
+        root_payload["sha256"],
+        cwd=worktree,
+    )
+    assert acknowledged.returncode == 0, acknowledged.stderr
     shown_anchor = run_runner(
-        "--json", "anchor", "show", "--task", task_id, cwd=worktree
+        "--json", "anchor", "show", "--task", task_id, "--content", cwd=worktree
     )
     assert shown_anchor.returncode == 0, shown_anchor.stderr
     shown_anchor_payload = json.loads(shown_anchor.stdout)["result"]
@@ -205,7 +288,7 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert json.loads(updated_anchor.stdout)["result"]["changed"] is True
     anchor_input.unlink()
     refreshed_anchor = run_runner(
-        "--json", "anchor", "show", "--task", task_id, cwd=worktree
+        "--json", "anchor", "show", "--task", task_id, "--content", cwd=worktree
     )
     assert refreshed_anchor.returncode == 0, refreshed_anchor.stderr
     assert json.loads(refreshed_anchor.stdout)["result"]["content"] == anchor_content
@@ -248,6 +331,30 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert tail.returncode == 0, tail.stderr
     assert json.loads(tail.stdout)["result"]["status"] == "completed"
     assert (smoke_repo / "smoke.txt").exists()
+    root_evidence = smoke_repo / "installed-root-evidence.md"
+    root_evidence.write_text(
+        "Installed V2 was checked after local delivery.\n", encoding="utf-8"
+    )
+    current_root = run_runner("--json", "root-anchor", "show", "--root", root_id)
+    assert current_root.returncode == 0, current_root.stderr
+    accepted_root = run_runner(
+        "root-anchor",
+        "accept",
+        "--root",
+        root_id,
+        "--status",
+        "accepted",
+        "--evidence-file",
+        str(root_evidence),
+        "--expected-sha256",
+        json.loads(current_root.stdout)["result"]["sha256"],
+    )
+    assert accepted_root.returncode == 0, accepted_root.stderr
+    root_evidence.unlink()
+    closed_root = run_runner(
+        "root-anchor", "close", "--root", root_id, "--confirm", root_id
+    )
+    assert closed_root.returncode == 0, closed_root.stderr
     in_place = run_runner(
         "start",
         "--name",

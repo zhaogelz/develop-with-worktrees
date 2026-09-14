@@ -8,9 +8,14 @@ from solo_ai.config import (
     load_repo_config,
     load_verification_config,
     managed_block,
+    managed_agents_status,
+    read_verification_config_file,
+    remove_managed_agents_block,
+    render_agents,
     render_repo_config,
     render_verification_config,
 )
+from solo_ai.config import _legacy_managed_block
 from solo_ai.repo import GitRepo
 from solo_ai.util import SoloAIError
 
@@ -31,6 +36,86 @@ def test_renders_safe_default_reuse_policy() -> None:
     assert 'external_state = "unknown"' in rendered
     assert "{port}" in render_repo_config()
     assert "cleanup = { owned_paths = [] }" in render_repo_config()
+
+
+def test_discovery_fallback_renders_a_conservative_integration_full_profile() -> None:
+    rendered = render_verification_config(
+        [CommandSpec(("uv", "run", "pytest"))],
+        static_only=False,
+        discovery_fallback=True,
+    )
+
+    assert 'level = "full"' in rendered
+    assert 'full_scope = "integration"' in rendered
+    assert "cross_task_reuse = false" in rendered
+    assert 'external_state = "unknown"' in rendered
+
+
+def test_reviewed_verification_file_uses_the_tracked_policy_schema(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "reviewed.toml"
+    source.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "reviewed-full"
+paths = ["src/**"]
+input_paths = ["src/**", "uv.lock"]
+input_closure = "declared"
+cross_task_reuse = false
+external_state = "unknown"
+environment = []
+timeout_seconds = 120
+resource_class = "normal"
+level = "full"
+full_scope = "integration"
+commands = [["uv", "run", "pytest"]]
+""",
+        encoding="utf-8",
+    )
+
+    resolved, text, loaded = read_verification_config_file(source)
+
+    assert resolved == source.resolve()
+    assert text == source.read_text(encoding="utf-8")
+    assert loaded.profiles[0].profile_id == "reviewed-full"
+    assert loaded.profiles[0].level == "full"
+
+
+def test_known_legacy_managed_block_can_be_upgraded_or_removed_without_touching_user_text() -> (
+    None
+):
+    existing = "# User instructions\n\n" + _legacy_managed_block() + "\nKeep this.\n"
+
+    assert managed_agents_status(existing) == "known-legacy-0.5.0-beta.1"
+    upgraded = render_agents(existing)
+    assert managed_agents_status(upgraded) == "current"
+    assert upgraded.startswith("# User instructions\n\n")
+    assert upgraded.endswith("\nKeep this.\n")
+    assert (
+        remove_managed_agents_block(upgraded) == "# User instructions\n\nKeep this.\n"
+    )
+
+
+def test_user_edited_managed_block_is_not_overwritten() -> None:
+    edited = _legacy_managed_block().replace(
+        "Read-only analysis does not claim a slot.",
+        "Read-only analysis is handled by our team.",
+    )
+
+    with pytest.raises(SoloAIError, match="user changes or an unknown version"):
+        render_agents(edited)
+
+
+def test_repository_managed_block_stays_in_sync_with_the_installer_template() -> None:
+    repository_agents = Path(__file__).parents[2] / "AGENTS.md"
+
+    assert (
+        managed_agents_status(repository_agents.read_text(encoding="utf-8"))
+        == "current"
+    )
 
 
 @pytest.mark.parametrize(("port_base", "valid"), [(62336, True), (62337, False)])

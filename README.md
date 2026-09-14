@@ -1,6 +1,6 @@
 # Develop with Worktrees
 
-When several AI tasks modify one Git repository, they can overwrite each other, commit from the wrong directory, or reach the main branch without combined validation. DWW gives each modifying task an isolated worktree and local task anchor, accepts only exact reviewed paths, and promotes verified results safely. Once a user has asked for work to proceed, the agent normally carries out the in-scope edits, checks, and local delivery without repeated confirmation; it asks only when a new decision or authority is needed.
+When several AI tasks modify one Git repository, they can overwrite each other, commit from the wrong directory, or reach the main branch without combined validation. DWW gives each modifying task an isolated worktree and local task anchor, accepts only exact reviewed paths, and promotes verified results safely. Once a user has asked for work to proceed, the host normally carries out the in-scope edits, checks, and local delivery without repeated confirmation; it stays responsible until the result reaches the base branch or a recorded failure needs a real decision.
 
 ## What it gives you
 
@@ -10,7 +10,7 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 - Exact-path commits and immutable source candidates.
 - Automatic integration whenever three eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
-- After publishing a candidate, the developer task may end its round. The host that freezes its batch follows integration and can return an attributed merge conflict to the original task or explicitly hand it to a replacement.
+- Publishing a candidate can end one developer task's coding round, but not the requested delivery. The host that freezes its batch follows integration, investigates a recorded failure, and can return an attributed merge conflict to the original task or explicitly hand it to a replacement.
 - Completed checks are saved individually. A later batch reuses a check when its declared inputs, environment, and tool versions still match; mutable environments and required build artifacts are never replaced by an old success report.
 - Batch Full runs only the repository-declared checks affected by the combined changes. Broad regression and stress checks are manual diagnostic tools, not periodic or release gates.
 
@@ -20,13 +20,13 @@ DWW is no longer a multi-AI task command center. The host's native task system d
 
 1. When you have confirmed a complete plan, the host first saves it in one local objective anchor. `Start` then creates the exact task anchor and isolated worktree, and lets an optional project Runtime Adapter establish project runtime identity before returning it as active.
 2. The agent edits only there, commits exact paths, and runs development checks when they help it work safely.
-3. `Finish` publishes the exact source candidate and releases the task worktree without moving the base or requiring a separate project test gate.
+3. `Finish` publishes the exact source candidate and releases the task worktree without moving the base or requiring a separate project test gate; it is not delivery by itself.
 4. Every three candidates, DWW freezes the oldest eligible three and composes them in an integration worktree. It then runs the affected combined checks, reusing valid individual results.
 5. With fewer than three candidates, the host ends the round or requests immediate integration with `batch reconcile --force --cause user`; DWW freezes that exact pending tail.
 
 Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state. It never guesses that an idle host means the round is over.
 
-Publishing a candidate ends the developer’s current round. The host that freezes its batch continues as the coordinator until it integrates or records a failure. For a conflict DWW can attribute to one candidate, it records a single repair handoff: the coordinator sends the returned native-task message, and the original task confirms or a replacement explicitly takes it over. DWW never guesses task identities or sends host messages itself.
+Publishing a candidate ends the developer’s current coding round. The host that freezes its batch continues as the coordinator until it integrates or records a failure, then follows a deterministic repair or asks only for a decision that the project rules cannot settle. For a conflict DWW can attribute to one candidate, it records a single repair handoff: the coordinator sends the returned native-task message, and the original task confirms or a replacement explicitly takes it over. DWW never guesses task identities or sends host messages itself.
 
 Releasing a task keeps its dependency caches, including normal package links. New repositories also reuse one integration workspace: ordinary successful or failed batches return it without deleting or hashing the entire dependency tree. Each fresh Full still recreates required runtime effects. Physical disk cleanup is separate maintenance; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
 

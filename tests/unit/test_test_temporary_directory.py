@@ -13,6 +13,7 @@ from conftest import (
     _default_pytest_temp_root,
     _is_within,
     _managed_worktree_root,
+    _pytest_machine_state_root,
     _pytest_fallback_temp_root,
 )
 
@@ -59,6 +60,12 @@ def test_default_tmp_path_is_outside_managed_worktrees(tmp_path: Path) -> None:
     assert not _is_within(tmp_path, _managed_worktree_root())
 
 
+def test_machine_state_fallback_is_outside_managed_worktrees() -> None:
+    root = _pytest_machine_state_root()
+    assert not _is_within(root, _managed_worktree_root())
+    assert root.parent == _pytest_fallback_temp_root().parent
+
+
 def test_explicit_managed_basetemp_is_rejected_before_pytest_can_clean_it(
     tmp_path: Path,
 ) -> None:
@@ -100,4 +107,18 @@ def test_configure_uses_fallback_without_changing_a_safe_explicit_basetemp(
 
     _configure_pytest_temp_root(tmp_path)
 
+    assert os.environ.get("PYTEST_DEBUG_TEMPROOT") is None
+
+
+def test_configure_uses_short_direct_basetemp_for_the_primary_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import conftest
+
+    fallback = _pytest_fallback_temp_root()
+    monkeypatch.delenv("PYTEST_DEBUG_TEMPROOT", raising=False)
+    monkeypatch.setattr(conftest, "_default_pytest_temp_root", lambda: fallback)
+    monkeypatch.setattr(conftest, "_is_usable_pytest_temp_root", lambda root: True)
+
+    assert _configure_pytest_temp_root(None) == fallback / "p"
     assert os.environ.get("PYTEST_DEBUG_TEMPROOT") is None

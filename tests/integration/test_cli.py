@@ -488,6 +488,148 @@ def test_cli_init_only_shows_plan_until_acceptance(git_repo: Path) -> None:
     assert not (git_repo / ".solo-ai").exists()
 
 
+def test_cli_init_accepts_a_reviewed_verification_file(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+    reviewed = tmp_path / "reviewed-verification.toml"
+    reviewed.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "reviewed-full"
+paths = ["**"]
+input_paths = ["**"]
+input_closure = "declared"
+cross_task_reuse = false
+external_state = "unknown"
+environment = []
+timeout_seconds = 120
+resource_class = "normal"
+level = "full"
+full_scope = "integration"
+commands = [["git", "diff", "--check", "main...HEAD"]]
+""",
+        encoding="utf-8",
+    )
+
+    preview = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "init",
+            "--verification-file",
+            str(reviewed),
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert preview.returncode == 0, preview.stderr
+    plan = json.loads(preview.stdout)["result"]["plan"]
+    assert plan["validation_source"].startswith("reviewed verification file:")
+    assert plan["profiles"][0]["id"] == "reviewed-full"
+    assert plan["profiles"][0]["level"] == "full"
+
+    accepted = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "init",
+            "--accept",
+            "--verification-file",
+            str(reviewed),
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert json.loads(accepted.stdout)["result"]["decision"] == "adopted"
+    assert (git_repo / ".solo-ai" / "verification.toml").read_text(
+        encoding="utf-8"
+    ) == reviewed.read_text(encoding="utf-8")
+
+
+def test_cli_choose_isolated_accepts_a_reviewed_verification_file(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+    reviewed = tmp_path / "reviewed-verification.toml"
+    reviewed.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "reviewed-ready"
+paths = ["**"]
+input_paths = ["**"]
+input_closure = "declared"
+cross_task_reuse = false
+external_state = "unknown"
+environment = []
+timeout_seconds = 120
+resource_class = "normal"
+level = "ready"
+commands = [["git", "diff", "--check", "main...HEAD"]]
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "choose",
+            "--mode",
+            "isolated",
+            "--verification-file",
+            str(reviewed),
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["result"]["decision"] == "adopted"
+    assert (git_repo / ".solo-ai" / "verification.toml").read_text(
+        encoding="utf-8"
+    ) == reviewed.read_text(encoding="utf-8")
+
+
 def test_cli_static_only_first_shows_a_plan(git_repo: Path) -> None:
     runner = (
         Path(__file__).parents[2]

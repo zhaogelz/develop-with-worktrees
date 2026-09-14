@@ -26,6 +26,7 @@ from solo_ai.candidate_batches import (
 )
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
+    acknowledge_root_plan,
     abandon,
     adopt_task_anchor,
     approve,
@@ -35,7 +36,9 @@ from solo_ai.lifecycle import (
     finish,
     initialize,
     ready,
+    record_root_task_acceptance,
     recover,
+    show_root_task_anchor,
     show_task_anchor,
     start,
 )
@@ -354,6 +357,83 @@ def test_root_close_requires_a_local_published_candidate_to_finish_delivery(
         CandidateBatchStore(repo).candidate(candidate["candidate_id"])["status"]
         == "integrated"
     )
+
+
+def test_structured_root_requires_current_review_before_finishing_a_candidate(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    plan = git_repo / "candidate-review-plan.md"
+    plan.write_text("# V1\n", encoding="utf-8")
+    root = create_root_task_anchor(
+        repo,
+        purpose="review before candidate publication",
+        target="block stale structured root context at Finish",
+        scope="one candidate only",
+        acceptance="candidate publication uses the current confirmed plan version",
+        plan_input_path=plan,
+        plan_source="user confirmed v1",
+        request_id="candidate-review-root-test",
+    )
+    plan.unlink()
+    task = start(repo, name="stale-root candidate", root_anchor_id=root["root_id"])
+    first = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    acknowledge_root_plan(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_version=1,
+        root_sha256=first["root_anchor"]["sha256"],
+    )
+    worktree = Path(task["worktree"])
+    (worktree / "candidate-review.txt").write_text("candidate\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: stage candidate after v1 review",
+        paths=["candidate-review.txt"],
+    )
+    change = git_repo / "candidate-review-change.md"
+    change.write_text("V2 用户修订。\n", encoding="utf-8")
+    lifecycle_module.amend_root_task_anchor(
+        repo,
+        root_id=root["root_id"],
+        plan_input_path=None,
+        change_input_path=change,
+        source="user confirmed v2",
+        summary="append v2 before candidate publication",
+        expected_sha256=first["root_anchor"]["sha256"],
+    )
+    change.unlink()
+    with pytest.raises(SoloAIError, match="Automatically recover"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+
+    second = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    acknowledge_root_plan(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_version=2,
+        root_sha256=second["root_anchor"]["sha256"],
+    )
+    candidate = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert candidate["status"] == "candidate-published"
+    withdraw_candidate(repo, candidate_id=candidate["candidate_id"])
+
+    evidence = git_repo / "candidate-review-evidence.md"
+    evidence.write_text("V2 候选已撤回并按计划验收。", encoding="utf-8")
+    current = show_root_task_anchor(repo, root_id=root["root_id"])
+    record_root_task_acceptance(
+        repo,
+        root_id=root["root_id"],
+        status="accepted",
+        evidence_input_path=evidence,
+        expected_sha256=current["sha256"],
+    )
+    assert close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
 
 
 def test_root_close_requires_external_published_candidate_to_be_withdrawn(

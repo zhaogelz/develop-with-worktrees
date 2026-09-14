@@ -26,6 +26,7 @@ from .config import (
     CommandSpec,
     load_repo_config,
     load_verification_config,
+    managed_agents_status,
 )
 from .delegated import (
     ALLOWED_CAPABILITIES,
@@ -138,12 +139,19 @@ def _parser() -> argparse.ArgumentParser:
         "init", help="show or accept the one-time repository adoption plan"
     )
     init.add_argument("--slots", type=int, default=3)
-    init.add_argument(
+    init_validation = init.add_mutually_exclusive_group()
+    init_validation.add_argument(
         "--verify",
         action="append",
         default=None,
         metavar="JSON_ARGV",
         help='explicit command argv, e.g. --verify \'["uv","run","pytest"]\'',
+    )
+    init_validation.add_argument(
+        "--verification-file",
+        type=Path,
+        metavar="PATH",
+        help="reviewed schema-3 verification.toml to copy into the new repository",
     )
     init.add_argument("--accept", action="store_true")
     init.add_argument("--accept-static-only", action="store_true")
@@ -163,12 +171,19 @@ def _parser() -> argparse.ArgumentParser:
         choices=["isolated", "current-task", "current-repository"],
     )
     choose_parser.add_argument("--slots", type=int, default=3)
-    choose_parser.add_argument(
+    choose_validation = choose_parser.add_mutually_exclusive_group()
+    choose_validation.add_argument(
         "--verify",
         action="append",
         default=None,
         metavar="JSON_ARGV",
         help="advanced explicit command argv for isolated setup",
+    )
+    choose_validation.add_argument(
+        "--verification-file",
+        type=Path,
+        metavar="PATH",
+        help="reviewed schema-3 verification.toml to copy for isolated setup",
     )
     choose_parser.add_argument(
         "--session",
@@ -446,10 +461,20 @@ def _parser() -> argparse.ArgumentParser:
     root_update.add_argument("--expected-sha256", required=True)
     root_amend = root_anchor_sub.add_parser(
         "amend",
-        help="replace the effective plan after an explicit user-confirmed change",
+        help="replace or append the effective plan after an explicit user-confirmed change",
     )
     root_amend.add_argument("--root", required=True)
-    root_amend.add_argument("--plan-file", type=Path, required=True)
+    root_amend_input = root_amend.add_mutually_exclusive_group(required=True)
+    root_amend_input.add_argument(
+        "--plan-file",
+        type=Path,
+        help="UTF-8 file replacing the complete effective plan",
+    )
+    root_amend_input.add_argument(
+        "--change-file",
+        type=Path,
+        help="UTF-8 file appended verbatim to the current effective plan",
+    )
     root_amend.add_argument("--source", required=True)
     root_amend.add_argument("--summary", required=True)
     root_amend.add_argument("--expected-sha256", required=True)
@@ -979,6 +1004,20 @@ def _doctor(repo: GitRepo) -> dict[str, Any]:
             repo.local_dir / "approvals.json", {"accepted": {}}
         ).get("accepted", {})
         report["validation_plan"] = plan
+        agents = repo.root / "AGENTS.md"
+        try:
+            report["managed_rule_block"] = {
+                "status": managed_agents_status(
+                    agents.read_text(encoding="utf-8") if agents.exists() else ""
+                ),
+                "sync": "A normal isolated task may replace only a known legacy block with the current managed block; user-edited or unknown text stays protected.",
+            }
+        except SoloAIError as exc:
+            report["managed_rule_block"] = {
+                "status": "unknown-or-user-edited",
+                "detail": str(exc),
+                "sync": "Inspect the block and keep user rules intact; DWW will not overwrite an unknown managed block.",
+            }
     report["deinit_ready"] = (
         report["mode"] == "managed"
         and report["primary_clean"]
@@ -1598,6 +1637,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             repo,
             slots=args.slots,
             commands=_parse_commands(args.verify),
+            verification_file=args.verification_file,
             accept=args.accept,
             accept_static_only=args.accept_static_only,
             decline=args.decline,
@@ -1608,6 +1648,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             mode=args.mode,
             slots=args.slots,
             commands=_parse_commands(args.verify),
+            verification_file=args.verification_file,
             session_id=args.session,
             delegation_code=args.delegate,
         )
@@ -1681,6 +1722,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 repo,
                 root_id=args.root,
                 plan_input_path=args.plan_file,
+                change_input_path=args.change_file,
                 source=args.source,
                 summary=args.summary,
                 expected_sha256=args.expected_sha256,
@@ -2088,14 +2130,17 @@ def _human(command: str, result: dict[str, Any]) -> str:
             )
         if result.get("outcome") == "candidate_published":
             next_step = (
-                "It will join the next full automatic batch. To integrate a smaller tail, "
-                "explicitly end the round with batch reconcile --force --cause user."
+                "It will join the next full automatic batch. Keep ownership through "
+                "integration; to integrate a smaller tail, explicitly end the round "
+                "with batch reconcile --force --cause user."
                 if result.get("seal_policy") == "auto_full"
                 and result.get("tail_policy") == "explicit"
-                else "It will join the next full automatic batch. A smaller tail follows "
-                "the repository's retained compatibility policy."
+                else "It will join the next full automatic batch. Keep ownership through "
+                "integration; a smaller tail follows the repository's retained "
+                "compatibility policy."
                 if result.get("seal_policy") == "auto_full"
-                else "This legacy policy requires an explicit exact candidate batch."
+                else "Keep ownership through integration; this legacy policy requires an "
+                "explicit exact candidate batch."
             )
             return (
                 f"Published {result['candidate_id']} at {result['candidate_head']}.\n"

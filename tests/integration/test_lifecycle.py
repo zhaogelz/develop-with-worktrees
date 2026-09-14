@@ -22,7 +22,12 @@ from solo_ai import proof as proof_module
 from solo_ai import state as state_module
 from solo_ai.cli import _prune
 from solo_ai.candidate_batches import seal_batch
-from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
+from solo_ai.config import (
+    CommandSpec,
+    _legacy_managed_block,
+    load_repo_config,
+    load_verification_config,
+)
 from solo_ai.lifecycle import (
     acknowledge_root_plan,
     amend_root_task_anchor,
@@ -92,6 +97,28 @@ def initialized(path: Path) -> GitRepo:
     git(path, "commit", "-m", "test: use legacy direct lifecycle")
     approve(repo, load_verification_config(repo))
     return repo
+
+
+def test_initialize_discovery_creates_a_conservative_integration_full_profile(
+    git_repo: Path,
+) -> None:
+    (git_repo / "pyproject.toml").write_text(
+        '[project]\nname = "discovery"\n', encoding="utf-8"
+    )
+    (git_repo / "tests").mkdir()
+    git(git_repo, "add", "pyproject.toml", "tests")
+    git(git_repo, "commit", "-m", "test: add discovered validation marker")
+
+    repo = GitRepo(git_repo)
+    result = initialize(
+        repo, slots=1, commands=None, accept=True, accept_static_only=False
+    )
+    verification = load_verification_config(repo)
+
+    assert result["decision"] == "adopted"
+    assert verification.profiles[0].level == "full"
+    assert verification.profiles[0].full_scope == "integration"
+    assert verification.profiles[0].cross_task_reuse is False
 
 
 def test_root_anchor_binds_child_task_and_closes_only_after_terminal_child(
@@ -262,6 +289,7 @@ def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
         repo,
         root_id=root["root_id"],
         plan_input_path=plan,
+        change_input_path=None,
         source="user explicitly changed the plan",
         summary="add a recoverable amendment",
         expected_sha256=reviewed["root_anchor"]["sha256"],
@@ -296,6 +324,171 @@ def test_confirmed_plan_root_is_idempotent_reviewable_and_needs_acceptance(
         repo, root_id=root["root_id"], confirm=root["root_id"]
     ) == {"root_id": root["root_id"], "status": "closed"}
     assert not history_directory.exists()
+
+
+def test_structured_root_review_recovers_automatically_before_commit_and_ready(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    plan = git_repo / "review-gated-plan.md"
+    plan.write_text("# V1\n\n- keep the exact objective\n", encoding="utf-8")
+    root = create_root_task_anchor(
+        repo,
+        purpose="recover the current structured objective",
+        target="gate only irreversible lifecycle actions",
+        scope="one child task and one plan amendment",
+        acceptance="the current root version is recorded before Commit and Ready",
+        plan_input_path=plan,
+        plan_source="user confirmed v1",
+        request_id="review-gate-root-test",
+    )
+    plan.unlink()
+    task = start(repo, name="review-gated child", root_anchor_id=root["root_id"])
+    worktree = Path(task["worktree"])
+    (worktree / "review-gated.txt").write_text("content\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="Automatically recover"):
+        commit_task(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            message="test: require current root review",
+            paths=["review-gated.txt"],
+        )
+    first_view = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    acknowledge_root_plan(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_version=1,
+        root_sha256=first_view["root_anchor"]["sha256"],
+    )
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: record reviewed root version",
+        paths=["review-gated.txt"],
+    )
+
+    change = git_repo / "review-gated-change.md"
+    change.write_text("用户确认的 V2 原文。\n", encoding="utf-8")
+    amended = amend_root_task_anchor(
+        repo,
+        root_id=root["root_id"],
+        plan_input_path=None,
+        change_input_path=change,
+        source="user supplied v2",
+        summary="append the exact v2 correction",
+        expected_sha256=first_view["root_anchor"]["sha256"],
+    )
+    change.unlink()
+    assert "用户确认的 V2 原文。" in amended["confirmed_plan"]
+
+    with pytest.raises(SoloAIError, match="Automatically recover"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+    second_view = show_task_anchor(repo, task_id=task["id"], with_root=True)
+    acknowledge_root_plan(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_version=2,
+        root_sha256=second_view["root_anchor"]["sha256"],
+    )
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    assert (
+        finish(repo, task_id=task["id"], lease=task["lease"])["status"] == "completed"
+    )
+
+    evidence = git_repo / "review-gated-evidence.md"
+    evidence.write_text("V2 已完成并按当前版本验收。", encoding="utf-8")
+    current_root = show_root_task_anchor(repo, root_id=root["root_id"])
+    accepted = record_root_task_acceptance(
+        repo,
+        root_id=root["root_id"],
+        status="accepted",
+        evidence_input_path=evidence,
+        expected_sha256=current_root["sha256"],
+    )
+    assert accepted["overall_acceptance_plan_version"] == 2
+    assert close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
+
+
+def test_root_reads_do_not_need_validation_plan_approval(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+
+    def unexpected_approval(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "root read or maintenance must not execute validation approval"
+        )
+
+    monkeypatch.setattr(lifecycle, "require_approval", unexpected_approval)
+    root = create_root_task_anchor(
+        repo,
+        purpose="read without running validation",
+        target="separate root context from validation execution",
+        scope="root metadata only",
+        acceptance="show and progress do not require an approval plan",
+    )
+    shown = show_root_task_anchor(repo, root_id=root["root_id"])
+    updated = lifecycle.update_root_task_progress(
+        repo,
+        root_id=root["root_id"],
+        progress="read-only and root maintenance remained independent",
+        expected_sha256=shown["sha256"],
+    )
+    assert updated["root_id"] == root["root_id"]
+
+
+def test_structured_legacy_acceptance_without_version_must_be_recorded_again(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    plan = git_repo / "legacy-acceptance-plan.md"
+    plan.write_text("# V1\n", encoding="utf-8")
+    root = create_root_task_anchor(
+        repo,
+        purpose="migrate structured acceptance evidence",
+        target="require a versioned acceptance record before close",
+        scope="root closure only",
+        acceptance="legacy structured acceptance cannot close without a current version",
+        plan_input_path=plan,
+        plan_source="user confirmed v1",
+        request_id="legacy-acceptance-version-test",
+    )
+    evidence = git_repo / "legacy-acceptance-evidence.md"
+    evidence.write_text("V1 已验收。", encoding="utf-8")
+    accepted = record_root_task_acceptance(
+        repo,
+        root_id=root["root_id"],
+        status="accepted",
+        evidence_input_path=evidence,
+        expected_sha256=root["sha256"],
+    )
+    root_path = Path(accepted["root_anchor_path"])
+    root_path.write_text(
+        str(accepted["content"]).replace("- Accepted plan version: 1\n", "", 1),
+        encoding="utf-8",
+        newline="\n",
+    )
+    with pytest.raises(SoloAIError, match="current plan version"):
+        close_root_task_anchor(repo, root_id=root["root_id"], confirm=root["root_id"])
+
+    legacy = show_root_task_anchor(repo, root_id=root["root_id"])
+    record_root_task_acceptance(
+        repo,
+        root_id=root["root_id"],
+        status="accepted",
+        evidence_input_path=evidence,
+        expected_sha256=legacy["sha256"],
+    )
+    assert close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
 
 
 def test_root_child_refuses_a_missing_root_anchor(git_repo: Path) -> None:
@@ -3447,6 +3640,41 @@ commands = [["git", "status"]]
     assert not (git_repo / ".solo-ai").exists()
     assert not (git_repo / "AGENTS.md").exists()
     assert not repo.local_dir.exists()
+
+
+def test_deinit_accepts_the_exact_known_legacy_managed_block(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    agents = git_repo / "AGENTS.md"
+    agents.write_text(_legacy_managed_block(), encoding="utf-8")
+    git(git_repo, "add", "AGENTS.md")
+    git(git_repo, "commit", "-m", "test: retain known legacy managed block")
+
+    result = deinit(
+        repo, confirm="DEINIT", message="chore: remove local worktree workflow"
+    )
+
+    assert result["status"] == "deinitialized"
+    assert not agents.exists()
+
+
+def test_deinit_preserves_a_user_edited_managed_block(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    agents = git_repo / "AGENTS.md"
+    agents.write_text(
+        agents.read_text(encoding="utf-8").replace(
+            "Read-only analysis does not claim a slot.",
+            "Read-only analysis is handled by our team.",
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "AGENTS.md")
+    git(git_repo, "commit", "-m", "test: retain user edited managed block")
+
+    with pytest.raises(SoloAIError, match="user changes or an unknown version"):
+        deinit(repo, confirm="DEINIT", message="chore: remove local worktree workflow")
+
+    assert agents.exists()
+    assert (git_repo / ".solo-ai" / "config.toml").exists()
 
 
 def test_deinit_preflights_slot_before_removing_tracked_policy(git_repo: Path) -> None:
