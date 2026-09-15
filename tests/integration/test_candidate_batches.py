@@ -282,6 +282,86 @@ def test_default_explicit_tail_freezes_only_the_current_pending_candidates(
     ]
 
 
+def test_round_complete_tail_waits_for_active_producers_and_records_its_basis(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, batch_size=3, tail_policy=None)
+    blocker = start(repo, name="remaining planned work")
+    candidate = publish(repo, name="completed planned work", relative="round.txt")
+    reason = "the coordinator has completed every planned task in this round"
+
+    with pytest.raises(SoloAIError, match="active producers"):
+        reconcile_batches(
+            repo,
+            force=True,
+            cause="round-complete",
+            reason=reason,
+        )
+    with pytest.raises(SoloAIError, match="active producers"):
+        seal_batch(
+            repo,
+            candidate_ids=[candidate["candidate_id"]],
+            cause="round-complete",
+            reason=reason,
+            require_tail_reason=True,
+        )
+
+    abandon(
+        repo,
+        task_id=blocker["id"],
+        lease=blocker["lease"],
+        confirm=blocker["id"],
+    )
+    completed = reconcile_batches(
+        repo,
+        force=True,
+        cause="round-complete",
+        reason=reason,
+    )
+
+    assert completed["status"] == "completed"
+    assert completed["batch"]["tail_request"] == {
+        "cause": "round-complete",
+        "reason": reason,
+    }
+
+
+def test_exact_tail_requires_a_reason_and_preserves_the_first_request(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, batch_size=3, tail_policy=None)
+    candidate = publish(repo, name="explicit tail", relative="explicit-tail.txt")
+
+    with pytest.raises(SoloAIError, match="requires both cause"):
+        seal_batch(
+            repo,
+            candidate_ids=[candidate["candidate_id"]],
+            cause="user",
+            require_tail_reason=True,
+        )
+
+    first = seal_batch(
+        repo,
+        candidate_ids=[candidate["candidate_id"]],
+        cause="dependency",
+        reason="the next confirmed task needs this interface",
+        require_tail_reason=True,
+    )
+    repeated = seal_batch(
+        repo,
+        candidate_ids=[candidate["candidate_id"]],
+        cause="deploy",
+        reason="a later retry must not rewrite the original basis",
+        require_tail_reason=True,
+    )
+
+    assert repeated["id"] == first["id"]
+    assert repeated["tail_request"] == {
+        "cause": "dependency",
+        "reason": "the next confirmed task needs this interface",
+    }
+
+
 def test_candidate_handoff_records_source_and_auto_batch_coordinator(
     git_repo: Path,
 ) -> None:

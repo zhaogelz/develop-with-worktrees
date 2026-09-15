@@ -17,6 +17,7 @@ from solo_ai.config import (
 )
 from solo_ai.config import (
     _legacy_managed_block,
+    _pre_simplification_managed_block,
     _pre_refresh_root_context_managed_block,
 )
 from solo_ai.repo import GitRepo
@@ -142,6 +143,22 @@ def test_pre_refresh_root_context_managed_block_can_be_upgraded() -> None:
     assert upgraded.endswith("\nKeep this.\n")
 
 
+def test_pre_simplification_managed_block_can_be_upgraded() -> None:
+    existing = (
+        "# User instructions\n\n"
+        + _pre_simplification_managed_block()
+        + "\nKeep this.\n"
+    )
+
+    assert (
+        managed_agents_status(existing)
+        == "known-legacy-0.5.0-beta.2-pre-simplification"
+    )
+    upgraded = render_agents(existing)
+    assert managed_agents_status(upgraded) == "current"
+    assert upgraded.endswith("\nKeep this.\n")
+
+
 def test_user_edited_managed_block_is_not_overwritten() -> None:
     edited = _legacy_managed_block().replace(
         "Read-only analysis does not claim a slot.",
@@ -196,17 +213,18 @@ def test_rejects_casefold_duplicate_cleanup_paths(git_repo: Path) -> None:
 def test_managed_policy_separates_local_lifecycle_from_explicit_publish() -> None:
     policy = managed_block()
 
-    assert "The DWW lifecycle is local-only" in policy
-    assert "After a successful Finish, an explicit user request" in policy
-    assert "ordinary non-force push" in policy
-    assert "separate from DWW" in policy
-    assert "batch reconcile" in policy
-    assert "There is no candidate-age or quiet-period auto-seal" in policy
-    assert "Candidate publication is not delivery" in policy
+    assert "DWW is local-only" in policy
+    assert (
+        "do not fetch, pull, push, rebase, squash, amend, or rewrite history" in policy
+    )
+    assert "one task anchor per task" in policy
     assert "complete plan" in policy
-    assert "root-anchor accept" in policy
-    assert "finish directly from `active`" in policy
-    assert "quiet-period auto-seal" in policy
+    assert "without a content-size limit" in policy
+    assert "without a separate acknowledgement step" in policy
+    assert "round-complete" in policy
+    assert "one short reason" in policy
+    assert "heartbeat, idle time, and task counts never seal a batch" in policy
+    assert "Candidate publication is not delivery" in policy
 
 
 def test_rejects_schema_two_verification_policy(git_repo: Path) -> None:

@@ -10,6 +10,7 @@ from typing import Any
 
 from . import VERSION
 from .candidate_batches import (
+    EXPLICIT_TAIL_CAUSES,
     CandidateBatchStore,
     prepare_candidate_repair,
     reconcile_batches,
@@ -119,6 +120,18 @@ def _resolved_host_reference(args: argparse.Namespace) -> dict[str, str] | None:
 
     return resolve_host_reference(
         getattr(args, "host_kind", None), getattr(args, "host_thread", None)
+    )
+
+
+def _add_tail_request_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--cause",
+        choices=tuple(sorted(EXPLICIT_TAIL_CAUSES)),
+        help="why this smaller tail may be sealed",
+    )
+    parser.add_argument(
+        "--reason",
+        help="one-line basis for this smaller tail",
     )
 
 
@@ -556,6 +569,7 @@ def _parser() -> argparse.ArgumentParser:
         "--after-failed-batch",
         help="create one reviewed idempotent generation after this exact failed batch",
     )
+    _add_tail_request_arguments(batch_seal)
     _add_host_reference_arguments(batch_seal, role="integration batch")
     batch_reconcile = batch_sub.add_parser(
         "reconcile",
@@ -576,8 +590,13 @@ def _parser() -> argparse.ArgumentParser:
             "user",
             "deploy",
             "dependency",
+            "round-complete",
         ),
         default="heartbeat",
+    )
+    batch_reconcile.add_argument(
+        "--reason",
+        help="one-line basis for a forced smaller tail",
     )
     _add_host_reference_arguments(batch_reconcile, role="integration batch")
     batch_recover = batch_sub.add_parser(
@@ -1908,13 +1927,20 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 candidate_ids=args.candidate,
                 after_failed_batch_id=args.after_failed_batch,
                 coordinator=_resolved_host_reference(args),
+                cause=args.cause,
+                reason=args.reason,
+                require_tail_reason=True,
             )
         if args.batch_command == "reconcile":
+            if args.reason is not None and not args.force:
+                raise SoloAIError("--reason is valid only with batch reconcile --force")
             return reconcile_batches(
                 repo,
                 force=args.force,
                 cause=args.cause,
                 coordinator=_resolved_host_reference(args),
+                reason=args.reason,
+                require_tail_reason=True,
             )
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
@@ -2244,7 +2270,7 @@ def _human(command: str, result: dict[str, Any]) -> str:
             next_step = (
                 "It will join the next full automatic batch. Keep ownership through "
                 "integration; to integrate a smaller tail, explicitly end the round "
-                "with batch reconcile --force --cause user."
+                "with batch reconcile --force --cause round-complete --reason <basis>."
                 if result.get("seal_policy") == "auto_full"
                 and result.get("tail_policy") == "explicit"
                 else "It will join the next full automatic batch. Keep ownership through "

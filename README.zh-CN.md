@@ -22,7 +22,7 @@ DWW 不再是多 AI 任务指挥中心。任务怎么拆、谁先做、谁依赖
 2. AI 只在该工作树修改，用 `commit` 提交精确路径；开发中按需要运行有帮助的检查。
 3. `Finish` 固化源码候选并释放开发工作树，主线暂时不动，也不要求再过一次独立项目测试；候选本身不等于交付。
 4. 每满 3 个候选，DWW 自动冻结最早 3 个，在集成工作树组合后只运行受影响的检查，并复用仍然有效的单项结果。
-5. 不足 3 个时，由宿主明确结束本轮，或用 `batch reconcile --force --cause user` 要求立即合入；DWW 只冻结当时精确的等待候选。
+5. 不足 3 个时，由宿主用 `batch reconcile --force --cause round-complete --reason <完成依据>` 结束本轮；用户要求、部署或下游依赖需要立即合入时，分别记录 `user`、`deploy`、`dependency` 原因。DWW 只冻结当时精确的等待候选。
 
 普通用户不用手工抄候选 ID。DWW 从持久化状态选择已经 `Finish` 且已释放项目运行资源的不可变候选；它不会把宿主空闲猜成这一轮已经结束。
 
@@ -37,7 +37,7 @@ DWW 不再是多 AI 任务指挥中心。任务怎么拆、谁先做、谁依赖
 ## DWW 不会做什么
 
 - 不根据界面任务数、原始工作树数量、Hook 或会话结束猜测候选；这些信号最多唤醒检查。
-- 不设置候选最长等待或静默计时自动封尾；尾批会等待宿主明确结束本轮或要求合入。
+- 不设置候选最长等待或静默计时自动封尾；尾批会等待宿主记录本轮完成依据，或记录立即合入的原因。
 - 不接管 Codex 的任务拆分、子代理调度和依赖关系。
 - 不自动 fetch、pull、push、创建 PR、部署、rebase、squash、amend 或改写历史。
 - 不把端口、数据库、浏览器、业务测试和部署规则从项目里搬走。
@@ -55,7 +55,7 @@ Hook 只是可选的提前拦截或唤醒来源。即使没有安装或信任 Ho
 ## 安装
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.1
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.2
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

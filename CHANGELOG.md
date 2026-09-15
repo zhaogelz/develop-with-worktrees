@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.5.0-beta.2 — 2026-09-15
+
+- 完整主锚点继续原样保存确认方案和历史全文；正常 Start、绑定和恢复改为由一次完整读取或 `refresh-root` 完成，不再把补填任务锚点或 `acknowledge-root` 作为正常开工手续。同步压缩并统一技能、任务治理和用户指南的主流程说明。
+- 小于完整批量的尾批现在记录 `round-complete`、`user`、`deploy` 或 `dependency` 原因和一行依据；`round-complete` 会拒绝仍有活跃生产任务的候选通道，`batch seal` 与强制 reconcile 使用同一校验，重试保留首次原因。
+- 插件安装回归会校验技能、核心脚本和关键引用文档与源插件逐字节一致，避免同一发布标识下安装到不一致的工作流内容。
 
 - 将“不要过度设计”和端到端交付责任同步到用户规则模板、技能、Hook 与插件入口：方案先以当前需求和验收为界，候选发布不再被表述为交付终点；宿主继续跟进自动批次或显式尾批、记录失败并在可唯一决定时返修。
 - 新仓库可用 `init` 或 `choose --mode isolated` 的 `--verification-file` 提交已审阅 schema-3 验证策略；未提供时自动发现命令会生成保守的 integration Full 配置且禁止推断复用。`dww doctor` 现在区分当前、已知历史和用户改写的 managed `AGENTS.md` 块，已知历史块可在正常隔离任务中升级，歧义文本始终保留。

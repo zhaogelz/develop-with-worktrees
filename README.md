@@ -22,7 +22,7 @@ DWW is no longer a multi-AI task command center. The host's native task system d
 2. The agent edits only there, commits exact paths, and runs development checks when they help it work safely.
 3. `Finish` publishes the exact source candidate and releases the task worktree without moving the base or requiring a separate project test gate; it is not delivery by itself.
 4. Every three candidates, DWW freezes the oldest eligible three and composes them in an integration worktree. It then runs the affected combined checks, reusing valid individual results.
-5. With fewer than three candidates, the host ends the round or requests immediate integration with `batch reconcile --force --cause user`; DWW freezes that exact pending tail.
+5. With fewer than three candidates, the host ends the round with `batch reconcile --force --cause round-complete --reason <basis>` or records an explicit `user`, `deploy`, or `dependency` reason; DWW freezes that exact pending tail.
 
 Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state. It never guesses that an idle host means the round is over.
 
@@ -37,7 +37,7 @@ Three candidates avoid turning each finished task into an integration wait while
 ## What DWW never does
 
 - It never guesses candidate identity from UI task counts, raw worktree counts, Hooks, or session end; those signals may only wake reconciliation.
-- It has no candidate-age, quiet-period, or longest-wait auto-seal. A tail stays pending until the host explicitly ends the round or asks to integrate it.
+- It has no candidate-age, quiet-period, or longest-wait auto-seal. A tail stays pending until the host records why the round is complete, or why immediate integration is needed.
 - It does not replace native task decomposition, dependencies, or worker scheduling.
 - It never fetches, pulls, pushes, opens PRs, deploys, rebases, squashes, amends, or rewrites history.
 - It does not absorb repository-specific ports, databases, browsers, test selection, or deployment rules.
@@ -55,7 +55,7 @@ Legacy repositories may keep explicit direct or explicit-seal policies during mi
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.1
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.2
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

@@ -137,7 +137,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.5.0-beta.1"
+    assert payload["version"] == "0.5.0-beta.2"
     plugin_version = payload["plugin_version"]
     assert plugin_version == manifest["version"]
     if plugin_version != payload["version"]:
@@ -1092,8 +1092,45 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
         "finish", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
     )
     assert published["outcome"] == "candidate_published"
-    tail = call_json("batch", "seal", "--candidate", published["candidate_id"])
+    unexplained_tail = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--script",
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "batch",
+            "seal",
+            "--candidate",
+            published["candidate_id"],
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+        timeout=90,
+    )
+    assert unexplained_tail.returncode == 2
+    assert "requires both cause and one-line reason" in unexplained_tail.stdout
+    tail = call_json(
+        "batch",
+        "seal",
+        "--candidate",
+        published["candidate_id"],
+        "--cause",
+        "round-complete",
+        "--reason",
+        "the CLI lifecycle test has completed its only planned task",
+    )
     assert tail["status"] == "completed"
+    sealed = call_json("batch", "status", "--batch", tail["id"])
+    assert sealed["batches"][0]["tail_request"] == {
+        "cause": "round-complete",
+        "reason": "the CLI lifecycle test has completed its only planned task",
+    }
     assert (git_repo / "cli.txt").exists()
 
     started_direct = subprocess.run(

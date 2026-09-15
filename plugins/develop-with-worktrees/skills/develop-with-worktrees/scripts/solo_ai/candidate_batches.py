@@ -72,6 +72,34 @@ LEGACY_EXPLICIT_POLICY = {
     "activation_epoch": "legacy-explicit",
 }
 AUTOMATIC_REPAIR_LIMIT = 2
+EXPLICIT_TAIL_CAUSES = frozenset({"user", "deploy", "dependency", "round-complete"})
+_LEGACY_EXACT_TAIL_CAUSE = "legacy-exact-list"
+_LEGACY_QUIET_TAIL_CAUSE = "legacy-quiet-policy"
+
+
+def _tail_request(*, cause: str, reason: str) -> dict[str, str]:
+    """规范化一次尾批的可审计原因，不把它误当成外部授权证明。"""
+
+    if cause not in EXPLICIT_TAIL_CAUSES | {
+        _LEGACY_EXACT_TAIL_CAUSE,
+        _LEGACY_QUIET_TAIL_CAUSE,
+    }:
+        raise SoloAIError(
+            "Tail request cause must be user, deploy, dependency, or round-complete"
+        )
+    normalized_reason = reason.strip()
+    if not normalized_reason or "\r" in normalized_reason or "\n" in normalized_reason:
+        raise SoloAIError("Tail request reason must be one non-empty line")
+    return {"cause": cause, "reason": normalized_reason}
+
+
+def _legacy_exact_tail_request() -> dict[str, str]:
+    """保留旧 Python API 的调用能力，同时让新批次明确它来自兼容入口。"""
+
+    return _tail_request(
+        cause=_LEGACY_EXACT_TAIL_CAUSE,
+        reason="legacy exact-list API call",
+    )
 
 
 def _candidate_lane(candidate: dict[str, Any]) -> tuple[str, str, str]:
@@ -345,6 +373,7 @@ class CandidateBatchStore:
         trigger: str,
         after_failed_batch_id: str | None = None,
         coordinator: dict[str, str] | None = None,
+        tail_request: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if not candidate_ids or len(candidate_ids) > batch_size:
             raise SoloAIError(
@@ -352,6 +381,27 @@ class CandidateBatchStore:
             )
         if trigger == "auto_full" and len(candidate_ids) != batch_size:
             raise SoloAIError("Automatic sealing requires one complete batch")
+        is_tail = len(candidate_ids) < batch_size
+        normalized_tail_request: dict[str, str] | None = None
+        if is_tail:
+            if trigger == "quiet_tail":
+                normalized_tail_request = _tail_request(
+                    cause=_LEGACY_QUIET_TAIL_CAUSE,
+                    reason="legacy quiet_or_explicit tail policy",
+                )
+            elif tail_request is not None:
+                normalized_tail_request = _tail_request(
+                    cause=str(tail_request.get("cause") or ""),
+                    reason=str(tail_request.get("reason") or ""),
+                )
+            elif after_failed_batch_id:
+                normalized_tail_request = _legacy_exact_tail_request()
+            else:
+                raise SoloAIError(
+                    "An explicit tail requires a recorded cause and one-line reason"
+                )
+        elif tail_request is not None:
+            raise SoloAIError("A complete batch does not accept a tail request")
         if len(candidate_ids) != len(set(candidate_ids)):
             raise SoloAIError("Seal candidates must be unique")
         candidates: list[dict[str, Any]] = []
@@ -427,6 +477,7 @@ class CandidateBatchStore:
             "seal_intent_id": seal_intent_id,
             "status": "sealed",
             "trigger": trigger,
+            "tail_request": normalized_tail_request,
             "host_coordinator": copy.deepcopy(coordinator),
             "host_coordinator_revision": 1 if coordinator else 0,
             "host_coordinator_transfers": [],
@@ -673,6 +724,7 @@ class CandidateBatchStore:
         batch_size: int,
         after_failed_batch_id: str | None = None,
         coordinator: dict[str, str] | None = None,
+        tail_request: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         coordinator = normalize_host_reference(coordinator)
         return self.mutate(
@@ -683,6 +735,9 @@ class CandidateBatchStore:
                 trigger="explicit_tail",
                 after_failed_batch_id=after_failed_batch_id,
                 coordinator=coordinator,
+                tail_request=tail_request
+                if tail_request is not None or len(candidate_ids) >= batch_size
+                else _legacy_exact_tail_request(),
             )
         )
 
@@ -728,6 +783,7 @@ class CandidateBatchStore:
         cause: str = "heartbeat",
         now_epoch: float | None = None,
         coordinator: dict[str, str] | None = None,
+        tail_request: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         coordinator = normalize_host_reference(coordinator)
         observed_now = time.time() if now_epoch is None else now_epoch
@@ -816,12 +872,21 @@ class CandidateBatchStore:
                     and quiet_elapsed >= quiet_seconds
                 )
                 if force or quiet_eligible:
+                    if force and cause == "round-complete" and active_count > 0:
+                        raise SoloAIError(
+                            "Round completion cannot seal a tail while this candidate lane "
+                            "still has active producers: "
+                            + ", ".join(
+                                str(task_id) for task_id in snapshot["active_task_ids"]
+                            )
+                        )
                     batch = self._seal_in_value(
                         value,
                         candidate_ids,
                         batch_size=batch_size,
                         trigger="explicit_tail" if force else "quiet_tail",
                         coordinator=coordinator,
+                        tail_request=tail_request,
                     )
                     return {"status": "sealed", "batch": batch, "cause": cause}
                 next_reconcile_at = None
@@ -1916,6 +1981,9 @@ def seal_batch(
     candidate_ids: list[str],
     after_failed_batch_id: str | None = None,
     coordinator: dict[str, str] | None = None,
+    cause: str | None = None,
+    reason: str | None = None,
+    require_tail_reason: bool = False,
 ) -> dict[str, Any]:
     from .lifecycle import _config_and_mode
 
@@ -1925,16 +1993,51 @@ def seal_batch(
             "This repository uses direct integration, not candidate batches"
         )
     store = CandidateBatchStore(repo)
-    first = store.candidate(candidate_ids[0]) if candidate_ids else None
-    frozen_policy = (first or {}).get("integration_policy") or LEGACY_EXPLICIT_POLICY
     with candidate_admission_lock(repo):
+        first = store.candidate(candidate_ids[0]) if candidate_ids else None
+        frozen_policy = (first or {}).get(
+            "integration_policy"
+        ) or LEGACY_EXPLICIT_POLICY
+        batch_size = int(frozen_policy.get("batch_size", config.integration.batch_size))
+        tail_request: dict[str, str] | None = None
+        if (cause is None) != (reason is None):
+            raise SoloAIError(
+                "An explicit tail requires both cause and one-line reason"
+            )
+        if len(candidate_ids) < batch_size:
+            if cause is None and reason is None and not require_tail_reason:
+                tail_request = _legacy_exact_tail_request()
+            else:
+                if cause is None or reason is None:
+                    raise SoloAIError(
+                        "An explicit tail requires both cause and one-line reason"
+                    )
+                tail_request = _tail_request(cause=cause, reason=reason)
+            if tail_request["cause"] == "round-complete" and first is not None:
+                policy = first.get("integration_policy") or LEGACY_EXPLICIT_POLICY
+                snapshot = StateStore(repo).candidate_producer_snapshot(
+                    base_ref=str(first["base_ref"]),
+                    base_head=str(first["base_head"]),
+                    activation_epoch=str(
+                        policy.get("activation_epoch") or "legacy-explicit"
+                    ),
+                )
+                if snapshot["active_count"]:
+                    raise SoloAIError(
+                        "Round completion cannot seal a tail while this candidate lane "
+                        "still has active producers: "
+                        + ", ".join(
+                            str(task_id) for task_id in snapshot["active_task_ids"]
+                        )
+                    )
+        elif cause is not None:
+            raise SoloAIError("A complete batch does not accept a tail request")
         batch = store.seal(
             candidate_ids,
-            batch_size=int(
-                frozen_policy.get("batch_size", config.integration.batch_size)
-            ),
+            batch_size=batch_size,
             after_failed_batch_id=after_failed_batch_id,
             coordinator=coordinator,
+            tail_request=tail_request,
         )
     return run_batch(repo, batch_id=str(batch["id"]))
 
@@ -1946,6 +2049,8 @@ def reconcile_batches(
     cause: str = "heartbeat",
     now_epoch: float | None = None,
     coordinator: dict[str, str] | None = None,
+    reason: str | None = None,
+    require_tail_reason: bool = False,
 ) -> dict[str, Any]:
     """仅用持久化候选与任务事实冻结一个可证明的批次。"""
 
@@ -1956,10 +2061,17 @@ def reconcile_batches(
         raise SoloAIError(
             "This repository uses direct integration, not candidate batches"
         )
-    if force and cause not in {"user", "deploy", "dependency"}:
+    if force and cause not in EXPLICIT_TAIL_CAUSES:
         raise SoloAIError(
-            "Forced tail reconciliation requires cause user, deploy, or dependency"
+            "Forced tail reconciliation requires cause user, deploy, dependency, or round-complete"
         )
+    tail_request = None
+    if force:
+        if reason is None and not require_tail_reason:
+            reason = "legacy programmatic forced tail"
+        if reason is None:
+            raise SoloAIError("A forced tail requires one-line reason")
+        tail_request = _tail_request(cause=cause, reason=reason)
     batch_store = CandidateBatchStore(repo)
     state_store = StateStore(repo)
     with candidate_admission_lock(repo):
@@ -1979,6 +2091,7 @@ def reconcile_batches(
             cause=cause,
             now_epoch=now_epoch,
             coordinator=coordinator,
+            tail_request=tail_request,
         )
     batch = result.get("batch")
     if not batch:

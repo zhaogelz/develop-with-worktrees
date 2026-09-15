@@ -111,6 +111,33 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     ]
     assert runners, "installed plugin does not expose its lifecycle runner"
     runner = runners[0]
+    installed_manifests = [
+        path
+        for path in codex_home.rglob("plugin.json")
+        if path.parent.name == ".codex-plugin"
+        and "develop-with-worktrees" in str(path).replace("\\", "/")
+    ]
+    assert len(installed_manifests) == 1, "installed plugin root is ambiguous"
+    installed_root = installed_manifests[0].parent.parent
+    shipped_paths = (
+        ".codex-plugin/plugin.json",
+        "skills/develop-with-worktrees/SKILL.md",
+        "skills/develop-with-worktrees/references/configuration.md",
+        "skills/develop-with-worktrees/references/lifecycle.md",
+        "skills/develop-with-worktrees/references/task-governance.md",
+        "skills/develop-with-worktrees/scripts/dww.py",
+        "skills/develop-with-worktrees/scripts/solo_ai/candidate_batches.py",
+        "skills/develop-with-worktrees/scripts/solo_ai/cli.py",
+        "skills/develop-with-worktrees/scripts/solo_ai/lifecycle.py",
+        "skills/develop-with-worktrees/scripts/solo_ai/root_context.py",
+    )
+    for relative_path in shipped_paths:
+        source_path = source / relative_path
+        installed_path = installed_root / relative_path
+        assert installed_path.is_file(), f"installed plugin misses {relative_path}"
+        assert hashlib.sha256(installed_path.read_bytes()).digest() == (
+            hashlib.sha256(source_path.read_bytes()).digest()
+        ), f"installed plugin differs from source at {relative_path}"
     smoke_repo = tmp_path / "installed-runner-smoke"
 
     def git(*args: str) -> None:
@@ -228,34 +255,21 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     root_change.unlink()
     amended_payload = json.loads(amended_root.stdout)["result"]
     assert "Installed V2 exact correction." in amended_payload["content"]
-    root_context = run_runner(
+    refreshed_root = run_runner(
         "--json",
         "anchor",
-        "show",
-        "--task",
-        task_id,
-        "--with-root",
-        "--content",
-        "--root-content",
-        cwd=worktree,
-    )
-    assert root_context.returncode == 0, root_context.stderr
-    root_payload = json.loads(root_context.stdout)["result"]["root_anchor"]
-    acknowledged = run_runner(
-        "--json",
-        "anchor",
-        "acknowledge-root",
+        "refresh-root",
         "--task",
         task_id,
         "--lease",
         lease,
-        "--root-version",
-        str(root_payload["plan_version"]),
-        "--root-sha256",
-        root_payload["sha256"],
         cwd=worktree,
     )
-    assert acknowledged.returncode == 0, acknowledged.stderr
+    assert refreshed_root.returncode == 0, refreshed_root.stderr
+    assert (
+        json.loads(refreshed_root.stdout)["result"]["root_plan_review"]["record_kind"]
+        == "read"
+    )
     shown_anchor = run_runner(
         "--json", "anchor", "show", "--task", task_id, "--content", cwd=worktree
     )
@@ -337,7 +351,17 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     )
     assert finished.returncode == 0, finished.stderr
     candidate_id = json.loads(finished.stdout)["result"]["candidate_id"]
-    tail = run_runner("--json", "batch", "seal", "--candidate", candidate_id)
+    tail = run_runner(
+        "--json",
+        "batch",
+        "seal",
+        "--candidate",
+        candidate_id,
+        "--cause",
+        "round-complete",
+        "--reason",
+        "the installation smoke task is the complete round",
+    )
     assert tail.returncode == 0, tail.stderr
     assert json.loads(tail.stdout)["result"]["status"] == "completed"
     assert (smoke_repo / "smoke.txt").exists()
