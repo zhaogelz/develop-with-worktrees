@@ -18,39 +18,8 @@ commands = [
   ["uv", "run", "python", "scripts/verify_repository.py"],
 ]
 
-# 核心代码、策略、测试及 CI 先运行可快速、纯本地的回归；测试层级由
-# tests/conftest.py 集中审计，新增测试默认进入 dww_full。
-[[profiles]]
-id = "dww-fast-ready"
-paths = [
-  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
-  "scripts/verify_repository.py", "tests/**", "uv.lock",
-  "plugins/develop-with-worktrees/hooks/**",
-  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
-  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
-]
-cross_task_reuse = true
-external_state = "none"
-input_paths = [
-  "pyproject.toml", "tests/conftest.py", "tests/unit/test_config.py",
-  "tests/unit/test_proof.py", "tests/unit/test_routing.py",
-  "tests/unit/test_safety.py", "tests/unit/test_task_context.py",
-  "tests/unit/test_host_context.py", "tests/unit/test_host_handoff_state.py",
-  "tests/unit/test_root_context.py", "tests/unit/test_hook.py",
-  "tests/unit/test_test_temporary_directory.py", "tests/unit/test_test_layers.py", "uv.lock",
-  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
-]
-environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
-input_closure = "complete"
-timeout_seconds = 600
-resource_class = "normal"
-level = "ready"
-commands = [
-  ["uv", "run", "pytest", "-m", "dww_fast", "-q", "--durations=20"],
-]
-
 # ruff 仍由 uvx 提供，尚未能把被包装工具版本放入项目锁文件闭包；
-# 所以它是非纯检查，不能跨任务复用。
+# 所以它是非纯检查，不能跨任务复用。它放在 fast 前，让格式错误尽早结束。
 [[profiles]]
 id = "dww-lint-ready"
 paths = [
@@ -77,6 +46,38 @@ level = "ready"
 commands = [
   ["uvx", "ruff", "check", "."],
   ["uvx", "ruff", "format", "--check", "."],
+]
+
+# 核心代码、策略、测试及 CI 再运行可快速、纯本地的回归；测试层级由
+# tests/conftest.py 集中审计，新增测试默认进入 dww_full。
+[[profiles]]
+id = "dww-fast-ready"
+paths = [
+  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
+  "scripts/verify_repository.py", "tests/**", "uv.lock",
+  "plugins/develop-with-worktrees/hooks/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+cross_task_reuse = true
+external_state = "none"
+input_paths = [
+  "AGENTS.md", ".solo-ai/verification.toml", ".solo-ai/stress-verification.toml",
+  "pyproject.toml", "tests/conftest.py", "tests/unit/test_config.py",
+  "tests/unit/test_proof.py", "tests/unit/test_routing.py",
+  "tests/unit/test_safety.py", "tests/unit/test_task_context.py",
+  "tests/unit/test_host_context.py", "tests/unit/test_host_handoff_state.py",
+  "tests/unit/test_root_context.py", "tests/unit/test_hook.py",
+  "tests/unit/test_test_temporary_directory.py", "tests/unit/test_test_layers.py", "uv.lock",
+  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
+]
+environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
+input_closure = "complete"
+timeout_seconds = 600
+resource_class = "normal"
+level = "ready"
+commands = [
+  ["uv", "run", "pytest", "-m", "dww_fast", "-q", "--durations=20"],
 ]
 
 # 日常组合验证只覆盖最小真实生命周期：它仍包含按变更选中的 Ready，且验证

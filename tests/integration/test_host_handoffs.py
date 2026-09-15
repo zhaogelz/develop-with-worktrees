@@ -6,9 +6,18 @@ import pytest
 from conftest import git
 from solo_ai import candidate_batches as batch_module
 from solo_ai.candidate_batches import CandidateBatchStore, seal_batch
+from solo_ai.cli import _status, main as cli_main
 from solo_ai.config import CommandSpec, load_verification_config
 from solo_ai.host_handoffs import HostHandoffStore
-from solo_ai.lifecycle import approve, commit_task, finish, initialize, ready, start
+from solo_ai.lifecycle import (
+    approve,
+    commit_task,
+    finish,
+    initialize,
+    ready,
+    recover,
+    start,
+)
 from solo_ai.repo import GitRepo
 from solo_ai.util import SoloAIError
 
@@ -55,7 +64,7 @@ def conflict_base(path: Path, *, relative: str = "conflict.txt") -> None:
 
 
 def test_composition_conflict_has_one_durable_handoff_and_safe_takeovers(
-    git_repo: Path,
+    git_repo: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = initialized_batched(git_repo)
     source = {"kind": "codex", "thread_id": "developer"}
@@ -92,6 +101,7 @@ def test_composition_conflict_has_one_durable_handoff_and_safe_takeovers(
     repeated_dispatch = handoffs.dispatch(request_id=request["id"], sender=coordinator)
     assert repeated_dispatch["message"] == first_dispatch["message"]
     assert len(repeated_dispatch["delivery_attempts"]) == 1
+    first_attempt = first_dispatch["delivery_attempt_id"]
 
     batch = CandidateBatchStore(repo).batch(request["batch_id"])
     taken_batch = CandidateBatchStore(repo).assign_host_coordinator(
@@ -108,17 +118,47 @@ def test_composition_conflict_has_one_durable_handoff_and_safe_takeovers(
     successor_dispatch = handoffs.dispatch(
         request_id=request["id"], sender=next_coordinator
     )
-    assert successor_dispatch["message"] == first_dispatch["message"]
+    assert request["id"] in successor_dispatch["message"]
+    assert successor_dispatch["delivery_attempt_id"] != first_attempt
 
     taken_repair = handoffs.take_over(
         request_id=request["id"], actor=successor, reason="source task is unavailable"
     )
     assert taken_repair["assignee"] == successor
+    late_delivery = handoffs.record_delivery(
+        request_id=request["id"],
+        sender=coordinator,
+        outcome="sent",
+        attempt_id=first_attempt,
+    )
+    assert late_delivery["delivery_status"] == "pending"
+    assert late_delivery["delivery_attempts"][0]["outcome"] == "sent"
     reissued = handoffs.dispatch(request_id=request["id"], sender=next_coordinator)
     assert reissued["delivery_status"] == "prepared"
-    handoffs.record_delivery(
-        request_id=request["id"], sender=next_coordinator, outcome="sent"
+    with pytest.raises(SoloAIError, match="does not match"):
+        handoffs.record_delivery(
+            request_id=request["id"],
+            sender=next_coordinator,
+            outcome="sent",
+            attempt_id=first_attempt,
+        )
+    with pytest.raises(SoloAIError, match="attempt id is required"):
+        handoffs.record_delivery(
+            request_id=request["id"], sender=next_coordinator, outcome="sent"
+        )
+    delivered = handoffs.record_delivery(
+        request_id=request["id"],
+        sender=next_coordinator,
+        outcome="sent",
+        attempt_id=reissued["delivery_attempt_id"],
     )
+    repeated_delivery = handoffs.record_delivery(
+        request_id=request["id"],
+        sender=next_coordinator,
+        outcome="sent",
+        attempt_id=reissued["delivery_attempt_id"],
+    )
+    assert repeated_delivery == delivered
     with pytest.raises(SoloAIError, match="recorded repair assignee"):
         handoffs.claim(request_id=request["id"], actor=source)
 
@@ -132,12 +172,30 @@ def test_composition_conflict_has_one_durable_handoff_and_safe_takeovers(
     ]
     assert claimed["status"] == "claimed"
 
-    prepared = handoffs.prepare(request_id=request["id"], actor=successor)
-    replayed = handoffs.prepare(request_id=request["id"], actor=successor)
-    assert (
-        prepared["request"]["repair_task_id"] == replayed["request"]["repair_task_id"]
+    arguments = [
+        "--repo",
+        str(git_repo),
+        "host-handoff",
+        "repair",
+        "prepare",
+        "--request",
+        request["id"],
+        "--host-kind",
+        "codex",
+        "--host-thread",
+        successor["thread_id"],
+    ]
+    assert cli_main(arguments) == 0
+    first_prepare = dict(
+        line.split(": ", 1) for line in capsys.readouterr().out.splitlines()
     )
-    repair_task = prepared["request"]["repair_task_id"]
+    assert cli_main(arguments) == 0
+    replayed_prepare = dict(
+        line.split(": ", 1) for line in capsys.readouterr().out.splitlines()
+    )
+    assert first_prepare["Task"] == replayed_prepare["Task"]
+    assert first_prepare["Lease"] == replayed_prepare["Lease"]
+    repair_task = first_prepare["Task"]
     assert repair_task
     assert (
         CandidateBatchStore(repo).candidate(candidate["candidate_id"])[
@@ -149,19 +207,35 @@ def test_composition_conflict_has_one_durable_handoff_and_safe_takeovers(
 
     assert StateStore(repo).task(repair_task)["host_origin"] == successor
 
-    repair_worktree = Path(StateStore(repo).task(repair_task)["worktree"])
+    repair_worktree = Path(first_prepare["Worktree"])
     (repair_worktree / "conflict.txt").write_text("resolved\n", encoding="utf-8")
-    repair_state = StateStore(repo).task(repair_task)
     commit_task(
         repo,
         task_id=repair_task,
-        lease=repair_state["lease"],
+        lease=first_prepare["Lease"],
         message="test: resolve the returned repair candidate",
         paths=["conflict.txt"],
     )
-    ready(repo, task_id=repair_task, lease=repair_state["lease"])
-    returned = finish(repo, task_id=repair_task, lease=repair_state["lease"])
-    assert returned["repair_handoff"]["id"] == request["id"]
+    ready(repo, task_id=repair_task, lease=first_prepare["Lease"])
+    original_record = HostHandoffStore.record_repair_candidate_published
+    calls = 0
+
+    def fail_first_record(
+        self: HostHandoffStore, *, task_id: str, candidate: dict[str, object]
+    ) -> dict[str, object] | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SoloAIError("test handoff receipt interruption")
+        return original_record(self, task_id=task_id, candidate=candidate)
+
+    monkeypatch.setattr(
+        HostHandoffStore, "record_repair_candidate_published", fail_first_record
+    )
+    returned = finish(repo, task_id=repair_task, lease=first_prepare["Lease"])
+    assert "recording_error" in returned["repair_handoff"]
+    recovered = recover(repo, task_id=repair_task)
+    assert recovered["repair_handoff"]["id"] == request["id"]
 
     returned_status = handoffs.status()
     assert returned_status["repair_requests"][0]["lifecycle_status"] == (
@@ -179,14 +253,43 @@ def test_composition_conflict_has_one_durable_handoff_and_safe_takeovers(
         request_id=request["id"], sender=successor
     )
     assert "尚未交付" in result_dispatch["message"]
-    handoffs.record_repair_result_delivery(
-        request_id=request["id"], sender=successor, outcome="sent"
+    final_coordinator = {"kind": "codex", "thread_id": "final-coordinator"}
+    current_batch = CandidateBatchStore(repo).batch(request["batch_id"])
+    CandidateBatchStore(repo).assign_host_coordinator(
+        request["batch_id"],
+        coordinator=final_coordinator,
+        expected_revision=current_batch["host_coordinator_revision"],
+        reason="handoff result coordinator is unavailable",
     )
+    reissued_result = handoffs.dispatch_repair_result(
+        request_id=request["id"], sender=successor
+    )
+    late_result = handoffs.record_repair_result_delivery(
+        request_id=request["id"],
+        sender=successor,
+        outcome="sent",
+        attempt_id=result_dispatch["return_delivery_attempt_id"],
+    )
+    assert late_result["return_delivery_status"] == "prepared"
+    assert late_result["return_delivery_attempts"][0]["outcome"] == "sent"
+    returned_delivery = handoffs.record_repair_result_delivery(
+        request_id=request["id"],
+        sender=successor,
+        outcome="sent",
+        attempt_id=reissued_result["return_delivery_attempt_id"],
+    )
+    repeated_result_delivery = handoffs.record_repair_result_delivery(
+        request_id=request["id"],
+        sender=successor,
+        outcome="sent",
+        attempt_id=reissued_result["return_delivery_attempt_id"],
+    )
+    assert repeated_result_delivery == returned_delivery
 
     completed = seal_batch(
         repo,
         candidate_ids=[returned["candidate_id"]],
-        coordinator=next_coordinator,
+        coordinator=final_coordinator,
     )
     assert completed["status"] == "completed"
     assert handoffs.status()["repair_requests"][0]["lifecycle_status"] == "resolved"
@@ -213,6 +316,63 @@ def test_validation_failure_does_not_create_a_repair_handoff(
         )
 
     assert HostHandoffStore(repo).status()["repair_requests"] == []
+
+
+def test_status_reuses_the_candidate_snapshot_for_handoff_projection(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo)
+    original = CandidateBatchStore.summary
+    calls = 0
+
+    def counted_summary(self: CandidateBatchStore) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return original(self)
+
+    monkeypatch.setattr(CandidateBatchStore, "summary", counted_summary)
+    status = _status(repo, detailed=False)
+
+    assert calls == 1
+    assert status["host_handoffs"] == {"repair_requests": [], "actions": []}
+
+
+def test_handoff_terminal_candidate_requires_a_complete_successor_lineage() -> None:
+    first = {
+        "candidate_id": "candidate-one",
+        "status": "superseded",
+        "superseded_by": "candidate-two",
+    }
+    second = {
+        "candidate_id": "candidate-two",
+        "status": "superseded",
+        "supersedes": "candidate-one",
+        "superseded_by": "candidate-three",
+    }
+    terminal = {
+        "candidate_id": "candidate-three",
+        "status": "integrated",
+        "supersedes": "candidate-two",
+        "delivered": True,
+    }
+
+    resolved, error = HostHandoffStore._terminal_candidate(
+        {
+            first["candidate_id"]: first,
+            second["candidate_id"]: second,
+            terminal["candidate_id"]: terminal,
+        },
+        first,
+    )
+    assert error is None
+    assert resolved == terminal
+
+    second["superseded_by"] = "candidate-one"
+    blocked, error = HostHandoffStore._terminal_candidate(
+        {first["candidate_id"]: first, second["candidate_id"]: second}, first
+    )
+    assert blocked is None
+    assert error is not None
 
 
 def test_coordinator_can_attribute_one_validation_failure_with_evidence(

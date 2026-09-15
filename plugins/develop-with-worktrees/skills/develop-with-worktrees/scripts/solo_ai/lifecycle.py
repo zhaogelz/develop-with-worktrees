@@ -3166,6 +3166,18 @@ def recover(
         publication = task.get("candidate_publication") or {}
         batch_store = CandidateBatchStore(repo)
         candidate = batch_store.candidate_for_task(task_id) or {}
+        repair_handoff = None
+        if candidate:
+            try:
+                from .host_handoffs import HostHandoffStore
+
+                repair_handoff = HostHandoffStore(
+                    repo
+                ).record_repair_candidate_published(
+                    task_id=task_id, candidate=candidate
+                )
+            except (OSError, SoloAIError) as handoff_error:
+                repair_handoff = {"recording_error": str(handoff_error)}
         if candidate.get("status") == "held":
             slot = store.read()["slots"].get(str(task.get("slot_id"))) or {}
             if slot.get("status") == "quarantined":
@@ -3193,6 +3205,7 @@ def recover(
                     "delivery_status": "integrated"
                     if batch.get("status") == "completed"
                     else "awaiting-integration",
+                    "repair_handoff": repair_handoff,
                 }
         if candidate.get("status") in {"integrated", "withdrawn", "superseded"}:
             delivered = candidate.get("status") == "integrated"
@@ -3203,6 +3216,7 @@ def recover(
                 "batch_id": candidate.get("integrated_batch"),
                 "delivered": delivered,
                 "delivery_status": "integrated" if delivered else "not-delivered",
+                "repair_handoff": repair_handoff,
             }
         require_anchor(repo, task)
         return {
@@ -3213,6 +3227,7 @@ def recover(
             "anchor_path": publication.get("anchor_path"),
             "delivered": False,
             "delivery_status": "awaiting-integration",
+            "repair_handoff": repair_handoff,
         }
     if _is_in_place(task):
         receipt = read_json(_in_place_receipt_path(repo, task_id), {})

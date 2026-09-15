@@ -10,6 +10,7 @@ from .util import (
     DirectoryLock,
     SoloAIError,
     atomic_write_json,
+    new_id,
     read_json,
     redact_text,
     sha256_text,
@@ -56,6 +57,92 @@ def _delivery_detail(value: str | None) -> str | None:
     return _reason(value)
 
 
+def _record_attempt_outcome(
+    request: dict[str, Any],
+    *,
+    attempts_key: str,
+    status_key: str,
+    active_attempt_key: str,
+    attempt_id: str | None,
+    sender: dict[str, str],
+    recipient: dict[str, str],
+    coordinator_revision: int,
+    outcome: str,
+    detail: str | None,
+    candidate_id: str | None = None,
+) -> bool | None:
+    """将回执绑定到一次准备；None 保留旧记录的兼容写法。"""
+
+    attempts = request.setdefault(attempts_key, [])
+    has_identified_attempt = any(isinstance(item.get("id"), str) for item in attempts)
+    if attempt_id is None:
+        if has_identified_attempt:
+            raise SoloAIError(
+                "Delivery attempt id is required; use the id returned by dispatch"
+            )
+        return None
+    attempt = next((item for item in attempts if item.get("id") == attempt_id), None)
+    if not isinstance(attempt, dict):
+        raise SoloAIError("Unknown delivery attempt")
+    if (
+        not _same_host(normalize_host_reference(attempt.get("sender")), sender)
+        or not _same_host(normalize_host_reference(attempt.get("recipient")), recipient)
+        or int(attempt.get("coordinator_revision", -1)) != coordinator_revision
+        or (
+            candidate_id is not None
+            and str(attempt.get("candidate_id") or "") != candidate_id
+        )
+    ):
+        raise SoloAIError(
+            "Delivery attempt does not match this sender, recipient, or revision"
+        )
+    existing = attempt.get("outcome")
+    if existing in _DELIVERY_OUTCOMES:
+        if existing == outcome and attempt.get("detail") == detail:
+            return False
+        raise SoloAIError("Delivery attempt already has a different recorded outcome")
+    if existing != "prepared":
+        raise SoloAIError("Delivery attempt is not ready to record")
+    attempt.update(
+        {"outcome": outcome, "detail": detail, "delivered_at": utc_timestamp()}
+    )
+    if request.get(active_attempt_key) == attempt_id:
+        request[status_key] = outcome
+    return True
+
+
+def _identified_attempt_context(
+    request: dict[str, Any],
+    *,
+    attempts_key: str,
+    attempt_id: str | None,
+    sender: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str], int] | None:
+    """为带编号的历史回执取回原发送上下文，避免迟到回执串入当前分配。"""
+
+    if attempt_id is None:
+        return None
+    attempts = request.get(attempts_key)
+    if not isinstance(attempts, list) or not any(
+        isinstance(item.get("id"), str) for item in attempts
+    ):
+        return None
+    attempt = next((item for item in attempts if item.get("id") == attempt_id), None)
+    if not isinstance(attempt, dict):
+        raise SoloAIError("Unknown delivery attempt")
+    attempt_sender = normalize_host_reference(attempt.get("sender"))
+    recipient = normalize_host_reference(attempt.get("recipient"))
+    if not _same_host(attempt_sender, sender) or recipient is None:
+        raise SoloAIError("Delivery attempt does not match this sender or recipient")
+    try:
+        revision = int(attempt.get("coordinator_revision"))
+    except (TypeError, ValueError) as error:
+        raise SoloAIError(
+            "Delivery attempt has an invalid coordinator revision"
+        ) from error
+    return attempt_sender, recipient, revision
+
+
 class HostHandoffStore:
     """保存宿主协作回执；候选、批次与 Git 事实仍由 DWW 主状态管理。"""
 
@@ -80,8 +167,10 @@ class HostHandoffStore:
             request["delivery_status"] = "uncertain"
         request.setdefault("delivery_status", "pending")
         request.setdefault("delivery_attempts", [])
+        request.setdefault("delivery_attempt_id", None)
         request.setdefault("return_delivery_status", "pending")
         request.setdefault("return_delivery_attempts", [])
+        request.setdefault("return_delivery_attempt_id", None)
         request.setdefault("repair_candidate", None)
         request.setdefault("attribution", {"kind": "legacy"})
         request.setdefault("takeovers", [])
@@ -226,12 +315,14 @@ class HostHandoffStore:
                 "status": "pending",
                 "delivery_status": "pending",
                 "delivery_attempts": [],
+                "delivery_attempt_id": None,
                 "claim": None,
                 "repair_task_id": None,
                 "repair_result": None,
                 "repair_candidate": None,
                 "return_delivery_status": "pending",
                 "return_delivery_attempts": [],
+                "return_delivery_attempt_id": None,
                 "takeovers": [],
                 "created_at": utc_timestamp(),
                 "updated_at": utc_timestamp(),
@@ -275,16 +366,27 @@ class HostHandoffStore:
             )
             if current in {"prepared", "sent"} and same_revision and not retry:
                 return copy.deepcopy(request)
-            prepared_count = sum(
-                1 for item in attempts if item.get("outcome") == "prepared"
+            if current in {"prepared", "sent"} and same_revision:
+                raise SoloAIError(
+                    "A delivered or prepared repair message cannot be retried"
+                )
+            if current in {"failed", "uncertain"} and not retry:
+                raise SoloAIError(
+                    "Repair delivery needs --retry after a failure or uncertainty"
+                )
+            attempt_count = sum(
+                1 for item in attempts if isinstance(item.get("id"), str)
             )
-            if retry and prepared_count >= _MAX_DELIVERY_ATTEMPTS:
+            if attempt_count >= _MAX_DELIVERY_ATTEMPTS:
                 raise SoloAIError(
                     "Repair delivery retry limit reached; take over or investigate"
                 )
+            attempt_id = new_id("repair-delivery")
             attempts.append(
                 {
+                    "id": attempt_id,
                     "sender": sender,
+                    "recipient": assignee,
                     "coordinator_revision": revision,
                     "at": utc_timestamp(),
                     "retry": retry,
@@ -297,6 +399,7 @@ class HostHandoffStore:
                     "coordinator": coordinator,
                     "coordinator_revision": revision,
                     "delivery_status": "prepared",
+                    "delivery_attempt_id": attempt_id,
                     "updated_at": utc_timestamp(),
                 }
             )
@@ -312,6 +415,7 @@ class HostHandoffStore:
         sender: dict[str, str],
         outcome: str,
         detail: str | None = None,
+        attempt_id: str | None = None,
     ) -> dict[str, Any]:
         """记录宿主原生消息的实际发送结果，不由 DWW 猜测成功。"""
 
@@ -320,22 +424,65 @@ class HostHandoffStore:
                 "Repair delivery outcome must be sent, uncertain, or failed"
             )
         detail = _delivery_detail(detail)
-        sender, coordinator, revision = self._require_current_coordinator(
-            request_id=request_id, sender=sender, action="record this repair delivery"
+        sender = normalize_host_reference(sender)
+        if sender is None:
+            raise SoloAIError("Repair delivery requires a verified host sender")
+        existing = self.request(request_id)
+        attempt_context = _identified_attempt_context(
+            existing,
+            attempts_key="delivery_attempts",
+            attempt_id=attempt_id,
+            sender=sender,
         )
+        if attempt_context is None:
+            sender, coordinator, revision = self._require_current_coordinator(
+                request_id=request_id,
+                sender=sender,
+                action="record this repair delivery",
+            )
+            recipient = None
+        else:
+            sender, recipient, revision = attempt_context
+            coordinator = sender
 
         def update(value: dict[str, Any]) -> dict[str, Any]:
             request = self._request_in(value, request_id)
             attempts = request.setdefault("delivery_attempts", [])
-            if not attempts or request.get("delivery_status") not in {
-                "prepared",
-                "sent",
-                "uncertain",
-                "failed",
-            }:
+            if not attempts or (
+                attempt_context is None
+                and request.get("delivery_status")
+                not in {"prepared", "sent", "uncertain", "failed"}
+            ):
                 raise SoloAIError(
                     "Prepare the repair message before recording delivery"
                 )
+            assignee = recipient or normalize_host_reference(request.get("assignee"))
+            if assignee is None:
+                raise SoloAIError("Repair handoff has no assignee")
+            recorded = _record_attempt_outcome(
+                request,
+                attempts_key="delivery_attempts",
+                status_key="delivery_status",
+                active_attempt_key="delivery_attempt_id",
+                attempt_id=attempt_id,
+                sender=sender,
+                recipient=assignee,
+                coordinator_revision=revision,
+                outcome=outcome,
+                detail=detail,
+            )
+            if recorded is not None:
+                if not recorded:
+                    return copy.deepcopy(request)
+                if request.get("delivery_attempt_id") == attempt_id:
+                    request.update(
+                        {
+                            "coordinator": coordinator,
+                            "coordinator_revision": revision,
+                            "updated_at": utc_timestamp(),
+                        }
+                    )
+                return copy.deepcopy(request)
             attempts.append(
                 {
                     "sender": sender,
@@ -377,9 +524,9 @@ class HostHandoffStore:
                 raise SoloAIError(
                     "Only the recorded repair assignee can claim this handoff"
                 )
-            if request.get("delivery_status") == "pending":
+            if request.get("delivery_status") not in {"sent", "uncertain"}:
                 raise SoloAIError(
-                    "Prepare and send the repair message before claiming it"
+                    "Record a sent or uncertain repair delivery before claiming it"
                 )
             claim = request.get("claim") or {}
             previous = normalize_host_reference(claim.get("actor"))
@@ -432,6 +579,7 @@ class HostHandoffStore:
                     "assignee": actor,
                     "status": "pending",
                     "delivery_status": "pending",
+                    "delivery_attempt_id": None,
                     "claim": None,
                     "updated_at": utc_timestamp(),
                 }
@@ -549,16 +697,27 @@ class HostHandoffStore:
             )
             if current in {"prepared", "sent"} and same_revision and not retry:
                 return copy.deepcopy(request)
-            prepared_count = sum(
-                1 for item in attempts if item.get("outcome") == "prepared"
+            if current in {"prepared", "sent"} and same_revision:
+                raise SoloAIError(
+                    "A delivered or prepared repair result cannot be retried"
+                )
+            if current in {"failed", "uncertain"} and not retry:
+                raise SoloAIError(
+                    "Repair result delivery needs --retry after a failure or uncertainty"
+                )
+            attempt_count = sum(
+                1 for item in attempts if isinstance(item.get("id"), str)
             )
-            if retry and prepared_count >= _MAX_DELIVERY_ATTEMPTS:
+            if attempt_count >= _MAX_DELIVERY_ATTEMPTS:
                 raise SoloAIError(
                     "Repair result delivery retry limit reached; investigate"
                 )
+            attempt_id = new_id("repair-result-delivery")
             attempts.append(
                 {
+                    "id": attempt_id,
                     "sender": sender,
+                    "recipient": coordinator,
                     "coordinator_revision": revision,
                     "candidate_id": repair_candidate["candidate_id"],
                     "at": utc_timestamp(),
@@ -572,6 +731,7 @@ class HostHandoffStore:
                     "coordinator": coordinator,
                     "coordinator_revision": revision,
                     "return_delivery_status": "prepared",
+                    "return_delivery_attempt_id": attempt_id,
                     "updated_at": utc_timestamp(),
                 }
             )
@@ -587,28 +747,73 @@ class HostHandoffStore:
         sender: dict[str, str],
         outcome: str,
         detail: str | None = None,
+        attempt_id: str | None = None,
     ) -> dict[str, Any]:
         if outcome not in _DELIVERY_OUTCOMES:
             raise SoloAIError(
                 "Repair result outcome must be sent, uncertain, or failed"
             )
         detail = _delivery_detail(detail)
-        sender, coordinator, revision, repair_candidate = self._require_repair_sender(
-            request_id=request_id, sender=sender
+        sender = normalize_host_reference(sender)
+        if sender is None:
+            raise SoloAIError("Repair result delivery requires a verified host sender")
+        existing = self.request(request_id)
+        attempt_context = _identified_attempt_context(
+            existing,
+            attempts_key="return_delivery_attempts",
+            attempt_id=attempt_id,
+            sender=sender,
         )
+        current_sender, current_coordinator, current_revision, repair_candidate = (
+            self._require_repair_sender(request_id=request_id, sender=sender)
+        )
+        if attempt_context is None:
+            sender, coordinator, revision = (
+                current_sender,
+                current_coordinator,
+                current_revision,
+            )
+            recipient = None
+        else:
+            sender, recipient, revision = attempt_context
+            coordinator = recipient
 
         def update(value: dict[str, Any]) -> dict[str, Any]:
             request = self._request_in(value, request_id)
             attempts = request.setdefault("return_delivery_attempts", [])
-            if not attempts or request.get("return_delivery_status") not in {
-                "prepared",
-                "sent",
-                "uncertain",
-                "failed",
-            }:
+            if not attempts or (
+                attempt_context is None
+                and request.get("return_delivery_status")
+                not in {"prepared", "sent", "uncertain", "failed"}
+            ):
                 raise SoloAIError(
                     "Prepare the repair result message before recording delivery"
                 )
+            recorded = _record_attempt_outcome(
+                request,
+                attempts_key="return_delivery_attempts",
+                status_key="return_delivery_status",
+                active_attempt_key="return_delivery_attempt_id",
+                attempt_id=attempt_id,
+                sender=sender,
+                recipient=recipient or coordinator,
+                coordinator_revision=revision,
+                outcome=outcome,
+                detail=detail,
+                candidate_id=str(repair_candidate["candidate_id"]),
+            )
+            if recorded is not None:
+                if not recorded:
+                    return copy.deepcopy(request)
+                if request.get("return_delivery_attempt_id") == attempt_id:
+                    request.update(
+                        {
+                            "coordinator": coordinator,
+                            "coordinator_revision": revision,
+                            "updated_at": utc_timestamp(),
+                        }
+                    )
+                return copy.deepcopy(request)
             attempts.append(
                 {
                     "sender": sender,
@@ -632,10 +837,10 @@ class HostHandoffStore:
 
         return self.mutate(update)
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, pool: dict[str, Any] | None = None) -> dict[str, Any]:
         from .candidate_batches import CandidateBatchStore
 
-        pool = CandidateBatchStore(self.repo).summary()
+        pool = pool or CandidateBatchStore(self.repo).summary()
         candidates = {
             str(candidate["candidate_id"]): candidate
             for candidate in pool["candidates"]
@@ -836,7 +1041,9 @@ class HostHandoffStore:
                 f"失败类型：{request['failure_kind']}",
                 f"失败详情：{request['failure_detail']}",
                 f"目标宿主：{assignee.get('kind')} / {assignee.get('thread_id')}",
-                "请先使用 host-handoff repair claim 确认接收，再使用 host-handoff repair prepare 建立受管返修任务。",
+                f"发送尝试 ID：{request.get('delivery_attempt_id')}",
+                "发送后用 host-handoff repair delivery --attempt <发送尝试 ID> 记录实际结果；"
+                "接收方再 claim 并 prepare 建立受管返修任务。",
             )
         )
 
@@ -851,9 +1058,35 @@ class HostHandoffStore:
                 f"返修候选回告 ID：{request['id']}",
                 f"返修候选：{candidate.get('candidate_id')} at {candidate.get('head')}",
                 f"目标负责人：{coordinator.get('kind')} / {coordinator.get('thread_id')}",
+                f"发送尝试 ID：{request.get('return_delivery_attempt_id')}",
                 "候选已发布，尚未交付；请由当前批次负责人继续集成并以 main 的实际提交为准。",
             )
         )
+
+    @staticmethod
+    def _terminal_candidate(
+        candidates: dict[str, dict[str, Any]], candidate: dict[str, Any] | None
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """沿已记录的替代链读取末端，不把缺失或循环误当成交付。"""
+
+        current = candidate
+        seen: set[str] = set()
+        while current is not None:
+            candidate_id = str(current.get("candidate_id") or "")
+            if not candidate_id or candidate_id in seen:
+                return None, "candidate successor lineage is missing or cyclic"
+            seen.add(candidate_id)
+            if current.get("status") != "superseded":
+                return current, None
+            successor_id = str(current.get("superseded_by") or "")
+            successor = candidates.get(successor_id)
+            if (
+                successor is None
+                or str(successor.get("supersedes") or "") != candidate_id
+            ):
+                return None, "candidate successor lineage is incomplete"
+            current = successor
+        return None, "candidate successor lineage is missing"
 
     @staticmethod
     def _project_request(
@@ -871,24 +1104,35 @@ class HostHandoffStore:
             if isinstance(repair_identity, dict)
             else None
         )
+        source_terminal, source_lineage_error = HostHandoffStore._terminal_candidate(
+            candidates, candidate
+        )
+        repair_terminal, repair_lineage_error = HostHandoffStore._terminal_candidate(
+            candidates, repair_candidate
+        )
+        projected["source_candidate_lineage_error"] = source_lineage_error
+        if repair_identity:
+            projected["repair_candidate_lineage_error"] = repair_lineage_error
+            projected["repair_terminal_candidate_id"] = (
+                repair_terminal.get("candidate_id") if repair_terminal else None
+            )
         if request.get("status") == "resolved":
             projected["lifecycle_status"] = "resolved"
         elif repair_identity:
-            if repair_candidate and repair_candidate.get("delivered"):
+            if repair_terminal and repair_terminal.get("delivered"):
                 projected["lifecycle_status"] = "resolved"
-            elif repair_candidate and repair_candidate.get("status") not in {
-                "withdrawn",
-                "superseded",
-            }:
+            elif repair_terminal and repair_terminal.get("status") == "withdrawn":
+                projected["lifecycle_status"] = "closed-without-delivery"
+            elif repair_terminal:
                 projected["lifecycle_status"] = "repair-pending-integration"
             else:
                 projected["lifecycle_status"] = "repair-return-blocked"
-        elif not candidate or not batch:
-            projected["lifecycle_status"] = "unknown"
-        elif candidate.get("delivered"):
+        elif source_terminal and source_terminal.get("delivered"):
             projected["lifecycle_status"] = "resolved"
-        elif candidate.get("status") == "withdrawn":
+        elif source_terminal and source_terminal.get("status") == "withdrawn":
             projected["lifecycle_status"] = "closed-without-delivery"
+        elif not source_terminal or not batch:
+            projected["lifecycle_status"] = "unknown"
         elif request.get("repair_task_id"):
             projected["lifecycle_status"] = "repair-prepared"
         else:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 import hashlib
 import io
 import json
@@ -93,6 +94,50 @@ def test_human_recover_output_accepts_integrated_candidate_without_a_lease() -> 
         "Delivery: integrated"
     )
     assert "Lease:" not in rendered
+
+
+def test_human_repair_prepare_only_returns_its_own_task_lease() -> None:
+    task = {
+        "id": "task-repair",
+        "worktree": "C:/repair",
+        "branch": "codex/repair",
+        "anchor_path": "C:/repair-anchor.md",
+        "lease": "repair-lease",
+        "request_reused": True,
+    }
+
+    rendered = _human(
+        "host-handoff",
+        {"request": {"id": "repair-request"}, "repair": task},
+        Namespace(host_handoff_command="repair", host_handoff_repair_command="prepare"),
+    )
+
+    assert "Lease: repair-lease" in rendered
+    assert "Worktree: C:/repair" in rendered
+    assert "repair-request" not in rendered
+    assert _human("host-handoff", {"repair": task}) != rendered
+    assert _human("candidate", task, Namespace(candidate_command="repair")) == _human(
+        "host-handoff",
+        {"repair": task},
+        Namespace(host_handoff_command="repair", host_handoff_repair_command="prepare"),
+    )
+
+
+def test_human_finish_marks_candidate_publication_as_the_end_of_coding_round() -> None:
+    rendered = _human(
+        "finish",
+        {
+            "outcome": "candidate_published",
+            "candidate_id": "candidate-one",
+            "candidate_head": "a" * 40,
+            "seal_policy": "auto_full",
+            "tail_policy": "explicit",
+            "repair_handoff": {"id": "repair-one"},
+        },
+    )
+
+    assert "Repair return request: repair-one" in rendered
+    assert "Keep ownership" not in rendered
 
 
 def test_cli_main_emits_utf8_when_noninteractive(

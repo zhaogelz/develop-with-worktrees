@@ -18,6 +18,21 @@ def test_new_test_modules_default_to_full() -> None:
     assert dww_test_layer(Path("tests/unit/test_new_contract.py")) == "dww_full"
 
 
+def test_fast_proof_covers_its_real_configuration_inputs_and_lint_runs_first() -> None:
+    with (_REPOSITORY_ROOT / ".solo-ai" / "verification.toml").open("rb") as handle:
+        primary = tomllib.load(handle)
+
+    profiles = primary["profiles"]
+    fast = next(profile for profile in profiles if profile["id"] == "dww-fast-ready")
+    assert {
+        "AGENTS.md",
+        ".solo-ai/verification.toml",
+        ".solo-ai/stress-verification.toml",
+    } <= set(fast["input_paths"])
+    ids = [profile["id"] for profile in profiles]
+    assert ids.index("dww-lint-ready") < ids.index("dww-fast-ready")
+
+
 def test_complete_full_profile_excludes_the_explicit_stress_layer() -> None:
     """完整回归与显式 Stress 必须互斥，避免一次里程碑验证重复长测。"""
 

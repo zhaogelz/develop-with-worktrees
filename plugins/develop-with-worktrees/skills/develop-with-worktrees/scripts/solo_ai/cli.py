@@ -716,6 +716,9 @@ def _parser() -> argparse.ArgumentParser:
     host_handoff_delivery.add_argument(
         "--detail", help="optional safe one-line delivery evidence or failure detail"
     )
+    host_handoff_delivery.add_argument(
+        "--attempt", help="delivery attempt id returned by repair dispatch"
+    )
     _add_host_reference_arguments(host_handoff_delivery, role="repair dispatch")
     host_handoff_attribute = host_handoff_repair_sub.add_parser(
         "attribute",
@@ -761,6 +764,9 @@ def _parser() -> argparse.ArgumentParser:
         "--outcome", choices=("sent", "uncertain", "failed"), required=True
     )
     host_handoff_result_delivery.add_argument("--detail")
+    host_handoff_result_delivery.add_argument(
+        "--attempt", help="delivery attempt id returned by repair result-dispatch"
+    )
     _add_host_reference_arguments(
         host_handoff_result_delivery, role="repair result sender"
     )
@@ -1080,7 +1086,7 @@ def _status(repo: GitRepo, *, detailed: bool) -> dict[str, Any]:
         "task_anchors": list_anchors(repo),
         "candidate_pool": candidate_batches["candidates"],
         "integration_batches": candidate_batches["batches"],
-        "host_handoffs": HostHandoffStore(repo).status(),
+        "host_handoffs": HostHandoffStore(repo).status(pool=candidate_batches),
     }
     if detailed:
         for slot in result["slots"]:
@@ -1902,6 +1908,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     sender=actor,
                     outcome=args.outcome,
                     detail=args.detail,
+                    attempt_id=args.attempt,
                 )
             if args.host_handoff_repair_command == "attribute":
                 return handoffs.attribute_validation_failure(
@@ -1928,6 +1935,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     sender=actor,
                     outcome=args.outcome,
                     detail=args.detail,
+                    attempt_id=args.attempt,
                 )
             raise SoloAIError(
                 f"Unknown host handoff repair command: {args.host_handoff_repair_command}"
@@ -2255,7 +2263,38 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     raise SoloAIError("Unsupported command")
 
 
-def _human(command: str, result: dict[str, Any]) -> str:
+def _repair_task_human(task: dict[str, Any]) -> str:
+    """只在创建任务的本地终端交付该任务自己的 lease。"""
+
+    return "\n".join(
+        (
+            f"Task: {task['id']}",
+            f"Worktree: {task['worktree']}",
+            f"Branch: {task['branch']}",
+            f"Anchor: {task['anchor_path']}",
+            f"Lease: {task['lease']}",
+            *(("Request reused: yes",) if task.get("request_reused") else ()),
+        )
+    )
+
+
+def _human(
+    command: str, result: dict[str, Any], args: argparse.Namespace | None = None
+) -> str:
+    if (
+        command == "host-handoff"
+        and getattr(args, "host_handoff_command", None) == "repair"
+        and getattr(args, "host_handoff_repair_command", None) == "prepare"
+    ):
+        repair = result.get("repair")
+        if isinstance(repair, dict) and isinstance(repair.get("lease"), str):
+            return _repair_task_human(repair)
+    if (
+        command == "candidate"
+        and getattr(args, "candidate_command", None) == "repair"
+        and isinstance(result.get("lease"), str)
+    ):
+        return _repair_task_human(result)
     if command == "choose":
         if result.get("decision") == "deferred":
             return (
@@ -2296,25 +2335,36 @@ def _human(command: str, result: dict[str, Any]) -> str:
         return summary
     if command == "finish":
         if result.get("outcome") == "batch_integrated":
-            return (
+            summary = (
                 f"Published {result['candidate_id']} and integrated full batch "
                 f"{result['batch_id']} at {result['integrated_head']} "
                 f"from {result['candidate_count']} candidates."
             )
+            handoff = result.get("repair_handoff")
+            if isinstance(handoff, dict) and handoff.get("id"):
+                return (
+                    f"{summary}\nRepair handoff {handoff['id']} is already delivered "
+                    "with this batch; no return message is required."
+                )
+            return summary
         if result.get("outcome") == "candidate_published":
+            handoff = result.get("repair_handoff")
             next_step = (
-                "It will join the next full automatic batch. Keep ownership through "
-                "integration; to integrate a smaller tail, explicitly end the round "
-                "with batch reconcile --force --cause round-complete --reason <basis>."
+                "This coding round is complete. The actual batch freezer owns follow-through; "
+                "a smaller tail requires an explicit round completion."
                 if result.get("seal_policy") == "auto_full"
                 and result.get("tail_policy") == "explicit"
-                else "It will join the next full automatic batch. Keep ownership through "
-                "integration; a smaller tail follows the repository's retained "
-                "compatibility policy."
+                else "This coding round is complete. The actual batch coordinator follows "
+                "the retained compatibility policy."
                 if result.get("seal_policy") == "auto_full"
-                else "Keep ownership through integration; this legacy policy requires an "
-                "explicit exact candidate batch."
+                else "This coding round is complete. This legacy policy requires an explicit "
+                "exact candidate batch."
             )
+            if isinstance(handoff, dict) and handoff.get("id"):
+                next_step = (
+                    f"Repair return request: {handoff['id']}. Send its result-dispatch payload, "
+                    "then record the actual result-delivery; the coordinator owns integration."
+                )
             return (
                 f"Published {result['candidate_id']} at {result['candidate_head']}.\n"
                 f"The base branch did not move. {next_step}"
@@ -2436,5 +2486,5 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     else:
-        print(_human(args.command, result))
+        print(_human(args.command, result, args))
     return 0

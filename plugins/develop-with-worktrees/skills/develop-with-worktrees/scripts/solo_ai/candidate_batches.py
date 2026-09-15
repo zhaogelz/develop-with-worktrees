@@ -2244,7 +2244,7 @@ def prepare_candidate_repair(
 {root_line}- Implementation target: replay candidate `{source["head"]}` onto `{base_ref}` at `{base_head}` and preserve its verified intent
 - Reference baseline: {task["anchor_origin"]["reference_baseline"]}
 - Scope boundary: change only the source candidate's intent and the minimum conflict resolution; do not choose between competing product, permission, migration, deletion, or security rules
-- Acceptance criteria: resolve every recorded conflict, review the exact path manifest, run Commit/Ready/Finish, then explicitly seal the replacement candidate and prove it is in the base
+- Acceptance criteria: resolve every recorded conflict, review the exact path manifest, run Commit/Ready/Finish to publish the replacement candidate, then end this coding round; if this task has a repair handoff, send and record its result notification, while the actual batch coordinator owns sealing and only main delivery proves completion
 - Current progress: repair attempt {attempt} prepared at {utc_timestamp()}
 
 This local file is not committed. Keep it current, and reread it after context loss or continuation.
