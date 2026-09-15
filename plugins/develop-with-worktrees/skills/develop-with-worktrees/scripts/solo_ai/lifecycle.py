@@ -2529,7 +2529,11 @@ def _restore_orphaned_ready_proof(
 
 
 def _resume_candidate_publication(
-    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    coordinator: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     from .candidate_batches import CandidateBatchStore
 
@@ -2601,12 +2605,14 @@ def _resume_candidate_publication(
     if policy.get("mode") != "batched":
         raise SoloAIError("Candidate publication requires a batched task policy")
     batch_store = CandidateBatchStore(repo)
+    coordinator = normalize_host_reference(coordinator)
     publication_result = batch_store.publish(
         dict(publication),
         capacity=int(policy["candidate_capacity"]),
         batch_size=int(policy["batch_size"]),
         seal_policy=str(policy["seal_policy"]),
         activate=False,
+        coordinator=coordinator,
     )
     published = publication_result["candidate"]
     from .runtime_adapter import (
@@ -2683,8 +2689,19 @@ def _resume_candidate_publication(
         str(publication["candidate_id"]),
         batch_size=int(policy["batch_size"]),
         seal_policy=str(policy["seal_policy"]),
+        coordinator=coordinator,
     )
     published = publication_result["candidate"]
+    handoff = None
+    try:
+        from .host_handoffs import HostHandoffStore
+
+        handoff = HostHandoffStore(repo).record_repair_candidate_published(
+            task_id=str(task["id"]), candidate=published
+        )
+    except (OSError, SoloAIError) as handoff_error:
+        # 候选已安全发布，不能因通知记录问题回滚不可变 Git 事实；将不确定性返回给宿主。
+        handoff = {"recording_error": str(handoff_error)}
     return {
         "task_id": completed["id"],
         "status": "candidate-published",
@@ -2703,15 +2720,22 @@ def _resume_candidate_publication(
         ),
         "seal_policy": policy["seal_policy"],
         "tail_policy": policy["tail_policy"],
+        "repair_handoff": handoff,
     }
 
 
 def finish(
-    repo: GitRepo, *, task_id: str, lease: str, session_id: str | None = None
+    repo: GitRepo,
+    *,
+    task_id: str,
+    lease: str,
+    session_id: str | None = None,
+    host_actor: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     initial = store.task(task_id)
+    host_actor = normalize_host_reference(host_actor)
     if not initial.get("integration_policy"):
         initial = store.ensure_task_integration_policy(task_id, config)
     policy = initial.get("integration_policy") or {}
@@ -2762,7 +2786,7 @@ def finish(
             if task.get("candidate_publication"):
                 with candidate_admission_lock(repo):
                     candidate_result = _resume_candidate_publication(
-                        repo, store=store, task=task
+                        repo, store=store, task=task, coordinator=host_actor
                     )
             elif task.get("integration"):
                 result = resume_integration(
@@ -2834,7 +2858,7 @@ def finish(
                     )
                     with candidate_admission_lock(repo):
                         candidate_result = _resume_candidate_publication(
-                            repo, store=store, task=prepared
+                            repo, store=store, task=prepared, coordinator=host_actor
                         )
                 else:
                     from .runtime_adapter import release_task_runtime
@@ -2875,7 +2899,7 @@ def finish(
     else:
         from .candidate_batches import reconcile_batches
 
-        reconciliation = reconcile_batches(repo, cause="finish")
+        reconciliation = reconcile_batches(repo, cause="finish", coordinator=host_actor)
         candidate_result.update(
             {
                 "delivered": False,
@@ -2970,6 +2994,7 @@ def _recover_published_runtime_adapter_release(
     store: StateStore,
     task: dict[str, Any],
     paths: list[str],
+    coordinator: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """从已交付 base 重试一个 held 候选的 Adapter release，不改候选内容。"""
 
@@ -3086,7 +3111,9 @@ def _recover_published_runtime_adapter_release(
                 receipt=runtime_release,
             )
         with candidate_admission_lock(repo):
-            return _resume_candidate_publication(repo, store=store, task=task)
+            return _resume_candidate_publication(
+                repo, store=store, task=task, coordinator=coordinator
+            )
 
 
 def recover(
@@ -3094,10 +3121,12 @@ def recover(
     *,
     task_id: str,
     repair_runtime_adapter_paths: list[str] | None = None,
+    host_actor: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """根据持久化事务和 Git 事实恢复；失败时不轮换租约或改变现场。"""
     _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
+    host_actor = normalize_host_reference(host_actor)
     store.reconcile_operation_receipts()
     task = store.task(task_id)
     if repair_runtime_adapter_paths is not None:
@@ -3108,6 +3137,7 @@ def recover(
                     store=store,
                     task=task,
                     paths=repair_runtime_adapter_paths,
+                    coordinator=host_actor,
                 )
             return _recover_runtime_adapter_repair(
                 repo,
@@ -3133,6 +3163,7 @@ def recover(
                     str(candidate["candidate_id"]),
                     batch_size=int(policy["batch_size"]),
                     seal_policy=str(policy["seal_policy"]),
+                    coordinator=host_actor,
                 )
             candidate = activated["candidate"]
             auto_batch = activated.get("auto_batch")
@@ -3269,7 +3300,9 @@ def recover(
                     "recovered_ready_proof": True,
                 }
             if task.get("candidate_publication"):
-                return _resume_candidate_publication(repo, store=store, task=task)
+                return _resume_candidate_publication(
+                    repo, store=store, task=task, coordinator=host_actor
+                )
             if task.get("abandonment"):
                 _stop_registered_processes(store, task)
                 result = resume_abandonment(repo, store=store, task=store.task(task_id))

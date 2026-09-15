@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from solo_ai.host_handoffs import HANDOFF_SCHEMA, HostHandoffStore
@@ -104,3 +105,23 @@ def test_same_repair_takeover_is_idempotent(git_repo: Path) -> None:
 
     assert repeated == first
     assert len(repeated["takeovers"]) == 1
+
+
+def test_legacy_dispatched_message_is_projected_as_uncertain(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    request_id = seed_handoff(repo, status="pending")
+    path = repo.local_dir / "host-handoffs.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema_version"] = 1
+    atomic_write_json(path, value)
+
+    status = HostHandoffStore(repo).status()
+
+    assert status["repair_requests"][0]["delivery_status"] == "uncertain"
+    assert status["actions"] == [
+        {
+            "kind": "confirm_or_retry_repair_delivery",
+            "request_id": request_id,
+            "target": SOURCE,
+        }
+    ]

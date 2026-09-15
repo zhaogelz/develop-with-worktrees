@@ -148,6 +148,7 @@ def publish(
     name: str,
     relative: str,
     host_origin: dict[str, str] | None = None,
+    finish_actor: dict[str, str] | None = None,
     root_anchor_id: str | None = None,
     root_anchor_file: Path | None = None,
     run_ready: bool = True,
@@ -170,7 +171,12 @@ def publish(
     )
     if run_ready:
         ready(repo, task_id=task["id"], lease=task["lease"])
-    return finish(repo, task_id=task["id"], lease=task["lease"])
+    return finish(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        host_actor=finish_actor,
+    )
 
 
 def test_new_default_publishes_source_candidates_without_ready_then_tests_combined_batch(
@@ -281,6 +287,7 @@ def test_candidate_handoff_records_source_and_auto_batch_coordinator(
 ) -> None:
     repo = initialized_batched(git_repo)
     source = {"kind": "codex", "thread_id": "developer-task"}
+    second_source = {"kind": "codex", "thread_id": "developer-task-2"}
     coordinator = {"kind": "codex", "thread_id": "integration-task"}
 
     first = publish(
@@ -293,20 +300,23 @@ def test_candidate_handoff_records_source_and_auto_batch_coordinator(
         repo,
         name="coordinator handoff",
         relative="coordinator-handoff.txt",
-        host_origin=coordinator,
+        host_origin=second_source,
+        finish_actor=coordinator,
     )
 
     pool = CandidateBatchStore(repo).summary()
     candidates = {item["candidate_id"]: item for item in pool["candidates"]}
     assert candidates[first["candidate_id"]]["host_origin"] == source
-    assert candidates[second["candidate_id"]]["host_origin"] == coordinator
+    assert candidates[second["candidate_id"]]["host_origin"] == second_source
     assert len(pool["batches"]) == 1
     assert pool["batches"][0]["host_coordinator"] == coordinator
 
     status = _status(repo, detailed=False)
     tasks = {item["id"]: item for item in status["tasks"]}
     assert tasks[first["task_id"]]["candidate_delivery"]["source_host"] == source
-    assert tasks[second["task_id"]]["candidate_delivery"]["source_host"] == coordinator
+    assert (
+        tasks[second["task_id"]]["candidate_delivery"]["source_host"] == second_source
+    )
 
 
 def test_explicit_tail_records_the_triggering_host_as_coordinator(

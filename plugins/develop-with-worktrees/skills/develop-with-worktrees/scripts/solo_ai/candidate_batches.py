@@ -464,8 +464,10 @@ class CandidateBatchStore:
         batch_size: int,
         seal_policy: str,
         activate: bool = True,
+        coordinator: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         created_ref = False
+        coordinator = normalize_host_reference(coordinator)
 
         def update(value: dict[str, Any]) -> dict[str, Any]:
             nonlocal created_ref
@@ -574,7 +576,7 @@ class CandidateBatchStore:
                         [str(item["candidate_id"]) for item in eligible[:batch_size]],
                         batch_size=batch_size,
                         trigger="auto_full",
-                        coordinator=record.get("host_origin"),
+                        coordinator=coordinator,
                     )
             return {
                 "candidate": copy.deepcopy(
@@ -598,7 +600,10 @@ class CandidateBatchStore:
         *,
         batch_size: int,
         seal_policy: str,
+        coordinator: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        coordinator = normalize_host_reference(coordinator)
+
         def update(value: dict[str, Any]) -> dict[str, Any]:
             candidate = value["candidates"].get(candidate_id)
             if not candidate:
@@ -652,7 +657,7 @@ class CandidateBatchStore:
                         [str(item["candidate_id"]) for item in eligible[:batch_size]],
                         batch_size=batch_size,
                         trigger="auto_full",
-                        coordinator=candidate.get("host_origin"),
+                        coordinator=coordinator,
                     )
             return {
                 "candidate": copy.deepcopy(candidate),
@@ -1065,6 +1070,53 @@ class CandidateBatchStore:
 
         return self.mutate(update)
 
+    def mark_candidate_repair_eligible(
+        self, *, batch_id: str, candidate_id: str, failure_kind: str
+    ) -> dict[str, Any]:
+        """记录由负责人明确归因的返修资格，不自行猜测业务责任。"""
+
+        if failure_kind not in {"composition_conflict", "validation_failed"}:
+            raise SoloAIError(
+                "Only attributed composition or validation failures can enable repair"
+            )
+
+        def update(value: dict[str, Any]) -> dict[str, Any]:
+            batch = value["batches"].get(batch_id)
+            candidate = value["candidates"].get(candidate_id)
+            if not batch or not candidate:
+                raise SoloAIError(
+                    "Repair attribution references an unknown batch or candidate"
+                )
+            if (
+                batch.get("status") != "failed"
+                or batch.get("failure_kind") != failure_kind
+            ):
+                raise SoloAIError(
+                    "Repair attribution does not match the recorded batch failure"
+                )
+            if candidate_id not in batch.get("candidate_ids", []):
+                raise SoloAIError("Repair candidate is not part of the failed batch")
+            if candidate.get("status") not in {"pending", "retained"} or candidate.get(
+                "sealed_batch"
+            ):
+                raise SoloAIError(
+                    "Only an unsealed retained candidate can be prepared for repair"
+                )
+            if candidate.get("last_failed_batch") != batch_id:
+                raise SoloAIError(
+                    "Repair candidate is not retained from this failed batch"
+                )
+            candidate.update(
+                {
+                    "repair_eligible": True,
+                    "last_failure_kind": failure_kind,
+                    "updated_at": utc_timestamp(),
+                }
+            )
+            return copy.deepcopy(candidate)
+
+        return self.mutate(update)
+
     def repair_source(self, candidate_id: str) -> dict[str, Any]:
         candidate = self.candidate(candidate_id)
         if candidate.get("status") not in {"pending", "retained"} or candidate.get(
@@ -1076,7 +1128,7 @@ class CandidateBatchStore:
         if not candidate.get("repair_eligible"):
             kind = candidate.get("last_failure_kind") or "unknown"
             raise SoloAIError(
-                "Automatic repair is limited to a candidate that caused a composition conflict; "
+                "Automatic repair is limited to a coordinator-attributed composition or validation failure; "
                 f"the latest failure kind is {kind}. Review the failure before choosing a new result."
             )
         attempt = int(candidate.get("repair_attempt", 0))

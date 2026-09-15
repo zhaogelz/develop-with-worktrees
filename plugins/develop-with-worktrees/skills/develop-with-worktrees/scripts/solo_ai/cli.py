@@ -20,7 +20,7 @@ from .candidate_batches import (
     withdraw_candidate,
 )
 from .cleanup import classify_cleanup_path, require_managed_directory_identity
-from .host_context import host_reference
+from .host_context import resolve_host_reference
 from .host_handoffs import HostHandoffStore
 from .config import (
     CommandSpec,
@@ -111,6 +111,14 @@ def _add_host_reference_arguments(
     parser.add_argument(
         "--host-thread",
         help=f"verified host task or session identifier that owns this {role}; requires --host-kind",
+    )
+
+
+def _resolved_host_reference(args: argparse.Namespace) -> dict[str, str] | None:
+    """优先使用兼容参数；Codex Desktop 未传参数时读取其精确任务上下文。"""
+
+    return resolve_host_reference(
+        getattr(args, "host_kind", None), getattr(args, "host_thread", None)
     )
 
 
@@ -650,9 +658,31 @@ def _parser() -> argparse.ArgumentParser:
     host_handoff_dispatch.add_argument(
         "--retry",
         action="store_true",
-        help="record one explicit resend after a delivery failure",
+        help="prepare one explicit resend after a delivery failure or uncertainty",
     )
     _add_host_reference_arguments(host_handoff_dispatch, role="repair dispatch")
+    host_handoff_delivery = host_handoff_repair_sub.add_parser(
+        "delivery",
+        help="record the actual native-host delivery outcome for one repair request",
+    )
+    host_handoff_delivery.add_argument("--request", required=True)
+    host_handoff_delivery.add_argument(
+        "--outcome", choices=("sent", "uncertain", "failed"), required=True
+    )
+    host_handoff_delivery.add_argument(
+        "--detail", help="optional safe one-line delivery evidence or failure detail"
+    )
+    _add_host_reference_arguments(host_handoff_delivery, role="repair dispatch")
+    host_handoff_attribute = host_handoff_repair_sub.add_parser(
+        "attribute",
+        help="record a coordinator-reviewed validation failure that needs one repair",
+    )
+    host_handoff_attribute.add_argument("--batch", required=True)
+    host_handoff_attribute.add_argument("--candidate", required=True)
+    host_handoff_attribute.add_argument(
+        "--evidence", required=True, help="single-line test, log, or candidate evidence"
+    )
+    _add_host_reference_arguments(host_handoff_attribute, role="validation attribution")
     host_handoff_claim = host_handoff_repair_sub.add_parser(
         "claim", help="acknowledge receipt as the exact current repair assignee"
     )
@@ -669,6 +699,27 @@ def _parser() -> argparse.ArgumentParser:
     )
     host_handoff_prepare.add_argument("--request", required=True)
     _add_host_reference_arguments(host_handoff_prepare, role="repair assignee")
+    host_handoff_result_dispatch = host_handoff_repair_sub.add_parser(
+        "result-dispatch",
+        help="return a published repair candidate message for the current coordinator",
+    )
+    host_handoff_result_dispatch.add_argument("--request", required=True)
+    host_handoff_result_dispatch.add_argument("--retry", action="store_true")
+    _add_host_reference_arguments(
+        host_handoff_result_dispatch, role="repair result sender"
+    )
+    host_handoff_result_delivery = host_handoff_repair_sub.add_parser(
+        "result-delivery",
+        help="record the actual native-host delivery outcome for a repair candidate",
+    )
+    host_handoff_result_delivery.add_argument("--request", required=True)
+    host_handoff_result_delivery.add_argument(
+        "--outcome", choices=("sent", "uncertain", "failed"), required=True
+    )
+    host_handoff_result_delivery.add_argument("--detail")
+    _add_host_reference_arguments(
+        host_handoff_result_delivery, role="repair result sender"
+    )
 
     runtime = sub.add_parser(
         "runtime", help="ask the project Adapter to verify a delivered runtime"
@@ -755,6 +806,8 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--task", required=True)
         item.add_argument("--lease", required=True)
         item.add_argument("--session")
+        if name == "finish":
+            _add_host_reference_arguments(item, role="candidate publication")
 
     retarget_parser = sub.add_parser(
         "retarget", help="explicitly rebind a task after its base branch changed"
@@ -797,6 +850,7 @@ def _parser() -> argparse.ArgumentParser:
         help="recover an interrupted task from persisted identity and Git facts",
     )
     recover.add_argument("--task", required=True)
+    _add_host_reference_arguments(recover, role="candidate publication recovery")
     recover.add_argument(
         "--repair-runtime-adapter",
         action="store_true",
@@ -1710,7 +1764,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             target=args.target,
             scope=args.scope,
             acceptance=args.acceptance,
-            host_origin=host_reference(args.host_kind, args.host_thread),
+            host_origin=_resolved_host_reference(args),
         )
     if args.command == "root-anchor":
         if args.root_anchor_command == "create":
@@ -1780,7 +1834,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             if args.host_handoff_batch_command == "take-over":
                 return CandidateBatchStore(repo).assign_host_coordinator(
                     args.batch,
-                    coordinator=host_reference(args.host_kind, args.host_thread),
+                    coordinator=_resolved_host_reference(args),
                     expected_revision=args.expected_revision,
                     reason=args.reason,
                 )
@@ -1788,10 +1842,24 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 f"Unknown host handoff batch command: {args.host_handoff_batch_command}"
             )
         if args.host_handoff_command == "repair":
-            actor = host_reference(args.host_kind, args.host_thread)
+            actor = _resolved_host_reference(args)
             if args.host_handoff_repair_command == "dispatch":
                 return handoffs.dispatch(
                     request_id=args.request, sender=actor, retry=args.retry
+                )
+            if args.host_handoff_repair_command == "delivery":
+                return handoffs.record_delivery(
+                    request_id=args.request,
+                    sender=actor,
+                    outcome=args.outcome,
+                    detail=args.detail,
+                )
+            if args.host_handoff_repair_command == "attribute":
+                return handoffs.attribute_validation_failure(
+                    batch_id=args.batch,
+                    candidate_id=args.candidate,
+                    coordinator=actor,
+                    evidence=args.evidence,
                 )
             if args.host_handoff_repair_command == "claim":
                 return handoffs.claim(request_id=args.request, actor=actor)
@@ -1801,6 +1869,17 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 )
             if args.host_handoff_repair_command == "prepare":
                 return handoffs.prepare(request_id=args.request, actor=actor)
+            if args.host_handoff_repair_command == "result-dispatch":
+                return handoffs.dispatch_repair_result(
+                    request_id=args.request, sender=actor, retry=args.retry
+                )
+            if args.host_handoff_repair_command == "result-delivery":
+                return handoffs.record_repair_result_delivery(
+                    request_id=args.request,
+                    sender=actor,
+                    outcome=args.outcome,
+                    detail=args.detail,
+                )
             raise SoloAIError(
                 f"Unknown host handoff repair command: {args.host_handoff_repair_command}"
             )
@@ -1812,7 +1891,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return prepare_candidate_repair(
                 repo,
                 candidate_id=args.candidate,
-                host_origin=host_reference(args.host_kind, args.host_thread),
+                host_origin=_resolved_host_reference(args),
             )
         if args.candidate_command == "withdraw":
             return withdraw_candidate(repo, candidate_id=args.candidate)
@@ -1828,14 +1907,14 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 repo,
                 candidate_ids=args.candidate,
                 after_failed_batch_id=args.after_failed_batch,
-                coordinator=host_reference(args.host_kind, args.host_thread),
+                coordinator=_resolved_host_reference(args),
             )
         if args.batch_command == "reconcile":
             return reconcile_batches(
                 repo,
                 force=args.force,
                 cause=args.cause,
-                coordinator=host_reference(args.host_kind, args.host_thread),
+                coordinator=_resolved_host_reference(args),
             )
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
@@ -1926,7 +2005,11 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return ready(repo, task_id=args.task, lease=args.lease, session_id=args.session)
     if args.command == "finish":
         return finish(
-            repo, task_id=args.task, lease=args.lease, session_id=args.session
+            repo,
+            task_id=args.task,
+            lease=args.lease,
+            session_id=args.session,
+            host_actor=_resolved_host_reference(args),
         )
     if args.command == "retarget":
         return retarget(
@@ -2074,6 +2157,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             repair_runtime_adapter_paths=(
                 args.repair_path if args.repair_runtime_adapter else None
             ),
+            host_actor=_resolved_host_reference(args),
         )
     if args.command == "handoff":
         return handoff(repo, task_id=args.task, confirm=args.confirm)
