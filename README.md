@@ -6,7 +6,7 @@ When several AI tasks modify one Git repository, they can overwrite each other, 
 
 - One isolated worktree per modifying task.
 - A local task anchor that records the purpose, implementation target, scope, acceptance, and baseline at `Start`, so continuation and handoff do not begin with template fields; `anchor show/update` reads and saves checked context during an active task, without a DWW content-size quota.
-- When you confirm a complete plan, one local objective anchor keeps that exact plan through resumed tasks and conflict repairs. Plan-changing revisions retain the complete prior version, while normal status remains compact; DWW records the checked overall result before the objective closes.
+- When you confirm a complete plan, one local objective anchor keeps that exact plan through resumed tasks and conflict repairs. Start or a later bind prints that plan once for the implementation agent; plan-changing revisions retain the complete prior version, while normal status remains compact. DWW records the checked overall result before the objective closes.
 - Exact-path commits and immutable source candidates.
 - Automatic integration whenever three eligible candidates accumulate.
 - A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
@@ -18,7 +18,7 @@ DWW is no longer a multi-AI task command center. The host's native task system d
 
 ## Default flow
 
-1. When you have confirmed a complete plan, the host first saves it in one local objective anchor. Start writes the known task facts once and creates the isolated worktree; an optional project Runtime Adapter establishes runtime identity before the task returns as active.
+1. When you have confirmed a complete plan, the host first saves it in one local objective anchor. Start writes the known task facts once, creates the isolated worktree, and prints the complete root plan once; an optional project Runtime Adapter establishes runtime identity before the task returns as active.
 2. The agent edits only there, commits exact paths, and runs development checks when they help it work safely.
 3. `Finish` publishes the exact source candidate and releases the task worktree without moving the base or requiring a separate project test gate; it is not delivery by itself.
 4. Every three candidates, DWW freezes the oldest eligible three and composes them in an integration worktree. It then runs the affected combined checks, reusing valid individual results.
@@ -55,7 +55,7 @@ Legacy repositories may keep explicit direct or explicit-seal policies during mi
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.2
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.3
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

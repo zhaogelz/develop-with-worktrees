@@ -17,6 +17,7 @@ from solo_ai.config import (
 )
 from solo_ai.config import (
     _legacy_managed_block,
+    _pre_root_output_managed_block,
     _pre_simplification_managed_block,
     _pre_refresh_root_context_managed_block,
 )
@@ -154,6 +155,17 @@ def test_pre_simplification_managed_block_can_be_upgraded() -> None:
         managed_agents_status(existing)
         == "known-legacy-0.5.0-beta.2-pre-simplification"
     )
+    upgraded = render_agents(existing)
+    assert managed_agents_status(upgraded) == "current"
+    assert upgraded.endswith("\nKeep this.\n")
+
+
+def test_pre_root_output_managed_block_can_be_upgraded() -> None:
+    existing = (
+        "# User instructions\n\n" + _pre_root_output_managed_block() + "\nKeep this.\n"
+    )
+
+    assert managed_agents_status(existing) == "known-legacy-root-output"
     upgraded = render_agents(existing)
     assert managed_agents_status(upgraded) == "current"
     assert upgraded.endswith("\nKeep this.\n")

@@ -128,8 +128,10 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         "skills/develop-with-worktrees/scripts/dww.py",
         "skills/develop-with-worktrees/scripts/solo_ai/candidate_batches.py",
         "skills/develop-with-worktrees/scripts/solo_ai/cli.py",
+        "skills/develop-with-worktrees/scripts/solo_ai/config.py",
         "skills/develop-with-worktrees/scripts/solo_ai/lifecycle.py",
         "skills/develop-with-worktrees/scripts/solo_ai/root_context.py",
+        "skills/develop-with-worktrees/scripts/solo_ai/task_context.py",
     )
     for relative_path in shipped_paths:
         source_path = source / relative_path
@@ -214,7 +216,10 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         "installed-runner-root-smoke",
     )
     assert created_root.returncode == 0, created_root.stderr
-    root_id = json.loads(created_root.stdout)["result"]["root_id"]
+    created_root_payload = json.loads(created_root.stdout)["result"]
+    assert "content" not in created_root_payload
+    assert "confirmed_plan" not in created_root_payload
+    root_id = created_root_payload["root_id"]
     root_plan.unlink()
     started = run_runner(
         "start",
@@ -230,7 +235,12 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         root_id,
     )
     assert started.returncode == 0, started.stderr
-    values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
+    headers, separator, root_body = started.stdout.partition(
+        "\n\nRoot anchor (complete plan):\n"
+    )
+    assert separator
+    assert root_body.count("# Installed plan V1") == 1
+    values = dict(line.split(": ", 1) for line in headers.splitlines())
     task_id = values["Task"]
     lease = values["Lease"]
     worktree = Path(values["Worktree"])
@@ -249,12 +259,14 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         "--summary",
         "append the installed exact correction",
         "--expected-sha256",
-        json.loads(created_root.stdout)["result"]["sha256"],
+        created_root_payload["sha256"],
+        "--content",
     )
     assert amended_root.returncode == 0, amended_root.stderr
     root_change.unlink()
     amended_payload = json.loads(amended_root.stdout)["result"]
-    assert "Installed V2 exact correction." in amended_payload["content"]
+    assert amended_payload["content"].count("Installed V2 exact correction.") == 1
+    assert "confirmed_plan" not in amended_payload
     refreshed_root = run_runner(
         "--json",
         "anchor",
@@ -270,6 +282,15 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         json.loads(refreshed_root.stdout)["result"]["root_plan_review"]["record_kind"]
         == "read"
     )
+    refreshed_payload = json.loads(refreshed_root.stdout)["result"]
+    assert "initial installed target" in refreshed_payload["task_anchor"]["content"]
+    assert (
+        refreshed_payload["root_anchor"]["content"].count(
+            "Installed V2 exact correction."
+        )
+        == 1
+    )
+    assert "confirmed_plan" not in refreshed_payload["root_anchor"]
     shown_anchor = run_runner(
         "--json", "anchor", "show", "--task", task_id, "--content", cwd=worktree
     )

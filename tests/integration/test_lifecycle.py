@@ -4663,7 +4663,9 @@ def test_root_content_is_returned_once_for_a_bound_task(git_repo: Path) -> None:
     )
     refreshed = refresh_root_context(repo, task_id=task["id"], lease=task["lease"])
     assert refreshed["root_plan_review"]["current_version"] == amended["plan_version"]
+    assert "Task anchor: read root once" in refreshed["task_anchor"]["content"]
     assert refreshed["root_anchor"]["content"].count("Keep V2 once.") == 1
+    assert "confirmed_plan" not in refreshed["root_anchor"]
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 

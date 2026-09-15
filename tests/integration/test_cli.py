@@ -70,6 +70,43 @@ def test_human_recover_output_uses_id_for_idempotent_candidate_publication() -> 
     assert "Lease:" not in rendered
 
 
+def test_human_start_output_keeps_headers_separate_from_one_complete_root_plan() -> (
+    None
+):
+    marker = "DWW_COMPLETE_ROOT_PLAN_MARKER"
+    rendered = _human(
+        "start",
+        {
+            "id": "task-root-output",
+            "mode": "isolated",
+            "worktree": "C:/worktree",
+            "branch": "codex/root-output",
+            "anchor_path": "C:/anchor.md",
+            "lease": "lease-value",
+            "root_anchor": {
+                "content": (
+                    "# Root task anchor\n\n"
+                    f"{marker}\n"
+                    "Task: this plan text is not a response header\n"
+                )
+            },
+        },
+    )
+
+    headers, separator, body = rendered.partition("\n\nRoot anchor (complete plan):\n")
+    assert separator
+    assert dict(line.split(": ", 1) for line in headers.splitlines()) == {
+        "Task": "task-root-output",
+        "Mode": "isolated",
+        "Worktree": "C:/worktree",
+        "Branch": "codex/root-output",
+        "Anchor": "C:/anchor.md",
+        "Lease": "lease-value",
+    }
+    assert body.count(marker) == 1
+    assert "Task: this plan text is not a response header" in body
+
+
 def test_runtime_adapter_repair_cli_requires_an_exact_path(git_repo: Path) -> None:
     runner = (
         Path(__file__).parents[2]
@@ -137,7 +174,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.5.0-beta.2"
+    assert payload["version"] == "0.5.0-beta.3"
     plugin_version = payload["plugin_version"]
     assert plugin_version == manifest["version"]
     if plugin_version != payload["version"]:

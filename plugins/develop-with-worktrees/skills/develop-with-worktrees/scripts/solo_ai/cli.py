@@ -477,6 +477,11 @@ def _parser() -> argparse.ArgumentParser:
     root_create.add_argument(
         "--request-id", help="stable caller id; repeated creation returns the same root"
     )
+    root_create.add_argument(
+        "--content",
+        action="store_true",
+        help="include the complete root-anchor body in this response",
+    )
     root_show = root_anchor_sub.add_parser(
         "show", help="show one root anchor summary; use --content for its full body"
     )
@@ -493,6 +498,11 @@ def _parser() -> argparse.ArgumentParser:
     root_update.add_argument("--root", required=True)
     root_update.add_argument("--file", type=Path, required=True)
     root_update.add_argument("--expected-sha256", required=True)
+    root_update.add_argument(
+        "--content",
+        action="store_true",
+        help="include the complete root-anchor body in this response",
+    )
     root_amend = root_anchor_sub.add_parser(
         "amend",
         help="replace or append the effective plan after an explicit user-confirmed change",
@@ -515,12 +525,22 @@ def _parser() -> argparse.ArgumentParser:
     root_amend.add_argument("--target")
     root_amend.add_argument("--scope")
     root_amend.add_argument("--acceptance")
+    root_amend.add_argument(
+        "--content",
+        action="store_true",
+        help="include the complete root-anchor body in this response",
+    )
     root_progress = root_anchor_sub.add_parser(
         "progress", help="record root progress without changing the confirmed plan"
     )
     root_progress.add_argument("--root", required=True)
     root_progress.add_argument("--progress", required=True)
     root_progress.add_argument("--expected-sha256", required=True)
+    root_progress.add_argument(
+        "--content",
+        action="store_true",
+        help="include the complete root-anchor body in this response",
+    )
     root_acceptance = root_anchor_sub.add_parser(
         "accept", help="record the checked overall objective result"
     )
@@ -530,6 +550,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     root_acceptance.add_argument("--evidence-file", type=Path, required=True)
     root_acceptance.add_argument("--expected-sha256", required=True)
+    root_acceptance.add_argument(
+        "--content",
+        action="store_true",
+        help="include the complete root-anchor body in this response",
+    )
     root_close = root_anchor_sub.add_parser(
         "close", help="delete a root anchor after every child task is terminal"
     )
@@ -1797,6 +1822,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 plan_input_path=args.plan_file,
                 plan_source=args.plan_source,
                 request_id=args.request_id,
+                include_content=args.content,
             )
         if args.root_anchor_command == "show":
             return show_root_task_anchor(
@@ -1811,6 +1837,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 root_id=args.root,
                 input_path=args.file,
                 expected_sha256=args.expected_sha256,
+                include_content=args.content,
             )
         if args.root_anchor_command == "amend":
             return amend_root_task_anchor(
@@ -1824,6 +1851,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 target=args.target,
                 scope=args.scope,
                 acceptance=args.acceptance,
+                include_content=args.content,
             )
         if args.root_anchor_command == "progress":
             return update_root_task_progress(
@@ -1831,6 +1859,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 root_id=args.root,
                 progress=args.progress,
                 expected_sha256=args.expected_sha256,
+                include_content=args.content,
             )
         if args.root_anchor_command == "accept":
             return record_root_task_acceptance(
@@ -1839,6 +1868,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 status=args.status,
                 evidence_input_path=args.evidence_file,
                 expected_sha256=args.expected_sha256,
+                include_content=args.content,
             )
         if args.root_anchor_command == "close":
             return close_root_task_anchor(repo, root_id=args.root, confirm=args.confirm)
@@ -2248,7 +2278,7 @@ def _human(command: str, result: dict[str, Any]) -> str:
         )
     if command == "start":
         mode = result.get("mode", "isolated")
-        return "\n".join(
+        summary = "\n".join(
             (
                 f"Task: {result['id']}",
                 f"Mode: {mode}",
@@ -2259,6 +2289,11 @@ def _human(command: str, result: dict[str, Any]) -> str:
                 *(("Request reused: yes",) if result.get("request_reused") else ()),
             )
         )
+        root = result.get("root_anchor")
+        root_content = root.get("content") if isinstance(root, dict) else None
+        if isinstance(root_content, str) and root_content:
+            return f"{summary}\n\nRoot anchor (complete plan):\n{root_content.rstrip()}"
+        return summary
     if command == "finish":
         if result.get("outcome") == "batch_integrated":
             return (

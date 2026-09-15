@@ -906,12 +906,15 @@ def refresh_root_context(repo: GitRepo, *, task_id: str, lease: str) -> dict[str
             raise SoloAIError(
                 "Only an active or ready task can refresh its root context"
             )
+        task_anchor = read_anchor(repo, task)
+        task_anchor["status"] = task.get("status")
         context = _read_root_context(repo, store=store, task=task)
         if not context:
             raise SoloAIError("Task is not bound to a root anchor")
         return {
             "task_id": task_id,
             "root_id": task["root_anchor_id"],
+            "task_anchor": _anchor_view(task_anchor, include_content=True),
             **context,
         }
 
@@ -2054,6 +2057,7 @@ def create_root_task_anchor(
     plan_input_path: Path | None = None,
     plan_source: str | None = None,
     request_id: str | None = None,
+    include_content: bool = True,
 ) -> dict[str, Any]:
     """创建主会话长期执行合同；它不领取工作树也不创建候选。"""
 
@@ -2088,7 +2092,7 @@ def create_root_task_anchor(
             plan_source=plan_source,
             request_id=request_id,
         )
-        return _anchor_view(result, include_content=True)
+        return _anchor_view(result, include_content=include_content)
 
 
 def show_root_task_anchor(
@@ -2113,15 +2117,17 @@ def update_root_task_anchor(
     root_id: str,
     input_path: Path,
     expected_sha256: str,
+    include_content: bool = True,
 ) -> dict[str, Any]:
     _config_and_mode(repo)
     with maintenance_lock(repo):
-        return update_root_anchor(
+        result = update_root_anchor(
             repo,
             root_id=root_id,
             input_path=input_path,
             expected_sha256=expected_sha256,
         )
+        return _anchor_view(result, include_content=include_content)
 
 
 def amend_root_task_anchor(
@@ -2136,6 +2142,7 @@ def amend_root_task_anchor(
     target: str | None = None,
     scope: str | None = None,
     acceptance: str | None = None,
+    include_content: bool = True,
 ) -> dict[str, Any]:
     _config_and_mode(repo)
     with maintenance_lock(repo):
@@ -2159,20 +2166,26 @@ def amend_root_task_anchor(
             scope=scope,
             acceptance=acceptance,
         )
-        return _anchor_view(result, include_content=True)
+        return _anchor_view(result, include_content=include_content)
 
 
 def update_root_task_progress(
-    repo: GitRepo, *, root_id: str, progress: str, expected_sha256: str
+    repo: GitRepo,
+    *,
+    root_id: str,
+    progress: str,
+    expected_sha256: str,
+    include_content: bool = True,
 ) -> dict[str, Any]:
     _config_and_mode(repo)
     with maintenance_lock(repo):
-        return update_root_progress(
+        result = update_root_progress(
             repo,
             root_id=root_id,
             progress=progress,
             expected_sha256=expected_sha256,
         )
+        return _anchor_view(result, include_content=include_content)
 
 
 def record_root_task_acceptance(
@@ -2182,16 +2195,18 @@ def record_root_task_acceptance(
     status: str,
     evidence_input_path: Path,
     expected_sha256: str,
+    include_content: bool = True,
 ) -> dict[str, Any]:
     _config_and_mode(repo)
     with maintenance_lock(repo):
-        return record_root_acceptance(
+        result = record_root_acceptance(
             repo,
             root_id=root_id,
             status=status,
             evidence=read_root_acceptance_evidence_input(repo, evidence_input_path),
             expected_sha256=expected_sha256,
         )
+        return _anchor_view(result, include_content=include_content)
 
 
 def close_root_task_anchor(
