@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from conftest import declare_delegated_adapter, git
 from solo_ai import __version__
+import solo_ai.cli as cli_module
 from solo_ai.cli import _human
 from solo_ai.state import STATE_SCHEMA
 
@@ -68,6 +72,48 @@ def test_human_recover_output_uses_id_for_idempotent_candidate_publication() -> 
         f"Candidate: candidate-published at {'a' * 40}"
     )
     assert "Lease:" not in rendered
+
+
+def test_human_recover_output_accepts_integrated_candidate_without_a_lease() -> None:
+    result = {
+        "id": "task-integrated",
+        "status": "integrated",
+        "candidate_id": "candidate-integrated",
+        "batch_id": "batch-integrated",
+        "delivery_status": "integrated",
+    }
+
+    rendered = _human("recover", result)
+
+    assert rendered == (
+        "Task: task-integrated\n"
+        "Status: integrated\n"
+        "Candidate: candidate-integrated\n"
+        "Batch: batch-integrated\n"
+        "Delivery: integrated"
+    )
+    assert "Lease:" not in rendered
+
+
+def test_cli_main_emits_utf8_when_noninteractive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_stdout = io.BytesIO()
+    raw_stderr = io.BytesIO()
+    stdout = io.TextIOWrapper(raw_stdout, encoding="gbk")
+    stderr = io.TextIOWrapper(raw_stderr, encoding="gbk")
+    monkeypatch.setattr(cli_module.sys, "stdout", stdout)
+    monkeypatch.setattr(cli_module.sys, "stderr", stderr)
+    monkeypatch.setattr(
+        cli_module,
+        "_dispatch",
+        lambda _args: {"message": "中文完整方案正文"},
+    )
+
+    assert cli_module.main(["version"]) == 0
+
+    stdout.flush()
+    assert "中文完整方案正文" in raw_stdout.getvalue().decode("utf-8")
 
 
 def test_human_start_output_keeps_headers_separate_from_one_complete_root_plan() -> (
@@ -174,7 +220,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.5.0-beta.3"
+    assert payload["version"] == "0.5.0-beta.4"
     plugin_version = payload["plugin_version"]
     assert plugin_version == manifest["version"]
     if plugin_version != payload["version"]:

@@ -195,7 +195,10 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert version_payload["verification_schema"] == 3
     assert version_payload["state_schema"] == STATE_SCHEMA
     root_plan = smoke_repo / "installed-root-plan.md"
-    root_plan.write_text("# Installed plan V1\n", encoding="utf-8")
+    root_plan.write_text(
+        "# 已安装完整方案 V1\n\n用于验证非交互式 UTF-8 输出。\n",
+        encoding="utf-8",
+    )
     created_root = run_runner(
         "--json",
         "root-anchor",
@@ -239,7 +242,8 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         "\n\nRoot anchor (complete plan):\n"
     )
     assert separator
-    assert root_body.count("# Installed plan V1") == 1
+    assert root_body.count("# 已安装完整方案 V1") == 1
+    assert "用于验证非交互式 UTF-8 输出。" in root_body
     values = dict(line.split(": ", 1) for line in headers.splitlines())
     task_id = values["Task"]
     lease = values["Lease"]

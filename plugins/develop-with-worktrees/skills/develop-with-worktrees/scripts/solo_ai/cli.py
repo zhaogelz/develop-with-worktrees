@@ -2355,10 +2355,45 @@ def _human(command: str, result: dict[str, Any]) -> str:
                 f"Task: {result.get('id') or result.get('task_id')}\n"
                 f"Status: abandoned\nTransaction: {result['transaction_id']}"
             )
-        return "\n".join((f"Task: {result['id']}", f"Lease: {result['lease']}"))
+        if result.get("status") in {"integrated", "withdrawn", "superseded"}:
+            lines = (
+                f"Task: {result.get('id') or result.get('task_id')}",
+                f"Status: {result['status']}",
+                *(
+                    (f"Candidate: {result['candidate_id']}",)
+                    if result.get("candidate_id")
+                    else ()
+                ),
+                *((f"Batch: {result['batch_id']}",) if result.get("batch_id") else ()),
+                *(
+                    (f"Delivery: {result['delivery_status']}",)
+                    if result.get("delivery_status")
+                    else ()
+                ),
+            )
+            return "\n".join(lines)
+        lease = result.get("lease")
+        if isinstance(lease, str) and lease:
+            return "\n".join((f"Task: {result['id']}", f"Lease: {lease}"))
+        return json.dumps(
+            _redact_leases(result), ensure_ascii=False, indent=2, sort_keys=True
+        )
     return json.dumps(
         _redact_leases(result), ensure_ascii=False, indent=2, sort_keys=True
     )
+
+
+def _configure_noninteractive_text_output() -> None:
+    """让被宿主捕获的 CLI 文本稳定为 UTF-8，交互终端保持原样。"""
+
+    for stream in (sys.stdout, sys.stderr):
+        if stream.isatty():
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError, ValueError):
+            # 嵌入式宿主可替换标准流；无法重配时沿用其既有契约。
+            continue
 
 
 def _redact_leases(value: Any) -> Any:
@@ -2381,6 +2416,7 @@ def _redact_leases(value: Any) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_noninteractive_text_output()
     parser = _parser()
     args = parser.parse_args(argv)
     try:

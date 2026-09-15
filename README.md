@@ -55,7 +55,7 @@ Legacy repositories may keep explicit direct or explicit-seal policies during mi
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.3
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.4
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
