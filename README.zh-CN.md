@@ -61,7 +61,7 @@ Hook 只是可选的提前拦截或唤醒来源。即使没有安装或信任 Ho
 ## 安装
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.4
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.5
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
