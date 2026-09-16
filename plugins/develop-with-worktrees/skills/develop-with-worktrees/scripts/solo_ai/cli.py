@@ -567,7 +567,18 @@ def _parser() -> argparse.ArgumentParser:
         help="inspect or withdraw immutable source candidates in batched mode",
     )
     candidate_sub = candidate.add_subparsers(dest="candidate_command", required=True)
-    candidate_sub.add_parser("status", help="show the local candidate pool")
+    candidate_status = candidate_sub.add_parser(
+        "status", help="show the local candidate pool"
+    )
+    candidate_status.add_argument(
+        "--history", action="store_true", help="include terminal candidate history"
+    )
+    candidate_status.add_argument(
+        "--candidate", help="show one exact candidate, including its history"
+    )
+    candidate_status.add_argument(
+        "--check", action="store_true", help="check DWW candidate refs without changes"
+    )
     candidate_repair = candidate_sub.add_parser(
         "repair",
         help="prepare one bounded managed repair task for a composition conflict",
@@ -578,6 +589,9 @@ def _parser() -> argparse.ArgumentParser:
         "withdraw", help="withdraw one pending candidate that is not in an active batch"
     )
     candidate_withdraw.add_argument("--candidate", required=True)
+    candidate_withdraw.add_argument(
+        "--reason", required=True, help="one-line reason retained with the withdrawal"
+    )
 
     batch = sub.add_parser(
         "batch", help="close a smaller tail, inspect, or recover candidate integration"
@@ -928,6 +942,9 @@ def _parser() -> argparse.ArgumentParser:
     abandoned.add_argument("--task", required=True)
     abandoned.add_argument("--lease", required=True)
     abandoned.add_argument("--confirm", required=True)
+    abandoned.add_argument(
+        "--reason", required=True, help="one-line reason retained with the abandonment"
+    )
     abandoned.add_argument("--session")
 
     resume = sub.add_parser(
@@ -1114,6 +1131,7 @@ def _version() -> dict[str, Any]:
 
 def _doctor(repo: GitRepo) -> dict[str, Any]:
     report = _status(repo, detailed=False)
+    report["candidate_integrity"] = CandidateBatchStore(repo).integrity_check()
     policy = repo.policy_path()
     if report["mode"] == "managed":
         verification = load_verification_config(repo, cwd=policy)
@@ -1943,7 +1961,16 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         raise SoloAIError(f"Unknown host handoff command: {args.host_handoff_command}")
     if args.command == "candidate":
         if args.candidate_command == "status":
-            return CandidateBatchStore(repo).summary()
+            store = CandidateBatchStore(repo)
+            summary = store.summary()
+            return {
+                **summary,
+                "status_view": store.status_view(
+                    include_history=args.history,
+                    candidate_id=args.candidate,
+                    check=args.check,
+                ),
+            }
         if args.candidate_command == "repair":
             return prepare_candidate_repair(
                 repo,
@@ -1951,7 +1978,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 host_origin=_resolved_host_reference(args),
             )
         if args.candidate_command == "withdraw":
-            return withdraw_candidate(repo, candidate_id=args.candidate)
+            return withdraw_candidate(
+                repo, candidate_id=args.candidate, reason=args.reason, source="cli"
+            )
         raise SoloAIError(f"Unknown candidate command: {args.candidate_command}")
     if args.command == "batch":
         if args.batch_command == "status":
@@ -2238,6 +2267,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             task_id=args.task,
             lease=args.lease,
             confirm=args.confirm,
+            reason=args.reason,
+            source="cli",
             session_id=args.session,
         )
     if args.command == "warm-slot":
@@ -2295,6 +2326,43 @@ def _human(
         and isinstance(result.get("lease"), str)
     ):
         return _repair_task_human(result)
+    if command == "candidate" and getattr(args, "candidate_command", None) == "status":
+        view = result.get("status_view") or {}
+        summary = view.get("status_summary") or {}
+        lines = [
+            "Candidates: "
+            f"{summary.get('active', 0)} active, "
+            f"{summary.get('history', 0)} historical, "
+            f"{summary.get('active_batches', 0)} active batch(es)."
+        ]
+        if view.get("view") == "active" and summary.get("history"):
+            lines.append(
+                "Historical candidates are hidden; use --history to show them."
+            )
+        for candidate in view.get("candidates") or []:
+            lines.append(
+                "- "
+                f"{candidate.get('candidate_id')}: {candidate.get('status')} "
+                f"({candidate.get('delivery_status')})"
+            )
+        integrity = view.get("integrity") or {}
+        if integrity.get("status") == "not-checked":
+            lines.append(
+                "Integrity: not checked; use --check to inspect DWW candidate refs."
+            )
+        else:
+            issues = integrity.get("issues") or []
+            in_progress = integrity.get("in_progress") or []
+            observations = integrity.get("observations") or []
+            lines.append(
+                "Integrity: checked; "
+                f"{len(issues)} issue(s), {len(in_progress)} recovery item(s), "
+                f"{len(observations)} historical observation(s)."
+            )
+            for item in [*issues, *in_progress][:10]:
+                identity = item.get("candidate_id") or item.get("ref") or "unknown"
+                lines.append(f"- {item.get('kind')}: {identity}")
+        return "\n".join(lines)
     if command == "choose":
         if result.get("decision") == "deferred":
             return (

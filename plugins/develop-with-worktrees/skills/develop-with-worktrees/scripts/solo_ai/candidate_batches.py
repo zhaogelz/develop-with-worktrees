@@ -60,6 +60,18 @@ ACTIVE_BATCH_STATES = {
     "promotion_blocked",
     "promoted",
 }
+TERMINAL_CANDIDATE_STATES = frozenset({"integrated", "withdrawn", "superseded"})
+KNOWN_CANDIDATE_STATES = frozenset(
+    {
+        "held",
+        "pending",
+        "sealed",
+        "retained",
+        "withdrawing",
+        *TERMINAL_CANDIDATE_STATES,
+    }
+)
+CANDIDATE_REF_PREFIX = "refs/dww/candidates/"
 LEGACY_EXPLICIT_POLICY = {
     "schema_version": 1,
     "mode": "batched",
@@ -222,6 +234,161 @@ class CandidateBatchStore:
                 for item in value["candidates"].values()
             ],
             "batches": list(value["batches"].values()),
+        }
+
+    def status_view(
+        self,
+        *,
+        include_history: bool = False,
+        candidate_id: str | None = None,
+        check: bool = False,
+    ) -> dict[str, Any]:
+        """为人类和宿主提供紧凑视图，内部摘要仍保留完整历史。"""
+
+        summary = self.summary()
+        candidates = sorted(
+            summary["candidates"],
+            key=lambda item: (
+                int(item.get("publication_sequence", 0)),
+                str(item.get("candidate_id", "")),
+            ),
+        )
+        by_status = {
+            status: sum(item.get("status") == status for item in candidates)
+            for status in sorted({str(item.get("status")) for item in candidates})
+        }
+        active = [
+            item
+            for item in candidates
+            if item.get("status") not in TERMINAL_CANDIDATE_STATES
+        ]
+        if candidate_id:
+            selected = [
+                item for item in candidates if item.get("candidate_id") == candidate_id
+            ]
+            if not selected:
+                raise SoloAIError(f"Unknown candidate: {candidate_id}")
+            view = "candidate"
+        elif include_history:
+            selected = candidates
+            view = "history"
+        else:
+            selected = active
+            view = "active"
+        return {
+            "view": view,
+            "candidates": selected,
+            "status_summary": {
+                "active": len(active),
+                "history": len(candidates) - len(active),
+                "by_status": by_status,
+                "active_batches": sum(
+                    item.get("status") in ACTIVE_BATCH_STATES
+                    for item in summary["batches"]
+                ),
+            },
+            "integrity": self.integrity_check() if check else {"status": "not-checked"},
+        }
+
+    def integrity_check(self) -> dict[str, Any]:
+        """按需核对候选池与 DWW 自有引用，不修改任何生命周期事实。"""
+
+        with DirectoryLock(self.lock_path, wait=True):
+            return self._integrity_check()
+
+    def _integrity_check(self) -> dict[str, Any]:
+        value = self.read()
+        records = value["candidates"]
+        listed = self.repo.git(
+            [
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)",
+                CANDIDATE_REF_PREFIX,
+            ]
+        ).stdout
+        refs: dict[str, str] = {}
+        for line in listed.splitlines():
+            ref, separator, head = line.partition("\0")
+            if separator and ref and head:
+                refs[ref] = head
+
+        issues: list[dict[str, str]] = []
+        in_progress: list[dict[str, str]] = []
+        observations: list[dict[str, str]] = []
+        registered_refs: dict[str, str] = {}
+        for candidate_id, candidate in records.items():
+            status = str(candidate.get("status") or "")
+            ref = str(candidate.get("ref") or "")
+            expected = str(candidate.get("head") or "")
+            label = {"candidate_id": str(candidate_id), "status": status}
+            if status not in KNOWN_CANDIDATE_STATES:
+                issues.append({"kind": "unknown-status", **label})
+            if not ref.startswith(CANDIDATE_REF_PREFIX):
+                issues.append({"kind": "outside-dww-namespace", "ref": ref, **label})
+                continue
+            prior = registered_refs.get(ref)
+            if prior and prior != str(candidate_id):
+                issues.append(
+                    {
+                        "kind": "duplicate-record-ref",
+                        "ref": ref,
+                        "other_candidate_id": prior,
+                        **label,
+                    }
+                )
+            registered_refs[ref] = str(candidate_id)
+            actual = refs.get(ref)
+            retention = (candidate.get("withdrawal") or {}).get("ref_retention")
+            if actual is None:
+                if status == "withdrawing":
+                    in_progress.append(
+                        {
+                            "kind": "withdrawal-ref-missing",
+                            "ref": ref,
+                            "expected": expected,
+                            **label,
+                        }
+                    )
+                elif status == "withdrawn" and retention != "preserved":
+                    observations.append(
+                        {"kind": "legacy-withdrawn-ref-missing", "ref": ref, **label}
+                    )
+                elif (
+                    status not in TERMINAL_CANDIDATE_STATES or retention == "preserved"
+                ):
+                    issues.append(
+                        {"kind": "candidate-ref-missing", "ref": ref, **label}
+                    )
+                else:
+                    observations.append(
+                        {"kind": "terminal-candidate-ref-missing", "ref": ref, **label}
+                    )
+                continue
+            if actual != expected:
+                issues.append(
+                    {
+                        "kind": "candidate-ref-mismatch",
+                        "ref": ref,
+                        "expected": expected,
+                        "actual": actual,
+                        **label,
+                    }
+                )
+                continue
+            result = self.repo.git(
+                ["cat-file", "-e", f"{actual}^{{commit}}"], check=False
+            )
+            if result.returncode:
+                issues.append({"kind": "candidate-ref-not-commit", "ref": ref, **label})
+        for ref, head in refs.items():
+            if ref not in registered_refs:
+                issues.append({"kind": "unregistered-ref", "ref": ref, "head": head})
+        return {
+            "status": "checked",
+            "ok": not issues and not in_progress,
+            "issues": issues,
+            "in_progress": in_progress,
+            "observations": observations,
         }
 
     def _candidate_projection(
@@ -1229,7 +1396,12 @@ class CandidateBatchStore:
 
         return self.mutate(update)
 
-    def begin_withdraw(self, candidate_id: str) -> dict[str, Any]:
+    def begin_withdraw(
+        self, candidate_id: str, *, reason: str | None, source: str
+    ) -> dict[str, Any]:
+        if source not in {"api", "cli"}:
+            raise SoloAIError("Withdrawal audit source is unsupported")
+
         def update(value: dict[str, Any]) -> dict[str, Any]:
             candidate = value["candidates"].get(candidate_id)
             if not candidate:
@@ -1246,6 +1418,15 @@ class CandidateBatchStore:
                 )
             if candidate.get("sealed_batch"):
                 raise SoloAIError("A candidate in an active batch cannot be withdrawn")
+            if not candidate.get("withdrawal"):
+                candidate["withdrawal"] = {
+                    "reason": _optional_one_line_reason(
+                        reason, label="Withdrawal reason"
+                    ),
+                    "source": source,
+                    "started_at": utc_timestamp(),
+                    "ref_retention": "preserved",
+                }
             candidate["status"] = "withdrawing"
             candidate["updated_at"] = utc_timestamp()
             return copy.deepcopy(candidate)
@@ -1257,7 +1438,12 @@ class CandidateBatchStore:
             candidate = value["candidates"][candidate_id]
             if candidate.get("status") not in {"withdrawing", "withdrawn"}:
                 raise SoloAIError("Candidate withdrawal state changed")
-            candidate.update({"status": "withdrawn", "withdrawn_at": utc_timestamp()})
+            candidate.update(
+                {
+                    "status": "withdrawn",
+                    "withdrawn_at": candidate.get("withdrawn_at") or utc_timestamp(),
+                }
+            )
             return copy.deepcopy(candidate)
 
         return self.mutate(update)
@@ -1270,6 +1456,17 @@ def _parse_timestamp(value: object) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _optional_one_line_reason(reason: str | None, *, label: str) -> str | None:
+    if reason is None:
+        return None
+    normalized = reason.strip()
+    if not normalized or "\r" in normalized or "\n" in normalized:
+        raise SoloAIError(f"{label} must be one non-empty line")
+    if len(normalized) > 240:
+        raise SoloAIError(f"{label} must be at most 240 characters")
+    return normalized
 
 
 def _numeric_summary(values: list[float]) -> dict[str, float | int | None]:
@@ -2544,17 +2741,26 @@ def retire_failed_batch(
             return store.update_batch(batch_id, worktree_retired_at=utc_timestamp())
 
 
-def withdraw_candidate(repo: GitRepo, *, candidate_id: str) -> dict[str, Any]:
+def withdraw_candidate(
+    repo: GitRepo,
+    *,
+    candidate_id: str,
+    reason: str | None = None,
+    source: str = "api",
+) -> dict[str, Any]:
     from .lifecycle import _config_and_mode
 
     _config_and_mode(repo)
     store = CandidateBatchStore(repo)
-    candidate = store.begin_withdraw(candidate_id)
+    candidate = store.begin_withdraw(candidate_id, reason=reason, source=source)
+    if candidate.get("status") == "withdrawn":
+        return candidate
     ref = str(candidate["ref"])
     head = str(candidate["head"])
-    if repo.ref_head(ref) == head:
-        repo.delete_ref(ref, expected=head)
-    elif repo.ref_head(ref) is not None:
+    actual = repo.ref_head(ref)
+    if actual != head:
+        if actual is None:
+            raise SoloAIError("Candidate ref is missing and was preserved for recovery")
         raise SoloAIError("Candidate ref changed and was preserved")
     result = store.complete_withdraw(candidate_id)
     delete_anchor(repo, str(candidate["task_id"]))

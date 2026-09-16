@@ -23,6 +23,7 @@ import psutil
 
 from .abandonment import (
     assert_task_not_held_by_candidate_delivery,
+    in_place_audit,
     prepare as prepare_abandonment,
 )
 from .abandonment import resume as resume_abandonment
@@ -3557,6 +3558,8 @@ def abandon(
     task_id: str,
     lease: str,
     confirm: str,
+    reason: str | None = None,
+    source: str = "api",
     session_id: str | None = None,
 ) -> dict[str, Any]:
     if confirm != task_id:
@@ -3572,9 +3575,15 @@ def abandon(
                 raise SoloAIError(
                     "In-place abandon never resets or cleans the current worktree. Commit exact paths and Finish, or preserve and handle the changes manually."
                 )
+            audit = in_place_audit(task, reason=reason, source=source)
+            if not task.get("abandonment_audit"):
+                store.update_task(task_id, abandonment_audit=audit)
             from .runtime_adapter import release_task_runtime
 
             runtime_release = release_task_runtime(repo, task=task, reason="abandon")
+            if not audit.get("completed_at"):
+                audit["completed_at"] = utc_timestamp()
+                store.update_task(task_id, abandonment_audit=audit)
             with candidate_admission_lock(repo):
                 store.release(task_id, final_status="abandoned")
             delete_anchor(repo, task_id)
@@ -3583,6 +3592,7 @@ def abandon(
                 "status": "abandoned",
                 "mode": IN_PLACE_MODE,
                 "preserved": True,
+                "abandonment_audit": audit,
                 "runtime_release": runtime_release,
             }
         else:
@@ -3615,7 +3625,13 @@ def abandon(
                     runtime_release = release_task_runtime(
                         repo, task=task, reason="abandon"
                     )
-                    prepared = prepare_abandonment(repo, store=store, task=task)
+                    prepared = prepare_abandonment(
+                        repo,
+                        store=store,
+                        task=task,
+                        reason=reason,
+                        source=source,
+                    )
                     with candidate_admission_lock(repo):
                         result = resume_abandonment(repo, store=store, task=prepared)
                 result["runtime_release"] = runtime_release

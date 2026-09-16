@@ -472,6 +472,95 @@ def test_root_close_requires_a_local_published_candidate_to_finish_delivery(
     )
 
 
+def test_candidate_status_view_hides_history_but_keeps_internal_delivery_facts(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="status history", relative="status-history.txt")
+    store = CandidateBatchStore(repo)
+
+    active = store.status_view()
+
+    assert active["view"] == "active"
+    assert [item["candidate_id"] for item in active["candidates"]] == [
+        candidate["candidate_id"]
+    ]
+    assert active["integrity"] == {"status": "not-checked"}
+
+    seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    default_after_delivery = store.status_view()
+    history = store.status_view(include_history=True)
+
+    assert default_after_delivery["candidates"] == []
+    assert default_after_delivery["status_summary"]["history"] == 1
+    assert history["candidates"][0]["delivery_status"] == "integrated"
+    assert store.summary()["candidates"][0]["delivery_status"] == "integrated"
+
+    repo.git(
+        [
+            "update-ref",
+            "refs/dww/candidates/unregistered-fixture",
+            repo.head(git_repo),
+        ]
+    )
+    checked = store.status_view(check=True)["integrity"]
+
+    assert checked["status"] == "checked"
+    assert checked["ok"] is False
+    assert any(item["kind"] == "unregistered-ref" for item in checked["issues"])
+
+
+def test_withdrawal_keeps_ref_and_freezes_its_audit_reason(git_repo: Path) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="retain withdrawn ref", relative="retain-ref.txt")
+    before = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+
+    withdrawn = withdraw_candidate(
+        repo,
+        candidate_id=candidate["candidate_id"],
+        reason="the experiment is no longer needed",
+    )
+    repeated = withdraw_candidate(
+        repo,
+        candidate_id=candidate["candidate_id"],
+        reason="a later retry must not overwrite the original reason",
+    )
+
+    assert withdrawn["status"] == "withdrawn"
+    assert repo.ref_head(before["ref"]) == before["head"]
+    assert withdrawn["withdrawal"]["reason"] == "the experiment is no longer needed"
+    assert withdrawn["withdrawal"]["source"] == "api"
+    assert withdrawn["withdrawal"]["started_at"]
+    assert withdrawn["withdrawal"]["ref_retention"] == "preserved"
+    assert repeated["withdrawal"] == withdrawn["withdrawal"]
+    assert CandidateBatchStore(repo).status_view(check=True)["integrity"]["ok"] is True
+
+
+def test_missing_new_withdrawal_ref_stays_recoverable_and_is_not_reclassified(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(
+        repo, name="missing retain ref", relative="missing-retain-ref.txt"
+    )
+    record = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+    repo.delete_ref(record["ref"], expected=record["head"])
+
+    with pytest.raises(SoloAIError, match="missing and was preserved"):
+        withdraw_candidate(
+            repo,
+            candidate_id=candidate["candidate_id"],
+            reason="leave the exact recovery scene intact",
+        )
+
+    stored = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+    check = CandidateBatchStore(repo).status_view(check=True)["integrity"]
+    assert stored["status"] == "withdrawing"
+    assert stored["withdrawal"]["reason"] == "leave the exact recovery scene intact"
+    assert check["issues"] == []
+    assert check["in_progress"][0]["kind"] == "withdrawal-ref-missing"
+
+
 def test_structured_root_requires_current_review_before_finishing_a_candidate(
     git_repo: Path,
 ) -> None:
@@ -2700,7 +2789,7 @@ def test_fast_failed_batch_retirement_accepts_explicitly_withdrawn_candidate(
     assert retired["worktree_retired_at"]
     assert retired["fast_retirement_receipt_sha256"]
     assert record["status"] == "withdrawn"
-    assert repo.ref_head(record["ref"]) is None
+    assert repo.ref_head(record["ref"]) == record["head"]
     assert not worktree.exists()
 
 

@@ -96,8 +96,44 @@ def _active_ref_snapshot(
     return snapshot
 
 
+def _audit_metadata(*, reason: str | None, source: str, action: str) -> dict[str, Any]:
+    if source not in {"api", "cli"}:
+        raise SoloAIError("Abandonment audit source is unsupported")
+    normalized = None if reason is None else reason.strip()
+    if normalized is not None and (
+        not normalized or "\r" in normalized or "\n" in normalized
+    ):
+        raise SoloAIError("Abandonment reason must be one non-empty line")
+    if normalized is not None and len(normalized) > 240:
+        raise SoloAIError("Abandonment reason must be at most 240 characters")
+    return {
+        "action": action,
+        "reason": normalized,
+        "source": source,
+        "started_at": utc_timestamp(),
+    }
+
+
+def in_place_audit(
+    task: dict[str, Any], *, reason: str | None, source: str
+) -> dict[str, Any]:
+    """冻结兼容路径的放弃原因；重试只能续用原始事实。"""
+
+    existing = task.get("abandonment_audit")
+    if existing:
+        if existing.get("action") != "abandon":
+            raise SoloAIError("In-place abandonment audit identity changed")
+        return dict(existing)
+    return _audit_metadata(reason=reason, source=source, action="abandon")
+
+
 def new_transaction(
-    repo: GitRepo, store: StateStore, *, task: dict[str, Any]
+    repo: GitRepo,
+    store: StateStore,
+    *,
+    task: dict[str, Any],
+    reason: str | None,
+    source: str,
 ) -> dict[str, Any]:
     active = task.get("active_operation") or {}
     operation_id = str(active.get("id") or "")
@@ -173,6 +209,7 @@ def new_transaction(
         "base_head": base_head,
         "tracked_status": tracked_status,
         "ordinary_untracked": ordinary,
+        "audit": _audit_metadata(reason=reason, source=source, action="abandon"),
         "prepared_at": utc_timestamp(),
     }
 
@@ -216,11 +253,18 @@ def write_completed_receipt(repo: GitRepo, task: dict[str, Any]) -> dict[str, An
 
 
 def prepare(
-    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    reason: str | None,
+    source: str,
 ) -> dict[str, Any]:
     # 与候选封存共用准入锁：检查完成并把任务置入 abandonment 前，批次不能抢占它。
     with candidate_admission_lock(repo):
-        transaction = new_transaction(repo, store, task=task)
+        transaction = new_transaction(
+            repo, store, task=task, reason=reason, source=source
+        )
         return store.prepare_abandonment(
             task["id"],
             operation_id=str(transaction["prepared_by_operation_id"]),

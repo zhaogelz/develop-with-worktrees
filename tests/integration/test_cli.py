@@ -39,6 +39,51 @@ def test_human_batch_output_accepts_direct_and_reconcile_results() -> None:
     )
 
 
+def test_candidate_status_human_output_is_compact_and_reasons_are_required() -> None:
+    rendered = _human(
+        "candidate",
+        {
+            "status_view": {
+                "view": "active",
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-active",
+                        "status": "withdrawing",
+                        "delivery_status": "awaiting-integration",
+                    }
+                ],
+                "status_summary": {
+                    "active": 1,
+                    "history": 4,
+                    "active_batches": 0,
+                },
+                "integrity": {"status": "not-checked"},
+            }
+        },
+        Namespace(candidate_command="status"),
+    )
+
+    assert "1 active, 4 historical" in rendered
+    assert "Historical candidates are hidden" in rendered
+    assert "candidate-active: withdrawing" in rendered
+    assert "not checked" in rendered
+    parser = cli_module._parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["candidate", "withdraw", "--candidate", "candidate-one"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "abandon",
+                "--task",
+                "task-one",
+                "--lease",
+                "lease",
+                "--confirm",
+                "task-one",
+            ]
+        )
+
+
 def test_human_recover_output_accepts_candidate_publication_without_a_lease() -> None:
     result = {
         "task_id": "task-published",
@@ -1129,6 +1174,8 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         lease,
         "--confirm",
         task_id,
+        "--reason",
+        "the validation-level fixture has completed",
         repo_path=worktree,
     )
 
@@ -1452,5 +1499,7 @@ def test_anchor_cli_roundtrip_through_uv_script(git_repo: Path) -> None:
         lease,
         "--confirm",
         task_id,
+        "--reason",
+        "the anchor roundtrip fixture has completed",
         repo_path=worktree,
     )

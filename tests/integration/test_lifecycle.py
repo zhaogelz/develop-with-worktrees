@@ -970,6 +970,54 @@ def test_in_place_detached_binding_preserves_a_branch_at_different_head(
     assert repo.ref_head("refs/heads/codex/wrong-detached-head") == repo.head(git_repo)
 
 
+def test_abandonment_audit_freezes_reason_for_isolated_and_in_place_tasks(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    isolated = start(repo, name="audited isolated abandon")
+
+    abandon(
+        repo,
+        task_id=isolated["id"],
+        lease=isolated["lease"],
+        confirm=isolated["id"],
+        reason="the isolated experiment was superseded",
+        source="cli",
+    )
+    recovered = recover(repo, task_id=isolated["id"])
+    receipt = read_json(
+        repo.local_dir / "abandonment-receipts" / f"{isolated['id']}.json", {}
+    )
+
+    assert recovered["status"] == "abandoned"
+    assert receipt["audit"] == {
+        "action": "abandon",
+        "reason": "the isolated experiment was superseded",
+        "source": "cli",
+        "started_at": receipt["audit"]["started_at"],
+    }
+
+    in_place = start(
+        repo, name="audited in-place abandon", in_place=True, session_id="audit-session"
+    )
+    result = abandon(
+        repo,
+        task_id=in_place["id"],
+        lease=in_place["lease"],
+        confirm=in_place["id"],
+        reason="the current-directory experiment was cancelled",
+        source="cli",
+        session_id="audit-session",
+    )
+    audit = StateStore(repo).task(in_place["id"])["abandonment_audit"]
+
+    assert result["status"] == "abandoned"
+    assert audit["reason"] == "the current-directory experiment was cancelled"
+    assert audit["source"] == "cli"
+    assert audit["started_at"]
+    assert audit["completed_at"]
+
+
 def test_in_place_session_mismatch_quarantines_without_cleaning_files(
     git_repo: Path,
 ) -> None:

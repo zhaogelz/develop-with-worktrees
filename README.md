@@ -26,6 +26,12 @@ DWW is no longer a multi-AI task command center. The host's native task system d
 
 Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state. It never guesses that an idle host means the round is over.
 
+## Candidate history and withdrawal
+
+`candidate status` keeps the normal terminal output focused on candidates that still need action, while `--history` shows terminal records and `--candidate <id>` shows one exact record. Existing JSON fields retain the complete pool for host compatibility; the added `status_view` is the compact presentation. `--check` is an explicit read-only comparison of DWW candidate records and `refs/dww/candidates/*`; a normal status call reports that this diagnostic was not run.
+
+`candidate withdraw --candidate <id> --reason <one-line>` removes an eligible candidate from future integration but keeps its immutable candidate ref after checking the exact SHA. It freezes the reason, source, and start time so retries do not rewrite them. Old withdrawn records whose refs were removed by an earlier version remain historical observations, not invented corruption. `abandon` likewise requires a one-line reason in the CLI and freezes it in the existing abandonment transaction or in-place audit.
+
 Publishing a candidate ends the developer’s current coding round. In Codex Desktop, DWW automatically records the exact task that starts, finishes, or freezes work; the caller that actually freezes a batch becomes its coordinator. For an attributed conflict, DWW prepares a native-task message and records its actual send result separately. The returned repair candidate is reported back to that coordinator, and the handoff closes only after it reaches the base branch. DWW never sends host messages itself.
 
 Releasing a task keeps its dependency caches, including normal package links. New repositories also reuse one integration workspace: ordinary successful or failed batches return it without deleting or hashing the entire dependency tree. Each fresh Full still recreates required runtime effects. Physical disk cleanup is separate maintenance; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
