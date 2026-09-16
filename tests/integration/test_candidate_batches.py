@@ -46,8 +46,9 @@ from solo_ai.repo import GitRepo
 from solo_ai.proof import approval_plan
 from solo_ai.runtime_adapter import verify_runtime_effective
 from solo_ai.state import StateStore
+from solo_ai.status_views import status_view
 from solo_ai.task_context import anchor_path
-from solo_ai.util import SoloAIError
+from solo_ai.util import ActionableSoloAIError, SoloAIError
 from solo_ai.util import atomic_write_json, read_json
 
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
@@ -152,6 +153,8 @@ def publish(
     root_anchor_id: str | None = None,
     root_anchor_file: Path | None = None,
     run_ready: bool = True,
+    delivery_cause: str | None = None,
+    delivery_reason: str | None = None,
 ) -> dict[str, str]:
     task = start(
         repo,
@@ -176,6 +179,8 @@ def publish(
         task_id=task["id"],
         lease=task["lease"],
         host_actor=finish_actor,
+        cause=delivery_cause,
+        reason=delivery_reason,
     )
 
 
@@ -510,6 +515,296 @@ def test_candidate_status_view_hides_history_but_keeps_internal_delivery_facts(
     assert any(item["kind"] == "unregistered-ref" for item in checked["issues"])
 
 
+def test_compact_candidate_status_projects_only_selected_candidates_and_reuses_batch_git_facts(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, batch_size=2)
+    first = publish(repo, name="history first", relative="history-first.txt")
+    second = publish(repo, name="history second", relative="history-second.txt")
+    seal_batch(repo, candidate_ids=[first["candidate_id"], second["candidate_id"]])
+    active = publish(repo, name="still current", relative="still-current.txt")
+    store = CandidateBatchStore(repo)
+
+    original_projection = CandidateBatchStore._candidate_projection
+    projected: list[str] = []
+
+    def counted_projection(self, candidate, batches, **kwargs):
+        projected.append(str(candidate["candidate_id"]))
+        return original_projection(self, candidate, batches, **kwargs)
+
+    monkeypatch.setattr(
+        CandidateBatchStore, "_candidate_projection", counted_projection
+    )
+    compact = store.status_view()
+
+    assert [item["candidate_id"] for item in compact["candidates"]] == [
+        active["candidate_id"]
+    ]
+    assert projected == [active["candidate_id"]]
+
+    projected.clear()
+    ref_calls = 0
+    ancestor_calls = 0
+    original_ref_head = repo.ref_head
+    original_is_ancestor = repo.is_ancestor
+
+    def counted_ref_head(ref: str):
+        nonlocal ref_calls
+        if ref == "refs/heads/main":
+            ref_calls += 1
+        return original_ref_head(ref)
+
+    def counted_is_ancestor(ancestor: str, descendant: str) -> bool:
+        nonlocal ancestor_calls
+        ancestor_calls += 1
+        return original_is_ancestor(ancestor, descendant)
+
+    monkeypatch.setattr(repo, "ref_head", counted_ref_head)
+    monkeypatch.setattr(repo, "is_ancestor", counted_is_ancestor)
+    history = store.status_view(include_history=True)
+
+    assert len(history["candidates"]) == 3
+    assert set(projected) == {
+        first["candidate_id"],
+        second["candidate_id"],
+        active["candidate_id"],
+    }
+    assert ref_calls == 1
+    assert ancestor_calls == 1
+
+
+def test_compact_status_is_read_only_and_keeps_terminal_history_out_of_current_view(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="compact status", relative="compact-status.txt")
+    seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    record = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+    state_path = repo.local_dir / "state.json"
+    before = state_path.read_bytes()
+    original_reconcile = StateStore.reconcile_operation_receipts
+
+    def fail_if_reconciled(self: StateStore) -> int:
+        raise AssertionError("compact status must not reconcile operation receipts")
+
+    monkeypatch.setattr(StateStore, "reconcile_operation_receipts", fail_if_reconciled)
+
+    current = status_view(repo)
+    task = status_view(repo, task_id=str(record["task_id"]))
+    history = status_view(repo, include_history=True)
+
+    monkeypatch.setattr(StateStore, "reconcile_operation_receipts", original_reconcile)
+
+    assert state_path.read_bytes() == before
+    assert current["scope"] == "current"
+    assert current["candidates"] == []
+    assert current["history_counts"]["candidates"] == 1
+    assert task["task"]["candidate_delivery"]["delivery_status"] == "integrated"
+    assert history["scope"] == "history"
+    assert [item["id"] for item in history["candidates"]] == [candidate["candidate_id"]]
+
+
+def test_compact_root_status_projects_child_candidates_once_per_request(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, batch_size=2)
+    root = create_root_task_anchor(
+        repo,
+        purpose="compact root projection",
+        target="show current root children",
+        scope="status view only",
+        acceptance="one request reuses its candidate projection",
+    )
+    first = publish(
+        repo,
+        name="rooted one",
+        relative="rooted-one.txt",
+        root_anchor_id=root["root_id"],
+    )
+    second = publish(
+        repo,
+        name="rooted two",
+        relative="rooted-two.txt",
+        root_anchor_id=root["root_id"],
+    )
+    seal_batch(repo, candidate_ids=[first["candidate_id"], second["candidate_id"]])
+
+    calls = 0
+    original_project = CandidateBatchStore.project_candidates
+
+    def counted_project(self, candidates, batches):
+        nonlocal calls
+        calls += 1
+        return original_project(self, candidates, batches)
+
+    monkeypatch.setattr(CandidateBatchStore, "project_candidates", counted_project)
+    view = status_view(repo, root_id=root["root_id"])
+
+    assert calls == 1
+    assert [
+        child["candidate_delivery"]["status"] for child in view["local_children"]
+    ] == [
+        "integrated",
+        "integrated",
+    ]
+    assert view["root"]["next_action"] == {"kind": "record_root_acceptance"}
+
+
+def test_finish_delivery_intent_seals_only_its_exact_candidate_lane(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, batch_size=3)
+    older = publish(repo, name="older lane", relative="older-lane.txt")
+    (git_repo / "advance-main.txt").write_text("advance\n", encoding="utf-8")
+    git(git_repo, "add", "advance-main.txt")
+    git(git_repo, "commit", "-m", "test: advance the second candidate lane")
+
+    delivered = publish(
+        repo,
+        name="requested lane",
+        relative="requested-lane.txt",
+        delivery_cause="user",
+        delivery_reason="the user requested this completed development round",
+    )
+
+    assert delivered["outcome"] == "batch_integrated"
+    assert delivered["batch_trigger"] == "explicit_tail"
+    assert delivered["delivered"] is True
+    batch = CandidateBatchStore(repo).batch(str(delivered["batch_id"]))
+    assert batch["candidate_ids"] == [delivered["candidate_id"]]
+    assert batch["tail_request"] == {
+        "cause": "user",
+        "reason": "the user requested this completed development round",
+    }
+    assert (
+        CandidateBatchStore(repo).candidate(older["candidate_id"])["status"]
+        == "pending"
+    )
+    publication = StateStore(repo).task(str(delivered["task_id"]))[
+        "candidate_publication"
+    ]
+    assert publication["delivery_intent"] == {
+        "schema_version": 1,
+        "cause": "user",
+        "reason": "the user requested this completed development round",
+    }
+
+
+def test_finish_delivery_intent_waiting_for_another_batch_does_not_claim_its_identity(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, batch_size=3)
+    prior = publish(repo, name="prior batch", relative="prior-batch.txt")
+    prior_batch = CandidateBatchStore(repo).seal([prior["candidate_id"]], batch_size=3)
+
+    waiting = publish(
+        repo,
+        name="later requested candidate",
+        relative="later-requested.txt",
+        delivery_cause="user",
+        delivery_reason="wait for the batch already holding the integration turn",
+    )
+
+    assert waiting["outcome"] == "candidate_published"
+    assert waiting["delivered"] is False
+    assert "batch_id" not in waiting
+    assert waiting["reconciliation"]["status"] == "waiting-for-prior-batch"
+    assert waiting["reconciliation"]["active_batch"]["id"] == prior_batch["id"]
+    assert (
+        CandidateBatchStore(repo).candidate(waiting["candidate_id"])["status"]
+        == "pending"
+    )
+
+
+def test_finish_delivery_intent_is_validated_persisted_and_recovered_once(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, batch_size=2)
+    task = start(repo, name="persist finish intent")
+    worktree = Path(task["worktree"])
+    (worktree / "intent.txt").write_text("intent\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: prepare persisted finish intent",
+        paths=["intent.txt"],
+    )
+
+    with pytest.raises(ActionableSoloAIError) as invalid:
+        finish(repo, task_id=task["id"], lease=task["lease"], cause="user")
+    assert invalid.value.code == "INVALID_DELIVERY_INTENT"
+    assert StateStore(repo).task(task["id"])["candidate_publication"] is None
+
+    original_publish = CandidateBatchStore.publish
+
+    def interrupt_before_publication(self, *args, **kwargs):
+        raise KeyboardInterrupt("synthetic publication interruption")
+
+    monkeypatch.setattr(CandidateBatchStore, "publish", interrupt_before_publication)
+    with pytest.raises(KeyboardInterrupt, match="publication interruption"):
+        finish(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            cause="user",
+            reason="the first recorded delivery request must survive recovery",
+        )
+
+    publication = StateStore(repo).task(task["id"])["candidate_publication"]
+    assert publication["schema_version"] == 3
+    assert publication["delivery_intent"]["cause"] == "user"
+    with pytest.raises(ActionableSoloAIError) as conflict:
+        finish(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            cause="deploy",
+            reason="a retry must not replace the first intent",
+        )
+    assert conflict.value.code == "DELIVERY_INTENT_CONFLICT"
+
+    monkeypatch.setattr(CandidateBatchStore, "publish", original_publish)
+    recovered = recover(repo, task_id=task["id"])
+
+    assert recovered["outcome"] == "batch_integrated"
+    assert recovered["delivered"] is True
+    assert len(CandidateBatchStore(repo).summary()["candidates"]) == 1
+
+
+def test_finish_delivery_intent_rejects_non_batched_task_before_publication(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    task = start(repo, name="reject direct intent")
+    worktree = Path(task["worktree"])
+    (worktree / "direct-intent.txt").write_text("direct\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: reject direct delivery intent",
+        paths=["direct-intent.txt"],
+    )
+    policy = StateStore(repo).task(task["id"])["integration_policy"]
+    StateStore(repo).update_task(
+        task["id"], integration_policy={**policy, "mode": "direct"}
+    )
+
+    with pytest.raises(ActionableSoloAIError) as rejected:
+        finish(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            cause="user",
+            reason="direct tasks must retain their existing finish path",
+        )
+
+    assert rejected.value.code == "DELIVERY_INTENT_UNSUPPORTED"
+    assert StateStore(repo).task(task["id"])["candidate_publication"] is None
+    assert CandidateBatchStore(repo).summary()["candidates"] == []
+
+
 def test_withdrawal_keeps_ref_and_freezes_its_audit_reason(git_repo: Path) -> None:
     repo = initialized_batched(git_repo, auto_full=False)
     candidate = publish(repo, name="retain withdrawn ref", relative="retain-ref.txt")
@@ -665,6 +960,9 @@ def test_root_close_requires_external_published_candidate_to_be_withdrawn(
         root_anchor_id=root["root_id"],
         root_anchor_file=Path(root["root_anchor_path"]),
     )
+    owner_view = status_view(owner, root_id=root["root_id"])
+    assert owner_view["external_children"]
+    assert owner_view["root"]["next_action"] == {"kind": "check_external_children"}
     worktree = Path(task["worktree"])
     (worktree / "external-root.txt").write_text("pending\n", encoding="utf-8")
     commit_task(
@@ -3128,10 +3426,30 @@ def test_batch_metrics_are_derived_without_mutating_lifecycle_state(
         "maximum": 180.0,
         "mean": 150.0,
     }
+    assert (
+        metrics["publication_to_delivery_seconds"] == metrics["candidate_wait_seconds"]
+    )
     assert metrics["executed_full_validation_seconds"]["median"] == 12.5
     assert metrics["reused_full_profiles"] == 0
     assert metrics["missing_full_proofs"] == 0
     assert metrics["legacy_completed_without_full_proof"] == 0
+    assert metrics["metric_coverage"] == {
+        "publication_to_delivery_seconds": {
+            "integrated_candidates": 2,
+            "observed": 2,
+            "missing_publication_timestamp": 0,
+            "missing_delivery_timestamp": 0,
+            "not_integrated_candidates": 1,
+        },
+        "executed_full_validation_seconds": {
+            "completed_batches": 1,
+            "batches_with_full_profiles": 1,
+            "executed_profiles": 1,
+            "reused_profiles": 0,
+            "missing_full_proofs": 0,
+            "legacy_weak_proofs": 0,
+        },
+    }
     assert store.path.read_bytes() == before
 
 

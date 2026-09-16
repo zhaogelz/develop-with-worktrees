@@ -68,6 +68,21 @@ def test_candidate_status_human_output_is_compact_and_reasons_are_required() -> 
     assert "candidate-active: withdrawing" in rendered
     assert "not checked" in rendered
     parser = cli_module._parser()
+    finish_intent = parser.parse_args(
+        [
+            "finish",
+            "--task",
+            "task-one",
+            "--lease",
+            "lease",
+            "--cause",
+            "user",
+            "--reason",
+            "the user completed this development round",
+        ]
+    )
+    assert finish_intent.cause == "user"
+    assert finish_intent.reason == "the user completed this development round"
     with pytest.raises(SystemExit):
         parser.parse_args(["candidate", "withdraw", "--candidate", "candidate-one"])
     with pytest.raises(SystemExit):
@@ -310,7 +325,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.5.0-beta.5"
+    assert payload["version"] == "0.5.0-beta.6"
     plugin_version = payload["plugin_version"]
     assert plugin_version == manifest["version"]
     if plugin_version != payload["version"]:
@@ -433,6 +448,66 @@ def test_cli_json_status_masks_uninitialized_state(git_repo: Path) -> None:
     assert payload["ok"] is True
     assert payload["result"]["mode"] == "uninitialized"
     assert "lease" not in json.dumps(payload["result"])
+
+
+def test_cli_compact_status_is_opt_in_and_invalid_queries_are_structured(
+    git_repo: Path,
+) -> None:
+    runner = (
+        Path(__file__).parents[2]
+        / "plugins"
+        / "develop-with-worktrees"
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    )
+    state_path = git_repo / ".git" / "solo-ai" / "state.json"
+    compact = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "status",
+            "--compact",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+    assert compact.returncode == 0, compact.stderr
+    view = json.loads(compact.stdout)["result"]
+    assert view["view_schema"] == 1
+    assert view["scope"] == "current"
+    assert "candidate_pool" not in view
+    assert not state_path.exists()
+
+    invalid = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo",
+            str(git_repo),
+            "--json",
+            "status",
+            "--history",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+    assert invalid.returncode == 2
+    payload = json.loads(invalid.stdout)
+    assert payload["error_code"] == "INVALID_STATUS_QUERY"
+    assert payload["next_action"] == {"kind": "add_compact"}
 
 
 def test_cli_route_is_compact_and_read_only_for_mature_workflow(

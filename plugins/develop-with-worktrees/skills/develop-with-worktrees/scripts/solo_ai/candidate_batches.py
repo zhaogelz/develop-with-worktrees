@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -228,13 +228,38 @@ class CandidateBatchStore:
 
     def summary(self) -> dict[str, Any]:
         value = self.read()
+        return self._summary_from_value(value)
+
+    def _summary_from_value(self, value: dict[str, Any]) -> dict[str, Any]:
         return {
-            "candidates": [
-                self._candidate_projection(item, value["batches"])
-                for item in value["candidates"].values()
-            ],
+            "candidates": self.project_candidates(
+                value["candidates"].values(), value["batches"]
+            ),
             "batches": list(value["batches"].values()),
         }
+
+    def project_candidates(
+        self,
+        candidates: Iterable[dict[str, Any]],
+        batches: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """在一次查询中投影所选候选，并复用同一批次的 Git 事实。
+
+        这不是跨请求缓存：下一次状态查询仍会重新读取当前 base，避免把已经
+        推进的 main 错误显示为未交付。
+        """
+
+        ref_heads: dict[str, str | None] = {}
+        ancestry: dict[tuple[str, str], bool] = {}
+        return [
+            self._candidate_projection(
+                item,
+                batches,
+                ref_heads=ref_heads,
+                ancestry=ancestry,
+            )
+            for item in candidates
+        ]
 
     def status_view(
         self,
@@ -245,9 +270,97 @@ class CandidateBatchStore:
     ) -> dict[str, Any]:
         """为人类和宿主提供紧凑视图，内部摘要仍保留完整历史。"""
 
-        summary = self.summary()
-        candidates = sorted(
+        value = self.read()
+        return self._status_view_from_value(
+            value,
+            include_history=include_history,
+            candidate_id=candidate_id,
+            check=check,
+        )
+
+    def status_view_from_summary(
+        self,
+        summary: dict[str, Any],
+        *,
+        include_history: bool = False,
+        candidate_id: str | None = None,
+        check: bool = False,
+    ) -> dict[str, Any]:
+        """从旧完整摘要构造视图，避免兼容 JSON 重复投影候选池。"""
+
+        return self._status_view(
             summary["candidates"],
+            summary["batches"],
+            include_history=include_history,
+            candidate_id=candidate_id,
+            check=check,
+        )
+
+    def _status_view_from_value(
+        self,
+        value: dict[str, Any],
+        *,
+        include_history: bool,
+        candidate_id: str | None,
+        check: bool,
+    ) -> dict[str, Any]:
+        raw_candidates = list(value["candidates"].values())
+        batches = list(value["batches"].values())
+        candidates = sorted(
+            raw_candidates,
+            key=lambda item: (
+                int(item.get("publication_sequence", 0)),
+                str(item.get("candidate_id", "")),
+            ),
+        )
+        by_status = {
+            status: sum(item.get("status") == status for item in candidates)
+            for status in sorted({str(item.get("status")) for item in candidates})
+        }
+        active = [
+            item
+            for item in candidates
+            if item.get("status") not in TERMINAL_CANDIDATE_STATES
+        ]
+        if candidate_id:
+            selected = [
+                item for item in candidates if item.get("candidate_id") == candidate_id
+            ]
+            if not selected:
+                raise SoloAIError(f"Unknown candidate: {candidate_id}")
+            view = "candidate"
+        elif include_history:
+            selected = candidates
+            view = "history"
+        else:
+            selected = active
+            view = "active"
+        projected = self.project_candidates(selected, value["batches"])
+        return {
+            "view": view,
+            "candidates": projected,
+            "status_summary": {
+                "active": len(active),
+                "history": len(candidates) - len(active),
+                "by_status": by_status,
+                "active_batches": sum(
+                    item.get("status") in ACTIVE_BATCH_STATES for item in batches
+                ),
+            },
+            "integrity": self.integrity_check() if check else {"status": "not-checked"},
+        }
+
+    def _status_view(
+        self,
+        candidates: list[dict[str, Any]],
+        batches: list[dict[str, Any]],
+        *,
+        include_history: bool,
+        candidate_id: str | None,
+        check: bool,
+    ) -> dict[str, Any]:
+        candidates = sorted(
+            candidates,
             key=lambda item: (
                 int(item.get("publication_sequence", 0)),
                 str(item.get("candidate_id", "")),
@@ -283,8 +396,7 @@ class CandidateBatchStore:
                 "history": len(candidates) - len(active),
                 "by_status": by_status,
                 "active_batches": sum(
-                    item.get("status") in ACTIVE_BATCH_STATES
-                    for item in summary["batches"]
+                    item.get("status") in ACTIVE_BATCH_STATES for item in batches
                 ),
             },
             "integrity": self.integrity_check() if check else {"status": "not-checked"},
@@ -392,7 +504,12 @@ class CandidateBatchStore:
         }
 
     def _candidate_projection(
-        self, candidate: dict[str, Any], batches: dict[str, Any]
+        self,
+        candidate: dict[str, Any],
+        batches: dict[str, Any],
+        *,
+        ref_heads: dict[str, str | None] | None = None,
+        ancestry: dict[tuple[str, str], bool] | None = None,
     ) -> dict[str, Any]:
         projected = copy.deepcopy(candidate)
         status = str(projected.get("status"))
@@ -409,11 +526,20 @@ class CandidateBatchStore:
             and batch.get("validation_outcome") == "passed"
             and released
         ):
-            current_base = self.repo.ref_head(f"refs/heads/{batch['base_ref']}")
-            delivered = bool(
-                current_base
-                and self.repo.is_ancestor(str(batch["integration_head"]), current_base)
-            )
+            base_ref = f"refs/heads/{batch['base_ref']}"
+            if ref_heads is not None and base_ref in ref_heads:
+                current_base = ref_heads[base_ref]
+            else:
+                current_base = self.repo.ref_head(base_ref)
+                if ref_heads is not None:
+                    ref_heads[base_ref] = current_base
+            identity = (str(batch["integration_head"]), str(current_base or ""))
+            if current_base and ancestry is not None and identity in ancestry:
+                delivered = ancestry[identity]
+            elif current_base:
+                delivered = self.repo.is_ancestor(identity[0], current_base)
+                if ancestry is not None:
+                    ancestry[identity] = delivered
         projected["delivered"] = delivered
         projected["finalization_pending"] = (
             delivered and batch.get("status") != "completed"
@@ -908,7 +1034,9 @@ class CandidateBatchStore:
             )
         )
 
-    def pending_lanes(self) -> list[dict[str, Any]]:
+    def pending_lanes(
+        self, *, target_lane: tuple[str, str, str] | None = None
+    ) -> list[dict[str, Any]]:
         candidates = sorted(
             (
                 item
@@ -924,6 +1052,8 @@ class CandidateBatchStore:
         for candidate in candidates:
             policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
             key = _candidate_lane(candidate)
+            if target_lane is not None and key != target_lane:
+                continue
             lane = lanes.setdefault(
                 key,
                 {
@@ -951,6 +1081,7 @@ class CandidateBatchStore:
         now_epoch: float | None = None,
         coordinator: dict[str, str] | None = None,
         tail_request: dict[str, str] | None = None,
+        target_lane: tuple[str, str, str] | None = None,
     ) -> dict[str, Any]:
         coordinator = normalize_host_reference(coordinator)
         observed_now = time.time() if now_epoch is None else now_epoch
@@ -1001,6 +1132,8 @@ class CandidateBatchStore:
             lane_candidates: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
             for candidate in candidates:
                 key = _candidate_lane(candidate)
+                if target_lane is not None and key != target_lane:
+                    continue
                 lane_candidates.setdefault(key, []).append(candidate)
             for key, eligible in lane_candidates.items():
                 policy = eligible[0].get("integration_policy") or LEGACY_EXPLICIT_POLICY
@@ -1200,16 +1333,27 @@ class CandidateBatchStore:
         ]
         tail = [batch for batch in terminal if batch not in full]
         waits: list[float] = []
+        integrated_candidates = 0
+        missing_publication_timestamps = 0
+        missing_delivery_timestamps = 0
         for candidate in value["candidates"].values():
+            if candidate.get("status") != "integrated":
+                continue
+            integrated_candidates += 1
             published = _parse_timestamp(candidate.get("published_at"))
             integrated = _parse_timestamp(candidate.get("integrated_at"))
             if published is not None and integrated is not None:
                 waits.append((integrated - published).total_seconds())
+            elif published is None:
+                missing_publication_timestamps += 1
+            else:
+                missing_delivery_timestamps += 1
 
         full_costs: list[float] = []
         reused_full_profiles = 0
         missing_full_proofs = 0
         legacy_completed_without_full_proof = 0
+        completed_with_full_profiles = 0
         for batch in terminal:
             if batch.get("status") != "completed":
                 continue
@@ -1244,6 +1388,8 @@ class CandidateBatchStore:
                     legacy_completed_without_full_proof += 1
                 else:
                     missing_full_proofs += 1
+            else:
+                completed_with_full_profiles += 1
 
         count = len(terminal)
         return {
@@ -1260,10 +1406,33 @@ class CandidateBatchStore:
             "full_batch_rate": round(len(full) / count, 4) if count else None,
             "tail_batch_rate": round(len(tail) / count, 4) if count else None,
             "candidate_wait_seconds": _numeric_summary(waits),
+            # 保留 beta.5 的 candidate_wait_seconds，同时给出不依赖猜测的
+            # 新名称：只统计已有 published_at 和 integrated_at 的候选。
+            "publication_to_delivery_seconds": _numeric_summary(waits),
             "executed_full_validation_seconds": _numeric_summary(full_costs),
             "reused_full_profiles": reused_full_profiles,
             "missing_full_proofs": missing_full_proofs,
             "legacy_completed_without_full_proof": legacy_completed_without_full_proof,
+            "metric_coverage": {
+                "publication_to_delivery_seconds": {
+                    "integrated_candidates": integrated_candidates,
+                    "observed": len(waits),
+                    "missing_publication_timestamp": missing_publication_timestamps,
+                    "missing_delivery_timestamp": missing_delivery_timestamps,
+                    "not_integrated_candidates": len(value["candidates"])
+                    - integrated_candidates,
+                },
+                "executed_full_validation_seconds": {
+                    "completed_batches": sum(
+                        batch.get("status") == "completed" for batch in terminal
+                    ),
+                    "batches_with_full_profiles": completed_with_full_profiles,
+                    "executed_profiles": len(full_costs),
+                    "reused_profiles": reused_full_profiles,
+                    "missing_full_proofs": missing_full_proofs,
+                    "legacy_weak_proofs": legacy_completed_without_full_proof,
+                },
+            },
         }
 
     def fail(
@@ -2248,6 +2417,7 @@ def reconcile_batches(
     coordinator: dict[str, str] | None = None,
     reason: str | None = None,
     require_tail_reason: bool = False,
+    candidate_id: str | None = None,
 ) -> dict[str, Any]:
     """仅用持久化候选与任务事实冻结一个可证明的批次。"""
 
@@ -2272,8 +2442,19 @@ def reconcile_batches(
     batch_store = CandidateBatchStore(repo)
     state_store = StateStore(repo)
     with candidate_admission_lock(repo):
+        target_lane = None
+        if candidate_id is not None:
+            candidate = batch_store.candidate(candidate_id)
+            if candidate.get("status") != "pending" or candidate.get("sealed_batch"):
+                return {
+                    "status": "candidate-not-pending",
+                    "candidate_id": candidate_id,
+                    "candidate_status": candidate.get("status"),
+                    "cause": cause,
+                }
+            target_lane = _candidate_lane(candidate)
         snapshots: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for lane in batch_store.pending_lanes():
+        for lane in batch_store.pending_lanes(target_lane=target_lane):
             key = (
                 str(lane["base_ref"]),
                 str(lane["base_head"]),
@@ -2289,7 +2470,23 @@ def reconcile_batches(
             now_epoch=now_epoch,
             coordinator=coordinator,
             tail_request=tail_request,
+            target_lane=target_lane,
         )
+    if (
+        candidate_id is not None
+        and result.get("status") == "active-batch"
+        and candidate_id not in (result.get("batch") or {}).get("candidate_ids", [])
+    ):
+        # 交付意图只能描述它刚发布的候选。前序批次可以占用集成 turn，
+        # 但绝不能被呈现或持久化为该候选所属的批次。
+        active_batch = result.pop("batch")
+        return {
+            **result,
+            "status": "waiting-for-prior-batch",
+            "candidate_id": candidate_id,
+            "active_batch": active_batch,
+            "delivered": False,
+        }
     batch = result.get("batch")
     if not batch:
         return result

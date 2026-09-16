@@ -18,7 +18,9 @@ def test_new_test_modules_default_to_full() -> None:
     assert dww_test_layer(Path("tests/unit/test_new_contract.py")) == "dww_full"
 
 
-def test_fast_proof_covers_its_real_configuration_inputs_and_lint_runs_first() -> None:
+def test_fast_proof_covers_its_real_configuration_inputs_and_development_lint_is_locked() -> (
+    None
+):
     with (_REPOSITORY_ROOT / ".solo-ai" / "verification.toml").open("rb") as handle:
         primary = tomllib.load(handle)
 
@@ -30,7 +32,18 @@ def test_fast_proof_covers_its_real_configuration_inputs_and_lint_runs_first() -
         ".solo-ai/stress-verification.toml",
     } <= set(fast["input_paths"])
     ids = [profile["id"] for profile in profiles]
-    assert ids.index("dww-lint-ready") < ids.index("dww-fast-ready")
+    lint = next(
+        profile for profile in profiles if profile["id"] == "dww-lint-development"
+    )
+    assert ids.index(lint["id"]) < ids.index("dww-fast-ready")
+    assert lint["level"] == "development"
+    assert lint["commands"] == [
+        ["uv", "run", "ruff", "check", "."],
+        ["uv", "run", "ruff", "format", "--check", "."],
+    ]
+    assert lint["input_paths"] == ["**"]
+    assert lint["input_closure"] == "complete"
+    assert lint["cross_task_reuse"] is True
 
 
 def test_complete_full_profile_excludes_the_explicit_stress_layer() -> None:

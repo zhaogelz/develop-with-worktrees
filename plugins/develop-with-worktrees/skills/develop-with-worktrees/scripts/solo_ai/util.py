@@ -28,6 +28,23 @@ class SoloAIError(RuntimeError):
     """A user-actionable workflow error."""
 
 
+class ActionableSoloAIError(SoloAIError):
+    """保留旧错误文本，同时为可判定的下一步提供机器可读事实。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        context: dict[str, Any] | None = None,
+        next_action: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.context = context or {}
+        self.next_action = next_action or {}
+
+
 @dataclass(frozen=True)
 class CommandResult:
     args: Sequence[str] | str

@@ -82,7 +82,9 @@ from .repo import GitRepo
 from .routing import detect_existing_workflows
 from .runtime_adapter import verify_runtime_effective
 from .state import FINAL_TASK_STATES, STATE_SCHEMA, StateStore
+from .status_views import status_view as query_status_view
 from .util import (
+    ActionableSoloAIError,
     SoloAIError,
     atomic_write_json,
     delete_plain_path_if_unchanged,
@@ -579,6 +581,11 @@ def _parser() -> argparse.ArgumentParser:
     candidate_status.add_argument(
         "--check", action="store_true", help="check DWW candidate refs without changes"
     )
+    candidate_status.add_argument(
+        "--compact",
+        action="store_true",
+        help="return only the selected candidate view in JSON output",
+    )
     candidate_repair = candidate_sub.add_parser(
         "repair",
         help="prepare one bounded managed repair task for a composition conflict",
@@ -871,6 +878,7 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--lease", required=True)
         item.add_argument("--session")
         if name == "finish":
+            _add_tail_request_arguments(item)
             _add_host_reference_arguments(item, role="candidate publication")
 
     retarget_parser = sub.add_parser(
@@ -906,8 +914,22 @@ def _parser() -> argparse.ArgumentParser:
         help="at level full, include complete-regression profiles as an explicit milestone check",
     )
 
-    status = sub.add_parser("status", help="show masked slots and tasks")
+    status = sub.add_parser("status", help="show current DWW work or one exact object")
     status.add_argument("--detailed", action="store_true")
+    status.add_argument(
+        "--compact",
+        action="store_true",
+        help="return a current, read-only JSON view instead of legacy full history",
+    )
+    status.add_argument(
+        "--history",
+        action="store_true",
+        help="include historical entries in the compact view",
+    )
+    status_selector = status.add_mutually_exclusive_group()
+    status_selector.add_argument("--task", help="show one exact task and its delivery")
+    status_selector.add_argument("--root", help="show one exact root and its children")
+    status_selector.add_argument("--batch", help="show one exact integration batch")
 
     recover = sub.add_parser(
         "recover",
@@ -1962,10 +1984,17 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "candidate":
         if args.candidate_command == "status":
             store = CandidateBatchStore(repo)
+            if args.compact:
+                return store.status_view(
+                    include_history=args.history,
+                    candidate_id=args.candidate,
+                    check=args.check,
+                )
             summary = store.summary()
             return {
                 **summary,
-                "status_view": store.status_view(
+                "status_view": store.status_view_from_summary(
+                    summary,
                     include_history=args.history,
                     candidate_id=args.candidate,
                     check=args.check,
@@ -2103,6 +2132,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             lease=args.lease,
             session_id=args.session,
             host_actor=_resolved_host_reference(args),
+            cause=args.cause,
+            reason=args.reason,
         )
     if args.command == "retarget":
         return retarget(
@@ -2236,6 +2267,27 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 "kind": proof["kind"],
             }
     if args.command == "status":
+        has_selector = any((args.task, args.root, args.batch))
+        if args.detailed and (args.compact or args.history or has_selector):
+            raise ActionableSoloAIError(
+                "--detailed cannot be combined with compact status selectors",
+                code="INVALID_STATUS_QUERY",
+                next_action={"kind": "choose_detailed_or_compact"},
+            )
+        if args.json and args.history and not args.compact and not has_selector:
+            raise ActionableSoloAIError(
+                "--json status --history requires --compact",
+                code="INVALID_STATUS_QUERY",
+                next_action={"kind": "add_compact"},
+            )
+        if not args.json or args.compact or args.history or has_selector:
+            return query_status_view(
+                repo,
+                task_id=args.task,
+                root_id=args.root,
+                batch_id=args.batch,
+                include_history=args.history,
+            )
         return _status(repo, detailed=args.detailed)
     if args.command == "recover":
         if args.repair_path and not args.repair_runtime_adapter:
@@ -2326,6 +2378,8 @@ def _human(
         and isinstance(result.get("lease"), str)
     ):
         return _repair_task_human(result)
+    if command == "status":
+        return _status_view_human(result)
     if command == "candidate" and getattr(args, "candidate_command", None) == "status":
         view = result.get("status_view") or {}
         summary = view.get("status_summary") or {}
@@ -2404,7 +2458,8 @@ def _human(
     if command == "finish":
         if result.get("outcome") == "batch_integrated":
             summary = (
-                f"Published {result['candidate_id']} and integrated full batch "
+                f"Published {result['candidate_id']} and integrated "
+                f"{result.get('batch_trigger', 'full')} batch "
                 f"{result['batch_id']} at {result['integrated_head']} "
                 f"from {result['candidate_count']} candidates."
             )
@@ -2501,6 +2556,60 @@ def _human(
     )
 
 
+def _status_view_human(result: dict[str, Any]) -> str:
+    """普通 status 默认只展示当前可行动对象，不复制完整历史 JSON。"""
+
+    scope = result.get("scope")
+    if scope in {"current", "history"}:
+        lines = [
+            f"Status view: {scope} ({len(result.get('tasks') or [])} task(s), "
+            f"{len(result.get('candidates') or [])} candidate(s), "
+            f"{len(result.get('batches') or [])} batch(es))."
+        ]
+        for task in result.get("tasks") or []:
+            lines.append(
+                f"- task {task.get('id')}: {task.get('status')} "
+                f"({task.get('next_action', {}).get('kind')})"
+            )
+        for candidate in result.get("candidates") or []:
+            lines.append(
+                f"- candidate {candidate.get('id')}: {candidate.get('status')} "
+                f"({candidate.get('delivery_status')})"
+            )
+        for batch in result.get("batches") or []:
+            lines.append(f"- batch {batch.get('id')}: {batch.get('status')}")
+        counts = result.get("history_counts") or {}
+        if scope == "current" and any(counts.values()):
+            lines.append(
+                "History hidden: "
+                f"{counts.get('tasks', 0)} task(s), "
+                f"{counts.get('candidates', 0)} candidate(s), "
+                f"{counts.get('batches', 0)} batch(es). Use status --history."
+            )
+        return "\n".join(lines)
+    if scope == "task":
+        task = result["task"]
+        return (
+            f"Task {task.get('id')}: {task.get('status')}\n"
+            f"Next: {task.get('next_action', {}).get('kind')}"
+        )
+    if scope == "batch":
+        batch = result["batch"]
+        return (
+            f"Batch {batch.get('id')}: {batch.get('status')}\n"
+            f"Next: {batch.get('next_action', {}).get('kind')}"
+        )
+    if scope == "root":
+        root = result["root"]
+        return (
+            f"Root {root.get('id')}: acceptance={root.get('overall_acceptance_status')}\n"
+            f"Next: {root.get('next_action', {}).get('kind')}"
+        )
+    return json.dumps(
+        _redact_leases(result), ensure_ascii=False, indent=2, sort_keys=True
+    )
+
+
 def _configure_noninteractive_text_output() -> None:
     """让被宿主捕获的 CLI 文本稳定为 UTF-8，交互终端保持原样。"""
 
@@ -2541,7 +2650,16 @@ def main(argv: list[str] | None = None) -> int:
         result = _dispatch(args)
     except (SoloAIError, DelegatedContractError) as exc:
         if args.json:
-            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=True))
+            payload: dict[str, Any] = {"ok": False, "error": str(exc)}
+            if isinstance(exc, ActionableSoloAIError):
+                payload.update(
+                    {
+                        "error_code": exc.code,
+                        "context": exc.context,
+                        "next_action": exc.next_action,
+                    }
+                )
+            print(json.dumps(payload, ensure_ascii=True))
         else:
             print(f"error: {exc}", file=sys.stderr)
         return 2

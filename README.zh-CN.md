@@ -22,13 +22,13 @@ DWW 不再是多 AI 任务指挥中心。任务怎么拆、谁先做、谁依赖
 2. AI 只在该工作树修改，用 `commit` 提交精确路径；开发中按需要运行有帮助的检查。
 3. `Finish` 固化源码候选并释放开发工作树，主线暂时不动，也不要求再过一次独立项目测试；候选本身不等于交付。
 4. 每满 3 个候选，DWW 自动冻结最早 3 个，在集成工作树组合后只运行受影响的检查，并复用仍然有效的单项结果。
-5. 不足 3 个时，由宿主用 `batch reconcile --force --cause round-complete --reason <完成依据>` 结束本轮；用户要求、部署或下游依赖需要立即合入时，分别记录 `user`、`deploy`、`dependency` 原因。DWW 只冻结当时精确的等待候选。
+5. 不足 3 个时，由宿主用 `batch reconcile --force --cause round-complete --reason <完成依据>` 结束本轮；用户要求、部署或下游依赖需要立即合入时，分别记录 `user`、`deploy`、`dependency` 原因。DWW 只冻结当时精确的等待候选。源码任务也可在 `finish --cause <原因> --reason <依据>` 中直接表达同一意图：首次意图会持久化，恢复时仍复用，并且只作用于该候选所在的 lane；不传这两个参数时，Finish 保持只发布源码候选的原行为。
 
 普通用户不用手工抄候选 ID。DWW 从持久化状态选择已经 `Finish` 且已释放项目运行资源的不可变候选；它不会把宿主空闲猜成这一轮已经结束。
 
 ## 候选历史和撤回
 
-`candidate status` 的普通终端输出只突出仍需处理的候选；`--history` 显示终态历史，`--candidate <id>` 查看一条精确记录。为保持宿主兼容，原有 JSON 字段仍包含完整候选池；新增的 `status_view` 才是紧凑展示。`--check` 会按需只读核对 DWW 候选记录和 `refs/dww/candidates/*`；普通查询会明确显示尚未执行该诊断。
+`candidate status` 的普通终端输出只突出仍需处理的候选；`--history` 显示终态历史，`--candidate <id>` 查看一条精确记录。为保持宿主兼容，原有 JSON 字段仍包含完整候选池。AI 只需当前事实时使用 `status --compact`，并可加 `--task`、`--root` 或 `--batch` 精确收窄；只有需要终态记录才加 `--history`。`candidate status --compact` 提供对应的候选视图。紧凑视图不 reconcile 回执，也不写状态。`--check` 会按需只读核对 DWW 候选记录和 `refs/dww/candidates/*`；普通查询会明确显示尚未执行该诊断。
 
 `candidate withdraw --candidate <id> --reason <单行原因>` 会把符合条件的候选移出后续集成，但在核对精确 SHA 后保留其不可变候选 ref。原因、来源和开始时间首次写入后不被重试改写。旧版本已删除 ref 的撤回记录只作为历史观察，不会被补造为损坏。CLI 的 `abandon` 同样要求单行原因，并把它冻结在既有放弃事务或当前目录兼容路径的审计记录中。
 
@@ -54,17 +54,17 @@ Hook 只是可选的提前拦截或唤醒来源。即使没有安装或信任 Ho
 
 组合阶段若能明确定位到某个冲突候选，DWW 可在最新主线上准备最多两代受管返修；只要代码、契约、测试和当前用户要求能唯一决定结果，AI 就会自动继续。只有这些信息仍留下实质不同的产品、权限、迁移、删除或安全结果时，才交给人决定。最终验证失败不会冒充合并冲突盲目重跑。若已诊断的外部阻塞发生变化而候选未变，`batch seal --after-failed-batch <id>` 会显式且幂等地创建该失败代次唯一的已审查后继。
 
-复用模式的批次失败后，可用 `batch retire --batch <id>` 完成安全归还；旧批次迟到退役不能删除后来者的工作区。旧专用目录批次保留精确物理退役。对于已明确批准清理、且候选全部已被替代或显式放弃的历史失败专用批次，可用 `batch retire --fast --batch <id>`：仍核对 Git、目录身份、链接、受保护和未知内容，只跳过可再生依赖的逐文件内容哈希，并通过暂存目录和收据支持幂等重试。候选 ref 和审计事实始终保留。调整批量前先用只读 `batch metrics` 查看满批率、尾批率、候选等待和实际 Full 成本，不凭感觉改默认值。
+复用模式的批次失败后，可用 `batch retire --batch <id>` 完成安全归还；旧批次迟到退役不能删除后来者的工作区。旧专用目录批次保留精确物理退役。对于已明确批准清理、且候选全部已被替代或显式放弃的历史失败专用批次，可用 `batch retire --fast --batch <id>`：仍核对 Git、目录身份、链接、受保护和未知内容，只跳过可再生依赖的逐文件内容哈希，并通过暂存目录和收据支持幂等重试。候选 ref 和审计事实始终保留。调整批量前先用只读 `batch metrics` 查看满批率、尾批率、已观测的“发布到交付”时间和实际 Full 成本；`metric_coverage` 会分别说明可观测时间戳、未交付候选以及缺失或旧版 Full 回执，避免把缺数据说成性能结论。
 
 旧项目可以继续显式使用 direct 或手工封批策略；它们只用于平稳升级，新项目默认使用候选流水线。
 
 ## 安装
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.5
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.6
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-安装或更新后新开一个 Codex 会话，使新版技能文案稳定加载。DWW 的本地生命周期不包含远程发布；只有用户另行明确要求时，才可从已合入且干净的基线工作树执行 dry-run 优先的普通非强制推送。
+源码 CLI 版本为 `0.5.0-beta.6`；插件清单可追加 `+codex.<build>` 作为缓存隔离后缀，但其前缀仍对应源码版本。安装或更新后新开一个 Codex 会话，使新版技能文案稳定加载。DWW 的本地生命周期不包含远程发布；只有用户另行明确要求时，才可从已合入且干净的基线工作树执行 dry-run 优先的普通非强制推送。
 
 详细配置、升级兼容、异常恢复和安全原理见[配置参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)、[生命周期参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md)、[任务治理参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md)和[安全参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md)。

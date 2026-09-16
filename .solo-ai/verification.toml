@@ -18,10 +18,10 @@ commands = [
   ["uv", "run", "python", "scripts/verify_repository.py"],
 ]
 
-# ruff 仍由 uvx 提供，尚未能把被包装工具版本放入项目锁文件闭包；
-# 所以它是非纯检查，不能跨任务复用。它放在 fast 前，让格式错误尽早结束。
+# Ruff 已锁定在 uv.lock；开发期先做格式与语法检查，完整输入闭包未变时可
+# 复用同仓库证明。Ready/Full 不隐式重复它，开发者需要时显式运行 development。
 [[profiles]]
-id = "dww-lint-ready"
+id = "dww-lint-development"
 paths = [
   ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
   "scripts/verify_repository.py", "tests/**", "uv.lock",
@@ -29,23 +29,17 @@ paths = [
   "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
   "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
 ]
-cross_task_reuse = false
-external_state = "unknown"
-input_paths = [
-  ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
-  "scripts/verify_repository.py", "tests/**", "uv.lock",
-  "plugins/develop-with-worktrees/hooks/**",
-  "plugins/develop-with-worktrees/skills/develop-with-worktrees/agents/**",
-  "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
-]
+cross_task_reuse = true
+external_state = "none"
+input_paths = ["**"]
 environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
-input_closure = "declared"
-timeout_seconds = 600
+input_closure = "complete"
+timeout_seconds = 120
 resource_class = "normal"
-level = "ready"
+level = "development"
 commands = [
-  ["uvx", "ruff", "check", "."],
-  ["uvx", "ruff", "format", "--check", "."],
+  ["uv", "run", "ruff", "check", "."],
+  ["uv", "run", "ruff", "format", "--check", "."],
 ]
 
 # 核心代码、策略、测试及 CI 再运行可快速、纯本地的回归；测试层级由

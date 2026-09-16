@@ -22,13 +22,13 @@ DWW is no longer a multi-AI task command center. The host's native task system d
 2. The agent edits only there, commits exact paths, and runs development checks when they help it work safely.
 3. `Finish` publishes the exact source candidate and releases the task worktree without moving the base or requiring a separate project test gate; it is not delivery by itself.
 4. Every three candidates, DWW freezes the oldest eligible three and composes them in an integration worktree. It then runs the affected combined checks, reusing valid individual results.
-5. With fewer than three candidates, the host ends the round with `batch reconcile --force --cause round-complete --reason <basis>` or records an explicit `user`, `deploy`, or `dependency` reason; DWW freezes that exact pending tail.
+5. With fewer than three candidates, the host ends the round with `batch reconcile --force --cause round-complete --reason <basis>` or records an explicit `user`, `deploy`, or `dependency` reason; DWW freezes that exact pending tail. A source task may carry the same intent in `finish --cause <cause> --reason <basis>`: DWW persists the first intent, reuses it after recovery, and targets only that source candidate's lane. Omitting both options keeps Finish's source-publication behavior.
 
 Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state. It never guesses that an idle host means the round is over.
 
 ## Candidate history and withdrawal
 
-`candidate status` keeps the normal terminal output focused on candidates that still need action, while `--history` shows terminal records and `--candidate <id>` shows one exact record. Existing JSON fields retain the complete pool for host compatibility; the added `status_view` is the compact presentation. `--check` is an explicit read-only comparison of DWW candidate records and `refs/dww/candidates/*`; a normal status call reports that this diagnostic was not run.
+`candidate status` keeps the normal terminal output focused on candidates that still need action, while `--history` shows terminal records and `--candidate <id>` shows one exact record. Existing JSON fields retain the complete pool for host compatibility. For a current, read-only AI snapshot use `status --compact` (optionally `--task`, `--root`, or `--batch`); add `--history` only when terminal records matter. `candidate status --compact` provides the matching candidate view. These compact views do not reconcile receipts or write state. `--check` is an explicit read-only comparison of DWW candidate records and `refs/dww/candidates/*`; a normal status call reports that this diagnostic was not run.
 
 `candidate withdraw --candidate <id> --reason <one-line>` removes an eligible candidate from future integration but keeps its immutable candidate ref after checking the exact SHA. It freezes the reason, source, and start time so retries do not rewrite them. Old withdrawn records whose refs were removed by an earlier version remain historical observations, not invented corruption. `abandon` likewise requires a one-line reason in the CLI and freezes it in the existing abandonment transaction or in-place audit.
 
@@ -54,17 +54,17 @@ Projects may configure a Runtime Adapter. At Start it can establish ignored proj
 
 A composition conflict tied to one candidate can prepare up to two managed repair generations on the latest base. The agent continues when code, contracts, tests, and the current user request determine one answer. It asks for a decision only when they leave materially different product, permission, migration, deletion, or security outcomes open. Final-validation failures are never disguised as merge conflicts and blindly retried. If a diagnosed external blocker changes while the candidates do not, `batch seal --after-failed-batch <id>` explicitly and idempotently creates one reviewed successor of that exact failed generation.
 
-After a reusable generation fails, `batch retire --batch <id>` can finish its safe workspace return; it never deletes a later batch's workspace. Older dedicated batches retain exact, non-force physical retirement. For an explicitly approved cleanup of an old failed dedicated batch whose candidates are all superseded or explicitly withdrawn, `batch retire --fast --batch <id>` uses the same identity and protected-content preflight while avoiding dependency content hashes; it preserves candidate refs and audit facts and is retry-safe. `batch metrics` reads existing lifecycle and proof facts to report full/tail rates, candidate wait time, and executed Full cost before changing batch-size policy. It reports schema-1 completed batches with only legacy weak proof separately, so they are not mistaken for missing Full proof in the current lifecycle.
+After a reusable generation fails, `batch retire --batch <id>` can finish its safe workspace return; it never deletes a later batch's workspace. Older dedicated batches retain exact, non-force physical retirement. For an explicitly approved cleanup of an old failed dedicated batch whose candidates are all superseded or explicitly withdrawn, `batch retire --fast --batch <id>` uses the same identity and protected-content preflight while avoiding dependency content hashes; it preserves candidate refs and audit facts and is retry-safe. `batch metrics` reads existing lifecycle and proof facts to report full/tail rates, observed publication-to-delivery time, and executed Full cost before changing batch-size policy. `metric_coverage` distinguishes integrated records with observable timestamps from retained/unintegrated records and reports missing or legacy Full-proof facts, so absence is not presented as a performance result.
 
 Legacy repositories may keep explicit direct or explicit-seal policies during migration. New repositories use the candidate-first flow.
 
 ## Installation
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.5
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.6
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-Start a new Codex session after installing or updating so the new skill text is loaded. Remote publishing is separate and requires an explicit user request for a dry-run-first ordinary non-force push from the clean integrated base.
+The source CLI version is `0.5.0-beta.6`; the plugin manifest may append a `+codex.<build>` cache-buster while retaining that source-version prefix. Start a new Codex session after installing or updating so the new skill text is loaded. Remote publishing is separate and requires an explicit user request for a dry-run-first ordinary non-force push from the clean integrated base.
 
 See the [Chinese guide](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), [lifecycle](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md), [task governance](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md), and [architecture](docs/architecture.md) for details.

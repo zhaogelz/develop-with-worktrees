@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0-beta.6 — 2026-09-16
+
+- 新增 `status --compact` 的任务、目标和批次定向视图，以及 `candidate status --compact`；默认排除终态历史，查询不再通过回执 reconcile 写状态，同一请求复用候选 Git 投影。旧 JSON `status` 字段和行为保持兼容；无效的新查询会给出机器可读错误码、上下文和下一步。
+- `finish --cause ... --reason ...` 可把明确尾批交付意图与 batched 候选发布原子保存；恢复只重放该候选所在 lane 的既有批次 reconcile，不嵌套调度、不绕过 Full，也不会误封其他 lane。无参数 Finish 保持 beta.5 行为。
+- 将 Ruff 锁入 `uv.lock`，增加可复用、完整输入闭包的 development 静态预检；技能入口改为高频生命周期路由，低频恢复和策略细节按需读取参考文档。
+- `batch metrics` 新增 `publication_to_delivery_seconds` 与覆盖范围，明确区分已观测交付、尚未交付和缺失/旧版 Full 证明，避免把缺数据当成性能结论。
+
 ## 0.5.0-beta.5 — 2026-09-16
 
 - 默认候选状态改为紧凑的当前视图；历史记录、单条候选与 Git 引用一致性检查按需查看，避免把已完成历史误报为待办。

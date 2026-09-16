@@ -819,6 +819,45 @@ class StateStore:
 
         return self.mutate(update)
 
+    def record_candidate_delivery_intent(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        delivery_intent: dict[str, Any],
+    ) -> dict[str, Any]:
+        """为已准备的候选补录第一次交付意图，重试不得改写它。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            publication = task.get("candidate_publication") if task else None
+            active = task.get("active_operation") if task else None
+            policy = task.get("integration_policy") if task else None
+            if (
+                not isinstance(publication, dict)
+                or task.get("status") != "publishing"
+                or not isinstance(active, dict)
+                or active.get("id") != operation_id
+                or active.get("kind") != "finish"
+                or not isinstance(policy, dict)
+                or policy.get("mode") != "batched"
+            ):
+                raise SoloAIError(
+                    "Candidate delivery intent requires a prepared batched Finish publication"
+                )
+            existing = publication.get("delivery_intent")
+            if existing is not None and existing != delivery_intent:
+                raise SoloAIError(
+                    "Candidate delivery intent changed; recover with the originally recorded intent"
+                )
+            if existing is None:
+                publication["schema_version"] = 3
+                publication["delivery_intent"] = copy.deepcopy(delivery_intent)
+                task["updated_at"] = utc_timestamp()
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     def complete_candidate_publication(
         self, task_id: str, *, candidate_id: str
     ) -> dict[str, Any]:

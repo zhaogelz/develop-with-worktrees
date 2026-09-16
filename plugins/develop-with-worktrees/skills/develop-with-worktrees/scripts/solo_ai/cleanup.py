@@ -285,7 +285,6 @@ def _pinned_cleanup_ancestors(
 def _remove_recreatable_contents(
     repo: GitRepo, *, cwd: Path, policy: CleanupPolicy
 ) -> None:
-
     inventory = inspect_untracked(
         repo, cwd=cwd, policy=policy, expand_dependencies=True
     )

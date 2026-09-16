@@ -103,6 +103,7 @@ from .task_context import (
     update_anchor,
 )
 from .util import (
+    ActionableSoloAIError,
     DirectoryLock,
     SoloAIError,
     atomic_write_json,
@@ -2432,6 +2433,7 @@ def _prepare_candidate_publication(
     store: StateStore,
     task: dict[str, Any],
     proof: dict[str, Any] | None,
+    delivery_intent: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     active = task.get("active_operation") or {}
     operation_id = str(active.get("id") or "")
@@ -2441,7 +2443,7 @@ def _prepare_candidate_publication(
     worktree = Path(str(task["worktree"])).absolute()
     managed_root = worktree.parent
     publication = {
-        "schema_version": 2,
+        "schema_version": 3 if delivery_intent else 2,
         "phase": "prepared",
         "candidate_id": candidate_id,
         "ref": f"refs/dww/candidates/{candidate_id}",
@@ -2469,6 +2471,11 @@ def _prepare_candidate_publication(
         "prepared_by_operation_id": operation_id,
         "prepared_at": utc_timestamp(),
     }
+    if delivery_intent:
+        publication["delivery_intent"] = {
+            "schema_version": 1,
+            **delivery_intent,
+        }
     return store.prepare_candidate_publication(
         task["id"], operation_id=operation_id, publication=publication
     )
@@ -2572,10 +2579,11 @@ def _resume_candidate_publication(
         "managed_root_identity",
         "integration_policy",
     )
-    if publication.get("schema_version") not in {1, 2} or any(
+    if publication.get("schema_version") not in {1, 2, 3} or any(
         not publication.get(key) for key in required
     ):
         raise SoloAIError("Candidate publication identity is incomplete")
+    delivery_intent = _publication_delivery_intent(publication)
     if candidate_validation not in {"ready", "batch"}:
         raise SoloAIError("Candidate publication has an unknown validation mode")
     if candidate_validation == "ready" and not publication.get("proof"):
@@ -2736,8 +2744,152 @@ def _resume_candidate_publication(
         ),
         "seal_policy": policy["seal_policy"],
         "tail_policy": policy["tail_policy"],
+        "delivery_intent": delivery_intent,
         "repair_handoff": handoff,
     }
+
+
+def _normalize_finish_delivery_intent(
+    *, cause: str | None, reason: str | None
+) -> dict[str, str] | None:
+    """把 Finish 的可选交付意图规范化为可持久化的最小事实。"""
+
+    if cause is None and reason is None:
+        return None
+    if cause is None or reason is None:
+        raise ActionableSoloAIError(
+            "Finish delivery intent requires both --cause and --reason",
+            code="INVALID_DELIVERY_INTENT",
+            next_action={"kind": "supply_cause_and_reason"},
+        )
+    from .candidate_batches import EXPLICIT_TAIL_CAUSES, _tail_request
+
+    if cause not in EXPLICIT_TAIL_CAUSES:
+        raise ActionableSoloAIError(
+            "Finish delivery intent must use user, deploy, dependency, or round-complete",
+            code="INVALID_DELIVERY_INTENT",
+            context={"cause": cause},
+            next_action={"kind": "choose_explicit_tail_cause"},
+        )
+    try:
+        return _tail_request(cause=cause, reason=reason)
+    except SoloAIError as exc:
+        raise ActionableSoloAIError(
+            str(exc),
+            code="INVALID_DELIVERY_INTENT",
+            next_action={"kind": "provide_one_line_reason"},
+        ) from exc
+
+
+def _publication_delivery_intent(publication: dict[str, Any]) -> dict[str, str] | None:
+    stored = publication.get("delivery_intent")
+    if stored is None:
+        return None
+    if publication.get("schema_version") != 3 or not isinstance(stored, dict):
+        raise SoloAIError("Candidate publication delivery intent is invalid")
+    if stored.get("schema_version") != 1:
+        raise SoloAIError("Candidate publication delivery intent schema is unsupported")
+    try:
+        return _normalize_finish_delivery_intent(
+            cause=stored.get("cause"), reason=stored.get("reason")
+        )
+    except ActionableSoloAIError as exc:
+        raise SoloAIError(
+            f"Candidate publication delivery intent is invalid: {exc}"
+        ) from exc
+
+
+def _record_finish_delivery_intent(
+    store: StateStore,
+    *,
+    task: dict[str, Any],
+    delivery_intent: dict[str, str] | None,
+) -> dict[str, Any]:
+    """给中断后的 prepared publication 追加一次且不可改写的意图。"""
+
+    if delivery_intent is None:
+        return task
+    publication = task.get("candidate_publication") or {}
+    existing = _publication_delivery_intent(publication)
+    if existing is not None and existing != delivery_intent:
+        raise ActionableSoloAIError(
+            "Finish delivery intent conflicts with the one already recorded for this candidate",
+            code="DELIVERY_INTENT_CONFLICT",
+            context={"candidate_id": publication.get("candidate_id")},
+            next_action={"kind": "recover_with_recorded_intent"},
+        )
+    if existing is not None:
+        return task
+    active = task.get("active_operation") or {}
+    operation_id = str(active.get("id") or "")
+    if not operation_id:
+        raise SoloAIError("Finish operation identity is missing for delivery intent")
+    return store.record_candidate_delivery_intent(
+        str(task["id"]),
+        operation_id=operation_id,
+        delivery_intent={"schema_version": 1, **delivery_intent},
+    )
+
+
+def _reconcile_delivery_intent(
+    repo: GitRepo,
+    *,
+    candidate_id: str,
+    delivery_intent: dict[str, str] | None,
+    coordinator: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    if delivery_intent is None:
+        return None
+    from .candidate_batches import reconcile_batches
+
+    return reconcile_batches(
+        repo,
+        force=True,
+        cause=delivery_intent["cause"],
+        reason=delivery_intent["reason"],
+        require_tail_reason=True,
+        coordinator=coordinator,
+        candidate_id=candidate_id,
+    )
+
+
+def _apply_delivery_intent_result(
+    repo: GitRepo,
+    *,
+    candidate_result: dict[str, Any],
+    coordinator: dict[str, str] | None,
+) -> dict[str, Any]:
+    """只由已发布候选的持久化意图触发一次精确通道 reconcile。"""
+
+    reconciliation = _reconcile_delivery_intent(
+        repo,
+        candidate_id=str(candidate_result["candidate_id"]),
+        delivery_intent=candidate_result.get("delivery_intent"),
+        coordinator=coordinator,
+    )
+    if reconciliation is None:
+        return candidate_result
+    batch = reconciliation.get("batch")
+    delivered = bool(reconciliation.get("delivered"))
+    candidate_result.update(
+        {
+            "reconciliation": reconciliation,
+            "delivered": delivered,
+            "delivery_status": "integrated" if delivered else "awaiting-integration",
+        }
+    )
+    if isinstance(batch, dict):
+        candidate_result.update(
+            {
+                "outcome": "batch_integrated" if delivered else "candidate_published",
+                "batch_id": batch.get("id"),
+                "batch_status": batch.get("status"),
+                "batch_trigger": batch.get("trigger"),
+                "integrated_head": batch.get("integrated_head"),
+                "candidate_count": len(batch.get("candidate_ids") or []),
+            }
+        )
+    return candidate_result
 
 
 def finish(
@@ -2747,6 +2899,8 @@ def finish(
     lease: str,
     session_id: str | None = None,
     host_actor: dict[str, str] | None = None,
+    cause: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
@@ -2755,6 +2909,14 @@ def finish(
     if not initial.get("integration_policy"):
         initial = store.ensure_task_integration_policy(task_id, config)
     policy = initial.get("integration_policy") or {}
+    delivery_intent = _normalize_finish_delivery_intent(cause=cause, reason=reason)
+    if delivery_intent and (_is_in_place(initial) or policy.get("mode") != "batched"):
+        raise ActionableSoloAIError(
+            "Finish delivery intent is available only for batched isolated tasks",
+            code="DELIVERY_INTENT_UNSUPPORTED",
+            context={"mode": policy.get("mode")},
+            next_action={"kind": "finish_without_delivery_intent"},
+        )
     candidate_result: dict[str, Any] | None = None
     with store.operation(task_id, lease, "finish") as active_task:
         if _is_in_place(active_task):
@@ -2800,6 +2962,9 @@ def finish(
             store.require_lease(task, lease)
             _assert_no_in_place_integration_conflict(store, task)
             if task.get("candidate_publication"):
+                task = _record_finish_delivery_intent(
+                    store, task=task, delivery_intent=delivery_intent
+                )
                 with candidate_admission_lock(repo):
                     candidate_result = _resume_candidate_publication(
                         repo, store=store, task=task, coordinator=host_actor
@@ -2870,7 +3035,11 @@ def finish(
                 )
                 if policy.get("mode") == "batched":
                     prepared = _prepare_candidate_publication(
-                        repo, store=store, task=task, proof=proof
+                        repo,
+                        store=store,
+                        task=task,
+                        proof=proof,
+                        delivery_intent=delivery_intent,
                     )
                     with candidate_admission_lock(repo):
                         candidate_result = _resume_candidate_publication(
@@ -2913,16 +3082,23 @@ def finish(
             }
         )
     else:
-        from .candidate_batches import reconcile_batches
+        if candidate_result.get("delivery_intent"):
+            candidate_result = _apply_delivery_intent_result(
+                repo, candidate_result=candidate_result, coordinator=host_actor
+            )
+        else:
+            from .candidate_batches import reconcile_batches
 
-        reconciliation = reconcile_batches(repo, cause="finish", coordinator=host_actor)
-        candidate_result.update(
-            {
-                "delivered": False,
-                "delivery_status": "awaiting-integration",
-                "reconciliation": reconciliation,
-            }
-        )
+            reconciliation = reconcile_batches(
+                repo, cause="finish", coordinator=host_actor
+            )
+            candidate_result.update(
+                {
+                    "delivered": False,
+                    "delivery_status": "awaiting-integration",
+                    "reconciliation": reconciliation,
+                }
+            )
     return candidate_result
 
 
@@ -3127,9 +3303,12 @@ def _recover_published_runtime_adapter_release(
                 receipt=runtime_release,
             )
         with candidate_admission_lock(repo):
-            return _resume_candidate_publication(
+            resumed = _resume_candidate_publication(
                 repo, store=store, task=task, coordinator=coordinator
             )
+        return _apply_delivery_intent_result(
+            repo, candidate_result=resumed, coordinator=coordinator
+        )
 
 
 def recover(
@@ -3220,7 +3399,7 @@ def recover(
                 "repair_handoff": repair_handoff,
             }
         require_anchor(repo, task)
-        return {
+        result = {
             "id": task_id,
             "status": "candidate-published",
             "candidate_id": publication.get("candidate_id"),
@@ -3228,7 +3407,17 @@ def recover(
             "anchor_path": publication.get("anchor_path"),
             "delivered": False,
             "delivery_status": "awaiting-integration",
+            "delivery_intent": _publication_delivery_intent(publication),
             "repair_handoff": repair_handoff,
+        }
+        applied = _apply_delivery_intent_result(
+            repo, candidate_result=result, coordinator=host_actor
+        )
+        return {
+            **applied,
+            "status": "integrated"
+            if applied.get("delivered")
+            else "candidate-published",
         }
     if _is_in_place(task):
         receipt = read_json(_in_place_receipt_path(repo, task_id), {})
@@ -3313,6 +3502,24 @@ def recover(
                 "transaction_id": receipt["transaction_id"],
                 "candidate_head": receipt["candidate_head"],
             }
+    if task.get("candidate_publication"):
+        # 候选发布恢复仍需按原任务进入 FIFO，但持久化的尾批意图只能在
+        # 此 turn 释放之后执行；否则同一进程会排在自己的任务票据之后。
+        with store.recovery_operation(task_id) as recovery_task:
+            recovery_operation_id = str(recovery_task["active_operation"]["id"])
+            with maintenance_lock(repo), integration_turn(repo, task_id):
+                task = store.task(task_id)
+                active = task.get("active_operation") or {}
+                if active.get("id") != recovery_operation_id:
+                    raise SoloAIError(
+                        "Task recovery operation identity changed while waiting"
+                    )
+                resumed = _resume_candidate_publication(
+                    repo, store=store, task=task, coordinator=host_actor
+                )
+        return _apply_delivery_intent_result(
+            repo, candidate_result=resumed, coordinator=host_actor
+        )
     with store.recovery_operation(task_id) as recovery_task:
         recovery_operation_id = str(recovery_task["active_operation"]["id"])
         with maintenance_lock(repo), integration_turn(repo, task_id):
@@ -3330,10 +3537,6 @@ def recover(
                     "ready_proof": restored["ready_proof"],
                     "recovered_ready_proof": True,
                 }
-            if task.get("candidate_publication"):
-                return _resume_candidate_publication(
-                    repo, store=store, task=task, coordinator=host_actor
-                )
             if task.get("abandonment"):
                 _stop_registered_processes(store, task)
                 result = resume_abandonment(repo, store=store, task=store.task(task_id))
