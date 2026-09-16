@@ -61,10 +61,10 @@ Hook 只是可选的提前拦截或唤醒来源。即使没有安装或信任 Ho
 ## 安装
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.6
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-源码 CLI 版本为 `0.5.0-beta.6`；插件清单可追加 `+codex.<build>` 作为缓存隔离后缀，但其前缀仍对应源码版本。安装或更新后新开一个 Codex 会话，使新版技能文案稳定加载。DWW 的本地生命周期不包含远程发布；只有用户另行明确要求时，才可从已合入且干净的基线工作树执行 dry-run 优先的普通非强制推送。
+源码 CLI 版本为 `0.5.0-beta.7`；插件清单可追加 `+codex.<build>` 作为缓存隔离后缀，但其前缀仍对应源码版本。安装或更新后新开一个 Codex 会话，使新版技能文案稳定加载。DWW 的本地生命周期不包含远程发布；只有用户另行明确要求时，才可从已合入且干净的基线工作树执行 dry-run 优先的普通非强制推送。
 
 详细配置、升级兼容、异常恢复和安全原理见[配置参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)、[生命周期参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md)、[任务治理参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md)和[安全参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md)。

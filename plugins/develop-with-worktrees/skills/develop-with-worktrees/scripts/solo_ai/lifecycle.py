@@ -943,10 +943,17 @@ def _require_current_structured_root_review(
         return
     if task.get("reviewed_root_plan_version") == current_version:
         return
-    raise SoloAIError(
+    raise ActionableSoloAIError(
         "The bound structured root plan has not been reviewed at its current version. "
         "Automatically recover through the host one-step root-context refresh; it reads "
-        "and records the current version without a new user confirmation."
+        "and records the current version without a new user confirmation.",
+        code="ROOT_CONTEXT_STALE",
+        context={"task_id": str(task["id"]), "root_id": str(root_id)},
+        next_action={
+            "kind": "refresh_root",
+            "task_id": str(task["id"]),
+            "retry": "after_action",
+        },
     )
 
 
@@ -1916,6 +1923,23 @@ def _unknown_ignored(repo: GitRepo, worktree: Path) -> list[str]:
     )
 
 
+def _unknown_content_error(
+    *, task_id: str, phase: str, paths: list[str]
+) -> ActionableSoloAIError:
+    """未知或受保护内容必须保留，并给调用方一个不会扩大清理范围的下一步。"""
+
+    return ActionableSoloAIError(
+        f"Unknown or protected ignored files block {phase}:\n"
+        + "\n".join(f"- {item}" for item in paths[:20]),
+        code="UNKNOWN_CONTENT",
+        context={"task_id": task_id, "phase": phase, "paths": paths[:20]},
+        next_action={
+            "kind": "preserve_and_inspect_worktree",
+            "task_id": task_id,
+        },
+    )
+
+
 def _assert_removable_managed_slot(repo: GitRepo, path: Path) -> bool:
     """只允许删除干净、已登记且没有受保护忽略内容的受管槽位。"""
     if not path.exists():
@@ -2621,9 +2645,10 @@ def _resume_candidate_publication(
     ):
         raise SoloAIError("Candidate worktree changed during publication")
     if unknown := _unknown_ignored(repo, worktree):
-        raise SoloAIError(
-            "Unknown or protected ignored files block candidate publication:\n"
-            + "\n".join(f"- {item}" for item in unknown[:20])
+        raise _unknown_content_error(
+            task_id=str(task["id"]),
+            phase="candidate publication",
+            paths=unknown,
         )
     load_repo_config(repo, cwd=worktree)
     if policy.get("mode") != "batched":
@@ -3021,9 +3046,10 @@ def finish(
                     )
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
                 if unknown := _unknown_ignored(repo, worktree):
-                    raise SoloAIError(
-                        "Unknown or protected ignored files block slot release:\n"
-                        + "\n".join(f"- {item}" for item in unknown[:20])
+                    raise _unknown_content_error(
+                        task_id=task_id,
+                        phase="slot release",
+                        paths=unknown,
                     )
                 _stop_registered_processes(store, task)
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)

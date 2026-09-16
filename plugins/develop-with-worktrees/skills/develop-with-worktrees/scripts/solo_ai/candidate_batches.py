@@ -32,6 +32,7 @@ from .safety import require_safe
 from .state import StateStore, candidate_admission_lock
 from .task_context import delete_anchor, require_anchor
 from .util import (
+    ActionableSoloAIError,
     DirectoryLock,
     SoloAIError,
     atomic_write_json,
@@ -131,8 +132,23 @@ class CandidateCompositionConflict(SoloAIError):
         self.candidate_id = candidate_id
 
 
-class BatchRuntimePending(SoloAIError):
+class BatchRuntimePending(ActionableSoloAIError):
     """批次运行时结果不确定；保留批次所有权并等待显式恢复。"""
+
+
+def _tail_producers_active_error(
+    *, base_ref: str, active_task_ids: Iterable[object]
+) -> ActionableSoloAIError:
+    """短尾批不能取代仍在同一 lane 中工作的生产者。"""
+
+    task_ids = [str(task_id) for task_id in active_task_ids]
+    return ActionableSoloAIError(
+        "Round completion cannot seal a tail while this candidate lane still has active "
+        "producers: " + ", ".join(task_ids),
+        code="TAIL_PRODUCERS_ACTIVE",
+        context={"active_task_ids": task_ids, "base_ref": base_ref},
+        next_action={"kind": "wait_for_lane_producers", "task_ids": task_ids},
+    )
 
 
 class BatchCleanupPending(SoloAIError):
@@ -1173,12 +1189,9 @@ class CandidateBatchStore:
                 )
                 if force or quiet_eligible:
                     if force and cause == "round-complete" and active_count > 0:
-                        raise SoloAIError(
-                            "Round completion cannot seal a tail while this candidate lane "
-                            "still has active producers: "
-                            + ", ".join(
-                                str(task_id) for task_id in snapshot["active_task_ids"]
-                            )
+                        raise _tail_producers_active_error(
+                            base_ref=key[0],
+                            active_task_ids=snapshot["active_task_ids"],
                         )
                     batch = self._seal_in_value(
                         value,
@@ -2037,7 +2050,10 @@ def _activate_batch_runtime(
             runtime_activation_error=str(exc),
         )
         raise BatchRuntimePending(
-            "Batch runtime activation is pending; fix the Adapter and run batch recover"
+            "Batch runtime activation is pending; fix the Adapter and run batch recover",
+            code="RUNTIME_ACTIVATION_PENDING",
+            context={"batch_id": str(batch["id"])},
+            next_action={"kind": "recover_batch", "batch_id": str(batch["id"])},
         ) from exc
     return store.update_batch(
         batch["id"],
@@ -2073,7 +2089,10 @@ def _release_batch_runtime(
             runtime_release_error=str(exc),
         )
         raise BatchRuntimePending(
-            "Batch runtime release is pending; main was preserved and batch recover must retry release"
+            "Batch runtime release is pending; main was preserved and batch recover must retry release",
+            code="RUNTIME_RELEASE_PENDING",
+            context={"batch_id": str(batch["id"])},
+            next_action={"kind": "recover_batch", "batch_id": str(batch["id"])},
         ) from exc
     outcome = str(batch["validation_outcome"])
     worktree = Path(str(batch["worktree"]))
@@ -2389,12 +2408,9 @@ def seal_batch(
                     ),
                 )
                 if snapshot["active_count"]:
-                    raise SoloAIError(
-                        "Round completion cannot seal a tail while this candidate lane "
-                        "still has active producers: "
-                        + ", ".join(
-                            str(task_id) for task_id in snapshot["active_task_ids"]
-                        )
+                    raise _tail_producers_active_error(
+                        base_ref=str(first["base_ref"]),
+                        active_task_ids=snapshot["active_task_ids"],
                     )
         elif cause is not None:
             raise SoloAIError("A complete batch does not accept a tail request")

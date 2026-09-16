@@ -6,11 +6,25 @@ from typing import Any
 
 from .cleanup import inspect_untracked, require_managed_directory_identity
 from .repo import GitRepo
-from .util import SoloAIError, is_link_or_junction, path_identity, utc_timestamp
+from .util import (
+    ActionableSoloAIError,
+    SoloAIError,
+    is_link_or_junction,
+    path_identity,
+    utc_timestamp,
+)
 
 
-class BatchWorkspacePending(SoloAIError):
+class BatchWorkspacePending(ActionableSoloAIError):
     """位置事实不明确时保留现场；不能标成普通失败后另占一个目录。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code="OWNERSHIP_DRIFT",
+            context={"scope": "integration_workspace"},
+            next_action={"kind": "preserve_and_inspect_workspace_ownership"},
+        )
 
 
 def _generation(value: Any) -> int:

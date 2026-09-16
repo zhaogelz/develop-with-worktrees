@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from conftest import git
 from solo_ai import candidate_batches as batch_module
+from solo_ai import batch_workspace
 from solo_ai import cleanup as cleanup_module
 from solo_ai import lifecycle as lifecycle_module
 from solo_ai import validation_queue
@@ -52,6 +53,14 @@ from solo_ai.util import ActionableSoloAIError, SoloAIError
 from solo_ai.util import atomic_write_json, read_json
 
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
+
+
+def test_workspace_ownership_drift_has_a_safe_structured_preserve_action() -> None:
+    error = batch_workspace.BatchWorkspacePending("Batch workspace binding changed")
+
+    assert error.code == "OWNERSHIP_DRIFT"
+    assert error.context == {"scope": "integration_workspace"}
+    assert error.next_action == {"kind": "preserve_and_inspect_workspace_ownership"}
 
 
 @pytest.fixture(autouse=True)
@@ -295,14 +304,26 @@ def test_round_complete_tail_waits_for_active_producers_and_records_its_basis(
     candidate = publish(repo, name="completed planned work", relative="round.txt")
     reason = "the coordinator has completed every planned task in this round"
 
-    with pytest.raises(SoloAIError, match="active producers"):
+    with pytest.raises(
+        ActionableSoloAIError, match="active producers"
+    ) as reconcile_error:
         reconcile_batches(
             repo,
             force=True,
             cause="round-complete",
             reason=reason,
         )
-    with pytest.raises(SoloAIError, match="active producers"):
+    assert reconcile_error.value.code == "TAIL_PRODUCERS_ACTIVE"
+    assert reconcile_error.value.context == {
+        "active_task_ids": [blocker["id"]],
+        "base_ref": "main",
+    }
+    assert reconcile_error.value.next_action == {
+        "kind": "wait_for_lane_producers",
+        "task_ids": [blocker["id"]],
+    }
+
+    with pytest.raises(ActionableSoloAIError, match="active producers") as seal_error:
         seal_batch(
             repo,
             candidate_ids=[candidate["candidate_id"]],
@@ -310,6 +331,7 @@ def test_round_complete_tail_waits_for_active_producers_and_records_its_basis(
             reason=reason,
             require_tail_reason=True,
         )
+    assert seal_error.value.code == "TAIL_PRODUCERS_ACTIVE"
 
     abandon(
         repo,
@@ -602,6 +624,116 @@ def test_compact_status_is_read_only_and_keeps_terminal_history_out_of_current_v
     assert task["task"]["candidate_delivery"]["delivery_status"] == "integrated"
     assert history["scope"] == "history"
     assert [item["id"] for item in history["candidates"]] == [candidate["candidate_id"]]
+
+
+@pytest.mark.parametrize("history_size", [1, 100, 1000])
+def test_compact_exact_task_query_ignores_unrelated_terminal_history(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, history_size: int
+) -> None:
+    """精确任务查询的昂贵投影只依赖它自己的候选，而不是历史总量。"""
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="targeted status", relative="targeted-status.txt")
+    seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    store = CandidateBatchStore(repo)
+    target = store.candidate(candidate["candidate_id"])
+
+    def add_terminal_history(value: dict[str, object]) -> None:
+        candidates = value["candidates"]
+        assert isinstance(candidates, dict)
+        for index in range(history_size - 1):
+            history_id = f"candidate-history-{history_size}-{index}"
+            candidates[history_id] = {
+                **target,
+                "candidate_id": history_id,
+                "task_id": f"task-history-{history_size}-{index}",
+                "publication_sequence": 10_000 + index,
+                "status": "integrated",
+                "sealed_batch": None,
+            }
+
+    store.mutate(add_terminal_history)
+    projection_sizes: list[int] = []
+    ref_calls = 0
+    ancestor_calls = 0
+    original_project = CandidateBatchStore.project_candidates
+    original_ref_head = repo.ref_head
+    original_is_ancestor = repo.is_ancestor
+
+    def counted_project(self, candidates, batches):
+        projection_sizes.append(len(candidates))
+        return original_project(self, candidates, batches)
+
+    def counted_ref_head(ref: str):
+        nonlocal ref_calls
+        if ref == "refs/heads/main":
+            ref_calls += 1
+        return original_ref_head(ref)
+
+    def counted_is_ancestor(ancestor: str, descendant: str) -> bool:
+        nonlocal ancestor_calls
+        ancestor_calls += 1
+        return original_is_ancestor(ancestor, descendant)
+
+    monkeypatch.setattr(CandidateBatchStore, "project_candidates", counted_project)
+    monkeypatch.setattr(repo, "ref_head", counted_ref_head)
+    monkeypatch.setattr(repo, "is_ancestor", counted_is_ancestor)
+
+    current = status_view(repo)
+    exact = status_view(repo, task_id=str(target["task_id"]))
+
+    assert current["candidates"] == []
+    assert current["history_counts"]["candidates"] == history_size
+    assert exact["task"]["candidate_delivery"]["delivery_status"] == "integrated"
+    assert projection_sizes == [0, 1]
+    assert ref_calls == 1
+    assert ancestor_calls == 1
+
+
+def test_compact_task_status_reports_a_live_operation_without_owner_details(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    task = start(repo, name="status live operation")
+    StateStore(repo).update_task(
+        task["id"],
+        active_operation={
+            "id": "operation-fixture",
+            "kind": "finish",
+            "started_at": "2026-09-16T00:00:00Z",
+            "owner": {"pid": 12345, "token": "must not be projected"},
+        },
+    )
+
+    view = status_view(repo, task_id=task["id"])
+
+    assert view["task"]["active_operation"] == {
+        "kind": "finish",
+        "started_at": "2026-09-16T00:00:00Z",
+    }
+    assert view["task"]["next_action"] == {
+        "kind": "wait_for_operation",
+        "task_id": task["id"],
+        "operation": "finish",
+    }
+
+
+def test_live_operation_error_has_a_safe_structured_wait_action(git_repo: Path) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    task = start(repo, name="structured live operation")
+    store = StateStore(repo)
+
+    with store.operation(task["id"], task["lease"], "ready"):
+        with pytest.raises(ActionableSoloAIError) as live:
+            with store.operation(task["id"], task["lease"], "finish"):
+                pass
+
+    assert live.value.code == "OPERATION_LIVE"
+    assert live.value.context == {"task_id": task["id"], "operation": "ready"}
+    assert live.value.next_action == {
+        "kind": "wait_for_operation",
+        "task_id": task["id"],
+        "operation": "ready",
+    }
 
 
 def test_compact_root_status_projects_child_candidates_once_per_request(
@@ -3560,8 +3692,20 @@ def test_batch_runtime_release_failure_blocks_promotion_and_recovery_reuses_full
         return original_validate(*args, **kwargs)
 
     monkeypatch.setattr(batch_module, "validate", count_validation)
-    with pytest.raises(batch_module.BatchRuntimePending, match="release is pending"):
+    with pytest.raises(
+        batch_module.BatchRuntimePending, match="release is pending"
+    ) as error:
         seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+
+    assert error.value.code == "RUNTIME_RELEASE_PENDING"
+    assert set(error.value.context) == {"batch_id"}
+    assert error.value.next_action == {
+        "kind": "recover_batch",
+        "batch_id": error.value.context["batch_id"],
+    }
+
+    view = status_view(repo, batch_id=error.value.context["batch_id"])
+    assert view["batch"]["next_action"] == error.value.next_action
 
     pending = CandidateBatchStore(repo).summary()["batches"][0]
     assert pending["status"] == "runtime_release_pending"

@@ -222,6 +222,18 @@ def _task_projection(
     if candidate_delivery:
         projected["candidate_delivery"] = _candidate_projection(candidate_delivery)
         projected["next_action"] = _candidate_next_action(candidate_delivery)
+    active_operation = task.get("active_operation")
+    if isinstance(active_operation, dict) and active_operation.get("kind"):
+        operation = str(active_operation["kind"])
+        projected["active_operation"] = {
+            "kind": operation,
+            "started_at": active_operation.get("started_at"),
+        }
+        projected["next_action"] = {
+            "kind": "wait_for_operation",
+            "task_id": task.get("id"),
+            "operation": operation,
+        }
     return projected
 
 
@@ -270,12 +282,31 @@ def _batch_projection(batch: dict[str, Any]) -> dict[str, Any]:
         "validation_outcome": batch.get("validation_outcome"),
         "runtime_release_result": release.get("result"),
         "integration_head": batch.get("integration_head"),
-        "next_action": (
-            {"kind": "wait_or_recover_batch", "batch_id": batch.get("id")}
-            if batch.get("status") in ACTIVE_BATCH_STATES
-            else {"kind": "batch_terminal"}
-        ),
+        "next_action": _batch_next_action(batch),
     }
+
+
+def _batch_next_action(batch: dict[str, Any]) -> dict[str, Any]:
+    batch_id = batch.get("id")
+    status = batch.get("status")
+    if status in {"runtime_activation_pending", "runtime_release_pending"}:
+        return {"kind": "recover_batch", "batch_id": batch_id}
+    if status in ACTIVE_BATCH_STATES:
+        return {"kind": "wait_or_recover_batch", "batch_id": batch_id}
+    if status != "failed":
+        return {"kind": "batch_terminal"}
+    failure_kind = batch.get("failure_kind")
+    if failure_kind == "composition_conflict" and batch.get("failed_candidate_id"):
+        return {
+            "kind": "prepare_candidate_repair",
+            "batch_id": batch_id,
+            "candidate_id": batch.get("failed_candidate_id"),
+        }
+    if failure_kind == "validation_failed":
+        return {"kind": "inspect_validation_evidence", "batch_id": batch_id}
+    if failure_kind == "promotion_blocked":
+        return {"kind": "inspect_promotion_block", "batch_id": batch_id}
+    return {"kind": "inspect_batch_failure", "batch_id": batch_id}
 
 
 def _root_next_action(

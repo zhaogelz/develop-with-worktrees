@@ -13,6 +13,7 @@ from typing import Any
 from .config import RepoConfig
 from .repo import GitRepo
 from .util import (
+    ActionableSoloAIError,
     DirectoryLock,
     SoloAIError,
     atomic_write_json,
@@ -1246,8 +1247,18 @@ class StateStore:
             self.require_lease(task, lease)
             active = task.get("active_operation")
             if active and process_matches(active.get("owner", {})):
-                raise SoloAIError(
-                    f"Task already has a live {active.get('kind', 'unknown')} operation"
+                raise ActionableSoloAIError(
+                    f"Task already has a live {active.get('kind', 'unknown')} operation",
+                    code="OPERATION_LIVE",
+                    context={
+                        "task_id": task_id,
+                        "operation": str(active.get("kind") or "unknown"),
+                    },
+                    next_action={
+                        "kind": "wait_for_operation",
+                        "task_id": task_id,
+                        "operation": str(active.get("kind") or "unknown"),
+                    },
                 )
             task["active_operation"] = {
                 "id": operation_id,

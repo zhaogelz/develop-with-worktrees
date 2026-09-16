@@ -18,6 +18,7 @@ from .config import (
 )
 from .repo import GitRepo
 from .util import (
+    ActionableSoloAIError,
     SoloAIError,
     atomic_write_json,
     new_id,
@@ -985,8 +986,15 @@ def _run_profile(
         and _logs_exist(existing)
         and _deterministic_failure(profile, existing)
     ):
-        raise SoloAIError(
-            f"Validation profile {profile.profile_id} already failed with the same complete deterministic inputs. Change the candidate or policy, or explicitly reclassify its external state before retrying."
+        raise ActionableSoloAIError(
+            f"Validation profile {profile.profile_id} already failed with the same complete deterministic inputs. Change the candidate or policy, or explicitly reclassify its external state before retrying.",
+            code="DETERMINISTIC_VALIDATION_FAILED",
+            context={"profile_id": profile.profile_id},
+            next_action={
+                "kind": "inspect_validation_evidence",
+                "profile_id": profile.profile_id,
+                "retry": "after_change_or_reclassification",
+            },
         )
     run_id = new_id(f"profile-{profile.profile_id}")
     temp_dir = repo.local_dir / "logs" / "pending" / run_id

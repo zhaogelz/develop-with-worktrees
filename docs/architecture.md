@@ -27,6 +27,40 @@ DWW is built for fast AI-assisted development by individuals and small teams. Af
 
 This does not remove the boundaries that make the workflow dependable. The agent still stops when the current request and durable project contract leave a material product, permission, migration, deletion, security, or external-side-effect decision unresolved. It keeps exact candidate identity, required validation, and protection for unknown working-tree content. New persistent services, state, abstractions, or human gates need an observed failure mode and a reason existing mechanisms cannot cover it.
 
+## Fast-development refactor validation (0.5.0-beta.7)
+
+This is a bounded acceptance record for the compact-query and delivery-intent work. It
+does not claim that every DWW command became faster.
+
+- `test_compact_exact_task_query_ignores_unrelated_terminal_history` builds one
+  exact target plus 1, 100, and 1,000 terminal-history records. In all three
+  cases the exact-task view projects one candidate and makes one current-base
+  ref lookup plus one ancestry lookup; the default view returns only history
+  counts. The fixture does not write lifecycle state while querying.
+- A warm-up plus five local `--json status --compact` samples on 2026-09-16,
+  using the beta.7 source tree against a state with 138 historical tasks, 89
+  historical candidates, and 89 historical batches, produced 1,206 UTF-8
+  bytes per response, a 388.3 ms median, and a 384.8–430.9 ms range. The
+  confirmed-plan baseline recorded beta.5's legacy full JSON at 1,064,230
+  bytes and 8,351 ms for 138 tasks, 88 candidates, and 88 batches. Those are
+  deliberately different interfaces and nearby, not identical, snapshots: the
+  comparison demonstrates reduced current-status query work, not a universal
+  latency or throughput promise.
+- Old `--json status` remains its full compatibility path, including receipt
+  reconciliation. `--compact` and exact selectors are read-only projections;
+  an old caller is never silently switched to the new shape.
+- The integration Full profile retains every pre-existing selected check and
+  additionally exercises compact query scale, root-context staleness,
+  deterministic validation failure, Finish intent recovery, tail admission,
+  live-operation waiting, and runtime-release recovery. No Full selection was
+  removed because there is no behavior-coverage evidence for doing so.
+- The accepted failure boundary is explicit rather than automatic: root
+  staleness, live operations, active tail producers, deterministic validation
+  failure, runtime release, workspace ownership drift, and unknown content
+  carry stable codes with safe next actions. The beta.7 source result does
+  not install or replace the beta.6 cached plugin; installation remains a
+  separately authorized operation.
+
 ## Approval and evidence
 
 Machine-local approval describes the executable lifecycle policy: normalized repository and verification configuration, declared commands and environment names, profile coverage and closure, tool and lockfile identity, and Runtime Adapter inputs. Formatting-only policy edits such as comments or line endings therefore keep an existing approval; any semantic command, scope, permission, runtime, or configuration change produces a new plan and an explicit drift report. Older approval records remain readable but cannot authorize a newer plan.

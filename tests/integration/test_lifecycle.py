@@ -62,7 +62,13 @@ from solo_ai.lifecycle import (
 )
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
-from solo_ai.util import SoloAIError, atomic_write_json, process_snapshot, read_json
+from solo_ai.util import (
+    ActionableSoloAIError,
+    SoloAIError,
+    atomic_write_json,
+    process_snapshot,
+    read_json,
+)
 
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
 STRICT_VERIFY = CommandSpec(("git", "status", "--short"))
@@ -361,8 +367,20 @@ def test_structured_root_review_recovers_automatically_before_commit_and_ready(
     change.unlink()
     assert "用户确认的 V2 原文。" in amended["content"]
 
-    with pytest.raises(SoloAIError, match="host one-step root-context refresh"):
+    with pytest.raises(
+        ActionableSoloAIError, match="host one-step root-context refresh"
+    ) as stale_root:
         ready(repo, task_id=task["id"], lease=task["lease"])
+    assert stale_root.value.code == "ROOT_CONTEXT_STALE"
+    assert stale_root.value.context == {
+        "task_id": task["id"],
+        "root_id": root["root_id"],
+    }
+    assert stale_root.value.next_action == {
+        "kind": "refresh_root",
+        "task_id": task["id"],
+        "retry": "after_action",
+    }
     refreshed = refresh_root_context(repo, task_id=task["id"], lease=task["lease"])
     assert refreshed["root_plan_review"]["record_kind"] == "read"
     ready(repo, task_id=task["id"], lease=task["lease"])
@@ -709,8 +727,21 @@ def test_finish_keeps_ready_proof_when_prepublication_cleanup_blocks(
     original = lifecycle._unknown_ignored
     monkeypatch.setattr(lifecycle, "_unknown_ignored", lambda *_: ["pytest-current"])
 
-    with pytest.raises(SoloAIError, match="Unknown or protected ignored files"):
+    with pytest.raises(
+        ActionableSoloAIError, match="Unknown or protected ignored files"
+    ) as raised:
         finish(repo, task_id=task["id"], lease=task["lease"])
+
+    assert raised.value.code == "UNKNOWN_CONTENT"
+    assert raised.value.context == {
+        "task_id": task["id"],
+        "phase": "slot release",
+        "paths": ["pytest-current"],
+    }
+    assert raised.value.next_action == {
+        "kind": "preserve_and_inspect_worktree",
+        "task_id": task["id"],
+    }
 
     held = StateStore(repo).task(task["id"])
     assert held["status"] == "ready"
@@ -3282,8 +3313,15 @@ def test_ready_does_not_blindly_rerun_an_unchanged_deterministic_failure(
 
     with pytest.raises(SoloAIError, match="Validation failed"):
         ready(repo, task_id=task["id"], lease=task["lease"])
-    with pytest.raises(SoloAIError, match="already failed"):
+    with pytest.raises(ActionableSoloAIError, match="already failed") as deterministic:
         ready(repo, task_id=task["id"], lease=task["lease"])
+
+    assert deterministic.value.code == "DETERMINISTIC_VALIDATION_FAILED"
+    assert deterministic.value.next_action == {
+        "kind": "inspect_validation_evidence",
+        "profile_id": "default",
+        "retry": "after_change_or_reclassification",
+    }
 
     assert counter.read_text(encoding="utf-8") == "1"
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])

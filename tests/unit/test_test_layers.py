@@ -81,3 +81,34 @@ def test_complete_full_profile_excludes_the_explicit_stress_layer() -> None:
     assert explicit_stress["commands"] == [
         ["uv", "run", "pytest", "-m", "dww_stress", "-vv", "-x", "--durations=30"]
     ]
+
+
+def test_integration_full_keeps_the_fast_refactor_safety_boundaries() -> None:
+    """本轮没有缩小 Full；新增的查询和恢复边界必须实际经过候选门禁。"""
+
+    with (_REPOSITORY_ROOT / ".solo-ai" / "verification.toml").open("rb") as handle:
+        primary = tomllib.load(handle)
+    integration = next(
+        profile
+        for profile in primary["profiles"]
+        if profile["id"] == "dww-batch-integration"
+    )
+    command = integration["commands"][0]
+
+    assert integration["full_scope"] == "integration"
+    assert (
+        "tests/integration/test_candidate_batches.py::test_compact_exact_task_query_ignores_unrelated_terminal_history"
+        in command
+    )
+    assert (
+        "tests/integration/test_candidate_batches.py::test_finish_delivery_intent_is_validated_persisted_and_recovered_once"
+        in command
+    )
+    assert (
+        "tests/integration/test_lifecycle.py::test_structured_root_review_recovers_automatically_before_commit_and_ready"
+        in command
+    )
+    assert (
+        "tests/integration/test_lifecycle.py::test_ready_does_not_blindly_rerun_an_unchanged_deterministic_failure"
+        in command
+    )
