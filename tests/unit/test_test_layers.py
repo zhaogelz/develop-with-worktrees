@@ -108,6 +108,9 @@ def test_integration_full_keeps_the_fast_refactor_safety_boundaries() -> None:
         "tests/integration/test_lifecycle.py::test_structured_root_review_recovers_automatically_before_commit_and_ready"
         in command
     )
+    # Full 会先包含 Ready；快速层已经覆盖此配置契约，组合命令不能再跑一次。
+    assert "tests/unit/test_config.py" not in command
+    assert "tests/unit/test_config.py" not in integration["input_paths"]
     assert (
         "tests/integration/test_lifecycle.py::test_ready_does_not_blindly_rerun_an_unchanged_deterministic_failure"
         in command

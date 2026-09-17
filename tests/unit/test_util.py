@@ -590,6 +590,31 @@ def test_logged_run_finishes_when_output_is_silent(tmp_path: Path) -> None:
     assert time.monotonic() - started < 5
 
 
+def test_logged_run_marks_receipt_interrupted_when_observation_raises(
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "interrupted-receipt.json"
+
+    def stop_after_heartbeat(_heartbeat: object) -> None:
+        raise RuntimeError("fixture stops observation")
+
+    with pytest.raises(RuntimeError, match="fixture stops observation"):
+        run_logged(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=tmp_path,
+            log_path=tmp_path / "interrupted.log",
+            receipt_path=receipt_path,
+            heartbeat_seconds=0.01,
+            termination_grace_seconds=0.1,
+            on_heartbeat=stop_after_heartbeat,
+        )
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "interrupted"
+    assert receipt["interrupted"] is True
+    assert receipt["duration_seconds"] >= 0
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM ignore is POSIX-specific")
 def test_logged_run_force_stops_a_process_that_ignores_sigterm(tmp_path: Path) -> None:
     result = run_logged(

@@ -178,10 +178,11 @@ def run_logged(
             creationflags=creation_flags,
         )
         reader: threading.Thread | None = None
+        receipt: dict[str, Any] | None = None
         try:
             assert process.stdout is not None
             snapshot = process_snapshot(process.pid)
-            receipt: dict[str, Any] = {
+            receipt = {
                 "schema_version": 1,
                 "command": [redact_text(item) for item in command],
                 "cwd": str(cwd),
@@ -192,7 +193,7 @@ def run_logged(
             }
             if receipt_metadata:
                 receipt["metadata"] = receipt_metadata
-            if receipt_path:
+            if receipt_path and receipt is not None:
                 atomic_write_json(receipt_path, receipt)
             output: Queue[str | None] = Queue()
             reader = threading.Thread(
@@ -288,6 +289,17 @@ def run_logged(
                 error.add_note(
                     "Owned command cleanup failed: " + redact_text(str(cleanup_error))
                 )
+            if receipt_path and receipt is not None:
+                receipt.update(
+                    {
+                        "status": "interrupted",
+                        "finished_at": utc_timestamp(),
+                        "duration_seconds": round(clock() - started, 3),
+                        "interrupted": True,
+                        "log": str(log_path),
+                    }
+                )
+                atomic_write_json(receipt_path, receipt)
             raise
         finally:
             if process.poll() is not None and reader is not None:
@@ -296,7 +308,7 @@ def run_logged(
                 if process.stdout is not None:
                     process.stdout.close()
     result = LoggedRunResult(returncode, duration, timed_out, snapshot)
-    if receipt_path:
+    if receipt_path and receipt is not None:
         receipt.update(
             {
                 "status": "timed_out" if timed_out else "finished",

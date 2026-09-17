@@ -81,7 +81,15 @@ from .lifecycle import (
 from .orchestration import BatchStore
 from .orchestration.adapters import adapter_for
 from .orchestration.models import MAX_DEVELOPMENT_PARALLELISM
-from .proof import approval_plan, frozen_validation_environment, proof_inputs, validate
+from .proof import (
+    approval_plan,
+    frozen_validation_environment,
+    new_validation_attempt_id,
+    profile_execution_decision,
+    profile_selection_reason,
+    proof_inputs,
+    validate,
+)
 from .repo import GitRepo
 from .routing import detect_existing_workflows
 from .runtime_adapter import verify_runtime_effective
@@ -946,6 +954,16 @@ def _parser() -> argparse.ArgumentParser:
         "plan", help="read the registered verification plan for one task"
     )
     plan.add_argument("--task", required=True)
+    plan.add_argument(
+        "--level",
+        choices=["development", "ready", "full", "stress"],
+        help="show one execution phase; omit it to compare every registered phase",
+    )
+    plan.add_argument(
+        "--complete",
+        action="store_true",
+        help="with --level full, include the explicit complete-regression phase",
+    )
 
     verify = sub.add_parser(
         "verify",
@@ -2224,13 +2242,15 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             confirm=args.confirm,
         )
     if args.command == "plan":
+        if args.complete and args.level != "full":
+            raise SoloAIError("plan --complete requires --level full")
         task = StateStore(repo).task(args.task)
         worktree = Path(str(task["worktree"]))
         verification = load_verification_config(repo, cwd=worktree)
         verification_base = str(task.get("start_head") or task["base_ref"])
         validation_base_ref = str(task["base_ref"])
         force_task_scope = task.get("mode") == "in-place"
-        inputs, ready_records = proof_inputs(
+        inputs, _ = proof_inputs(
             repo,
             cwd=worktree,
             base=verification_base,
@@ -2245,13 +2265,29 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 validation_base_ref=validation_base_ref,
             ),
         )
-        records_by_id = {record[0].profile_id: record for record in ready_records}
-        # 计划按各检查的实际执行阶段计算，避免Full身份污染Ready或开发证明。
-        for level, levels in (
-            ("development", ("development",)),
-            ("full", ("ready", "full")),
-            ("stress", ("stress",)),
-        ):
+        if args.level:
+            phase_specs = [
+                (
+                    args.level,
+                    ("ready", "full") if args.level == "full" else (args.level,),
+                    "complete" if args.complete else "integration",
+                )
+            ]
+        else:
+            phase_specs = [
+                ("development", ("development",), "integration"),
+                ("ready", ("ready",), "integration"),
+                ("full", ("ready", "full"), "integration"),
+                ("stress", ("stress",), "integration"),
+            ]
+        phases: list[dict[str, Any]] = []
+        profiles_by_id: dict[str, dict[str, Any]] = {}
+        for phase_level, levels, full_scope in phase_specs:
+            full_scopes = (
+                ("integration", "complete")
+                if phase_level == "full" and full_scope == "complete"
+                else (("integration",) if phase_level == "full" else None)
+            )
             _, phase_records = proof_inputs(
                 repo,
                 cwd=worktree,
@@ -2259,58 +2295,85 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 verification=verification,
                 task_id=task["id"],
                 levels=levels,
+                full_scopes=full_scopes,
                 force_task_scope=force_task_scope,
+                full_execution_id=(
+                    "plan-only" if phase_level in {"full", "stress"} else None
+                ),
                 validation_environment=(
                     frozen_validation_environment(
                         repo,
                         cwd=worktree,
                         base=verification_base,
                         validation_base_ref=validation_base_ref,
-                        full_scope="integration",
+                        full_scope=full_scope if phase_level == "full" else None,
                     )
-                    if level == "full"
+                    if phase_level in {"ready", "full"}
                     else {}
                 ),
             )
-            records_by_id.update(
-                (record[0].profile_id, record)
-                for record in phase_records
-                if record[0].level == level
+            estimate = estimate_validation(
+                [
+                    (
+                        profile.profile_id,
+                        [command.fingerprint for command in profile.commands],
+                    )
+                    for profile, _, _ in phase_records
+                ]
             )
-        records = [
-            records_by_id[profile.profile_id]
-            for profile in verification.profiles
-            if profile.profile_id in records_by_id
-        ]
-        estimate = estimate_validation(
-            [
-                (
-                    profile.profile_id,
-                    [command.fingerprint for command in profile.commands],
-                )
-                for profile, _, _ in records
-            ]
-        )
-        profiles = [
-            {
-                "id": profile.profile_id,
-                "level": profile.level,
-                "resource_class": profile.resource_class,
-                "timeout_seconds": profile.timeout_seconds,
-                "commands": [command.redacted() for command in profile.commands],
-                "fingerprint": fingerprint,
-                "estimated_seconds": estimate["profile_seconds"][index],
-            }
-            for index, (profile, _, fingerprint) in enumerate(records)
-        ]
+            phase_profiles = []
+            for index, (profile, profile_inputs, fingerprint) in enumerate(
+                phase_records
+            ):
+                profile_view = {
+                    "id": profile.profile_id,
+                    "level": profile.level,
+                    "resource_class": profile.resource_class,
+                    "timeout_seconds": profile.timeout_seconds,
+                    "commands": [command.redacted() for command in profile.commands],
+                    "fingerprint": fingerprint,
+                    "estimated_seconds": estimate["profile_seconds"][index],
+                    "selection": profile_selection_reason(profile, inputs["files"]),
+                    "execution": profile_execution_decision(
+                        repo,
+                        profile=profile,
+                        inputs=profile_inputs,
+                        fingerprint=fingerprint,
+                    ),
+                }
+                phase_profiles.append(profile_view)
+                profiles_by_id.setdefault(profile.profile_id, profile_view)
+            phases.append(
+                {
+                    "level": phase_level,
+                    "full_scope": full_scope if phase_level == "full" else None,
+                    "profiles": phase_profiles,
+                    "estimated_execution_seconds": estimate["estimated_seconds"],
+                    "advisory": estimate["advisory"],
+                    "queue_wait_seconds": None,
+                    "estimate_notice": "仅估计实际命令执行时间；队列等待取决于查询时的资源占用，未被猜测为固定时长。",
+                }
+            )
+        selected = len(phases) == 1
+        selected_phase = phases[0] if selected else None
         return {
             "task_id": task["id"],
             "base_ref": verification_base,
             "changed_files": inputs["files"],
             "unmapped_files": inputs["unmapped_files"],
-            "profiles": profiles,
-            "estimated_seconds": estimate["estimated_seconds"],
-            "advisory": estimate["advisory"],
+            "profiles": list(profiles_by_id.values()),
+            "phase_estimates": phases,
+            "estimated_seconds": (
+                selected_phase["estimated_execution_seconds"]
+                if selected_phase
+                else None
+            ),
+            "estimate_scope": (
+                "selected_phase_execution_only"
+                if selected
+                else "overview_not_a_remaining_time_estimate"
+            ),
+            "advisory": selected_phase["advisory"] if selected_phase else None,
         }
     if args.command == "verify":
         if args.complete and args.level != "full":
@@ -2327,6 +2390,18 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     "Commit task changes before producing reusable verification evidence"
                 )
             verification = load_verification_config(repo, cwd=worktree)
+            attempt_id = new_validation_attempt_id(args.level)
+            attempts = [
+                str(item)
+                for item in task.get("validation_attempts", [])
+                if isinstance(item, str) and item
+            ]
+            attempts.append(attempt_id)
+            store.update_task(
+                task["id"],
+                validation_attempt=attempt_id,
+                validation_attempts=attempts,
+            )
             proof = validate(
                 repo,
                 cwd=worktree,
@@ -2337,6 +2412,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 full_scope="complete" if args.complete else "integration",
                 force_task_scope=_is_in_place(task),
                 validation_base_ref=str(task["base_ref"]),
+                attempt_id=attempt_id,
+                attempt_owner={"kind": "task", "id": str(task["id"])},
             )
             return {
                 "task_id": task["id"],
@@ -2345,6 +2422,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 "proof": proof["fingerprint"],
                 "reused": proof.get("reused", False),
                 "kind": proof["kind"],
+                "validation_attempt": attempt_id,
             }
     if args.command == "status":
         has_selector = any((args.task, args.root, args.batch))

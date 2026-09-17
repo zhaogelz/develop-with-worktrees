@@ -770,6 +770,66 @@ def test_compact_task_status_reports_a_live_operation_without_owner_details(
     }
 
 
+def test_compact_status_projects_only_the_linked_validation_attempt(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    task = start(repo, name="status validation attempt")
+    attempt_id = "ready-attempt-status"
+    atomic_write_json(
+        repo.local_dir / "validation-attempts" / f"{attempt_id}.json",
+        {
+            "schema_version": 1,
+            "id": attempt_id,
+            "level": "ready",
+            "full_scope": "integration",
+            "state": "waiting",
+            "result": None,
+            "started_at": "2026-09-17T00:00:00Z",
+            "profiles": [
+                {
+                    "id": "fast",
+                    "state": "waiting",
+                    "reused": False,
+                    "execution_reason": "no_matching_successful_proof",
+                    "queue": {"resource_class": "normal"},
+                    "runs": [],
+                }
+            ],
+        },
+    )
+    StateStore(repo).update_task(
+        task["id"], validation_attempt=attempt_id, validation_attempts=[attempt_id]
+    )
+    state_path = repo.local_dir / "state.json"
+    before = state_path.read_bytes()
+
+    view = status_view(repo, task_id=task["id"])
+
+    assert view["task"]["validation"] == {
+        "id": attempt_id,
+        "level": "ready",
+        "full_scope": "integration",
+        "state": "waiting",
+        "result": None,
+        "started_at": "2026-09-17T00:00:00Z",
+        "finished_at": None,
+        "error": None,
+        "profiles": [
+            {
+                "id": "fast",
+                "state": "waiting",
+                "reused": False,
+                "execution_reason": "no_matching_successful_proof",
+                "error_reason": None,
+                "queue": {"resource_class": "normal"},
+                "executed_commands": 0,
+            }
+        ],
+    }
+    assert state_path.read_bytes() == before
+
+
 def test_live_operation_error_has_a_safe_structured_wait_action(git_repo: Path) -> None:
     repo = initialized_batched(git_repo, auto_full=False)
     task = start(repo, name="structured live operation")
@@ -2769,6 +2829,54 @@ def test_enabling_auto_full_does_not_capture_legacy_explicit_candidates(
     )
 
 
+def test_quiet_tail_waits_when_frozen_batch_would_be_oversized(
+    git_repo: Path,
+) -> None:
+    """空闲时间到了也不能把四个候选塞进大小为二的尾批。"""
+
+    repo = initialized_batched(git_repo, auto_full=False)
+    store = CandidateBatchStore(repo)
+    head = repo.head(git_repo)
+    policy = StateStore.integration_policy(load_repo_config(repo))
+    candidate_ids: list[str] = []
+    for index in range(4):
+        candidate_id = f"candidate-quiet-{index}"
+        store.publish(
+            {
+                "candidate_id": candidate_id,
+                "task_id": f"task-quiet-{index}",
+                "name": candidate_id,
+                "ref": f"refs/dww/candidates/{candidate_id}",
+                "head": head,
+                "base_head": head,
+                "base_ref": "main",
+                "proof": f"proof-quiet-{index}",
+                "integration_policy": policy,
+            },
+            capacity=10,
+            batch_size=2,
+            seal_policy="explicit",
+        )
+        candidate_ids.append(candidate_id)
+
+    lane = store.pending_lanes()[0]
+    key = (lane["base_ref"], lane["base_head"], lane["activation_epoch"])
+    result = store.reconcile(
+        producer_snapshots={
+            key: {
+                "active_count": 0,
+                "active_task_ids": [],
+                "quiet_since": "2000-01-01T00:00:00Z",
+            }
+        },
+        now_epoch=calendar.timegm(time.strptime("2000-01-01", "%Y-%m-%d")) + 91,
+    )
+
+    assert result["status"] == "waiting"
+    assert result["waiting"][0]["candidate_ids"] == candidate_ids
+    assert store.summary()["batches"] == []
+
+
 @pytest.mark.dww_stress
 def test_concurrent_fifth_and_sixth_publications_create_only_one_full_batch(
     git_repo: Path,
@@ -3637,6 +3745,13 @@ def test_batch_metrics_are_derived_without_mutating_lifecycle_state(
             "missing_full_proofs": 0,
             "legacy_weak_proofs": 0,
         },
+        "full_validation_attempt_seconds": {
+            "observed_attempts": 0,
+            "attempts_with_executed_commands": 0,
+            "executed_commands": 0,
+            "missing_attempt_receipts": 0,
+            "scope": "terminal batches; includes passed, failed, timed_out, interrupted, and unfinished attempts when their receipt exists",
+        },
     }
     assert store.path.read_bytes() == before
 
@@ -3698,6 +3813,76 @@ def test_batch_metrics_separate_legacy_weak_proofs_from_current_missing_full_pro
 
     assert metrics["legacy_completed_without_full_proof"] == 1
     assert metrics["missing_full_proofs"] == 2
+
+
+def test_batch_metrics_include_failed_full_attempt_costs(git_repo: Path) -> None:
+    """失败 Full 没有总证明时，已实际执行的命令时间仍须进入新口径。"""
+
+    repo = GitRepo(git_repo)
+    store = CandidateBatchStore(repo)
+    atomic_write_json(
+        store.path,
+        {
+            "schema_version": batch_module.POOL_SCHEMA,
+            "next_publication_sequence": 1,
+            "updated_at": "2026-09-17T00:00:00Z",
+            "candidates": {},
+            "batches": {
+                "batch-failed": {
+                    "id": "batch-failed",
+                    "status": "failed",
+                    "candidate_ids": ["candidate-a"],
+                    "integration_policy": {"batch_size": 1},
+                    "validation_attempts": ["full-attempt-failed"],
+                }
+            },
+        },
+    )
+    atomic_write_json(
+        repo.local_dir / "validation-attempts" / "full-attempt-failed.json",
+        {
+            "schema_version": 1,
+            "id": "full-attempt-failed",
+            "level": "full",
+            "result": "timed_out",
+            "profiles": [
+                {
+                    "id": "integration",
+                    "runs": [
+                        {"duration_seconds": 7.25},
+                        {"duration_seconds": 2.75},
+                    ],
+                }
+            ],
+        },
+    )
+    before = store.path.read_bytes()
+
+    metrics = store.metrics()
+
+    assert metrics["full_validation_attempt_seconds"] == {
+        "count": 1,
+        "minimum": 10.0,
+        "median": 10.0,
+        "p95": 10.0,
+        "maximum": 10.0,
+        "mean": 10.0,
+    }
+    assert metrics["full_validation_attempt_outcomes"] == {
+        "passed": 0,
+        "failed": 0,
+        "timed_out": 1,
+        "interrupted": 0,
+        "unfinished": 0,
+    }
+    assert metrics["metric_coverage"]["full_validation_attempt_seconds"] == {
+        "observed_attempts": 1,
+        "attempts_with_executed_commands": 1,
+        "executed_commands": 2,
+        "missing_attempt_receipts": 0,
+        "scope": "terminal batches; includes passed, failed, timed_out, interrupted, and unfinished attempts when their receipt exists",
+    }
+    assert store.path.read_bytes() == before
 
 
 def test_candidate_pool_schema_4_migrates_on_next_write(git_repo: Path) -> None:
@@ -3820,6 +4005,14 @@ def test_interrupted_batch_validation_releases_then_starts_a_new_runtime_cycle(
     assert interrupted_context["runtime_cycle"] == 1
     assert pending["status"] == "composed"
     assert pending["runtime_cycle"] == 1
+    interrupted_attempt = json.loads(
+        (
+            repo.local_dir
+            / "validation-attempts"
+            / f"{pending['validation_attempt']}.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert interrupted_attempt["result"] == "interrupted"
 
     completed = batch_module.recover_batch(repo, batch_id=pending["id"])
     completed_release = json.loads(release_context.read_text(encoding="utf-8"))

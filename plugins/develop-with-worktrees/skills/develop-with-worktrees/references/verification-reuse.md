@@ -66,6 +66,24 @@ admission.
   runtime effectiveness check is an explicit project Adapter operation after Git
   delivery.
 
+## 看懂等待、重跑和成本
+
+每次验证会留下一个精确的 `validation-attempts/<id>.json` 回执。它不是第二套
+任务数据库或证明缓存：证明仍是唯一的复用依据，尝试回执只把本次计划、队列等待、
+已执行命令和终态联系起来。失败、超时和中断的已执行命令同样进入批次指标；旧的
+`executed_full_validation_seconds` 保持原有“已完成批次的总证明”口径，新的
+`full_validation_attempt_seconds` 才是包含失败尝试的明确口径。
+
+`dww plan --task <id>` 默认比较 development、Ready、Full 和 Stress，因而不会
+把它们相加冒充“本次还要等多久”。使用 `--level` 选择一个实际阶段后，才会给出
+该阶段的命令执行历史估时；队列等待始终标为未知，除非已有当前尝试的队列事实。每个
+profile 会显示实际匹配的改动文件，以及复用、执行或阻止的直接原因。预览只解释当前
+事实，正式执行仍会重新核验输入。
+
+`dww status --task <id>` 和 `--batch <id>` 只读取对象关联的最新尝试回执，不会清理
+队列、重放恢复或扫描全部证明历史。状态中的 `waiting`、`running`、`reused`、
+`failed`、`timed_out` 与 `interrupted` 都来自这个回执，不能从缺失日志推断为仍在运行。
+
 ## Minimal policy examples
 
 Use these only when their stated purity is true.

@@ -15,6 +15,7 @@ from .candidate_batches import (
     CandidateBatchStore,
 )
 from .lifecycle import repository_route
+from .proof import read_validation_attempt
 from .repo import GitRepo
 from .root_context import show_root_anchor
 from .state import FINAL_TASK_STATES, StateStore
@@ -75,7 +76,7 @@ def status_view(
         return {
             **common,
             "scope": "task",
-            "task": _task_projection(task, delivery),
+            "task": _task_projection(repo, task, delivery),
         }
     if batch_id:
         batch = batches.get(batch_id)
@@ -90,7 +91,7 @@ def status_view(
         return {
             **common,
             "scope": "batch",
-            "batch": _batch_projection(batch),
+            "batch": _batch_projection(repo, batch),
             "candidates": [
                 _candidate_projection(delivery) for delivery in deliveries.values()
             ],
@@ -111,7 +112,7 @@ def status_view(
             batches,
         )
         local_children = [
-            _task_projection(task, deliveries.get(str(task["id"])))
+            _task_projection(repo, task, deliveries.get(str(task["id"])))
             for task in local_tasks
         ]
         external_children = copy.deepcopy(root.get("linked_child_tasks") or [])
@@ -157,13 +158,13 @@ def status_view(
         **common,
         "scope": "history" if include_history else "current",
         "tasks": [
-            _task_projection(task, deliveries.get(str(task["id"])))
+            _task_projection(repo, task, deliveries.get(str(task["id"])))
             for task in visible_tasks
         ],
         "candidates": [
             _candidate_projection(delivery) for delivery in deliveries.values()
         ],
-        "batches": [_batch_projection(batch) for batch in visible_batches],
+        "batches": [_batch_projection(repo, batch) for batch in visible_batches],
         "history_counts": {
             "tasks": len(all_tasks) - len(visible_tasks),
             "candidates": len(candidates) - len(visible_candidates),
@@ -209,7 +210,7 @@ def _project_deliveries(
 
 
 def _task_projection(
-    task: dict[str, Any], candidate_delivery: dict[str, Any] | None
+    repo: GitRepo, task: dict[str, Any], candidate_delivery: dict[str, Any] | None
 ) -> dict[str, Any]:
     projected = {
         "id": task.get("id"),
@@ -234,6 +235,12 @@ def _task_projection(
             "task_id": task.get("id"),
             "operation": operation,
         }
+    if validation := _validation_projection(
+        repo,
+        task.get("validation_attempt"),
+        task.get("validation_attempts"),
+    ):
+        projected["validation"] = validation
     return projected
 
 
@@ -270,9 +277,9 @@ def _candidate_next_action(candidate: dict[str, Any]) -> dict[str, Any]:
     return {"kind": "await_integration"}
 
 
-def _batch_projection(batch: dict[str, Any]) -> dict[str, Any]:
+def _batch_projection(repo: GitRepo, batch: dict[str, Any]) -> dict[str, Any]:
     release = batch.get("runtime_release") or {}
-    return {
+    projected = {
         "id": batch.get("id"),
         "status": batch.get("status"),
         "trigger": batch.get("trigger"),
@@ -283,6 +290,54 @@ def _batch_projection(batch: dict[str, Any]) -> dict[str, Any]:
         "runtime_release_result": release.get("result"),
         "integration_head": batch.get("integration_head"),
         "next_action": _batch_next_action(batch),
+    }
+    if validation := _validation_projection(
+        repo,
+        batch.get("validation_attempt"),
+        batch.get("validation_attempts"),
+    ):
+        projected["validation"] = validation
+    return projected
+
+
+def _validation_projection(
+    repo: GitRepo,
+    current_attempt: object,
+    attempt_history: object,
+) -> dict[str, Any] | None:
+    """只读取调用者显式关联的尝试回执，不触发队列清理或历史扫描。"""
+
+    attempt_id = current_attempt if isinstance(current_attempt, str) else None
+    if not attempt_id and isinstance(attempt_history, list):
+        attempt_id = next(
+            (item for item in reversed(attempt_history) if isinstance(item, str)), None
+        )
+    if not attempt_id:
+        return None
+    attempt = read_validation_attempt(repo, attempt_id)
+    if not attempt:
+        return {"id": attempt_id, "state": "not_recorded"}
+    return {
+        "id": attempt_id,
+        "level": attempt.get("level"),
+        "full_scope": attempt.get("full_scope"),
+        "state": attempt.get("state"),
+        "result": attempt.get("result"),
+        "started_at": attempt.get("started_at"),
+        "finished_at": attempt.get("finished_at"),
+        "error": attempt.get("error"),
+        "profiles": [
+            {
+                "id": profile.get("id"),
+                "state": profile.get("state"),
+                "reused": profile.get("reused"),
+                "execution_reason": profile.get("execution_reason"),
+                "error_reason": profile.get("error_reason"),
+                "queue": copy.deepcopy(profile.get("queue")),
+                "executed_commands": len(profile.get("runs") or []),
+            }
+            for profile in attempt.get("profiles", [])
+        ],
     }
 
 

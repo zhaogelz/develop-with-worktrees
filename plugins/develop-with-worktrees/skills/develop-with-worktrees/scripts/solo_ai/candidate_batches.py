@@ -21,7 +21,15 @@ from .cleanup import (
 from .config import CommandSpec, load_repo_config, load_verification_config
 from .host_context import normalize_host_reference
 from .integration import integration_turn
-from .proof import require_approved_plan, require_exact_passed_proof, validate
+from .proof import (
+    finish_validation_attempt,
+    new_validation_attempt_id,
+    read_validation_attempt,
+    require_approved_plan,
+    require_exact_passed_proof,
+    start_validation_attempt,
+    validate,
+)
 from .repo import GitRepo
 from .runtime_adapter import (
     activate_batch_runtime,
@@ -1187,7 +1195,9 @@ class CandidateBatchStore:
                     and quiet_elapsed is not None
                     and quiet_elapsed >= quiet_seconds
                 )
-                if force or quiet_eligible:
+                # 空闲尾批只能小于完整批次；积压超过冻结批次大小时，等待显式选择，
+                # 不能把无效的大批次交给 _seal_in_value()。
+                if force or (quiet_eligible and len(candidate_ids) <= batch_size):
                     if force and cause == "round-complete" and active_count > 0:
                         raise _tail_producers_active_error(
                             base_ref=key[0],
@@ -1404,6 +1414,57 @@ class CandidateBatchStore:
             else:
                 completed_with_full_profiles += 1
 
+        # 新回执按每次 Full 尝试聚合，包含失败、超时和中断已实际运行的命令。
+        # 旧 executed_full_validation_seconds 的口径不能悄悄变化，兼容字段仍保留。
+        attempt_costs: list[float] = []
+        attempt_outcomes: dict[str, int] = {
+            "passed": 0,
+            "failed": 0,
+            "timed_out": 0,
+            "interrupted": 0,
+            "unfinished": 0,
+        }
+        observed_full_attempts = 0
+        missing_full_attempt_receipts = 0
+        executed_full_commands = 0
+        for batch in terminal:
+            raw_attempt_ids = [
+                *(
+                    batch.get("validation_attempts", [])
+                    if isinstance(batch.get("validation_attempts"), list)
+                    else []
+                ),
+                batch.get("validation_attempt"),
+            ]
+            attempt_ids = list(
+                dict.fromkeys(
+                    str(item)
+                    for item in raw_attempt_ids
+                    if isinstance(item, str) and item
+                )
+            )
+            for attempt_id in attempt_ids:
+                attempt = read_validation_attempt(self.repo, attempt_id)
+                if not attempt:
+                    missing_full_attempt_receipts += 1
+                    continue
+                if attempt.get("level") != "full":
+                    continue
+                observed_full_attempts += 1
+                outcome = str(attempt.get("result") or "unfinished")
+                if outcome not in attempt_outcomes:
+                    outcome = "unfinished"
+                attempt_outcomes[outcome] += 1
+                durations: list[float] = []
+                for profile in attempt.get("profiles", []):
+                    for run in profile.get("runs", []):
+                        duration = run.get("duration_seconds")
+                        if isinstance(duration, (int, float)) and duration >= 0:
+                            durations.append(float(duration))
+                            executed_full_commands += 1
+                if durations:
+                    attempt_costs.append(round(sum(durations), 3))
+
         count = len(terminal)
         return {
             "schema_version": 1,
@@ -1423,6 +1484,8 @@ class CandidateBatchStore:
             # 新名称：只统计已有 published_at 和 integrated_at 的候选。
             "publication_to_delivery_seconds": _numeric_summary(waits),
             "executed_full_validation_seconds": _numeric_summary(full_costs),
+            "full_validation_attempt_seconds": _numeric_summary(attempt_costs),
+            "full_validation_attempt_outcomes": attempt_outcomes,
             "reused_full_profiles": reused_full_profiles,
             "missing_full_proofs": missing_full_proofs,
             "legacy_completed_without_full_proof": legacy_completed_without_full_proof,
@@ -1444,6 +1507,13 @@ class CandidateBatchStore:
                     "reused_profiles": reused_full_profiles,
                     "missing_full_proofs": missing_full_proofs,
                     "legacy_weak_proofs": legacy_completed_without_full_proof,
+                },
+                "full_validation_attempt_seconds": {
+                    "observed_attempts": observed_full_attempts,
+                    "attempts_with_executed_commands": len(attempt_costs),
+                    "executed_commands": executed_full_commands,
+                    "missing_attempt_receipts": missing_full_attempt_receipts,
+                    "scope": "terminal batches; includes passed, failed, timed_out, interrupted, and unfinished attempts when their receipt exists",
                 },
             },
         }
@@ -2000,6 +2070,26 @@ def _validate_batch(
         batch_workspace.require_owner(repo, store, batch)
     worktree = Path(str(batch["worktree"]))
     proof_fingerprint: str | None = None
+    attempt_id = new_validation_attempt_id("full")
+    attempt_ids = [
+        str(item)
+        for item in batch.get("validation_attempts", [])
+        if isinstance(item, str) and item
+    ]
+    attempt_ids.append(attempt_id)
+    batch = store.update_batch(
+        batch["id"],
+        validation_attempt=attempt_id,
+        validation_attempts=attempt_ids,
+    )
+    start_validation_attempt(
+        repo,
+        attempt_id=attempt_id,
+        level="full",
+        full_scope="integration",
+        task_id=str(batch["id"]),
+        owner={"kind": "batch", "id": str(batch["id"])},
+    )
     try:
         if (
             not any(item.path == worktree for item in repo.worktrees())
@@ -2030,6 +2120,8 @@ def _validate_batch(
             full_scope="integration",
             expected_base_head=str(batch["base_before"]),
             expected_candidate_head=str(batch["integration_head"]),
+            attempt_id=attempt_id,
+            attempt_owner={"kind": "batch", "id": str(batch["id"])},
         )
         proof_fingerprint = str(proof["fingerprint"])
         if batch.get("worktree_mode") == "reusable":
@@ -2039,6 +2131,13 @@ def _validate_batch(
                 "Batch base advanced during final validation; seal a fresh batch"
             )
     except (KeyboardInterrupt, SystemExit):
+        finish_validation_attempt(
+            repo,
+            attempt_id=attempt_id,
+            result="interrupted",
+            error="Combined Full validation was interrupted",
+            proof=proof_fingerprint,
+        )
         releasing = store.update_batch(
             batch["id"],
             status="runtime_releasing",
@@ -2049,6 +2148,16 @@ def _validate_batch(
         _release_batch_runtime(repo, store, releasing)
         raise
     except Exception as exc:
+        attempt_result = str(
+            read_validation_attempt(repo, attempt_id).get("result") or "failed"
+        )
+        finish_validation_attempt(
+            repo,
+            attempt_id=attempt_id,
+            result=attempt_result if attempt_result == "timed_out" else "failed",
+            error=str(exc),
+            proof=proof_fingerprint,
+        )
         releasing = store.update_batch(
             batch["id"],
             status="runtime_releasing",

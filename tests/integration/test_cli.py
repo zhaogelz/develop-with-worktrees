@@ -1084,6 +1084,29 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         "full",
         "stress",
     }
+    assert plan["estimated_seconds"] is None
+    assert plan["estimate_scope"] == "overview_not_a_remaining_time_estimate"
+    assert {phase["level"] for phase in plan["phase_estimates"]} == {
+        "development",
+        "ready",
+        "full",
+        "stress",
+    }
+    full_plan = call_json(
+        "plan", "--task", task_id, "--level", "full", repo_path=worktree
+    )
+    assert full_plan["estimate_scope"] == "selected_phase_execution_only"
+    assert full_plan["phase_estimates"][0]["queue_wait_seconds"] is None
+    assert [
+        profile["id"] for profile in full_plan["phase_estimates"][0]["profiles"]
+    ] == [
+        "ready",
+        "full",
+    ]
+    assert {
+        profile["id"]: profile["execution"]["action"]
+        for profile in full_plan["phase_estimates"][0]["profiles"]
+    } == {"ready": "execute", "full": "execute"}
     development = call_json(
         "verify",
         "--task",

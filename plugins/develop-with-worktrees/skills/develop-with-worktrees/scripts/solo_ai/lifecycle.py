@@ -56,6 +56,7 @@ from .integration import resume_prepared as resume_integration
 from .proof import (
     ValidationBaseChanged,
     approval_plan,
+    new_validation_attempt_id,
     require_approved_plan,
     require_exact_passed_proof,
     validate,
@@ -2006,6 +2007,18 @@ def ready(
             )
             _assert_exact_candidate(repo, task, candidate_head=expected_candidate_head)
             expected_base_head = None if _is_in_place(task) else str(task["base_head"])
+            attempt_id = new_validation_attempt_id("ready")
+            attempts = [
+                str(item)
+                for item in task.get("validation_attempts", [])
+                if isinstance(item, str) and item
+            ]
+            attempts.append(attempt_id)
+            task = store.update_task(
+                task_id,
+                validation_attempt=attempt_id,
+                validation_attempts=attempts,
+            )
             try:
                 proof = validate(
                     repo,
@@ -2017,6 +2030,8 @@ def ready(
                     expected_base_head=expected_base_head,
                     expected_candidate_head=expected_candidate_head,
                     validation_base_ref=str(task["base_ref"]),
+                    attempt_id=attempt_id,
+                    attempt_owner={"kind": "task", "id": task_id},
                 )
             except ValidationBaseChanged as exc:
                 convergence_retries += 1
@@ -2737,6 +2752,18 @@ def _finish_in_place(
         allowlist=config.sensitive_allowlist,
     )
     _assert_in_place_binding(repo, store, task, session_id=session_id)
+    attempt_id = new_validation_attempt_id("ready")
+    attempts = [
+        str(item)
+        for item in task.get("validation_attempts", [])
+        if isinstance(item, str) and item
+    ]
+    attempts.append(attempt_id)
+    task = store.update_task(
+        task["id"],
+        validation_attempt=attempt_id,
+        validation_attempts=attempts,
+    )
     proof = validate(
         repo,
         cwd=worktree,
@@ -2746,6 +2773,8 @@ def _finish_in_place(
         force_task_scope=True,
         expected_candidate_head=str(task["candidate_head"]),
         validation_base_ref=str(task["base_ref"]),
+        attempt_id=attempt_id,
+        attempt_owner={"kind": "task", "id": str(task["id"])},
     )
     _assert_in_place_binding(repo, store, task, session_id=session_id)
     if not repo.is_clean(worktree):
@@ -3382,6 +3411,18 @@ def finish(
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
                 proof: dict[str, Any] | None = None
                 if candidate_requires_ready:
+                    attempt_id = new_validation_attempt_id("ready")
+                    attempts = [
+                        str(item)
+                        for item in task.get("validation_attempts", [])
+                        if isinstance(item, str) and item
+                    ]
+                    attempts.append(attempt_id)
+                    task = store.update_task(
+                        task_id,
+                        validation_attempt=attempt_id,
+                        validation_attempts=attempts,
+                    )
                     proof = validate(
                         repo,
                         cwd=worktree,
@@ -3391,6 +3432,8 @@ def finish(
                         expected_base_head=str(task["base_head"]),
                         expected_candidate_head=candidate_head,
                         validation_base_ref=str(task["base_ref"]),
+                        attempt_id=attempt_id,
+                        attempt_owner={"kind": "task", "id": task_id},
                     )
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
                 if unknown := _unknown_ignored(repo, worktree):

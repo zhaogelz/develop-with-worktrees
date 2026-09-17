@@ -118,6 +118,31 @@ def test_input_changed_without_commit_cannot_receive_success_proof(git_repo: Pat
     assert not list((repo.local_dir / "profile-proofs").glob("*.json"))
 
 
+def test_failed_validation_keeps_an_attempt_receipt_with_executed_cost(
+    git_repo: Path,
+) -> None:
+    repo = configure(git_repo, "raise SystemExit(3)", external="unknown")
+    attempt_id = "full-attempt-failure"
+
+    with pytest.raises(SoloAIError, match="Validation failed"):
+        proof.validate(
+            repo,
+            cwd=repo.root,
+            base="main",
+            task_id="same-batch",
+            verification=load_verification_config(repo),
+            level="full",
+            expected_candidate_head=repo.head(repo.root),
+            attempt_id=attempt_id,
+        )
+
+    attempt = proof.read_validation_attempt(repo, attempt_id)
+    assert attempt["state"] == "completed"
+    assert attempt["result"] == "failed"
+    assert attempt["profiles"][0]["state"] == "failed"
+    assert attempt["profiles"][0]["runs"][0]["duration_seconds"] >= 0
+
+
 def test_input_drift_during_cached_log_check_cannot_receive_success(
     git_repo: Path, monkeypatch
 ):

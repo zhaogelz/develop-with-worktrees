@@ -46,6 +46,7 @@ LOCKFILES = (
     "go.sum",
 )
 PROOF_SCHEMA = 3
+VALIDATION_ATTEMPT_SCHEMA = 1
 # 审批计划和验证收据的演进速度不同：前者描述可执行的策略，后者绑定现场证据。
 # 5 将验证命令从本机审批记录中改为“脱敏展示 + 原始参数指纹”。
 # 旧计划可能含有原始命令参数，不能继续当作当前审批契约。
@@ -90,6 +91,105 @@ class ValidationCandidateChanged(SoloAIError):
         self.expected = expected
         self.current = current
         super().__init__(f"Validation candidate changed from {expected} to {current}")
+
+
+def new_validation_attempt_id(level: str) -> str:
+    """生成一次验证尝试的可追溯标识，不把它当作证明身份。"""
+
+    return new_id(f"{level}-attempt")
+
+
+def _validation_attempt_path(repo: GitRepo, attempt_id: str) -> Path:
+    return repo.local_dir / "validation-attempts" / f"{attempt_id}.json"
+
+
+def read_validation_attempt(repo: GitRepo, attempt_id: str) -> dict[str, Any]:
+    """读取一次精确尝试；状态视图只读取这个小回执，不扫描证明历史。"""
+
+    value = read_json(_validation_attempt_path(repo, attempt_id), {})
+    if value and value.get("schema_version") != VALIDATION_ATTEMPT_SCHEMA:
+        return {}
+    return value
+
+
+def start_validation_attempt(
+    repo: GitRepo,
+    *,
+    attempt_id: str,
+    level: str,
+    full_scope: str,
+    task_id: str | None,
+    owner: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """在真正计算输入前留下最小回执，避免失败批次失去成本归属。"""
+
+    existing = read_validation_attempt(repo, attempt_id)
+    if existing:
+        return existing
+    value = {
+        "schema_version": VALIDATION_ATTEMPT_SCHEMA,
+        "id": attempt_id,
+        "owner": dict(owner or ({"kind": "task", "id": task_id} if task_id else {})),
+        "task_id": task_id,
+        "level": level,
+        "full_scope": full_scope,
+        "state": "preparing",
+        "result": None,
+        "profiles": [],
+        "started_at": utc_timestamp(),
+        "updated_at": utc_timestamp(),
+    }
+    atomic_write_json(_validation_attempt_path(repo, attempt_id), value)
+    return value
+
+
+def _update_validation_attempt(
+    repo: GitRepo, attempt_id: str, **changes: Any
+) -> dict[str, Any]:
+    value = read_validation_attempt(repo, attempt_id)
+    if not value:
+        return {}
+    value.update(changes)
+    value["updated_at"] = utc_timestamp()
+    atomic_write_json(_validation_attempt_path(repo, attempt_id), value)
+    return value
+
+
+def _update_validation_attempt_profile(
+    repo: GitRepo, attempt_id: str, profile_id: str, **changes: Any
+) -> None:
+    value = read_validation_attempt(repo, attempt_id)
+    if not value:
+        return
+    profiles = value.get("profiles") or []
+    for profile in profiles:
+        if profile.get("id") == profile_id:
+            profile.update(changes)
+            value["updated_at"] = utc_timestamp()
+            atomic_write_json(_validation_attempt_path(repo, attempt_id), value)
+            return
+
+
+def finish_validation_attempt(
+    repo: GitRepo,
+    *,
+    attempt_id: str,
+    result: str,
+    error: str | None = None,
+    proof: str | None = None,
+) -> None:
+    """把通过、失败、超时或中断明确写成终态，而不是猜测缺失证据。"""
+
+    changes: dict[str, Any] = {
+        "state": "completed",
+        "result": result,
+        "finished_at": utc_timestamp(),
+    }
+    if error:
+        changes["error"] = redact_text(error)[:1000]
+    if proof:
+        changes["proof"] = proof
+    _update_validation_attempt(repo, attempt_id, **changes)
 
 
 def _require_expected_base_head(
@@ -954,6 +1054,66 @@ def _content_address_log(repo: GitRepo, temporary: Path) -> tuple[Path, str]:
     return target, digest
 
 
+def profile_execution_decision(
+    repo: GitRepo,
+    *,
+    profile: VerificationProfile,
+    inputs: dict[str, Any],
+    fingerprint: str,
+) -> dict[str, Any]:
+    """用执行路径相同的规则解释一个 profile 是复用、执行还是被阻止。"""
+
+    proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
+    existing = read_json(proof_path, {})
+    if existing:
+        try:
+            _require_stored_proof_identity(
+                existing, fingerprint=fingerprint, inputs=inputs
+            )
+        except SoloAIError:
+            return {
+                "action": "blocked",
+                "reason": "stored_proof_identity_changed",
+                "proof": str(proof_path),
+            }
+    if existing.get("result") == "passed" and _logs_exist(existing):
+        return {
+            "action": "reuse",
+            "reason": "matching_successful_proof",
+            "proof": str(proof_path),
+        }
+    if (
+        existing.get("result") == "failed"
+        and _logs_exist(existing)
+        and _deterministic_failure(profile, existing)
+    ):
+        return {
+            "action": "blocked",
+            "reason": "matching_deterministic_failure",
+            "proof": str(proof_path),
+        }
+    if existing and not _logs_exist(existing):
+        reason = "stored_proof_logs_missing_or_changed"
+    elif inputs.get("full_execution"):
+        reason = "new_full_execution_required"
+    else:
+        reason = "no_matching_successful_proof"
+    return {"action": "execute", "reason": reason, "proof": str(proof_path)}
+
+
+def profile_selection_reason(
+    profile: VerificationProfile, files: list[str]
+) -> dict[str, Any]:
+    """把触发选择的实际候选文件投影给 plan 与尝试回执。"""
+
+    matched = [
+        path
+        for path in files
+        if any(fnmatch.fnmatchcase(path, pattern) for pattern in profile.paths)
+    ]
+    return {"matched_files": matched, "path_patterns": list(profile.paths)}
+
+
 def _run_profile(
     repo: GitRepo,
     *,
@@ -967,39 +1127,80 @@ def _run_profile(
     expected_candidate_head: str | None,
     validation_environment: dict[str, str],
     check_inputs: Callable[[], None],
+    attempt_id: str,
 ) -> dict[str, Any]:
     proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
-    from .util import read_json
 
     check_inputs()
-    existing = read_json(proof_path, {})
-    _require_stored_proof_identity(existing, fingerprint=fingerprint, inputs=inputs)
-    if existing.get("result") == "passed" and _logs_exist(existing):
+    decision = profile_execution_decision(
+        repo, profile=profile, inputs=inputs, fingerprint=fingerprint
+    )
+    if decision["action"] == "reuse":
+        existing = read_json(proof_path, {})
         _require_expected_candidate_head(
             repo, cwd=cwd, expected_candidate_head=expected_candidate_head
         )
         existing["reused_at"] = utc_timestamp()
         atomic_write_json(proof_path, existing)
-        return {**existing, "reused": True}
-    if (
-        existing.get("result") == "failed"
-        and _logs_exist(existing)
-        and _deterministic_failure(profile, existing)
-    ):
-        raise ActionableSoloAIError(
-            f"Validation profile {profile.profile_id} already failed with the same complete deterministic inputs. Change the candidate or policy, or explicitly reclassify its external state before retrying.",
-            code="DETERMINISTIC_VALIDATION_FAILED",
-            context={"profile_id": profile.profile_id},
-            next_action={
-                "kind": "inspect_validation_evidence",
-                "profile_id": profile.profile_id,
-                "retry": "after_change_or_reclassification",
-            },
+        _update_validation_attempt_profile(
+            repo,
+            attempt_id,
+            profile.profile_id,
+            state="reused",
+            reused=True,
+            proof=fingerprint,
+            completed_at=utc_timestamp(),
         )
+        return {**existing, "reused": True}
+    if decision["action"] == "blocked":
+        _update_validation_attempt_profile(
+            repo,
+            attempt_id,
+            profile.profile_id,
+            state="blocked",
+            error_reason=decision["reason"],
+            completed_at=utc_timestamp(),
+        )
+        if decision["reason"] == "matching_deterministic_failure":
+            raise ActionableSoloAIError(
+                f"Validation profile {profile.profile_id} already failed with the same complete deterministic inputs. Change the candidate or policy, or explicitly reclassify its external state before retrying.",
+                code="DETERMINISTIC_VALIDATION_FAILED",
+                context={"profile_id": profile.profile_id},
+                next_action={
+                    "kind": "inspect_validation_evidence",
+                    "profile_id": profile.profile_id,
+                    "retry": "after_change_or_reclassification",
+                },
+            )
+        raise SoloAIError(
+            "Stored validation proof identity changed; inspect or prune proofs"
+        )
+    _update_validation_attempt_profile(
+        repo,
+        attempt_id,
+        profile.profile_id,
+        state="waiting",
+        reused=False,
+        execution_reason=decision["reason"],
+        queue={"resource_class": profile.resource_class},
+    )
     run_id = new_id(f"profile-{profile.profile_id}")
     temp_dir = repo.local_dir / "logs" / "pending" / run_id
     runs: list[dict[str, Any]] = []
     with claim_validation_slot(profile.resource_class) as queue_claim:
+        _update_validation_attempt_profile(
+            repo,
+            attempt_id,
+            profile.profile_id,
+            state="running",
+            queue={
+                "resource_class": profile.resource_class,
+                "ticket": queue_claim["id"],
+                "queued_at": queue_claim.get("queued_at"),
+                "acquired_at": queue_claim.get("acquired_at"),
+                "wait_seconds": queue_claim.get("wait_seconds"),
+            },
+        )
         for index, command in enumerate(profile.commands, 1):
             _require_expected_candidate_head(
                 repo, cwd=cwd, expected_candidate_head=expected_candidate_head
@@ -1018,37 +1219,61 @@ def _run_profile(
             environment = _execution_environment(profile)
             environment.update(validation_environment)
             environment.update(inherited_claim_environment(queue_claim))
-            result = run_logged(
-                command.argv,
-                cwd=cwd,
-                log_path=pending,
-                timeout_seconds=profile.timeout_seconds,
-                environment=environment,
-                receipt_path=receipt_path,
-                receipt_metadata={
-                    "task_id": task_id,
-                    "profile_id": profile.profile_id,
-                    "profile_fingerprint": fingerprint,
-                    "queue_ticket": queue_claim["id"],
-                },
-            )
+            try:
+                result = run_logged(
+                    command.argv,
+                    cwd=cwd,
+                    log_path=pending,
+                    timeout_seconds=profile.timeout_seconds,
+                    environment=environment,
+                    receipt_path=receipt_path,
+                    receipt_metadata={
+                        "task_id": task_id,
+                        "profile_id": profile.profile_id,
+                        "profile_fingerprint": fingerprint,
+                        "queue_ticket": queue_claim["id"],
+                    },
+                )
+            except BaseException:
+                receipt = read_json(receipt_path, {})
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state="interrupted",
+                    runs=[
+                        {
+                            "command_digest": command.fingerprint,
+                            "command": command.redacted(),
+                            "receipt": str(receipt_path),
+                            "duration_seconds": receipt.get("duration_seconds"),
+                            "status": receipt.get("status", "interrupted"),
+                        }
+                    ],
+                )
+                raise
             _require_expected_candidate_head(
                 repo, cwd=cwd, expected_candidate_head=expected_candidate_head
             )
             check_inputs()
             log_path, log_digest = _content_address_log(repo, pending)
-            runs.append(
-                {
-                    "command_digest": command.fingerprint,
-                    "command": command.redacted(),
-                    "exit_code": result.returncode,
-                    "duration_seconds": round(result.duration_seconds, 3),
-                    "timed_out": result.timed_out,
-                    "process": result.process,
-                    "receipt": str(receipt_path),
-                    "log": str(log_path),
-                    "log_sha256": log_digest,
-                }
+            run_record = {
+                "command_digest": command.fingerprint,
+                "command": command.redacted(),
+                "exit_code": result.returncode,
+                "duration_seconds": round(result.duration_seconds, 3),
+                "timed_out": result.timed_out,
+                "process": result.process,
+                "receipt": str(receipt_path),
+                "log": str(log_path),
+                "log_sha256": log_digest,
+            }
+            runs.append(run_record)
+            _update_validation_attempt_profile(
+                repo,
+                attempt_id,
+                profile.profile_id,
+                runs=copy.deepcopy(runs),
             )
             if result.returncode != 0:
                 # 旧基线上的失败不是当前候选的有效结论；交给 Ready 同步后重试。
@@ -1071,6 +1296,14 @@ def _run_profile(
                     "created_at": utc_timestamp(),
                 }
                 atomic_write_json(proof_path, proof)
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state="timed_out" if result.timed_out else "failed",
+                    proof=fingerprint,
+                    completed_at=utc_timestamp(),
+                )
                 raise SoloAIError(
                     f"Validation {'timed out' if result.timed_out else 'failed'} in profile {profile.profile_id}. Local redacted log: {log_path}"
                 )
@@ -1092,6 +1325,15 @@ def _run_profile(
         "created_at": utc_timestamp(),
     }
     atomic_write_json(proof_path, proof)
+    _update_validation_attempt_profile(
+        repo,
+        attempt_id,
+        profile.profile_id,
+        state="passed",
+        proof=fingerprint,
+        completed_at=utc_timestamp(),
+        runs=copy.deepcopy(runs),
+    )
     return {**proof, "reused": False}
 
 
@@ -1108,13 +1350,22 @@ def validate(
     expected_candidate_head: str | None = None,
     full_scope: str = "integration",
     validation_base_ref: str | None = None,
+    attempt_id: str | None = None,
+    attempt_owner: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    from .util import read_json
-
     if full_scope not in {"integration", "complete"}:
         raise SoloAIError("full_scope must be integration or complete")
     if level != "full" and full_scope != "integration":
         raise SoloAIError("A complete validation scope requires level full")
+    attempt_id = attempt_id or new_validation_attempt_id(level)
+    start_validation_attempt(
+        repo,
+        attempt_id=attempt_id,
+        level=level,
+        full_scope=full_scope,
+        task_id=task_id,
+        owner=attempt_owner,
+    )
     levels = ("ready", "full") if level == "full" else (level,)
     full_scopes = (
         ("integration", "complete")
@@ -1133,43 +1384,172 @@ def validate(
             expected_base_head=expected_base_head,
             full_scope=full_scope if level == "full" else None,
         )
-    inputs, records = proof_inputs(
-        repo,
-        cwd=cwd,
-        base=base,
-        verification=verification,
-        task_id=task_id,
-        levels=levels,
-        full_scopes=full_scopes,
-        force_task_scope=force_task_scope,
-        expected_candidate_head=expected_candidate_head,
-        full_execution_id=(
-            new_id(f"{level}-validation") if level in {"full", "stress"} else None
-        ),
-        tool_cache=tool_cache,
-        validation_environment=validation_environment,
-    )
-    # Ready（以及包含 Ready 的 Full）是候选晋级门禁，必须覆盖所有候选
-    # 路径。development 与显式 Stress 都是按变更选择的辅助执行层；要求
-    # 每个文档或无关文件也匹配压力配置，会让它们错误地无法单独运行。
-    if (
-        level in {"ready", "full"}
-        and inputs["unmapped_files"]
-        and not verification.static_only
-    ):
-        raise SoloAIError(
-            "No Ready verification profile covers every candidate path; add explicit path mappings:\n"
-            + "\n".join(f"- {path}" for path in inputs["unmapped_files"][:20])
+    try:
+        inputs, records = proof_inputs(
+            repo,
+            cwd=cwd,
+            base=base,
+            verification=verification,
+            task_id=task_id,
+            levels=levels,
+            full_scopes=full_scopes,
+            force_task_scope=force_task_scope,
+            expected_candidate_head=expected_candidate_head,
+            full_execution_id=(
+                new_id(f"{level}-validation") if level in {"full", "stress"} else None
+            ),
+            tool_cache=tool_cache,
+            validation_environment=validation_environment,
         )
-    if not records and not verification.static_only:
-        raise SoloAIError(
-            "No verification profile covers the candidate changes; add an explicit path mapping or opt into static_only"
+        planned_profiles = [
+            {
+                "id": profile.profile_id,
+                "level": profile.level,
+                "fingerprint": profile_fingerprint,
+                "state": "pending",
+                "selection": profile_selection_reason(profile, inputs["files"]),
+                "decision": profile_execution_decision(
+                    repo,
+                    profile=profile,
+                    inputs=profile_inputs,
+                    fingerprint=profile_fingerprint,
+                ),
+                "runs": [],
+            }
+            for profile, profile_inputs, profile_fingerprint in records
+        ]
+        _update_validation_attempt(
+            repo,
+            attempt_id,
+            state="planned",
+            candidate_head=inputs.get("candidate_head"),
+            base_head=inputs.get("base_head"),
+            changed_files=list(inputs.get("files") or []),
+            unmapped_files=list(inputs.get("unmapped_files") or []),
+            profiles=planned_profiles,
         )
-    fingerprint = sha256_text(stable_json(inputs))
-    proof_path = repo.local_dir / "proofs" / f"{fingerprint}.json"
-    existing = read_json(proof_path, {})
-    _require_stored_proof_identity(existing, fingerprint=fingerprint, inputs=inputs)
-    if existing.get("result") == "passed" and _logs_exist(existing):
+        # Ready（以及包含 Ready 的 Full）是候选晋级门禁，必须覆盖所有候选
+        # 路径。development 与显式 Stress 都是按变更选择的辅助执行层；要求
+        # 每个文档或无关文件也匹配压力配置，会让它们错误地无法单独运行。
+        if (
+            level in {"ready", "full"}
+            and inputs["unmapped_files"]
+            and not verification.static_only
+        ):
+            raise SoloAIError(
+                "No Ready verification profile covers every candidate path; add explicit path mappings:\n"
+                + "\n".join(f"- {path}" for path in inputs["unmapped_files"][:20])
+            )
+        if not records and not verification.static_only:
+            raise SoloAIError(
+                "No verification profile covers the candidate changes; add an explicit path mapping or opt into static_only"
+            )
+        fingerprint = sha256_text(stable_json(inputs))
+        proof_path = repo.local_dir / "proofs" / f"{fingerprint}.json"
+        existing = read_json(proof_path, {})
+        _require_stored_proof_identity(existing, fingerprint=fingerprint, inputs=inputs)
+        if existing.get("result") == "passed" and _logs_exist(existing):
+            _require_expected_candidate_head(
+                repo, cwd=cwd, expected_candidate_head=expected_candidate_head
+            )
+            for profile, profile_inputs, profile_fingerprint in records:
+                _require_profile_inputs(
+                    repo,
+                    cwd=cwd,
+                    profile=profile,
+                    inputs=profile_inputs,
+                    verification=verification,
+                    tool_cache=tool_cache,
+                    validation_environment=validation_environment,
+                )
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state="reused",
+                    reused=True,
+                    proof=profile_fingerprint,
+                    completed_at=utc_timestamp(),
+                )
+            existing["reused_at"] = utc_timestamp()
+            atomic_write_json(proof_path, existing)
+            finish_validation_attempt(
+                repo,
+                attempt_id=attempt_id,
+                result="passed",
+                proof=fingerprint,
+            )
+            return {**existing, "reused": True}
+
+        runs: list[dict[str, Any]] = []
+        profile_proofs: list[dict[str, Any]] = []
+        for profile, profile_inputs, profile_fingerprint in records:
+
+            def check_inputs(profile=profile, profile_inputs=profile_inputs):
+                _require_profile_inputs(
+                    repo,
+                    cwd=cwd,
+                    profile=profile,
+                    inputs=profile_inputs,
+                    verification=verification,
+                    tool_cache=tool_cache,
+                    validation_environment=validation_environment,
+                )
+
+            result = _run_profile(
+                repo,
+                cwd=cwd,
+                profile=profile,
+                inputs=profile_inputs,
+                fingerprint=profile_fingerprint,
+                task_id=task_id,
+                base=base,
+                expected_base_head=expected_base_head,
+                expected_candidate_head=expected_candidate_head,
+                validation_environment=_profile_validation_environment(
+                    profile, validation_environment
+                ),
+                check_inputs=check_inputs,
+                attempt_id=attempt_id,
+            )
+            profile_proofs.append(
+                {
+                    "profile_id": profile.profile_id,
+                    "fingerprint": profile_fingerprint,
+                    "reused": result["reused"],
+                }
+            )
+            runs.extend(
+                {
+                    **item,
+                    "profile_id": profile.profile_id,
+                    "reused": result["reused"],
+                }
+                for item in result["runs"]
+            )
+        if not records:
+            log_path = (
+                repo.local_dir / "logs" / "content" / "static-only-placeholder.log"
+            )
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            if not log_path.exists():
+                log_path.write_text(
+                    "Static-only gate completed: Git candidate integrity and sensitive-content checks only. No test command ran.\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            runs.append(
+                {
+                    "command_digest": None,
+                    "command": None,
+                    "exit_code": 0,
+                    "duration_seconds": 0.0,
+                    "log": str(log_path),
+                    "log_sha256": sha256_file(log_path),
+                    "profile_id": None,
+                    "reused": False,
+                }
+            )
         _require_expected_candidate_head(
             repo, cwd=cwd, expected_candidate_head=expected_candidate_head
         )
@@ -1181,98 +1561,37 @@ def validate(
                 inputs=profile_inputs,
                 verification=verification,
                 tool_cache=tool_cache,
-                validation_environment=validation_environment,
+                validation_environment=_profile_validation_environment(
+                    profile, validation_environment
+                ),
             )
-        existing["reused_at"] = utc_timestamp()
-        atomic_write_json(proof_path, existing)
-        return {**existing, "reused": True}
-
-    runs: list[dict[str, Any]] = []
-    profile_proofs: list[dict[str, Any]] = []
-    for profile, profile_inputs, profile_fingerprint in records:
-
-        def check_inputs(profile=profile, profile_inputs=profile_inputs):
-            _require_profile_inputs(
-                repo,
-                cwd=cwd,
-                profile=profile,
-                inputs=profile_inputs,
-                verification=verification,
-                tool_cache=tool_cache,
-                validation_environment=validation_environment,
-            )
-
-        result = _run_profile(
-            repo,
-            cwd=cwd,
-            profile=profile,
-            inputs=profile_inputs,
-            fingerprint=profile_fingerprint,
-            task_id=task_id,
-            base=base,
-            expected_base_head=expected_base_head,
-            expected_candidate_head=expected_candidate_head,
-            validation_environment=_profile_validation_environment(
-                profile, validation_environment
-            ),
-            check_inputs=check_inputs,
+        proof = {
+            "schema_version": PROOF_SCHEMA,
+            "fingerprint": fingerprint,
+            "result": "passed",
+            "kind": "static-only" if not records else "commands",
+            "inputs": inputs,
+            "profile_proofs": profile_proofs,
+            "runs": runs,
+            "created_at": utc_timestamp(),
+        }
+        atomic_write_json(proof_path, proof)
+        finish_validation_attempt(
+            repo, attempt_id=attempt_id, result="passed", proof=fingerprint
         )
-        profile_proofs.append(
-            {
-                "profile_id": profile.profile_id,
-                "fingerprint": profile_fingerprint,
-                "reused": result["reused"],
-            }
+        return {**proof, "reused": False}
+    except BaseException as exc:
+        attempt = read_validation_attempt(repo, attempt_id)
+        timed_out = any(
+            profile.get("state") == "timed_out"
+            for profile in attempt.get("profiles", [])
         )
-        runs.extend(
-            {**item, "profile_id": profile.profile_id, "reused": result["reused"]}
-            for item in result["runs"]
+        result = (
+            "interrupted"
+            if isinstance(exc, (KeyboardInterrupt, SystemExit))
+            else ("timed_out" if timed_out else "failed")
         )
-    if not records:
-        log_path = repo.local_dir / "logs" / "content" / "static-only-placeholder.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        if not log_path.exists():
-            log_path.write_text(
-                "Static-only gate completed: Git candidate integrity and sensitive-content checks only. No test command ran.\n",
-                encoding="utf-8",
-                newline="\n",
-            )
-        runs.append(
-            {
-                "command_digest": None,
-                "command": None,
-                "exit_code": 0,
-                "duration_seconds": 0.0,
-                "log": str(log_path),
-                "log_sha256": sha256_file(log_path),
-                "profile_id": None,
-                "reused": False,
-            }
+        finish_validation_attempt(
+            repo, attempt_id=attempt_id, result=result, error=str(exc)
         )
-    _require_expected_candidate_head(
-        repo, cwd=cwd, expected_candidate_head=expected_candidate_head
-    )
-    for profile, profile_inputs, _ in records:
-        _require_profile_inputs(
-            repo,
-            cwd=cwd,
-            profile=profile,
-            inputs=profile_inputs,
-            verification=verification,
-            tool_cache=tool_cache,
-            validation_environment=_profile_validation_environment(
-                profile, validation_environment
-            ),
-        )
-    proof = {
-        "schema_version": PROOF_SCHEMA,
-        "fingerprint": fingerprint,
-        "result": "passed",
-        "kind": "static-only" if not records else "commands",
-        "inputs": inputs,
-        "profile_proofs": profile_proofs,
-        "runs": runs,
-        "created_at": utc_timestamp(),
-    }
-    atomic_write_json(proof_path, proof)
-    return {**proof, "reused": False}
+        raise
