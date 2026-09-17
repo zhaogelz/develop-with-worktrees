@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import getpass
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -180,6 +181,8 @@ def pytest_collection_modifyitems(
 def directory_link():
     """Windows 用真实 junction；其他平台使用目录 symlink。"""
 
+    created: list[tuple[Path, tuple[int, int]]] = []
+
     def create(link: Path, target: Path) -> None:
         link.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
@@ -204,7 +207,25 @@ def directory_link():
         else:
             link.symlink_to(target, target_is_directory=True)
 
-    return create
+        details = link.lstat()
+        created.append((link, (int(details.st_dev), int(details.st_ino))))
+
+    yield create
+
+    for link, expected_identity in reversed(created):
+        try:
+            details = link.lstat()
+        except FileNotFoundError:
+            continue
+        if (int(details.st_dev), int(details.st_ino)) != expected_identity:
+            continue
+        if os.name == "nt":
+            if not getattr(details, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                continue
+            # rmdir 只删除 junction 对象，不会跟随或删除其目标目录。
+            link.rmdir()
+        elif stat.S_ISLNK(details.st_mode):
+            link.unlink()
 
 
 def git(repo: Path, *args: str) -> str:

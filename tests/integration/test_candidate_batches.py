@@ -1583,7 +1583,7 @@ def test_batch_cleanup_removes_known_recreatable_ignored_content(
 
 
 def test_finish_preserves_dependency_link_and_reuses_the_slot(
-    git_repo: Path, directory_link
+    git_repo: Path, tmp_path: Path, directory_link
 ) -> None:
     (git_repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
     git(git_repo, "add", ".gitignore")
@@ -1591,9 +1591,12 @@ def test_finish_preserves_dependency_link_and_reuses_the_slot(
     repo = initialized_batched(git_repo, auto_full=False)
     task = start(repo, name="linked dependency")
     worktree = Path(task["worktree"])
-    target = git_repo / "README.md"
+    target_root = tmp_path / "external-dependency-source"
+    target_root.mkdir()
+    target = target_root / "README.md"
+    target.write_text("dependency source\n", encoding="utf-8")
     link = worktree / "node_modules" / "local-package"
-    directory_link(link, git_repo)
+    directory_link(link, target_root)
     before = target.read_bytes()
     (worktree / "candidate.txt").write_text("candidate\n", encoding="utf-8")
     commit_task(

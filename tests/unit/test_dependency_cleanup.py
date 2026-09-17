@@ -233,10 +233,12 @@ def test_long_file_replacement_keeps_both_objects(tmp_path: Path) -> None:
 
 
 def test_retaining_dependency_root_does_not_walk_it(
-    git_repo: Path, directory_link, monkeypatch: pytest.MonkeyPatch
+    git_repo: Path, tmp_path: Path, directory_link, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = ignore(git_repo, "node_modules/")
-    directory_link(git_repo / "node_modules" / "loop", git_repo)
+    target = tmp_path / "external-dependency-source"
+    target.mkdir()
+    directory_link(git_repo / "node_modules" / "loop", target)
     original = Path.iterdir
 
     def guarded(path):
@@ -247,6 +249,7 @@ def test_retaining_dependency_root_does_not_walk_it(
     monkeypatch.setattr(Path, "iterdir", guarded)
     inventory = cleanup.inspect_untracked(repo, cwd=git_repo)
     assert inventory["retained"] == ["node_modules"]
+    assert target.is_dir()
 
 
 @pytest.mark.parametrize(
