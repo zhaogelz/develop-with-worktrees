@@ -1,35 +1,103 @@
 # Safety reference
 
-The CLI and persisted Git facts own lifecycle correctness. The Codex adapter supplies a strong but optional scoped guard. After the plugin Hook is trusted, `PreToolUse` returns the supported `permissionDecision: deny` response before protected base-worktree writes made through supported Codex local tool paths. Strictly read-only Bash commands are recognized by a small parser that covers quoted text, common repository and directory enumeration, and one limited `Get-Content`/`rg` to `Select-Object` pipeline; unknown or compound Bash, `apply_patch`, Edit, and Write are fail-closed on a protected base worktree. Repository scope is derived from the Hook payload's current working directory and verified Git facts; the Hook does not claim to sandbox commands that deliberately target another repository or bypass Codex's supported local-tool path.
+Use this reference before trusting a Hook, releasing a worktree, retiring a batch,
+or publishing remotely. DWW's CLI and persisted Git facts own lifecycle truth.
+The Codex Hook is optional scoped hardening, not the only safety boundary.
 
-Codex persists trust against the exact Hook definition. `hooks/hooks.json` is therefore a stable compatibility contract: ordinary plugin, skill, and guard-script updates keep it unchanged and require no repeated user action. Only an actual first install or intentional definition change may trigger review. When Codex reports pending review, the AI asks once after explaining the changed guard behavior and, after approval, uses host UI control when available to complete `/hooks`. The plugin never edits Codex trust storage, bypasses Hook trust, or claims a skipped Hook is active. If no Hook is installed or trusted, route fallback and the complete CLI lifecycle remain supported.
+## Hook trust and scope
 
-A mature repository workflow has absolute routing priority. `SessionStart` may inject one short deferral context; without it, the read-only route command returns the same decision. Later Pre/Post Tool Hooks step aside. The route reads but never deletes or rewrites existing DWW preferences and session authorizations.
+A trusted plugin Hook may deny supported Codex local writes to a protected base
+worktree before they happen. It recognizes a limited read-only command subset and
+fails closed for unknown or compound supported writes. The Hook derives repository
+scope from the current working directory and verified Git facts; it does not claim
+to sandbox deliberate cross-repository or specialized bypass paths.
 
-An explicit current-task choice is intentionally outside that protected mode. Its local authorization is bound to the exact worktree and a hash of the current Codex session, so both PreToolUse and PostToolUse step aside for that session. A child session must present a one-time parent delegation code, which is stored only as a hash. The adapter never widens this choice to every session in the repository or to a guessed time period. The long-term current-directory choice is also local-only and is blocked while active managed tasks, queue tickets, or lifecycle locks exist.
+`hooks/hooks.json` is the stable trust contract. Ordinary plugin, skill, and
+guard-script changes do not alter it. A first install or intentional definition
+change may require review. When the host reports pending review, explain the
+changed behavior and use supported host control after approval; never edit trust
+storage or bypass Hook trust. Without a trusted Hook, route fallback and the full
+CLI lifecycle remain supported.
 
-Batch Runtime Adapter activation and release are also machine-approved, content-addressed gates. Combined Full runs only after exact activation; promotion runs only after exact release and another clean-head check. A nonzero result, timeout, interruption, input drift, or uncertain release keeps the batch as the sole active owner of its base and leaves `main` unchanged. Recovery retries an uncertain command in the same persisted `runtime_cycle`; if resources were successfully released before validation retry, it increments the cycle and performs a real activation instead of reusing stale evidence. DWW supplies a dedicated batch port block but never creates, adopts, or interprets project ports, databases, services, authentication, or browsers. Approval drift writes a local field-level comparison to the nearest accepted normalized plan but never approves the drift.
+A mature workflow remains routing authority. Hook, idle, and session events may
+wake reconciliation but cannot select candidates, complete a task, delete an
+anchor, or release a slot.
 
-This is not operating-system enforcement. A specialised path may not invoke the Hook. When a later Hook call or `doctor` observes a dirty unowned base, it stores a local alert and tells the agent to preserve it; immediate observation of an opt-out path is not promised. It never resets, cleans, rolls back, moves, or silently adopts those files. Hook failures fail closed only for a supported PreToolUse call. Hook, idle, and SessionEnd events may wake `batch reconcile`, but no candidate is selected, task completed, anchor deleted, or slot released merely because one fired.
+## Identity and content protection
 
-An active in-place task is allowed only when its current worktree, branch, expected HEAD, and hashed Codex session identifier still match local state. A mismatch quarantines it before a new write. The task cannot be recovered around that mismatch. After a Codex task ends, an explicit exact-confirmation resume may transfer an unchanged active, ready, or quarantined task only after identity, live-operation, and live-validation checks; a mismatch still needs manual restoration first.
+Every managed Start, Commit, Ready, Finish, Recover, Abandon, and cleanup action
+checks the recorded worktree, branch, base/head, ref, and platform directory
+identity. A moved reference, dirty unknown content, replaced path, unreadable
+directory, or ambiguous Git fact preserves the scene. DWW does not reset, clean,
+rollback, move, or silently adopt it.
 
-Commands use explicit argv and `shell=False`. Logs redact common credentials; proofs persist command digests, hashes, and redacted displays but not environment values, leases, raw session identifiers, or raw command lines. Validation subprocesses have identity snapshots, heartbeats, hard timeouts, and persistent receipts. Recovery never kills or adopts an unverified process. Runtime Adapter commands and their tracked input closure are machine-approved. `activate` runs only after the isolated task, worktree, branch, slot identity, and anchor are exact; failure leaves the task retryably `starting`, while contamination quarantines and preserves it. Adapter-created ignored runtime data is allowed only under DWW's known retained roots; tracked changes, ordinary untracked content, protected data, and unknown ignored paths fail closed. `release` runs only after the immutable candidate ref is durable, and any nonzero exit, timeout, input drift, or worktree contamination leaves that candidate held and the base unchanged.
+Logs redact common credentials. Proofs record command digests, hashes, redacted
+displays, and results; they do not persist environment values, raw session IDs,
+leases, or raw command lines. Runtime Adapter input closure is locally approved.
+An Adapter failure or contamination preserves its task or candidate and leaves
+the base unchanged. See [Runtime Adapter](runtime-adapter.md).
 
-Finish never cleans caches or dependencies. Retention checks stop at real, fully ignored dependency roots and do not traverse their contents or link targets; normal dependency links therefore do not block task release or later slot reuse. Dependency roots and their ancestors must not themselves be links. Finish, Recover, and Abandon require the exact recorded worktree HEAD/branch/ref identity, including the Windows file identity of managed directories, and use compare-and-delete refs with the recorded SHA; no force switch or unconditional branch deletion is used. Abandon refuses tracked working-tree changes. Its ordinary untracked deletion holds and verifies the original file object; classification is case-insensitive and preserves `.env*`, database files, upload/storage trees, unknown ignored paths, replacements, symlinks, and junctions.
+## Task return and abandonment
 
-A Start quarantined before activation can resume only after the exact external blocker is gone. Recovery reuses its original task and slot, requires proof that runtime activation never completed, requires the same managed-directory identities and clean registered worktree, and rejects ambiguous partial branch, anchor, candidate, publication, integration, or abandonment facts. It never removes the blocking link or retained content itself.
+Finish never cleans dependency caches. Retained known dependency roots are
+opaque, including normal package links; their ancestors must not be links.
+Ordinary task release and Abandon require exact worktree identity. Abandon refuses
+tracked edits and deletes ordinary untracked files only through unchanged-object
+checks. It protects `.env*`, databases, uploads/storage, unknown ignored paths,
+replacements, symlinks, and junctions.
 
-Dedicated batch retirement checks the detached registered head, original managed-directory identity, exact integration result and untracked inventory. It expands regenerable dependencies once without following links. Only non-Windows single-link ordinary files inside known regenerable ignored dependency roots use identity, size and modification/change metadata instead of content SHA. Windows files require identity and content hashes because timestamps can collide after a write; older metadata-only deletion proofs are refused. Shared hardlinks also retain content hashes because deleting another link changes metadata without changing content; only the frozen in-tree names are removed, not external cache links. Ordinary output and tracked source retain content hashes. Windows deletion pins the original ancestors and conditionally deletes the same opened leaf object; only original empty directories are removed. Protected names within generated dependencies remain opaque, but build roots such as `dist` and `.swc` are not: protected descendants still block.
+An active in-place task additionally binds its trusted session, branch, start
+head, and expected head. A mismatch quarantines it. A post-session handoff
+requires explicit exact confirmation and cannot recreate or clean an ambiguous
+task.
 
-A recognized dependency symlink or junction is frozen as a link object; only that unchanged object may be removed. Windows compares file identity and reparse contents using an open-reparse handle. Its target is never enumerated, read or deleted. Protected or ordinary untracked content, unknown reparse types, links outside dependency roots, replaced ancestors and late-arriving entries stop deletion rather than being added to the frozen inventory.
+## Runtime and validation boundaries
 
-Non-force `git worktree remove` can delete ignored content; it is not a safety boundary for a populated tree. After regenerable output cleanup, DWW saves an immutable exact source/control-file removal receipt under Git-common-dir `solo-ai/worktree-removal-manifests/`, referenced by its digest in the existing batch, and pins the integration result. It conditionally removes only those frozen objects, leaves the `.git` control pointer until last, and gives Git only an already absent path for exact registration removal. Changed or recreated paths remain pending. Partial source removal resumes from that original receipt, never a fresh expanded deletion scope or repeated passed Full. Failed batches require explicit `batch retire` and preserve candidate refs and failure history. This is an audit receipt for existing batch recovery, not a new cleanup database or scheduler.
+Adapter activation happens after an exact isolated task and anchor exist; release
+happens after the immutable candidate ref exists. Batch activation and release
+wrap combined Full when configured. An uncertain or nonzero Adapter result,
+approval drift, timeout, or contamination blocks advancement. Successful release
+is required before promotion. Runtime resources and effects remain project-owned;
+DWW supplies identity and port facts but does not interpret services, databases,
+authentication, or browsers.
 
-An explicitly requested `batch retire --fast` is a maintenance shortcut for an old failed dedicated batch, not an ordinary lifecycle path. The command requires every included candidate to be `superseded` or explicitly `withdrawn`, the exact clean detached head and Git registration, the original managed-directory identity, and a second preflight that rejects tracked/ordinary untracked content, protected names (`.env*`, database files, `uploads`/`storage`), unknown ignored content, and reparse boundaries. It atomically renames the exact directory to a same-volume staging sibling, records the staging identity and preflight in the existing batch, does not enumerate or hash files under opaque declared dependency roots, and deletes links only as link objects. It never follows link targets, alters candidate refs, or treats a missing path without recorded staging facts as success. A minimal immutable receipt under `solo-ai/fast-retirement-receipts/` makes retries idempotent; any changed identity or ambiguous recovery remains pending. Normal `batch retire` keeps the exact per-file proof path.
+Validation commands use explicit argv and bounded, observed processes. DWW never
+adopts or kills an unverified process. See [verification reuse](verification-reuse.md)
+and [recovery](recovery.md) for proof and interruption rules.
 
-Manual `prune-slot` is bounded to declared top-level ownership paths and requires a reviewed plan id plus digest. The plan is bound to the slot generation and can succeed only once. Before the first move it persists a staging transaction; interrupted staging and item-by-item deletion resume only from that exact manifest. The worktree and staging directory remain bound to their original non-link Windows file identity before every move, walk, and deletion. Each file is removed through an unchanged-object handle, directories are removed only when empty, and sources are checked again before and after the completed projection. If a declared target contains `.env*`, a protected file/directory, a symlink or junction, or changes before or during execution, cleanup stops rather than following or recursively deleting late content.
+## Cleanup modes
 
-Reusable batch return does not invoke physical cleanup. It compares the current batch owner, generation, managed-directory identities, detached registered head, saved Git ref and confirmed runtime release under the existing integration lock. Known dependencies remain opaque, including package links; unknown or protected content outside them blocks return. Old returned batches cannot reacquire or retire a new owner's generation. Registration/checkout interruption preserves the same generation; active path disappearance or replacement fails closed. An idle missing location can be rebuilt only from the exact saved result and exact registration, never by broad prune. These ownership facts belong to the existing candidate pool, not a second task or cleanup database.
+| Operation | Use only when | What must remain protected |
+|---|---|---|
+| Ordinary task return | task/candidate reaches its normal terminal transition | dependency roots, unknown content, task identity |
+| Reusable batch return | current owner/generation has exact clean Git state and confirmed runtime release | later generation's workspace, protected/unknown content |
+| `batch retire` | a failed dedicated batch needs its exact detached workspace removed | candidate refs, history, original directory and Git identity |
+| `batch retire --fast` | explicitly approved old failed dedicated batch whose candidates are superseded or withdrawn | the same identity/link/protected-content checks; only regenerable dependency hashes are skipped |
+| `prune-slot` | reviewed one-time plan names exact top-level owned paths | task generation, staging manifest, changed/late/protected/link content |
 
-Remote publishing is never implicit. A user-requested post-Finish push must use the clean base worktree, verify the branch and remote, succeed in a dry-run, and avoid force, deletion, tags, PR creation, or deployment unless each additional action is separately authorized. Remote divergence stops the publish rather than triggering an automatic pull, rebase, merge, or history rewrite.
+A reusable workspace is returned, not physically cleaned. Dedicated retirement
+uses a persisted intent and exact removal receipt. Fast retirement stages the
+same directory on the same volume and never follows links; it is a maintenance
+shortcut, not ordinary recovery. `prune-slot` is bounded to a reviewed plan,
+recorded before the first move, and resumes only from that manifest.
+
+On Windows, removal pins original ancestors and conditionally deletes the same
+opened object. On all platforms, changed, recreated, protected, ordinary
+untracked, unknown ignored, or reparse content stops cleanup. Non-force `git
+worktree remove` is not a safety boundary for a populated tree.
+
+## Local-only and remote boundary
+
+DWW lifecycle operations never fetch, pull, push, create a pull request, deploy,
+rebase, squash, amend, or rewrite history. If the user explicitly asks to publish
+after integration, work from the clean base worktree, verify the branch and
+remote, run a dry-run first, and use an ordinary non-force push. Remote
+divergence stops publication; it does not authorize an automatic pull, rebase,
+merge, deletion, tag, PR, or deployment.
+
+## What DWW does not enforce
+
+DWW provides lifecycle safety, not an operating-system sandbox. A specialized
+path may bypass a Hook, and a project Adapter may deliberately escape the process
+boundary described by its contract. Those limits must stay visible rather than
+being presented as successful containment.

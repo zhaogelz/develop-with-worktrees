@@ -1,113 +1,155 @@
 # Lifecycle reference
 
-Mode precedence is detected mature workflow, local long-term current-directory choice, exact current-task authorization, managed policy, then the first-modification choice. A mature workflow always wins. A command whose route admission observes that workflow performs zero DWW lifecycle, anchor, candidate, or integration-batch writes unless its tracked delegated contract has been explicitly approved locally.
+Use this reference for normal route, Start, Commit, Ready, Finish, candidate,
+status, and tail-batch work. Use [recovery](recovery.md) when an exact operation
+is interrupted or fails, and [task governance](task-governance.md) for root and
+child anchor rules.
 
-Routing assigns lifecycle ownership. The host's native task/subagent system owns decomposition, dependencies, worker scheduling, waiting, and task status. DWW owns Git execution identity and integration safety for each routed managed task. The old `orchestrate` store is drain-only compatibility and is not created for new work.
+## Route first
 
-Hook-provided route context is an optional shortcut. Without it, the skill runs one read-only `dww route --json`; this fallback is a normal supported path. `PreToolUse` is optional hardening. Hook, idle, and SessionEnd events may wake a reconciliation check, but they never prove completion, choose candidates, or perform a lifecycle transition by themselves.
+Routing chooses the lifecycle owner in this order: a detected mature workflow,
+a local long-term current-directory choice, exact current-task authorization,
+managed policy, then the first-modification choice. A mature workflow wins. A
+command admitted as `defer` writes no DWW task, anchor, candidate, or batch
+state unless its tracked delegated contract is valid and locally approved.
 
-## First-modification choice
+The host owns task/subagent decomposition, scheduling, waiting, and status. DWW
+owns Git execution identity and local integration safety. Hooks may provide route
+context or wake a check, but a Hook, idle state, or session end never proves
+completion or performs a lifecycle transition by itself.
 
-The adapter asks one plain-language question only for the first modifying intent in an unchosen repository. `choose --mode isolated` adopts the normal lifecycle and accepts internal static-only checks when no test command is discovered. `choose --mode current-repository` stores a local preference without touching tracked files. The session-bound `current-task` compatibility choice needs a trusted session identifier; when Hook context is unavailable, do not simulate it by weakening managed isolation.
+### First modifying intent
 
-Before applying a choice, `choose` routes again. If a mature workflow exists, it returns `deferred` and writes no policy, preference, task, anchor, candidate, or slot state.
+In an unchosen repository, DWW asks one plain-language question. `choose --mode
+isolated` adopts the ordinary managed flow. `choose --mode current-repository`
+stores a local preference without changing tracked files. The session-bound
+`current-task` compatibility path requires a trusted session identity; do not
+simulate it by weakening managed isolation. Before choosing, DWW routes again,
+so a detected mature workflow remains deferred.
 
-## Isolated task (default)
+## Managed task
 
-`start` selects the least-recently-used idle slot and derives a task branch from the invocation worktree's current local branch. It records the branch, base commit, base worktree, slot generation, optional caller `request_id`, and optional repair `supersedes` candidate. A repeated non-empty request id bound to the same purpose and base returns the original task instead of consuming another slot.
+`start` selects an idle slot, derives a task branch from the local base branch,
+and records the branch, frozen base, worktree identity, and optional stable
+request ID. Repeating the same non-empty request ID with the same purpose and
+base returns the original task instead of allocating another slot.
 
-Before Start returns, it creates `<git-common-dir>/solo-ai/task-anchors/<task-id>.md` and persists the original purpose and baseline used to verify its immutable fields. The anchor is a regular UTF-8 local file with no DWW content-size quota; real filesystem, permission, or memory failures still fail normally. Ready requires its exact task identity and verified origin. It is local state, never a tracked workspace file, and stays available from every worktree. When Start is root-bound, its normal terminal output prints the complete root plan once after its fixed task headers. `anchor show --task <task-id>` returns its identity, digest, byte size, and state by default; add `--content` only when the full body is needed. Use `anchor update --task <task-id> --lease <lease> --file <input-file> --expected-sha256 <sha256>` from the recorded task or base worktree; the input file must stay under that calling worktree. Identical current content is an idempotent no-op; otherwise the digest prevents overwriting a newer revision. Ready accepts a change only to the complete `Current progress` block. Keep all phases of one change in this task; update the anchor when the target, scope, acceptance, progress, or a material blocker changes. An older active or ready task can be repaired into the normal root flow with `anchor bind-root --task <task-id> --lease <lease> --root <root-id> [--root-anchor-file <absolute-path>]`; identical binding is safe to retry, while a different root is rejected. On an actual continuation or root-plan change, `anchor refresh-root` returns that current task anchor and the complete root plan together; it is not required immediately after Start or binding.
+Before Start returns a writable worktree it creates one local task anchor. If a
+project configures `runtime_adapter.activate`, the task stays `starting` until
+the Adapter records success and DWW repeats the clean identity check. At this
+point the Adapter receives task, slot, worktree, base, and port-block facts; it
+does not receive `candidate_head`, because no candidate exists. Activation
+failure is retryable through the recorded task, while contamination is preserved
+and quarantined.
 
-When `runtime_adapter.activate` is configured, isolated Start keeps both task and slot in `starting` after the exact branch, worktree, directory identity, candidate head, and anchor exist. DWW then invokes the approved project command with an immutable context containing those facts and the slot's deterministic 100-port block. Only a successful receipt and a second clean identity check atomically make the task and slot `active`. A command failure remains retryable by the same Start request or `recover`; a proven successful receipt is reused after interruption. Any tracked, ordinary-untracked, protected, or unknown-ignored contamination quarantines and preserves the worktree. Commit and Ready cannot begin while activation is incomplete.
+Work only in the returned worktree. Update the anchor when its target, scope,
+acceptance, current progress, or material blocker changes. Do not stage a broad
+set of files: `commit` requires a reviewed exact path manifest and preserves any
+unreviewed content. See [task governance](task-governance.md) for anchor update
+and continuation details.
 
-If the approved `activate` code itself is the blocker, `recover --task <id> --repair-runtime-adapter --path <exact-adapter-input>` is the only managed bootstrap exception. It requires the exact persisted failed activation receipt and the original isolated task to remain clean, exact, pre-activation, and free of a live operation; both `activate` and `release` must be present in the approved plan. Every repeated `--path` must be a tracked exact path already covered by the approved `runtime_adapter.input_paths`; only `.solo-ai/config.toml` is additionally allowed so the command declaration itself can be repaired. The same task becomes active with an explicit skipped-activation receipt, and Commit accepts only the frozen exact path list—not the full glob expansion. Normal Ready, candidate publication, batch composition, and Full still apply. Finish invokes the repaired release with `reason = runtime-adapter-repair`; removing the required release command or failing to clean a partial activation preserves the candidate and base instead of releasing the slot.
+## Ready and Finish
 
-If Start is quarantined before branch and anchor creation because slot inspection encounters retained or linked content, DWW never deletes that content. After an operator removes the exact blocker, `recover` or the same `request_id` may resume only the original task, slot, base, branch name, and managed-directory identities. Any partial or conflicting Git fact remains quarantined.
+Ready remains available for development evidence and legacy policies. It checks
+the exact task identity and selected Ready profiles. The default candidate-first
+policy does not make Ready a mandatory project-test gate: run useful development
+checks, then Finish preserves the exact source candidate and the combined batch
+runs the required integration checks.
 
-A genuine pre-anchor task fails Ready until its execution contract is reviewed. `anchor adopt --task ... --objective ... --target ... --scope ... --acceptance ... --confirm <task-id>` reconstructs only that explicit local anchor. It refuses terminal tasks, blank fields, links, mismatched confirmation, and automatic inference from chat or stale plans.
+Direct integration remains compatibility for a repository explicitly configured
+for it. Its Finish records a persisted transaction and fast-forwards only the
+exact clean base; it never resets, cleans, or adopts ambiguous content.
 
-When a prior host session ended while an isolated `active` or `ready` task still has real uncommitted work, do not read or reuse its old lease and do not abandon or recreate it. After confirming no DWW operation, registered process, or validation is alive, use `handoff --task <id> --confirm <task-id>:<branch>:<head>`. Handoff rechecks the registered worktree, immutable managed-directory identity, branch, exact committed HEAD, and verified anchor, then rotates only the lease owner. It never stages, cleans, merges, resets, rebases, reads, or changes the retained worktree contents. It rejects in-place, terminal, candidate-published, finishing, abandoning, identity-drifted, or unsettled-validation tasks; resolve those through their normal lifecycle recovery path.
+## Candidate-first delivery
 
-`commit` requires an exact complete path manifest. Direct integration and old batched policies retain `ready`: it safely synchronizes a forward base, validates the Ready closure, and records proof. The current candidate-first default does not require a separate Ready step; developers run useful checks while developing, then Finish preserves only the exact source candidate. Ready profiles contain only syntax/static checks, affected compilation, and light contracts; heavy profiles are valid only at batch integration. Each profile rechecks the expected base and candidate around validation admission and execution. Proof reuse requires the same candidate tree, normalized command, tool/platform facts, declared environment hashes, and tracked input closure. Identity drift fails closed. An unchanged deterministic failure is not blindly rerun when the profile declares complete inputs and no external state. If another integration advances the base, Ready resynchronizes and may reuse exact unchanged evidence. Five retries bound convergence; continued movement preserves the task. When the read-only merge prediction finds a real conflict, the task may explicitly merge the current recorded base in its own worktree and review the resolution. Exact-path Commit accepts that merge only while `MERGE_HEAD` still equals the current forward base head; arbitrary or stale merge identities fail closed. The separately recorded candidate-repair merge follows the same exact-path gate.
+New repositories default to batched candidate-first integration:
 
-## Legacy direct integration
+1. Finish freezes `refs/dww/candidates/<id>` and records the exact source in
+   `held` state.
+2. If configured, the Runtime Adapter releases project resources without
+   changing the task tree.
+3. DWW rechecks cleanliness, releases the task worktree and slot, then marks the
+   candidate `pending`.
+4. The task anchor stays until the candidate is delivered, withdrawn, or the
+   task is otherwise terminal.
 
-Direct is retained for an explicitly configured or pre-0.5 repository. `finish` freezes task, slot, worktree, branch, base, candidate, and proof identity in a persisted transaction, then fast-forwards the recorded clean base. The transaction moves `prepared → promoted → completed`. Completion keeps the slot unallocatable until exact cleanup and released-directory checks succeed. The completed receipt is a rebuildable projection, not the transaction log.
+The source candidate is immutable. Publishing it ends the developer's coding
+round, but it is delivered only after a completed batch is contained in the
+current base. Runtime effectiveness is a separate explicit project check.
 
-`recover` classifies an interruption from persisted identity and Git ancestry. An already promoted candidate proceeds only through exact cleanup. A forward base that no longer matches returns the unpromoted task for a fresh Ready; rewritten bases, dirty worktrees, moved refs, unknown ignored content, or ambiguous Git facts fail closed. Successful direct completion deletes the task anchor.
+The pool counts held, pending, and sealed nonterminal candidates. Its default
+capacity is 10. A full pool preserves the publishing task rather than dropping
+work. A release failure leaves a candidate held and recoverable; it cannot enter
+a batch.
 
-## Candidate-first integration
+### Automatic batches and explicit tails
 
-New repositories use `integration.mode = "batched"`, `seal_policy = "auto_full"`, `candidate_validation = "batch"`, and `tail_policy = "explicit"`. Finish runs task-level safety but does not require project validation for a default source candidate; instead of moving the base it:
+With `seal_policy = "auto_full"`, the third eligible pending candidate in the
+same frozen-base and policy lane automatically freezes the oldest exact three.
+The lane includes base ref, base head, and activation epoch, so candidates from
+different bases or policies are never mixed.
 
-1. freezes an immutable `refs/dww/candidates/<candidate-id>` ref and exact source identity in `held` state;
-2. runs the optional project runtime Adapter `release` command against an immutable JSON context;
-3. verifies that the task worktree is still clean and uncontaminated;
-4. detaches and deletes only the task branch, releases the slot, and activates the candidate as `pending`; and
-5. keeps the task anchor until the candidate reaches a real terminal outcome.
-
-## Candidate handoff and repair
-
-Candidate publication ends the developer's current implementation round, not delivery. The candidate stays immutable and the task anchor remains until integration or withdrawal. In Codex Desktop, the CLI records the injected exact `CODEX_THREAD_ID` at Start unless an explicit `--host-kind/--host-thread` compatibility override is supplied. The candidate source is immutable; DWW never substitutes a title, UI state, Hook session id, or inferred identity.
-
-The host that actually seals or reconciles a batch with an exact host reference becomes its coordinator. It owns the native follow-through while that batch is active: inspect persisted facts, run or recover integration, and send any repair notification through the host's own task API. `host-handoff status` exposes durable actions but does not wake, schedule, or message another task itself.
-
-When DWW can attribute a composition conflict to a single retained candidate, it writes one idempotent repair receipt. Its coordinator obtains a stable, redacted payload with `host-handoff repair dispatch`, sends it with the host-native task API, and records the observed send result using `host-handoff repair delivery --attempt <returned-id>`. A payload is `prepared` until that separate receipt says `sent`, `uncertain`, or `failed`; every returned attempt id binds its matching sender, recipient, coordinator revision, and (for a repair result) candidate, so a late receipt cannot replace a newer attempt. Limited explicit retries never turn preparation into a false success. The recorded source calls `host-handoff repair claim` then `host-handoff repair prepare`, whose local terminal output returns the repair task’s worktree, anchor, and lease without exposing it in normal JSON or status output. Publishing that repair candidate records a pending return to the current coordinator; the repair host uses `result-dispatch` and `result-delivery --attempt <returned-id>`, then the coordinator integrates it. Recovery replays a missing repair-candidate association from the existing task/candidate identity. The handoff reaches `resolved` only when the terminal candidate in its explicit replacement chain is actually delivered into the current base. An unavailable coordinator may be replaced only with `host-handoff batch take-over` at the exact stored coordinator revision. An unavailable source may be replaced only with `host-handoff repair take-over --reason ...`; the original source remains in the receipt. Validation failures and promotion blocks do not auto-create a repair request; after reviewing exact test, log, and candidate evidence, the current coordinator may make a bounded validation attribution with `host-handoff repair attribute`.
-
-Pool capacity defaults to 10 and counts held, pending, or sealed candidates. An Adapter failure leaves the durable candidate held and the task recoverable; it cannot enter a batch and the base stays unchanged. Full capacity makes Finish fail closed while preserving the ready/publishing task and its lease. A retained candidate from a deterministic failed generation remains available for exact repair or reuse but no longer consumes active capacity.
-
-When the exact project Adapter code that caused a held release has itself been delivered on the clean base, an explicit `recover --repair-runtime-adapter --path <exact-input>` may resume only that prepared publication. Every named path must be tracked, changed from the candidate worktree, and covered by the delivered Adapter's input closure. DWW executes the delivered Adapter inputs while keeping the process working directory and immutable context bound to the original candidate worktree, then records its successful receipt in the existing publication transaction before activation. It never changes the candidate ref or candidate tree, and rejects an unadvanced/dirty base, another task or worktree, a non-held candidate, unchanged/uncovered paths, receipt drift, or any ambiguous release fact.
-
-Start, candidate activation, Abandon, and tail reconciliation share the candidate-admission lock. Once one policy epoch and exact frozen local base lane contains the configured number of eligible candidates, DWW freezes that oldest full batch in publication order. The lane includes the immutable `base_head`, so automatic integration never guesses that candidates created before and after a base advance belong together. The Finish that completes the full batch releases its task worktree before long integration, then obtains the single persisted integration turn. Only one generation for a base may execute at once; later work may accumulate without making Finish wait for an existing long batch. No resident DWW controller is required: an interrupted generation is resumed from recorded phases and Git facts.
-
-`batch reconcile --force --cause round-complete --reason <one-line-basis>` freezes a smaller tail only from the exact pending candidates in one frozen-base-and-policy lane (`base_ref + base_head + activation_epoch`) after the coordinator completes the round. `user`, `deploy`, and `dependency` record explicit immediate-integration reasons. Activity and elapsed time never choose candidates; round completion also refuses a lane that still has active producers. A Start during the admission turn either blocks the freeze or begins after the immutable snapshot.
-
-### Compact status and Finish delivery intent
-
-The ordinary human `status` output remains short, while the legacy `--json status` response retains its compatibility payload and reconciliation behavior. Use `status --compact` for a read-only current snapshot; `--task`, `--root`, and `--batch` select one exact scope, and `--history` opts into terminal records. `candidate status --compact` is the equivalent candidate view. Compact reads do not reconcile operation receipts, update state, or load history unless requested; candidate Git facts are memoized only for that request.
-
-For a batched source task, `finish --cause user|deploy|dependency|round-complete --reason <one-line-basis>` records an optional delivery intent in the same publication transaction as the source candidate. The first persisted intent is immutable across retry and recovery. After publication is safe, DWW calls the existing reconciliation path only for that candidate's exact pending lane; an unrelated active batch or lane is never frozen. It validates and executes the same Full gate as a normal tail. Supplying neither option preserves the beta.5 Finish behavior. Direct, in-place, and non-batched tasks reject the intent before publication.
-
-There is deliberately no maximum candidate age or longest-wait auto-seal. A producer remains part of the timing decision until it reaches a recorded terminal state. An explicit round completion, user request, deployment, or downstream dependency may call `batch reconcile --force --cause round-complete|user|deploy|dependency --reason <one-line-basis>`; it still freezes only the current exact pending snapshot. `batch seal --candidate ...` remains the exact-list compatibility and recovery interface, and a smaller list records the same cause and reason. Seal intent excludes that explanation, so retries with the same ordered candidates, base, and policy epoch return the same generation instead of duplicating it or changing the first record. An unchanged exact list can advance beyond a diagnosed failed generation only through `--after-failed-batch <id>`; that predecessor identity joins the new intent, making retries idempotent while a later retry must explicitly name the newly failed generation.
-
-Both full and tail batches apply each candidate's exact tree difference to an isolated integration worktree and create deterministic local integration commits. When configured, the paired project Runtime Adapter `batch_activate` establishes project-owned validation resources from the exact frozen batch identity, positive persisted `runtime_cycle`, and dedicated port block before combined integration validation starts. DWW then runs only Ready plus `full_scope = "integration"` profiles selected by the combined tree, records `passed`, `failed`, or `interrupted`, and invokes `batch_release` with the same cycle before promotion, failure finalization, or retry. A `full_scope = "complete"` profile is an explicit diagnostic command, never a normal batch or release gate. A failed or uncertain activation/release receipt leaves the generation active, blocks `main`, and is retried by `batch recover`; successful receipts are reused only for identical declared inputs, command, input, context, and cycle identity. Once release succeeds, any later validation retry starts a new cycle and invokes activation again. DWW finally rechecks the composed worktree, base snapshot, and clean checked-out base worktree before fast-forwarding. A complete pure development proof can be reused in a later batch when its declared inputs still match. Projects select database, complete builds, authentication, and browser flows narrowly in the integration scope when the frozen changed paths need them; recovery after an already-passed batch validation resumes release/promotion without restarting validation. See [verification-reuse.md](verification-reuse.md).
-
-Only an exact complete-batch count under `auto_full` or an explicit tail request may create a seal. UI task counts, raw worktree enumeration, SessionEnd, Hook delivery, and quiet time cannot choose a candidate set. A later revision cannot mutate a captured generation. `start --supersedes` publishes a repair candidate for a future generation.
-
-Composition or final-validation failure releases any configured batch runtime, records the generation as failed, and preserves the base. Its candidates become retained rather than automatically pending again, so another publication cannot blindly recreate the same failed batch. A composition failure records the exact conflicting candidate and makes only that unsealed retained candidate eligible for `candidate repair --candidate <id>`. The command creates an idempotent managed task on the latest base, writes a complete repair anchor, and prepares the immutable candidate ref with `merge --no-commit --no-ff`; clean and conflicted preparations both remain inside the repair worktree. Exact-path Commit may complete only this recorded repair merge. Publishing the verified repair supersedes the old candidate. Other unchanged compatible retained candidates may be named again by exact identity in a reviewed new generation.
-
-Automatic repair preparation is bounded to two generations in one supersession chain. The host resolves a prepared conflict without user interruption when executable facts, durable contracts, and the current user request determine one answer. It requests a decision only when they leave materially different product, permission, migration, deletion, security, or test outcomes open. Final-validation and promotion failures are not eligible for automatic merge repair and retain their evidence for diagnosis. `batch recover` is reserved for an interrupted nonfailed transaction and resumes from the recorded phase and Git facts. After promotion it completes worktree/ref cleanup idempotently. Successful completion deletes every included task anchor. `candidate withdraw` deletes only an unsealed pending or retained candidate and its anchor. For a durably failed dedicated generation, `batch retire` records intent, verifies its original directory and clean detached result, then performs exact conditional retirement as described in [safety.md](safety.md). Once source removal begins, recovery uses its immutable receipt and saved result rather than demanding an intact source tree or adopting new contents. A terminal projection requires both the original path and exact Git registration to be absent; candidate refs and failure history remain. For explicitly approved disk maintenance, `batch retire --fast --batch <id>` is limited to a failed dedicated generation whose candidates are all `superseded` or explicitly `withdrawn`; it performs the same identity and protected-content preflight, stages the directory on the same volume, skips only per-file hashes in declared regenerable roots, and resumes only from recorded staging facts. `batch metrics` derives batch fullness, candidate wait, and executed Full duration from existing state and proofs without becoming lifecycle authority. A completed schema-1 batch that only has legacy weak proof is reported separately from a current batch whose Full proof is missing, preserving both historical audit truth and present-gate visibility.
-
-Candidate publication is not delivery. Summary derives delivery from passed Full, confirmed runtime release, and the composed head being contained in the current base; pending return bookkeeping is reported separately. Recovery after the fast-forward never repeats passed Full just because recording promotion was interrupted or the base advanced further. When a user explicitly asks whether that source is effective in a running environment, `runtime verify --candidate <id>` invokes the project Adapter only after delivery and records fresh runtime evidence. DWW does not interpret ports, databases, browsers, authentication, deployment, or runtime-version semantics.
-
-### Reusable integration workspace
-
-New policy freezes `worktree_mode = reusable`. The existing serial integration lock covers acquisition, composition, validation, promotion, failure recording and return. The candidate pool records one location with current batch owner, monotonic generation, directory identities and a registering flag for interrupted creation. Acquisition uses a non-force checkout that does not overwrite ignored files. Batch heads are pinned by `refs/dww/batch-heads/<batch-id>` before recording their identities; candidate refs, proofs and command logs remain independent of workspace lifetime.
-
-Ordinary success or failure with exact clean Git state, saved results, known retained content and confirmed resource release returns ownership without walking dependency contents or deleting caches. Reusable composition first applies each exact candidate patch in a disposable Git index. A predicted conflict therefore leaves the shared worktree clean, preserves the last composed commit and candidate refs, and returns ownership before a repair or later batch uses the location. The temporary index is not an additional lifecycle store. A later owner increments generation. Old returned batches are idempotent and cannot touch that newer generation, including through `batch retire`. Unexpected worktree changes, pre-existing conflicts, unknown content, path replacement, unreadability or uncertain release keep the original scene; this preflight does not authorize resetting an already dirty workspace. A missing idle location is repaired only after checking its saved ref and exact parent identity, using targeted non-force Git registration removal; missing active or unowned locations fail closed. No alternate workspace is spawned around an unresolved owner.
-
-Older frozen `dedicated` batches retain their original per-batch directory and physical cleanup/recovery. Switching configuration only affects newly started tasks. Physical disk reclamation is explicit maintenance, not part of ordinary reusable return or a new background scheduler.
-
-## Abandonment
-
-`status` projects a task's `candidate_delivery` and, when applicable, its `batch_ownership`: candidate ID/status, batch ID, full-or-tail kind, persisted phase, and the current batch-run process with a live-identity result. This lets a task card distinguish “ready locally” from “already owned by batch Full” without inferring delivery from the task state alone.
-
-`abandon --reason <one-line>` uses a persisted transaction under the integration and maintenance locks. Before stopping registered processes or releasing task runtime, it takes the candidate-admission lock and rejects a candidate that is queued or held by an active batch; the refusal names the candidate, batch, kind, and phase. The CLI freezes its reason, source, and start time in that transaction (or the in-place compatibility audit), so recovery and retries do not alter it. It never discards tracked changes or uses blanket `git clean`. Ordinary untracked files are removed only through unchanged-object checks; protected, unknown, replaced, or late content blocks release. Task-ref deletion verifies every other active task ref. Successful abandonment deletes the task anchor.
-
-A published candidate is no longer an active leased task and is not abandoned through task cleanup. Use `candidate withdraw --candidate <id> --reason <one-line>` while it is pending. Withdrawal removes it from future integration but preserves its exact candidate ref after SHA verification; an interrupted or mismatched ref remains protected for recovery. `candidate status --check` is the explicit read-only DWW namespace diagnostic; normal status stays fast and reports that no scan occurred.
-
-## In-place compatibility
-
-`start --in-place --session` is explicit compatibility, not the ordinary current-task bypass. It requires one clean attached current worktree and trusted session identity, creates no slot, and binds:
+A smaller tail requires:
 
 ```text
-base_worktree + branch + start_head + expected_head + session fingerprint + lease
+batch reconcile --force --cause round-complete --reason <one-line-basis>
 ```
 
-Commit, verify, Ready, Finish, and abandon recheck the same binding. In-place Finish writes a receipt and releases the task only; it does not merge, detach, reset, clean, or delete a branch. A mismatch quarantines and preserves files. `resume-in-place` transfers only an unchanged recorded identity with exact confirmation. In-place tasks also receive the standard DWW task anchor and remove it only on successful Finish or explicit clean abandonment.
+`user`, `deploy`, and `dependency` are explicit immediate-integration causes.
+`round-complete` refuses a lane with active producers. Start, candidate
+activation, Abandon, and tail reconciliation share admission locking, so the
+chosen candidates are an exact snapshot. UI counts, raw worktree enumeration,
+Hook delivery, quiet time, and session end cannot choose a batch.
 
-Codex may create a clean linked worktree in detached HEAD state even when the caller requested a branch. A trusted session may make that worktree usable through `start --in-place --session <session> --bind-branch <task-prefixed-branch>`. The worktree must be registered, non-primary, detached, clean, and free of an active isolated DWW task. The requested local branch must use the configured task prefix, must not be checked out elsewhere, and, if it already exists, must resolve to exactly the detached HEAD. DWW attaches or creates only that branch, rechecks the unchanged HEAD, then records the ordinary in-place binding. Any ambiguity leaves the detached worktree and branch untouched.
+A batched source task can carry the same intent at publication with
+`finish --cause <cause> --reason <basis>`. DWW persists the first intent and
+reconciles only that candidate's exact pending lane. Without both options,
+Finish retains ordinary source-publication behavior.
+
+### Combined verification and promotion
+
+A frozen batch applies each candidate's exact tree difference in an isolated
+integration worktree, runs selected Ready and integration Full profiles, and
+then rechecks the composed head and sealed base before protected promotion. Pure
+proofs may be reused only under their matching contract; mutable profiles run
+again. [Verification reuse](verification-reuse.md) explains the selection and
+proof rules, while [Runtime Adapter](runtime-adapter.md) covers optional batch
+resources.
+
+Failure before promotion records the generation and preserves the base. An
+interrupted nonfailed generation resumes with `batch recover`; a deterministic
+failure is handled through [recovery](recovery.md), not blindly resealed.
+
+## Candidate inspection, withdrawal, and abandonment
+
+Use ordinary `status` for a human summary. `status --compact` and `candidate
+status --compact` provide read-only current views without receipt reconciliation;
+use exact task, root, or batch selectors to narrow the projection and request
+history only when needed. `candidate status --check` explicitly compares the
+registered candidate records with the DWW ref namespace.
+
+`candidate withdraw --candidate <id> --reason <one-line>` removes an eligible
+pending or retained candidate from future integration after exact SHA checking.
+It keeps the immutable candidate ref and frozen withdrawal audit facts. It is not
+task abandonment. `abandon --reason <one-line>` applies to an active task,
+preserves tracked and protected content, and refuses a candidate already held by
+an active batch. Neither operation uses blanket cleanup.
+
+## Compatibility modes
+
+An explicit in-place task binds one clean registered worktree, branch, start
+head, expected head, and trusted session. It never merges, detaches, resets,
+cleans, or deletes that worktree at Finish. A trusted detached linked worktree
+may attach exactly one task-prefixed branch through the recorded bind path.
+
+Legacy direct and explicit-seal policies remain readable compatibility modes.
+Each task snapshots its resolved policy at Start; a later configuration change
+does not rewrite active task or candidate behavior.
 
 ## Local-only boundary
 
-DWW Start, Ready, Finish, candidate publication, seal, recovery, and cleanup never fetch, pull, push, create a PR, deploy, rebase, squash, amend, or rewrite history. An explicit user-requested remote sync is a separate dry-run-first ordinary non-force push from the clean integrated base worktree.
+Start, Ready, Finish, candidate publication, sealing, recovery, and cleanup do
+not fetch, pull, push, create a PR, deploy, rebase, squash, amend, or rewrite
+history. An explicitly requested remote publish is separate: use the clean base
+worktree, verify its branch and remote, run a dry-run, and never force, delete,
+tag, create a PR, or deploy unless separately authorized.

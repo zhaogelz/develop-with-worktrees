@@ -4,6 +4,7 @@ from argparse import Namespace
 import hashlib
 import io
 import json
+import re
 import subprocess
 import sys
 import tomllib
@@ -375,54 +376,60 @@ def test_hook_definition_remains_the_stable_trust_contract() -> None:
 
 def test_user_facing_docs_describe_only_the_current_contract() -> None:
     repository_root = Path(__file__).parents[2]
+    plugin_root = repository_root / "plugins" / "develop-with-worktrees"
+    skill_root = plugin_root / "skills" / "develop-with-worktrees"
+    references = sorted((skill_root / "references").glob("*.md"))
+    assert {path.name for path in references} == {
+        "configuration.md",
+        "delegated-adapters.md",
+        "delegated-internals.md",
+        "delegated-migration.md",
+        "host-handoffs.md",
+        "lifecycle.md",
+        "recovery.md",
+        "runtime-adapter.md",
+        "safety.md",
+        "task-governance.md",
+        "verification-reuse.md",
+    }
     documents = [
         repository_root / "README.md",
         repository_root / "README.zh-CN.md",
-        repository_root / "CHANGELOG.md",
         repository_root / "总体规划.md",
-        repository_root
-        / "plugins"
-        / "develop-with-worktrees"
-        / "skills"
-        / "develop-with-worktrees"
-        / "SKILL.md",
-        repository_root
-        / "plugins"
-        / "develop-with-worktrees"
-        / "skills"
-        / "develop-with-worktrees"
-        / "references"
-        / "delegated-migration.md",
+        repository_root / "docs" / "architecture.md",
+        repository_root / "docs" / "development.md",
+        skill_root / "SKILL.md",
+        *references,
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in documents)
     assert "0.1.0-beta.2" not in text
     assert "01..05" not in text
-    assert "schema 3 only" in text
-    assert "machine-global weighted FIFO" in text
     assert "--json route" in text
-    assert "mature workflow" in text
-    assert "native task/subagent" in text
-    assert "drain-only" in text
-    assert "optional hardening" in text
-    assert "hooks/hooks.json" in text
-    assert 'integration.mode = "batched"' in text
+    assert "does not receive `candidate_head`" in text
+    assert "candidate-pool schema is 6 and reads" in text
+    assert "schemas 1 through 5 before the next write upgrades them to 6" in text
+    assert "keeps the immutable candidate ref and frozen withdrawal audit facts" in text
+    assert "Approval is not a profile proof" in text
+    assert 'integration = { mode = "batched"' in text
     assert 'seal_policy = "auto_full"' in text
-    assert "Every three candidates" in text
-    assert "每满 3 个候选" in text
-    assert "batch seal" in text
     assert "candidate_capacity = 10" in text
-    assert "task anchor" in text
-    assert "任务锚点" in text
     assert "root-anchor" in text
-    assert "complete plan" in text
-    assert "root-anchor accept" in text
-    assert "不再是多 AI 任务指挥中心" in text
-    assert "Dual-run rules" in text
-    assert "delegated revoke" in text
+    assert "[Recovery](references/recovery.md)" in text
+    assert "[Runtime Adapter](references/runtime-adapter.md)" in text
+    assert "[Host handoffs](references/host-handoffs.md)" in text
     assert not (repository_root / "需求.md").exists()
     assert not (repository_root / "方案.md").exists()
-    assert "After every install or hook change" not in text
-    assert "每次安装或钩子升级后" not in text
+    for document in [skill_root / "SKILL.md", *references]:
+        pattern = r"(?<!!)\[[^\]]+\]\(([^)]+)\)"
+        for raw_target in re.findall(pattern, document.read_text(encoding="utf-8")):
+            target = raw_target.strip().split(maxsplit=1)[0].split("#", 1)[0]
+            if not target or "://" in target or target.startswith(("mailto:", "/")):
+                continue
+            resolved = (document.parent / target).resolve()
+            assert resolved.exists(), f"{document} links to missing {raw_target}"
+            assert resolved.is_relative_to(plugin_root), (
+                f"{document} links outside the packaged plugin: {raw_target}"
+            )
 
 
 def test_cli_json_status_masks_uninitialized_state(git_repo: Path) -> None:

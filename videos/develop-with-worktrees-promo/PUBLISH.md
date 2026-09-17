@@ -1,6 +1,6 @@
 # 多平台发布文案
 
-本视频为约 36 秒、1080×1920 的无配音竖版宣传片，适合小红书与 B 站竖屏投稿。发布时使用 `renders/develop-with-worktrees-promo.mp4`；若尚未渲染，先在 HyperFrames 预览中确认画面。
+本视频为约 36 秒、1080×1920 的无配音竖版宣传片，适合小红书与 B 站竖屏投稿。发布文件是 `renders/develop-with-worktrees-promo-36s.mp4`；渲染前先在 HyperFrames 预览中确认画面。
 
 ## 小红书
 
@@ -23,7 +23,7 @@ A 改登录，B 也改接口，测试又改了配置；等到要交付时，才�
 公开 Beta 安装：
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref main
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
@@ -48,7 +48,7 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 公开 Beta：
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref main
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 

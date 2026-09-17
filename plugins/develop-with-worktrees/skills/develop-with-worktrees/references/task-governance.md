@@ -1,64 +1,99 @@
 # Task context and durable documentation
 
-Use a short-lived task anchor to preserve the active implementation contract without turning every task into a permanent plan document.
+Use a short-lived task anchor to preserve the active execution contract without
+turning every change into a permanent plan document. This reference explains when
+anchors exist, what they hold, and how a confirmed objective survives a
+continuation.
 
-Routing decides which lifecycle owns task state. DWW-managed task context is now part of that lifecycle; task decomposition and worker scheduling remain owned by the host's native task/subagent system. Under `defer`, create no DWW task, anchor, candidate, or batch state. Apply the repository's own context rule after its lifecycle authorizes the writable workspace.
+## Lifecycle ownership
 
-## When to create an anchor
+Route first. A DWW-managed task gets its anchor from DWW. Under `defer`, create
+no DWW task, anchor, candidate, or batch state; follow the repository's own
+context rule after it authorizes a writable workspace. Read-only investigation
+does not create an anchor.
 
-Managed `Start` always creates one before returning the writable worktree. For a deferred or disabled workflow, follow its own rule and create a temporary anchor when any of these is true:
+A managed anchor lives at
+`<git-common-dir>/solo-ai/task-anchors/<task-id>.md`. It is a regular local UTF-8
+file, available from the base checkout and task worktree, and is never staged or
+committed.
 
-- the user confirmed a plan and asked to start or continue it;
-- the task has multiple implementation steps, repositories, modules, or acceptance checks;
-- completion is likely to span context compression, a model change, or a later continuation.
+## Child anchors
 
-A clearly bounded single small edit may omit it only outside the managed lifecycle. Read-only analysis never creates one.
-
-A managed task always uses `<git-common-dir>/solo-ai/task-anchors/<task-id>.md`. This makes the anchor available from the base checkout, task worktree, and recovery commands without placing it in the repository or requiring `.gitignore` changes. `Start` returns the exact path, Ready validates its regular-file, size, UTF-8, and task-id identity, and `status` lists it.
-
-## Confirmed-objective root anchors
-
-If the user explicitly confirms a complete implementation plan, asks to set that plan as the objective, or asks to proceed with it, the host creates exactly one root anchor before the first related child `Start`. It may do this even if the eventual work has only one child: root-anchor eligibility comes from the need to retain a confirmed objective, not from the eventual number of tasks. It belongs at the originating repository’s `<git-common-dir>/solo-ai/root-anchors/<root-id>.md`. The host supplies the complete final plan through a UTF-8 `--plan-file` below the repository or an explicit absolute external plain file, a short `--plan-source`, and its stable `--request-id`; a retry with the same request ID and plan is idempotent, while an attempt to reuse it for a changed plan fails closed.
-
-The structured root stores the complete confirmed plan—not a lossy summary—plus immutable purpose and baseline, current target/scope/acceptance, a monotonically increasing plan version, a source-tagged record of explicit user amendments, current progress, and the overall acceptance result. The plan body may contain its own Markdown headings, lists, and code; DWW delimits it with reserved internal markers so it can be read back in full. The source input is not a second canonical document after creation. Do not create a root for discussion, read-only investigation, or an ordinary bounded change without a separately confirmed plan. The host, not DWW, decides whether the user confirmed it.
-
-Only an explicit user change may replace the effective plan with `root-anchor amend --plan-file ... --source ... --summary ... --expected-sha256 ...`, or append its UTF-8 words verbatim with the mutually exclusive `--change-file ...`. Plan and change inputs follow the same explicit external plain-file rule as creation; acceptance evidence remains under the managed repository. Both operations increment the version, preserve the prior root version and amendment record, and reset the overall result to pending. The generic structured `root-anchor update` uses the same write path: a full-plan, target, scope, or acceptance-criteria change needs the next version and user-change record, resets acceptance, and cannot directly write `accepted` or `cancelled`. `root-anchor progress` changes only execution status. Technical implementation choices that do not alter purpose, scope, or acceptance stay local to the child task; neither the host nor DWW may silently rewrite the root plan. Existing legacy roots remain readable under their former rules; no agent may invent an unrecorded historic plan for them.
-
-A related child in the origin repository uses `start --root-anchor <root-id>`. A related child in another repository uses `start --root-anchor <root-id> --root-anchor-file <absolute-root-anchor-path>` and still keeps its normal unique task anchor, worktree, candidate, and lifecycle. Candidate repair inherits the source task's root binding. DWW verifies that an external path is the exact non-linked root file for that ID, persists the fixed locator in the child state, and writes one exact child-state locator into the root’s machine-managed registry. It never discovers repositories globally or creates a second root copy. A missing, changed, linked, or identity-mismatched root reference fails closed before further lifecycle work.
-
-Root anchors never define candidate membership, candidate groups, `scope_id`, task dependencies, worker scheduling, batch sealing, or cross-worktree atomicity. The host remains responsible for native orchestration. Start or `anchor bind-root` already prints the current root body once and records that version. On a real continuation, handoff, model/context recovery, root-version change, or candidate repair, read the child anchor and run `anchor refresh-root` once; that operation returns the current child anchor and complete root body together, then records its version without copying a version or digest. It does not ask the user and records no duplicate during continuous work on the same version. The record is not proof that an AI understood the full text. Only Commit, actual Ready, and Finish candidate publication require the recorded version to equal the current structured root version; a stale record gives an automatic refresh-and-retry path without discarding work. `root-anchor close` rejects linked local or registered external nonterminal children and fails closed if a registered child state is unavailable or ambiguous. For every `candidate-published` child, it follows the exact persisted supersession lineage and permits closure only after the terminal candidate is integrated or explicitly withdrawn; publication alone is never delivery. A structured root also requires `root-anchor accept` to record an `accepted` or `cancelled` overall result with evidence for its current plan version before closing.
-
-Use `anchor show --task <task-id> --content` to read the current UTF-8 content; the call without `--content` returns its compact identity, byte SHA-256, and origin-verification status. Save a reviewed revision through `anchor update --task <task-id> --lease <lease> --file <input-file> --expected-sha256 <sha256>`, invoked from the recorded task or base worktree with an input file under that same worktree. The command derives the destination from the task ID, checks the lease, state, physical worktree identity, and original purpose/baseline facts, then compares the byte digest under the maintenance lock and atomically replaces the anchor. If requested content is already current it succeeds as a no-op even when its otherwise-valid digest is old; otherwise a stale digest is rejected so one editor cannot overwrite another. A ready task may change only the complete `Current progress` block. Legacy anchors show as origin-unverified and must pass explicit `anchor adopt` before an update; anchors remain uncommitted and the input file is not itself an anchor.
-
-`candidate repair` fills the managed child anchor before preparing the source merge and retains its source root binding. It records the immutable source candidate, latest repair base, bounded attempt, scope boundary, acceptance path, and the rule that semantic product or safety choices must be escalated rather than guessed.
-
-Other routes must not create this DWW common-dir state. Use the repository-declared location, or a private repository-external temporary file if no safe ignored workspace location exists. Never stage or commit an anchor.
-
-## Minimum content
-
-The child anchor records only the current execution slice. A structured root additionally carries the full confirmed objective and its user-visible revisions. Record only the information needed for those roles:
+Managed Start creates one child anchor before returning the writable worktree.
+It records only the current execution slice:
 
 - original user objective;
-- implementation objects or repositories;
+- implementation target and repositories;
 - reference baseline or candidate identity;
-- scope boundaries and explicitly excluded work;
+- scope boundary and explicit exclusions;
 - acceptance criteria and validation route;
 - current progress, decisions, and unresolved blockers.
 
-Do not copy chat transcripts, hidden reasoning, credentials, leases, or unrelated project history. The anchor is a recovery aid, not a project diary.
+Update it when those facts materially change. A ready task may change only its
+complete `Current progress` block. Use the recorded lease and an input file under
+the recorded task or base worktree for `anchor update`; the digest prevents a
+stale editor from overwriting newer content. Do not copy chat transcripts, hidden
+reasoning, credentials, leases, or unrelated history into an anchor.
 
-## Precedence and recovery
+## Confirmed-objective root anchors
 
-Direct user instructions and repository hard rules remain authoritative. Within those boundaries, a structured root is the source for the confirmed objective, scope, and acceptance criteria; its bound child anchor is the source for the current execution slice. Executable facts in code, tests, schema, and configuration remain authoritative for implemented behavior; stale proposals and archived material do not override either.
+Create exactly one root anchor before the first related child when the user has
+explicitly confirmed a complete implementation plan, asks to set it as the
+objective, or asks to proceed with it. Do not create a root for a discussion,
+read-only investigation, or an ordinary small change without a confirmed plan.
 
-After context compression, a model change, handoff, repair, later continuation, or root-plan change, re-read the child anchor and refresh any bound root before the next modifying action. Do not add a redundant refresh immediately after Start or a successful bind, because that operation already returned the current root. A later user amendment makes the child require this automatic recovery before its next Commit, actual Ready, or candidate-publishing Finish. While active, update the execution contract or progress when either materially changes; once ready, only progress may change. Continue without interruption when the current request, hard rules, and executable facts determine one compatible result. Stop only when they conflict or leave materially different product, permission, migration, deletion, security, or validation outcomes open; do not silently rewrite the anchor.
+The root lives at `<git-common-dir>/solo-ai/root-anchors/<root-id>.md`. Its
+creation receives the complete UTF-8 plan through `--plan-file`, a concise source,
+and a stable request ID. It retains the complete plan, immutable purpose and
+baseline, target/scope/acceptance, monotonically versioned explicit user
+amendments, current progress, and overall acceptance result. The source input is
+not another canonical document after creation.
 
-## Durable-document boundary
+A child starts with `--root-anchor <root-id>`. A cross-repository child must also
+supply the exact external root file; DWW records that one non-linked locator and
+does not discover repositories or copy the root. Root anchors do not define
+candidate membership, task dependencies, scheduler ownership, or batch scope.
 
-At acceptance, first decide whether the work changed a fact that future tasks must continue to obey. Durable documentation is warranted only for a lasting product rule, public interface or contract, data model, permission boundary, architecture boundary, stable project responsibility, or long-lived UI contract.
+Only an explicit user plan change may replace the effective plan through
+`root-anchor amend` or append the user's words as a change. Technical choices that
+do not alter purpose, scope, or acceptance stay with the child. A plan change
+preserves the prior version and resets overall acceptance.
 
-Bug fixes that restore an existing contract, implementation details, tests, builds, validation evidence, debugging steps, and ordinary engineering adjustments stay in code, tests, configuration, receipts, or the existing engineering reference. Do not create a generic `CONTEXT.md`, `requirements.md`, `plan.md`, task ledger, or ADR directory unless the repository explicitly designates it as the canonical home.
+## Continuation and close
 
-When a durable fact changed, update only the repository's existing canonical document for that topic. Do not duplicate the same fact across a root plan, feature plan, README, and task log.
+Start or `anchor bind-root` returns the complete current root once. On actual
+continuation, handoff, model/context recovery, root-plan change, or candidate
+repair, read the child anchor and run `anchor refresh-root` once. That command
+returns the current child and complete root, then records the reviewed version.
 
-For legacy direct integration, DWW removes the anchor after successful Finish. In candidate-first mode it remains after publication and is removed only when the candidate's automatic full batch, explicit exact tail, or a deliberately retained legacy `quiet_or_explicit` tail completes, the unsealed candidate is withdrawn, or the task is abandoned. Publication alone is not delivery. Failed or interrupted Adapter release and integration keep the anchor for recovery. A pre-anchor legacy task must use reviewed `anchor adopt` fields; neither DWW nor the host may invent its old execution contract.
+The record is not proof of understanding and does not ask the user again. Commit,
+actual Ready, and candidate-publishing Finish require the recorded root version
+to equal the current root version. If it is stale, refresh and retry without
+discarding work. Do not add a redundant refresh immediately after Start or a
+successful bind.
+
+`root-anchor close` requires every linked child to be terminal. For a
+candidate-published child, its exact supersession lineage must be integrated or
+explicitly withdrawn; publication alone is not delivery. A structured root also
+requires `root-anchor accept` to record accepted or cancelled evidence for its
+current plan version before closure.
+
+## Precedence and durable documents
+
+Direct user instructions and repository hard rules are authoritative. Within
+them, the root is authoritative for confirmed objective, scope, and acceptance;
+the child anchor is authoritative for current execution facts. Code, tests,
+schema, and configuration remain authoritative evidence of implemented behavior.
+
+At acceptance, update long-lived documentation only when the change alters a
+lasting product rule, public contract, data model, permission boundary,
+architecture boundary, stable responsibility, or UI contract. Update the one
+existing canonical document for that topic. Ordinary fixes, debugging notes,
+tests, receipts, and temporary plans stay in their natural execution evidence.
+Do not create generic `CONTEXT.md`, `requirements.md`, `plan.md`, task ledgers, or
+an ADR directory unless the repository has named one as canonical.
+
+In candidate-first mode, a child anchor remains after source publication until
+the candidate is delivered or withdrawn. Failed integration, interrupted
+release, and uncertain state preserve it for recovery. See [recovery](recovery.md)
+for the actual repair decision tree.

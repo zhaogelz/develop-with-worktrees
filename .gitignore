@@ -9,3 +9,7 @@ dist/
 
 # HyperFrames 渲染产物
 /videos/**/renders/
+/videos/develop-with-worktrees-promo/.hyperframes/frame-packets/
+/videos/develop-with-worktrees-promo/capture/extracted/asset-descriptions.md
+/videos/develop-with-worktrees-promo/capture/extracted/visible-text.txt
+/videos/develop-with-worktrees-promo/capture/extracted/tokens.json

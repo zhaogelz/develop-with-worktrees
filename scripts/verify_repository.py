@@ -20,14 +20,15 @@ URL_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 
 def tracked_paths() -> list[Path]:
     completed = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=ROOT,
         check=True,
         capture_output=True,
     )
-    return [
+    paths = [
         ROOT / value.decode("utf-8") for value in completed.stdout.split(b"\0") if value
     ]
+    return [path for path in paths if path.exists()]
 
 
 def local_target(document: Path, raw: str) -> Path | None:

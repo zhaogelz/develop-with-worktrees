@@ -1,111 +1,93 @@
 # Architecture
 
+DWW is a local Git delivery layer for AI-assisted repository changes. It gives
+the host a durable execution identity without taking over the host's task graph
+or the project's product and runtime responsibilities.
+
 ```text
-Host-native task / subagent orchestration
-  goals, dependencies, workers, waits, user-facing status
-                    ↓ one Git-writing task per worker
+Host task system
+  decomposition, dependencies, workers, user-facing status
+                         |
+                         v
 DWW lifecycle router
-  defer → mature repository lifecycle
-  delegated → exact approved adapter
-  managed → task identity + anchor + isolated worktree → Adapter activate
-                    ↓
-Git safety and evidence
-  exact Commit → optional development proof → Finish
-                    ↓
-Integration policy
-  candidate-first → held → Adapter release → immutable pending pool
-                  → auto three-candidate batch / explicit exact tail
-                  → affected combined proof → protected fast-forward
-  legacy direct   → exact local fast-forward
+  defer -> mature project workflow
+  delegated -> exact locally approved adapter
+  managed -> task identity + anchor + isolated worktree
+                         |
+                         v
+Git lifecycle
+  exact commit -> source candidate -> combined verification -> local promotion
+                         |
+                         v
+Project contract
+  test selection, runtime resources, product decisions, optional effectiveness check
 ```
 
-The top seam is intentional: DWW does not compete with the host's task graph, worker dispatch, dependency management, or task UI. The legacy `solo-ai-orchestration` package remains only to drain already-created state. New work never creates a DWW controller identity or orchestration batch.
+## Responsibility boundary
 
-## Development priorities
+The host owns task decomposition, scheduling, waiting, and messages. DWW owns
+route admission, local task identity, worktrees, anchors, exact commits,
+candidate publication, local integration, and recovery receipts. The project
+owns validation commands, ports, databases, browsers, deployment semantics, and
+product decisions.
 
-DWW is built for fast AI-assisted development by individuals and small teams. After the user has authorized a task, the agent should keep moving through the in-scope investigation, implementation, checks, exact commits, locally permitted delivery, and deterministic recovery. Identity arguments such as `--confirm` verify an object; they are not a second request for user approval.
+The former generic orchestration store is drain-only compatibility. New work
+must not create a second DWW scheduler, task DAG, candidate group, or persistent
+coordinator.
 
-This does not remove the boundaries that make the workflow dependable. The agent still stops when the current request and durable project contract leave a material product, permission, migration, deletion, security, or external-side-effect decision unresolved. It keeps exact candidate identity, required validation, and protection for unknown working-tree content. New persistent services, state, abstractions, or human gates need an observed failure mode and a reason existing mechanisms cannot cover it.
+## Core invariants
 
-## Fast-development refactor validation (0.5.0-beta.7)
+- A detected mature workflow has routing priority. DWW writes no managed state
+  for `defer`; `delegated` requires an exact tracked contract and local approval.
+- A managed task receives one isolated worktree and one local task anchor before
+  it becomes writable. Identity uncertainty, dirty unexpected content, or a
+  moved reference preserves the scene instead of adopting or deleting it.
+- A confirmed objective has one root anchor. It retains the complete plan and
+  explicit amendments; its child anchors retain only their execution slices.
+- An exact-path commit creates the only eligible task change. Candidate
+  publication is immutable source preservation, not delivery.
+- New repositories publish source candidates, automatically freeze an exact
+  compatible group of three, and run affected combined checks before protected
+  local promotion. A smaller tail requires a recorded cause and reason.
+- A passed pure proof is reusable only under matching declared inputs,
+  environment, tools, and logs. Runtime effects and required artifacts are not
+  replaced by a prior success report.
+- A composition conflict, validation failure, and promotion block remain
+  distinct. Deterministic recovery uses recorded identities; it never changes
+  the base by guessing a merge or retrying an unchanged failure blindly.
 
-This is a bounded acceptance record for the compact-query and delivery-intent work. It
-does not claim that every DWW command became faster.
+## State and evidence
 
-- `test_compact_exact_task_query_ignores_unrelated_terminal_history` builds one
-  exact target plus 1, 100, and 1,000 terminal-history records. In all three
-  cases the exact-task view projects one candidate and makes one current-base
-  ref lookup plus one ancestry lookup; the default view returns only history
-  counts. The fixture does not write lifecycle state while querying.
-- A warm-up plus five local `--json status --compact` samples on 2026-09-16,
-  using the beta.7 source tree against a state with 138 historical tasks, 89
-  historical candidates, and 89 historical batches, produced 1,206 UTF-8
-  bytes per response, a 388.3 ms median, and a 384.8–430.9 ms range. The
-  confirmed-plan baseline recorded beta.5's legacy full JSON at 1,064,230
-  bytes and 8,351 ms for 138 tasks, 88 candidates, and 88 batches. Those are
-  deliberately different interfaces and nearby, not identical, snapshots: the
-  comparison demonstrates reduced current-status query work, not a universal
-  latency or throughput promise.
-- Old `--json status` remains its full compatibility path, including receipt
-  reconciliation. `--compact` and exact selectors are read-only projections;
-  an old caller is never silently switched to the new shape.
-- The integration Full profile retains every pre-existing selected check and
-  additionally exercises compact query scale, root-context staleness,
-  deterministic validation failure, Finish intent recovery, tail admission,
-  live-operation waiting, and runtime-release recovery. No Full selection was
-  removed because there is no behavior-coverage evidence for doing so.
-- The accepted failure boundary is explicit rather than automatic: root
-  staleness, live operations, active tail producers, deterministic validation
-  failure, runtime release, workspace ownership drift, and unknown content
-  carry stable codes with safe next actions. The beta.7 source result does
-  not install or replace the beta.6 cached plugin; installation remains a
-  separately authorized operation.
+Lifecycle state lives under the repository's Git common directory, not in the
+tracked checkout. The important groups are:
 
-## Approval and evidence
+| Location | Authority |
+|---|---|
+| `solo-ai/state.json` | slots, task identity, leases, direct transactions |
+| `solo-ai/task-anchors/` and `root-anchors/` | active execution contracts and confirmed objectives |
+| `solo-ai/proofs/` | validation evidence and logs |
+| `solo-ai/candidate-batches.json` | immutable candidates, batches, and reusable workspace ownership |
+| `solo-ai/runtime-adapter/` | content-addressed Adapter receipts |
 
-Machine-local approval describes the executable lifecycle policy: normalized repository and verification configuration, declared commands and environment names, profile coverage and closure, tool and lockfile identity, and Runtime Adapter inputs. Formatting-only policy edits such as comments or line endings therefore keep an existing approval; any semantic command, scope, permission, runtime, or configuration change produces a new plan and an explicit drift report. Older approval records remain readable but cannot authorize a newer plan.
+These are recovery evidence, not a public API for direct editing. The CLI and
+persisted Git facts decide lifecycle truth; status views are projections.
 
-Validation evidence has a separate, profile-scoped identity. Each check binds its own declared inputs, profile definition, tool facts, declared environment values, logs, and applicable frozen base. The aggregate receipt keeps the complete plan for audit, while an unrelated profile or formatting-only policy change does not rerun a check whose own inputs still match.
+## Delivery and runtime are separate
 
-## Local state
+A source candidate is published after its task finishes. It becomes delivered
+only when its completed batch is contained in the current base. An optional
+project runtime check may later determine whether that delivered source is
+effective in a running environment. DWW records the result but never interprets
+project-specific ports, databases, authentication, or deployment state.
 
-All lifecycle state stays under the repository's Git common directory:
+## Design references
 
-```text
-solo-ai/state.json                 slots, tasks, leases, direct transactions
-solo-ai/task-anchors/              active execution contracts
-solo-ai/proofs/                    exact validation evidence
-solo-ai/candidate-batches.json     immutable candidates and sealed generations
-solo-ai/*-receipts/                rebuildable completion projections
-solo-ai/runtime-adapter/           content-addressed Adapter evidence
-```
+The [skill](../plugins/develop-with-worktrees/skills/develop-with-worktrees/SKILL.md)
+routes operating procedures to a focused reference. Detailed policy lives in
+[configuration](../plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md),
+task continuity in [task governance](../plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md),
+and protection rules in [safety](../plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
 
-New tracked `.solo-ai/config.toml` defaults to candidate-first integration: source-only candidates, full batches of three, a pool capacity of ten, and an explicit tail. Start, candidate activation, Abandon, and reconciliation share the admission lock. Exactly the oldest three eligible candidates in one base-and-policy lane freeze once; a smaller exact snapshot freezes only after an explicit round-end or immediate-integration request. There is no age or quiet-period auto-seal. Legacy repositories without an integration table remain direct, and old batched policies retain Ready-gated candidate publication.
-
-## Task anchors
-
-Managed Start creates the anchor before returning the writable worktree. If configured, the optional project Runtime Adapter runs only after the exact isolated task, slot, branch, worktree identity, and candidate head are durable, and receives those facts plus the deterministic slot port block. The task becomes active only after a successful receipt and a second clean identity check; failure stays retryably `starting`, while contamination is quarantined and preserved. If the approved activate implementation itself is broken, an explicit repair recovery can convert only that same clean pre-activation task with an exact failed receipt into an Adapter repair: its activation is recorded as skipped, the caller freezes an exact subset of tracked approved Adapter input paths, Commit cannot escape that list, and the repaired release must clean any partial resources before publication. Ready verifies that the anchor is a regular local UTF-8 file with the exact task id; DWW imposes no content-size quota on task/root anchors, their plan inputs, retained plan versions, or exact closure state. The anchor is available through the Git common-dir rather than copied into every worktree. Direct completion and abandonment remove it. Candidate publication keeps it until explicit batch success or withdrawal.
-
-## Direct transaction
-
-Before changing a base ref, Finish freezes task, slot, worktree path and file identity, branch, base, candidate, and proof. The transaction advances `prepared → promoted → completed`. Git ancestry classifies interruption. Completion keeps the slot unavailable until a final identity/content check publishes it idle. The receipt is a validated projection, not the transaction authority.
-
-## Candidate publication
-
-Batched Finish records a publication transaction before Git cleanup. The default policy creates one exact `refs/dww/candidates/<id>` source identity without forcing a project test; legacy Ready-gated policies keep their existing proof. The optional project Runtime Adapter must release project-owned resources successfully without changing the task tree. DWW then detaches the worktree, deletes only the exact task branch, releases the slot with its directory identity, and activates the candidate as pending. Adapter failure or pool exhaustion leaves a recoverable publishing task and does not touch the base.
-
-## Candidate batch transaction
-
-Automatic full sealing snapshots the oldest configured pending candidate count. `batch reconcile --force --cause round-complete --reason <basis>` snapshots a smaller tail when the host has actually ended that round; `user`, `deploy`, and `dependency` record immediate-integration reasons. UI worker counts, raw worktree counts, Hook delivery, SessionEnd, and elapsed time never choose candidates. `batch seal` remains the exact-list compatibility and recovery interface. The ordered candidates, base, and policy epoch form an idempotent seal intent, so retries cannot duplicate a generation. A reviewed unchanged-candidate successor additionally names its exact failed predecessor; each explicit predecessor can therefore identify at most one successor generation.
-
-The batch uses an isolated integration worktree. For each frozen candidate it applies the exact binary tree difference from that candidate's recorded base and commits the composed result. If the project configures the paired batch Runtime Adapter, DWW passes the exact generation identity, persisted positive `runtime_cycle`, and a dedicated non-slot port block to `batch_activate`, runs only the Ready and integration Full profiles selected by the composed changes after activation succeeds, then calls `batch_release` with the same cycle and persisted validation outcome. Pure profiles with complete declared inputs reuse their valid receipts from development or earlier candidates; mutable profiles run again. Activation and release receipts are content-addressed recovery facts; uncertainty within one command reuses that cycle, but a retry after successful release increments the cycle and cannot reuse a stale activation receipt. Uncertainty retains sole batch ownership and blocks promotion. DWW then rechecks the composed head, confirms the base still equals the sealed snapshot, and fast-forwards the one clean worktree that owns the target branch. Broad regression and pressure profiles are manual project diagnostics, not lifecycle gates.
-
-Failure before promotion releases any configured batch runtime, records a failed generation, and preserves the base. Release uncertainty remains a nonfailed recoverable phase and cannot advance the base. Its candidates become retained and cannot be automatically selected again. A repair publishes a new candidate and the coordinating task may reuse unchanged exact candidates in a new generation. An interruption leaves a nonfailed recorded phase; `batch recover` resumes only that generation. A failed generation's exact clean detached worktree may be removed by an intent-first idempotent `batch retire` without deleting candidate refs or audit history. Read-only `batch metrics` derives full/tail rates, candidate wait, and executed Full cost from existing facts rather than adding policy state. Promotion is followed by idempotent worktree/ref cleanup, candidate completion, and anchor deletion.
-
-Publication and delivery are separate projections. A candidate is delivered only when its completed batch is contained in the current base. An explicit `runtime verify --candidate` may then ask the project Adapter whether that source is effective in its runtime; DWW records the evidence but never interprets project ports, databases, browsers, authentication, or deployment semantics. Terminal status presentation may hide history, but the internal pool remains complete because delivery and repair projections use it. New explicit withdrawal retains the exact candidate ref after SHA verification and freezes its one-line reason in the candidate record; older missing withdrawn refs are historical observations rather than guessed damage. A read-only explicit candidate integrity check compares only the DWW candidate namespace with registered records.
-
-## Delegation and Hooks
-
-A mature repository crosses the delegated seam only through a tracked declaration and machine-local approval of the exact contract and input hashes. Managed candidate batches are never imposed on a delegated workflow.
-
-Hooks are adapters around this architecture. SessionStart may cache route context; PreToolUse may deny unsafe supported writes. The CLI and persisted Git facts remain authoritative when Hooks are absent. Hook code never seals a batch, marks a task complete, releases a slot, deletes an anchor, or repairs state.
+The changelog records version-specific validation samples and historical policy
+changes. They are evidence about those releases, not the source of the current
+operating contract.

@@ -119,12 +119,16 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     ]
     assert len(installed_manifests) == 1, "installed plugin root is ambiguous"
     installed_root = installed_manifests[0].parent.parent
+    reference_paths = tuple(
+        path.relative_to(source).as_posix()
+        for path in sorted(
+            (source / "skills" / "develop-with-worktrees" / "references").glob("*.md")
+        )
+    )
     shipped_paths = (
         ".codex-plugin/plugin.json",
         "skills/develop-with-worktrees/SKILL.md",
-        "skills/develop-with-worktrees/references/configuration.md",
-        "skills/develop-with-worktrees/references/lifecycle.md",
-        "skills/develop-with-worktrees/references/task-governance.md",
+        *reference_paths,
         "skills/develop-with-worktrees/scripts/dww.py",
         "skills/develop-with-worktrees/scripts/solo_ai/candidate_batches.py",
         "skills/develop-with-worktrees/scripts/solo_ai/cli.py",

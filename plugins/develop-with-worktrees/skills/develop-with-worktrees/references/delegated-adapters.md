@@ -1,12 +1,15 @@
 # Delegated adapter contract
 
-Use this seam only when a repository already owns a mature local lifecycle. An ordinary workflow marker still makes DWW defer. A repository becomes `delegated` only after it commits a valid contract and the user locally approves the exact contract-plus-input fingerprint.
+Use delegation only when a repository already owns a mature local lifecycle. A
+normal workflow marker still makes DWW defer. The repository becomes
+§delegated§ only after it commits a valid contract and the user locally approves
+the exact contract-plus-input fingerprint.
 
 ## Tracked declaration
 
-Create `.solo-ai/delegated.toml`:
+Create §.solo-ai/delegated.toml§:
 
-```toml
+§§§toml
 schema_version = 1
 id = "example-worktree-flow"
 runtime = "python" # python, powershell, or sh
@@ -18,64 +21,55 @@ tracked_inputs = [
 ]
 capabilities = ["start", "status"]
 max_parallel = 5
-```
+§§§
 
-Every path is an exact forward-slash repository-relative path. The contract, entrypoint, workflow markers, and declared inputs must be tracked regular files inside the checkout, not links. `workflow_markers` must exactly equal the mature markers DWW detects. The entrypoint and every marker must also appear in `tracked_inputs`.
+Every path is an exact forward-slash repository-relative tracked regular file,
+not a link. §workflow_markers§ exactly match the mature markers DWW detects, and
+the entrypoint and every marker also appear in §tracked_inputs§.
 
-The runtime fixes the argv shape; the repository cannot inject shell arguments:
+The runtime fixes the command shape; project configuration cannot inject shell
+arguments:
 
-- `python`: `uv run --script <entrypoint>`
-- `powershell`: `pwsh -NoProfile -File <entrypoint>`
-- `sh`: `sh <entrypoint>`
+| Runtime | Invoked form |
+|---|---|
+| §python§ | §uv run --script <entrypoint>§ |
+| §powershell§ | §pwsh -NoProfile -File <entrypoint>§ |
+| §sh§ | §sh <entrypoint>§ |
 
-DWW limits contract and input count/size so the Codex hook can re-fingerprint them on every route without unbounded work. It hashes the raw contract and every declared input. A semantic edit, comment edit, script edit, marker addition, or marker removal therefore invalidates the local approval.
+DWW bounds declaration and input count/size so routing can fingerprint them
+without unbounded work. Any contract, comment, input, or marker change produces
+a new fingerprint and returns routing to §defer§ until approved again.
 
-Immediately before invocation, DWW retains the raw contract and every tracked-input byte read by the final fingerprint check, then creates one private repository-external execution closure with the same repository-relative layout. The runtime opens the entrypoint from that closure, so Python sibling imports and PEP 723 metadata, PowerShell `$PSScriptRoot` modules, shell directory helpers, workflow controllers, and declared configuration all resolve to the approved bytes instead of reopening the live checkout. The process working directory remains the original repository.
+## Verified input and live target
 
-DWW sets two authoritative environment variables for the bounded process lifetime:
+Immediately before invocation DWW freezes the approved contract and declared
+input bytes into a private repository-external closure. Adapter code, helpers,
+controllers, and configuration load from §DWW_VERIFIED_INPUT_ROOT§. The process
+working directory and §DWW_REPOSITORY_ROOT§ remain the original live repository,
+used only as the Git/state target.
 
-- `DWW_VERIFIED_INPUT_ROOT` is the immutable approved-input root. Adapter code, controllers, modules, and configuration must load executable or policy input only from this root (or from entrypoint-relative paths that stay inside it).
-- `DWW_REPOSITORY_ROOT` is the original live repository root. Use it only as the native workflow's Git/state target, not as a code or configuration source. It is also the process working directory.
+The closure includes the declaration and exact tracked inputs, preserves relative
+layout, disables Python bytecode writes, and never appears in repository status.
+A later edit to the live checkout can invalidate the next route but cannot change
+the bytes already executing. Full process-boundary mechanics are in
+[delegated internals](delegated-internals.md).
 
-The closure contains `.solo-ai/delegated.toml` plus exactly the declared tracked inputs, disables Python bytecode writes, never appears in repository Git status, and is removed after success, failure, or confirmed process-boundary termination. If any closure file, directory, or path identity is replaced or unexpected content appears, cleanup fails closed and preserves the changed path for diagnosis. If the caller cannot confirm that the owned POSIX process group or Windows Job Object is empty, it preserves the entire closure and reports its path because a surviving descendant may still be using those approved bytes. A concurrent edit to any live contract or tracked input can invalidate the next route, but cannot alter the already constructed approved closure.
+## Capabilities and transport
 
-Schema 1 deliberately exposes only two proven capabilities: read-only `status` and idempotent `start`. Ready, Finish, integration, recovery, abandonment, and cleanup remain native project commands. Adding names to the generic allowlist before their request, result, and interruption semantics are standardized would grant authority without a portable contract.
+Schema 1 deliberately exposes only read-only §status§ and idempotent §start§.
+Ready, Finish, integration, recovery, abandonment, and cleanup remain native
+project commands. Do not expand this allowlist without standardized request,
+result, and interruption semantics.
 
-## Inspection and local approval
+Invoke only a declared operation:
 
-Inspection is read-only and never executes the entrypoint:
-
-```text
-dww --repo <path> --json delegated inspect
-```
-
-Review the returned adapter fields and fingerprint, then approve that exact value:
-
-```text
-dww --repo <path> --json delegated approve --fingerprint <sha256> --accept
-```
-
-Approval is stored only under the Git common directory. It is not committed. A missing, unreadable, mismatched, or stale approval makes `route` return `defer`; it never falls through to managed initialization or executes an adapter.
-
-Revoke an exact approval without changing tracked files:
-
-```text
-dww --repo <path> --json delegated revoke --adapter-id <id> --fingerprint <sha256> --confirm
-```
-
-The adapter id and fingerprint must match the current local approval. After revocation, routing immediately returns to `defer` and the repository's native mature workflow remains authoritative.
-
-## Invocation protocol
-
-Invoke only a declared capability:
-
-```text
+§§§text
 dww --repo <path> --json delegated invoke --operation status --request '{}'
-```
+§§§
 
-DWW sends one JSON object on stdin and passes no project-controlled argv:
+DWW sends one JSON object on stdin:
 
-```json
+§§§json
 {
   "schema_version": 1,
   "adapter_id": "example-worktree-flow",
@@ -83,47 +77,50 @@ DWW sends one JSON object on stdin and passes no project-controlled argv:
   "operation": "status",
   "request": {}
 }
-```
+§§§
 
-Requests are exact:
+Requests are exact: §status§ accepts only §{}§; §start§ accepts exactly §name§ and
+a stable §request_id§ of at most 128 permitted characters. The adapter returns
+one strict UTF-8 JSON object with matching schema, adapter ID, fingerprint, and
+operation. Success has only §result§; failure has only a non-empty §error§.
 
-- `status` accepts only `{}`.
-- `start` accepts exactly `name` and a stable `request_id`; the request id uses letters, digits, `.`, `_`, `:`, or `-` and is at most 128 characters.
-
-The entrypoint must emit exactly one JSON object on stdout:
-
-```json
-{
-  "schema_version": 1,
-  "adapter_id": "example-worktree-flow",
-  "fingerprint": "<same-sha256>",
-  "operation": "status",
-  "ok": true,
-  "result": {"available_slots": 2}
-}
-```
-
-The response schema, adapter id, fingerprint, and operation must match. Outcome fields are mutually exclusive and exact: success has only `result`; failure has only a non-empty `error` and is surfaced as a failed invocation, never wrapped as success.
-
-Successful operation results are also exact:
-
-| Operation | Result fields |
+| Operation | Exact successful result |
 |---|---|
-| `status` | `available_slots`: integer from zero through the declared `max_parallel` |
-| `start` | `request_id`, `task_id`, absolute `worktree`, `slot_id`, `branch`, hexadecimal `base_head`, and boolean `request_reused` |
+| §status§ | §available_slots§ integer from 0 through §max_parallel§ |
+| §start§ | §request_id§, §task_id§, absolute §worktree§, §slot_id§, §branch§, hexadecimal §base_head§, and boolean §request_reused§ |
 
-The orchestration layer uses the live status count rather than assuming all declared capacity is idle. Project adapters may validate richer native output internally, but must not leak native fields through this minimal boundary.
+Output, request, payload, timeout, and errors are bounded. A timeout has unknown
+native effects: retry a mutating start only with the same request ID and use the
+repository's native recovery/status path if the outcome remains uncertain.
 
-Transport is bounded: the JSON request, launch payload, stdout, and stderr each have fixed byte limits; output must be strict UTF-8 and strict JSON; the caller enforces a positive deadline. Success, nonzero adapter failure, timeout, output overflow, bounded-output read failure, and every other `BaseException` must all leave the owned process boundary empty before a result is accepted or the verified closure is cleaned. On POSIX that boundary is the whole new process group, including descendants that outlive a root which returned normally or accepted `SIGTERM`; a remaining group is terminated and confirmed even after root exit.
+## Inspect, approve, revoke
 
-Before POSIX resource preparation the caller creates one empty process owner and keeps it inside the same outer `BaseException` guard through resource preparation, process creation, child-end cleanup, status, GO, launch return, monitoring, result reading, and final boundary cleanup. Each CLOEXEC status, gate, termination-control, and result channel is one self-owning object whose socket endpoints retain descriptor ownership across factory-return, caller-store, and endpoint-close interruption boundaries; no raw descriptor pair is transferred through a tuple unpack seam. The private bounded launch-payload descriptor is likewise attached directly to the pre-existing owner, launch fills that owner in place, and it returns no process wrapper. Only the exact launcher child ends are passed with `pass_fds`. The fixed launcher starts as a new-session process-group leader under an absolute Python executable with `-I -S`, uses filesystem root as its cwd even when the interpreter itself lives inside the repository, and receives only fixed locale variables; it does not inherit `PATH`, Python, dynamic-loader, locale-module, or other platform runtime configuration. It installs `SIGTERM` ignore before its bounded status frame, closes that endpoint, and waits without spawning. The caller requires `pid == pgid == process.pid > 0` and one unique GO byte. Only after GO does the supervisor read the original argv/cwd/environment payload, fork an adapter child, restore the child's default signals, confirm that every status/gate/payload/control/result descriptor has closed, and `execvpe` the adapter; an uncertain child-side close exits 126 without executing approved code. The supervisor alone waits the adapter and reports its return code through one bounded, single-writer result frame, then remains alive; adapter success, nonzero exit, exec failure, gate EOF, and protocol failure never release the group-leader identity.
+Inspection is read-only:
 
-The parent never sends a destructive signal to a numeric POSIX PID or PGID and never polls or reaps the supervisor before the final boundary close. Termination delivery has three states: not attempted, indeterminate, and delivered. A write becomes delivered only when the native call explicitly returns one byte; any `BaseException` around the state change or write retains the unique writer and permits bounded, idempotent retry by the stop path and its outer cleanup guard. The supervisor reads exactly one control byte at a time. Any `K` enters an irreversible loop that repeatedly signals its own current process group with `SIGKILL` until the signal takes effect, so duplicate K bytes are safe and a recycled PGID cannot redirect the signal. The private capability is consumed before status identity is trusted: invalid, forged, missing, or mismatched status cannot prevent K from reaching the actual supervisor, but without a proven unreaped direct child and matching group identity the caller still preserves the verified closure. With proven identity the parent only waits/reaps that direct child and performs a read-only absence check afterward; it never signals by PGID after identity release. If `_fork_exec` created the supervisor but `Popen` did not return it, the pre-created owner, status endpoint, and private control writer retain the same safe protocol. Missing, truncated, timed-out, externally reaped, or unexpectedly exited supervisor state is never converted into a guessed identity.
+§§§text
+dww --repo <path> --json delegated inspect
+§§§
 
-On Windows the caller creates a Job Object with `KILL_ON_JOB_CLOSE` before process creation. A private `CreateProcessW` wrapper passes both the exact inherited standard-stream HANDLE list and `PROC_THREAD_ATTRIBUTE_JOB_LIST` in one `STARTUPINFOEX`, with `CREATE_SUSPENDED`; the root therefore belongs to the Job from the first successful kernel return rather than through a post-create assignment window. A prebuilt process wrapper uniquely owns the `PROCESS_INFORMATION` process/thread HANDLE fields before the call, so a `BaseException` delivered after system creation but before Python returns still has both the atomic Job boundary and native handles available for cleanup. Only a confirmed Job member is resumed. `CREATE_BREAKAWAY_FROM_JOB` is never used. Incompatible nested-Job policy fails closed while the root is still suspended, and ownership never depends on a post-launch PID lookup or parent-chain snapshot. The Job handle stays owned through monitoring, root wait, and bounded output reading. Before any result is accepted, `ActiveProcesses` must reach zero; ordinary descendants, short-lived launchers, broken parent chains, and inherited-stdio descendants are terminated as one Job when necessary. Resume, termination, query, or close failures never fall back to PID enumeration; an unconfirmed Job preserves the verified closure. Every Job, process/thread, inherited-stream, and attribute-list close first binds the native API, then consumes the value from its single owner before entering the native call; an asynchronous exception after detach or close is explicitly indeterminate and cannot retry a reused numeric HANDLE. `CreateJobObjectW` itself returns an empty Job handle rather than writing into a pre-owned field, so an asynchronous interruption between that return and Python ownership assignment can at worst leak an empty Job handle; no child exists at that boundary, and retrying the unknown numeric handle would be less safe. Adapter stderr and structured errors are redacted and truncated before they reach the caller. A timeout has unknown native side effects, so retry a mutating `start` only with the same `request_id` and use the repository's native recovery/status path if its outcome remains uncertain.
+Review the returned fields and exact fingerprint, then approve it locally:
 
-This is a reliable cleanup boundary for approved adapters that stay inside the inherited process boundary; it is not an operating-system sandbox. On POSIX an adapter that deliberately creates a new session with `setsid`, or on any platform uses an external broker, privilege boundary, Hook bypass, or another deliberate escape, is outside the portable contract and must not be approved.
+§§§text
+dww --repo <path> --json delegated approve --fingerprint <sha256> --accept
+§§§
 
-This interface does not replace the delegated repository's lifecycle. That repository still owns its task identities, leases, candidate pool, explicit seal, validation evidence, recovery, and cleanup. DWW's managed candidate-batch implementation applies only when DWW itself owns the managed lifecycle; it is never imposed through delegation. The legacy generic orchestration store is not used for new delegated work.
+Approval is stored under the Git common directory and is not committed. Missing,
+unreadable, mismatched, or stale approval routes to §defer§; it never falls
+through to managed initialization or executes the adapter. Revoke an exact
+current approval with:
 
-For staged adoption, parity testing, rollout, and rollback, follow [Delegated adapter migration](delegated-migration.md).
+§§§text
+dww --repo <path> --json delegated revoke --adapter-id <id> --fingerprint <sha256> --confirm
+§§§
+
+Revocation returns routing to the mature repository workflow and does not delete
+its tasks, candidates, worktrees, proofs, or state.
+
+## Boundary
+
+Delegation wraps, rather than replaces, the repository's lifecycle. DWW's managed
+candidate batches are never imposed through delegation. Use
+[delegated migration](delegated-migration.md) for staged adoption and rollback.

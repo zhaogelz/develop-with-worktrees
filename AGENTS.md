@@ -21,3 +21,7 @@ An exact full batch freezes automatically. A smaller tail freezes only on an exp
 ## README audience
 
 README 面向第一次接触 DWW 的普通使用者。首页优先通俗说明“解决什么问题、带来什么帮助、默认怎么工作”，不得以内部状态、事务、指纹或安全术语开篇。主流程不超过五步；详细配置、异常恢复和实现原理进入 `docs/` 或技能 references。修改用户可感知行为时必须同步检查中英文 README，避免重新变成架构说明书。
+
+## 文档权威路线
+
+长期有效的产品定位、职责边界和架构取舍由 `docs/architecture.md` 统一维护；本仓库的开发、检查和文档维护入口见 `docs/development.md`。命令、配置和运行协议由插件技能的对应 reference 负责，README 只保留普通使用者需要的默认体验。`CHANGELOG.md` 是版本历史，视频目录只在视频工程任务中读取，不作为普通产品开发的默认上下文。

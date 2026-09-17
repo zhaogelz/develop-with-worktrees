@@ -1,70 +1,72 @@
 # Develop with Worktrees
 
-When several AI tasks modify one Git repository, they can overwrite each other, commit from the wrong directory, or reach the main branch without combined validation. DWW gives each modifying task an isolated worktree and local task anchor, accepts only exact reviewed paths, and promotes verified results safely. Once a user has asked for work to proceed, the host normally carries out the in-scope edits, checks, and local delivery without repeated confirmation; it stays responsible until the result reaches the base branch or a recorded failure needs a real decision.
+When several AI tasks change one Git repository, they can overwrite each
+other, commit from the wrong directory, or leave a result unverified. Develop
+with Worktrees (DWW) gives each modifying task its own worktree, records the
+task contract locally, and carries reviewed changes through local integration.
 
-## What it gives you
+## What you get
 
-- One isolated worktree per modifying task.
-- A local task anchor that records the purpose, implementation target, scope, acceptance, and baseline at `Start`, so continuation and handoff do not begin with template fields; `anchor show/update` reads and saves checked context during an active task, without a DWW content-size quota.
-- When you confirm a complete plan, one local objective anchor keeps that exact plan through resumed tasks and conflict repairs. Start or a later bind prints that plan once for the implementation agent; plan-changing revisions retain the complete prior version, while normal status remains compact. DWW records the checked overall result before the objective closes.
+- An isolated worktree for every managed modifying task.
+- A local task anchor that preserves the objective, scope, baseline, and
+  acceptance criteria across continuation or handoff.
 - Exact-path commits and immutable source candidates.
-- Automatic integration whenever three eligible candidates accumulate.
-- A recorded recovery path that leaves the base unchanged on conflicts or failed validation.
-- Publishing a candidate can end one developer task's coding round, but not the requested delivery. The host that freezes its batch follows integration, investigates a recorded failure, and can return an attributed merge conflict to the original task or explicitly hand it to a replacement.
-- Completed checks are saved individually. A later batch reuses a check when its declared inputs, environment, and tool versions still match; mutable environments and required build artifacts are never replaced by an old success report.
-- Batch Full runs only the repository-declared checks affected by the combined changes. Broad regression and stress checks are manual diagnostic tools, not periodic or release gates.
+- Combined validation and protected local promotion for compatible work.
+- A recoverable record when composition or validation fails; the base branch
+  stays unchanged until a batch succeeds.
 
-DWW is no longer a multi-AI task command center. The host's native task system decides who does what and when; DWW owns only the Git safety lifecycle that carries completed work into the base branch.
+DWW is the Git lifecycle layer. Your host's task system still decides how work
+is split, scheduled, and discussed. Your project still owns its tests, runtime
+resources, and product decisions.
 
-## Default flow
-
-1. When you have confirmed a complete plan, the host first saves it in one local objective anchor. Start writes the known task facts once, creates the isolated worktree, and prints the complete root plan once; an optional project Runtime Adapter establishes runtime identity before the task returns as active.
-2. The agent edits only there, commits exact paths, and runs development checks when they help it work safely.
-3. `Finish` publishes the exact source candidate and releases the task worktree without moving the base or requiring a separate project test gate; it is not delivery by itself.
-4. Every three candidates, DWW freezes the oldest eligible three and composes them in an integration worktree. It then runs the affected combined checks, reusing valid individual results.
-5. With fewer than three candidates, the host ends the round with `batch reconcile --force --cause round-complete --reason <basis>` or records an explicit `user`, `deploy`, or `dependency` reason; DWW freezes that exact pending tail. A source task may carry the same intent in `finish --cause <cause> --reason <basis>`: DWW persists the first intent, reuses it after recovery, and targets only that source candidate's lane. Omitting both options keeps Finish's source-publication behavior.
-
-Users do not need to copy candidate IDs. DWW selects only immutable candidates already activated in persisted state. It never guesses that an idle host means the round is over.
-
-## Candidate history and withdrawal
-
-`candidate status` keeps the normal terminal output focused on candidates that still need action, while `--history` shows terminal records and `--candidate <id>` shows one exact record. Existing JSON fields retain the complete pool for host compatibility. For a current, read-only AI snapshot use `status --compact` (optionally `--task`, `--root`, or `--batch`); add `--history` only when terminal records matter. `candidate status --compact` provides the matching candidate view. These compact views do not reconcile receipts or write state. `--check` is an explicit read-only comparison of DWW candidate records and `refs/dww/candidates/*`; a normal status call reports that this diagnostic was not run.
-
-`candidate withdraw --candidate <id> --reason <one-line>` removes an eligible candidate from future integration but keeps its immutable candidate ref after checking the exact SHA. It freezes the reason, source, and start time so retries do not rewrite them. Old withdrawn records whose refs were removed by an earlier version remain historical observations, not invented corruption. `abandon` likewise requires a one-line reason in the CLI and freezes it in the existing abandonment transaction or in-place audit.
-
-Publishing a candidate ends the developer’s current coding round. In Codex Desktop, DWW automatically records the exact task that starts, finishes, or freezes work; the caller that actually freezes a batch becomes its coordinator. For an attributed conflict, DWW prepares a native-task message and records its actual send result separately. The returned repair candidate is reported back to that coordinator, and the handoff closes only after it reaches the base branch. DWW never sends host messages itself.
-
-Releasing a task keeps its dependency caches, including normal package links. New repositories also reuse one integration workspace: ordinary successful or failed batches return it without deleting or hashing the entire dependency tree. Each fresh Full still recreates required runtime effects. Physical disk cleanup is separate maintenance; see the [cleanup safety contract](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/safety.md).
-
-## Why three and ten
-
-Three candidates avoid turning each finished task into an integration wait while still catching cross-task conflicts quickly. The pool holds ten nonterminal candidates by default, so one batch can integrate while the next accumulates. A full pool preserves the publishing task and asks it to retry; it never drops work.
-
-## What DWW never does
-
-- It never guesses candidate identity from UI task counts, raw worktree counts, Hooks, or session end; those signals may only wake reconciliation.
-- It has no candidate-age, quiet-period, or longest-wait auto-seal. A tail stays pending until the host records why the round is complete, or why immediate integration is needed.
-- It does not replace native task decomposition, dependencies, or worker scheduling.
-- It never fetches, pulls, pushes, opens PRs, deploys, rebases, squashes, amends, or rewrites history.
-- It does not absorb repository-specific ports, databases, browsers, test selection, or deployment rules.
-
-Hooks are optional early hardening or wake-up sources. Routing, anchors, worktrees, validation, candidates, batching, and recovery must still work without them.
-
-Projects may configure a Runtime Adapter. At Start it can establish ignored project runtime identity from DWW's exact task, slot, worktree, base, and deterministic port-block facts; no `candidate_head` is supplied until a candidate actually exists. DWW still verifies the clean worktree against the frozen base immediately before and after activation. After the immutable candidate ref is durable, the Adapter releases development resources before DWW frees the worktree and activates the candidate. Paired `batch_activate`/`batch_release` commands may wrap combined Full with a port block disjoint from all 32 task slots. Their context carries a persisted `runtime_cycle`: an interrupted command retries the same cycle and exact receipt, while recovery after resources were successfully released starts a new cycle and really activates them again. Uncertain activation or release preserves the batch and base for exact recovery. DWW never interprets the project's concrete port, database, browser, or service rules. Publication is not delivery: only a completed batch contained in the current base is delivered, and explicit runtime-effectiveness checks remain project-defined Adapter work.
-
-A composition conflict tied to one candidate can prepare up to two managed repair generations on the latest base. The agent continues when code, contracts, tests, and the current user request determine one answer. It asks for a decision only when they leave materially different product, permission, migration, deletion, or security outcomes open. Final-validation failures are never disguised as merge conflicts and blindly retried. If a diagnosed external blocker changes while the candidates do not, `batch seal --after-failed-batch <id>` explicitly and idempotently creates one reviewed successor of that exact failed generation.
-
-After a reusable generation fails, `batch retire --batch <id>` can finish its safe workspace return; it never deletes a later batch's workspace. Older dedicated batches retain exact, non-force physical retirement. For an explicitly approved cleanup of an old failed dedicated batch whose candidates are all superseded or explicitly withdrawn, `batch retire --fast --batch <id>` uses the same identity and protected-content preflight while avoiding dependency content hashes; it preserves candidate refs and audit facts and is retry-safe. `batch metrics` reads existing lifecycle and proof facts to report full/tail rates, observed publication-to-delivery time, and executed Full cost before changing batch-size policy. `metric_coverage` distinguishes integrated records with observable timestamps from retained/unintegrated records and reports missing or legacy Full-proof facts, so absence is not presented as a performance result.
-
-Legacy repositories may keep explicit direct or explicit-seal policies during migration. New repositories use the candidate-first flow.
-
-## Installation
+## Install
 
 ```text
 codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-The source CLI version is `0.5.0-beta.7`; the plugin manifest may append a `+codex.<build>` cache-buster while retaining that source-version prefix. Start a new Codex session after installing or updating so the new skill text is loaded. Remote publishing is separate and requires an explicit user request for a dry-run-first ordinary non-force push from the clean integrated base.
+Start a new Codex session after installing or updating so it loads the current
+skill. The source version is `0.5.0-beta.7`; a plugin cache build may append a
+`+codex.<build>` suffix.
 
-See the [Chinese guide](README.zh-CN.md), [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md), [lifecycle](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/lifecycle.md), [task governance](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/task-governance.md), and [architecture](docs/architecture.md) for details.
+## Default flow
+
+1. The host routes the repository. A managed change starts in an isolated
+   worktree; an existing mature workflow keeps ownership of its repository.
+2. The agent edits only there and commits the exact reviewed paths.
+3. `finish` publishes an immutable source candidate. It ends that coding round,
+   but does not by itself deliver the result to the base branch.
+4. Every three compatible candidates, DWW combines them in an integration
+   worktree and runs the repository checks affected by the combined changes.
+5. A smaller final group needs an explicit recorded reason such as
+   `round-complete`, `user`, `deploy`, or `dependency`; DWW never treats idle
+   time or a task count as proof that the round ended.
+
+The host follows a published candidate through integration, recovery, or a
+recorded decision. You do not need to copy candidate IDs for the normal flow.
+
+## Boundaries that keep work safe
+
+DWW preserves unknown or protected working-tree content and does not guess a
+candidate from UI state, hooks, or elapsed time. A conflict or failed combined
+check leaves the base branch unchanged and provides a recorded recovery route.
+Completed pure checks may be reused only when their declared inputs,
+environment, tool facts, and logs still match; required build output and mutable
+runtime effects are run again.
+
+DWW itself is local-only: it does not fetch, pull, push, open pull requests,
+deploy, rebase, squash, amend, or rewrite history. An explicitly requested
+remote publish is a separate operation from a clean integrated base.
+
+## Find the right detail
+
+- Use the installed [skill](plugins/develop-with-worktrees/skills/develop-with-worktrees/SKILL.md)
+  for a managed task and its scenario-specific references.
+- Read the [Chinese guide](README.zh-CN.md) for the same user flow in Chinese.
+- Read [architecture](docs/architecture.md) for responsibility and design
+  boundaries, or [development maintenance](docs/development.md) when changing
+  this repository.
+- See [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)
+  for policy fields, and [recovery](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
+  for an interrupted or failed task.
