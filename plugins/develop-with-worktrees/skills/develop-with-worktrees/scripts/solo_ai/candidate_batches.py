@@ -1853,6 +1853,68 @@ def _assert_batch_cleanup_safe(repo: GitRepo, batch: dict[str, Any]) -> Path:
     return worktree
 
 
+def _candidate_source_commits(
+    repo: GitRepo, candidate: dict[str, Any]
+) -> list[dict[str, str]]:
+    """读取候选自身的首父链提交，合并时不把前进基线误写为来源。"""
+
+    output = repo.git(
+        [
+            "log",
+            "--first-parent",
+            "--no-merges",
+            "--reverse",
+            "--format=%H%x1f%s%x1f%b%x1e",
+            f"{candidate['base_head']}..{candidate['head']}",
+        ]
+    ).stdout
+    commits: list[dict[str, str]] = []
+    for record in output.split("\x1e"):
+        fields = record.strip("\r\n").split("\x1f", maxsplit=2)
+        if len(fields) != 3 or not fields[0]:
+            continue
+        commits.append(
+            {
+                "head": fields[0],
+                "subject": fields[1].strip(),
+                "body": fields[2].strip(),
+            }
+        )
+    return commits
+
+
+def _candidate_integration_commit_message(
+    repo: GitRepo, *, batch: dict[str, Any], candidate: dict[str, Any]
+) -> tuple[str, str]:
+    """生成可读且可追溯的组合提交信息，不改变候选的冻结内容。"""
+
+    commits = _candidate_source_commits(repo, candidate)
+    task_name = str(candidate.get("name") or "").strip()
+    if len(commits) == 1 and commits[0]["subject"]:
+        subject = commits[0]["subject"]
+    elif task_name:
+        subject = task_name
+    else:
+        subject = f"Integrate candidate {candidate['candidate_id']}"
+
+    body = [
+        f"DWW batch: {batch['id']}",
+        f"Candidate: {candidate['candidate_id']}",
+        f"Task: {candidate['task_id']}",
+        f"Source base: {candidate['base_head']}",
+        "",
+        "Source commits:",
+    ]
+    if commits:
+        for source in commits:
+            body.append(f"- {source['head'][:12]} {source['subject']}")
+            if source["body"]:
+                body.extend(f"  {line}" for line in source["body"].splitlines())
+    else:
+        body.append(f"- {candidate['head'][:12]} (no non-merge source commit found)")
+    return subject, "\n".join(body)
+
+
 def _compose(
     repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1908,8 +1970,11 @@ def _compose(
         if staged.returncode not in {0, 1}:
             raise SoloAIError("Could not inspect the composed candidate")
         if staged.returncode == 1:
+            subject, message = _candidate_integration_commit_message(
+                repo, batch=batch, candidate=candidate
+            )
             repo.git(
-                ["commit", "-m", f"DWW 批次 {batch['id']}：{candidate_id}"],
+                ["commit", "-m", subject, "-m", message],
                 cwd=worktree,
             )
         applied_ids.append(candidate_id)

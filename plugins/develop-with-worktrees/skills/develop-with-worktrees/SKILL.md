@@ -46,8 +46,16 @@ of three. A smaller tail needs a recorded `round-complete`, `user`, `deploy`, or
 `dependency` cause and one-line reason. Idle time, Hooks, and task counts never
 prove a round ended.
 
+Ordinary completion or review wording is not an immediate-integration request:
+without a cause, Finish publishes the candidate and releases its task worktree.
+Use `round-complete` only after the actual round is over and its candidate lane
+has no active producer. Use `user` only when the user explicitly asks to
+integrate now without waiting for compatible work. A full batch does not wait for
+unrelated unfinished work.
+
 Follow each batch through integration and repair recorded, deterministic failures
-within scope. Use `status --compact` for a read-only view; candidate publication,
+within scope. The host that freezes a batch remains responsible for that follow
+through. Use `status --compact` for a read-only view; candidate publication,
 current-base delivery, and runtime effectiveness are separate facts.
 
 ## Read one reference for the active scenario

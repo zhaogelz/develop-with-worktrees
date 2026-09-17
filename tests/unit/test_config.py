@@ -17,6 +17,7 @@ from solo_ai.config import (
 )
 from solo_ai.config import (
     _legacy_managed_block,
+    _pre_batch_delivery_managed_block,
     _pre_root_output_managed_block,
     _pre_simplification_managed_block,
     _pre_refresh_root_context_managed_block,
@@ -102,6 +103,20 @@ def test_known_legacy_managed_block_can_be_upgraded_or_removed_without_touching_
     assert (
         remove_managed_agents_block(upgraded) == "# User instructions\n\nKeep this.\n"
     )
+
+
+def test_previous_batch_delivery_managed_block_can_be_upgraded() -> None:
+    existing = (
+        "# User instructions\n\n"
+        + _pre_batch_delivery_managed_block()
+        + "\nKeep this.\n"
+    )
+
+    assert managed_agents_status(existing) == "known-legacy-batch-delivery"
+    upgraded = render_agents(existing)
+    assert managed_agents_status(upgraded) == "current"
+    assert "Ordinary completion does not request immediate integration" in upgraded
+    assert upgraded.endswith("\nKeep this.\n")
 
 
 def test_immediately_previous_released_managed_block_can_be_upgraded() -> None:

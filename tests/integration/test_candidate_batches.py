@@ -157,6 +157,7 @@ def publish(
     *,
     name: str,
     relative: str,
+    commit_message: str | None = None,
     host_origin: dict[str, str] | None = None,
     finish_actor: dict[str, str] | None = None,
     root_anchor_id: str | None = None,
@@ -178,7 +179,7 @@ def publish(
         repo,
         task_id=task["id"],
         lease=task["lease"],
-        message=f"test: {name}",
+        message=commit_message or f"test: {name}",
         paths=[relative],
     )
     if run_ready:
@@ -250,6 +251,58 @@ def test_new_default_publishes_source_candidates_without_ready_then_tests_combin
         third["candidate_id"],
     }
     assert batches[0]["proof"]
+
+
+def test_composed_commits_keep_source_summary_and_traceability(git_repo: Path) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, batch_size=2)
+    single = publish(
+        repo,
+        name="单提交候选",
+        relative="single.txt",
+        commit_message="fix: preserve the source summary\n\nExplain the single-source repair.",
+    )
+    task = start(repo, name="Refactor candidate publication details")
+    worktree = Path(task["worktree"])
+    (worktree / "multi-implementation.txt").write_text(
+        "implementation\n", encoding="utf-8"
+    )
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="refactor: prepare candidate details",
+        paths=["multi-implementation.txt"],
+    )
+    (worktree / "multi-tests.txt").write_text("tests\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: cover candidate details",
+        paths=["multi-tests.txt"],
+    )
+    multiple = finish(repo, task_id=task["id"], lease=task["lease"])
+
+    batch = seal_batch(
+        repo,
+        candidate_ids=[single["candidate_id"], multiple["candidate_id"]],
+    )
+    messages = repo.git(
+        [
+            "log",
+            "--format=%B%x1e",
+            f"{batch['base_before']}..{batch['integration_head']}",
+        ]
+    ).stdout
+
+    assert "fix: preserve the source summary" in messages
+    assert "Refactor candidate publication details" in messages
+    assert "DWW batch: " + batch["id"] in messages
+    assert "Candidate: " + single["candidate_id"] in messages
+    assert "Candidate: " + multiple["candidate_id"] in messages
+    assert "Explain the single-source repair." in messages
+    assert "refactor: prepare candidate details" in messages
+    assert "test: cover candidate details" in messages
 
 
 def test_new_default_keeps_a_short_tail_until_an_explicit_round_end(

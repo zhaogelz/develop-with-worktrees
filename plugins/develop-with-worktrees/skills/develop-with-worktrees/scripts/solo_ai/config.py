@@ -988,6 +988,23 @@ Keep one task anchor per task. `Start` records the known purpose, scope, accepta
 
 Normal `Start` or `bind-root` prints the complete root context once without a separate acknowledgement step. After continuation, model/context recovery, a root-plan change, or candidate repair, use one `anchor refresh-root` operation to return the current task anchor and complete root context together; it records the current version without copying SHA or version parameters. This refresh is required before Commit, Ready, or Finish when the recorded root is stale, not on every edit. Close a structured root only after all children are terminal and accepted or cancelled evidence is recorded.
 
+An exact full batch freezes automatically. A smaller tail freezes only on an explicit `round-complete`, `user`, `deploy`, or `dependency` cause with one short reason; heartbeat, idle time, and task counts never seal a batch. Ordinary completion does not request immediate integration: without a cause, `Finish` publishes its candidate and releases its task worktree. Use `round-complete` only after the current round has ended and its candidate lane has no active producer; use `user` only when the user explicitly asks to integrate now without waiting. Do not infer that exception from ordinary completion or review wording. Candidate publication is not delivery: the coordinator that freezes a full batch or tail follows integration, inspects failures, and repairs deterministically within the agreed scope.
+{MANAGED_END}
+"""
+
+
+def _pre_batch_delivery_managed_block() -> str:
+    """批次收尾语义澄清前的当前托管块；只用于无歧义升级。"""
+
+    return f"""{MANAGED_START}
+## Isolated coding tasks
+
+For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in its returned worktree, review exact paths before `commit`, then `finish`; do not bypass failed gates. DWW is local-only: do not fetch, pull, push, rebase, squash, amend, or rewrite history through it.
+
+Keep one task anchor per task. `Start` records the known purpose, scope, acceptance criteria, baseline, and progress; update it only when that execution contract or progress materially changes. When the user has confirmed a complete plan, create one root anchor before its child tasks: the root keeps the complete plan, full plan-changing history, amendments, and overall result without a content-size limit, while children keep only their execution slice.
+
+Normal `Start` or `bind-root` prints the complete root context once without a separate acknowledgement step. After continuation, model/context recovery, a root-plan change, or candidate repair, use one `anchor refresh-root` operation to return the current task anchor and complete root context together; it records the current version without copying SHA or version parameters. This refresh is required before Commit, Ready, or Finish when the recorded root is stale, not on every edit. Close a structured root only after all children are terminal and accepted or cancelled evidence is recorded.
+
 An exact full batch freezes automatically. A smaller tail freezes only on an explicit `round-complete`, `user`, `deploy`, or `dependency` cause with one short reason; heartbeat, idle time, and task counts never seal a batch. Candidate publication is not delivery: after `Finish`, follow integration, inspect failures, and repair deterministically within the agreed scope.
 {MANAGED_END}
 """
@@ -1061,6 +1078,8 @@ def managed_agents_status(existing: str) -> str:
     block = existing[start:end].replace("\r\n", "\n") + "\n"
     if block == managed_block():
         return "current"
+    if block == _pre_batch_delivery_managed_block():
+        return "known-legacy-batch-delivery"
     if block == _pre_root_output_managed_block():
         return "known-legacy-root-output"
     if block == _pre_simplification_managed_block():

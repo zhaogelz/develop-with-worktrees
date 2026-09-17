@@ -96,10 +96,14 @@ batch reconcile --force --cause round-complete --reason <one-line-basis>
 ```
 
 `user`, `deploy`, and `dependency` are explicit immediate-integration causes.
-`round-complete` refuses a lane with active producers. Start, candidate
-activation, Abandon, and tail reconciliation share admission locking, so the
-chosen candidates are an exact snapshot. UI counts, raw worktree enumeration,
-Hook delivery, quiet time, and session end cannot choose a batch.
+Ordinary “complete”, “finish”, or “review” wording describes the requested
+outcome; it does not select `user`. Use that cause only when the user explicitly
+asks to integrate now without waiting for compatible work. `round-complete`
+refuses a lane with active producers. A full compatible batch does not wait for
+unrelated unfinished work. Start, candidate activation, Abandon, and tail
+reconciliation share admission locking, so the chosen candidates are an exact
+snapshot. UI counts, raw worktree enumeration, Hook delivery, quiet time, and
+session end cannot choose a batch.
 
 A batched source task can carry the same intent at publication with
 `finish --cause <cause> --reason <basis>`. DWW persists the first intent and

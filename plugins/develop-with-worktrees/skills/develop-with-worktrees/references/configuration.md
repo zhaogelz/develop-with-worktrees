@@ -89,6 +89,12 @@ use a timer. `tail_policy = "quiet_or_explicit"`, `candidate_validation = "ready
 behavior when deliberately configured. Every task snapshots the resolved policy
 at Start; do not assume a later policy edit changes an active candidate.
 
+For an explicit tail, `round-complete` means the actual compatible work round has
+ended and has no active producer. `user` is reserved for an explicit request to
+integrate now without waiting; ordinary completion or review wording does not
+select it. A full compatible batch still proceeds without waiting for unrelated
+active work.
+
 A reusable workspace returns safely without recursively deleting dependency
 trees. Dedicated batches retain their original physical-retirement behavior. Both
 modes use the same candidate and base identity gates; details are in
