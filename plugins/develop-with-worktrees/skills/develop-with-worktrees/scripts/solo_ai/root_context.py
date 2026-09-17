@@ -28,6 +28,7 @@ _ROOT_FIELDS = (
     "Current progress",
 )
 _PLAN_VERSION_FIELD = "Plan version"
+_OBJECTIVE_PROTOCOL_FIELD = "Objective protocol"
 _IMMUTABLE_FIELDS = ("Root ID", "Original purpose", "Reference baseline")
 _ROOT_ID_PATTERN = re.compile(r"root-[A-Za-z0-9][A-Za-z0-9-]*\Z")
 _FIELD_HEADER = re.compile(
@@ -43,6 +44,7 @@ _TASK_ID_PATTERN = re.compile(r"task-[A-Za-z0-9][A-Za-z0-9-]*\Z")
 _PLAN_HEADING = "## Confirmed plan"
 _CHANGES_HEADING = "## User-confirmed changes"
 _ACCEPTANCE_HEADING = "## Overall acceptance"
+_ACCEPTANCE_INDEX_HEADING = "## Acceptance index"
 _PLAN_START = "<!-- dww-confirmed-plan:start -->"
 _PLAN_END = "<!-- dww-confirmed-plan:end -->"
 _CHANGES_START = "<!-- dww-user-changes:start -->"
@@ -50,10 +52,17 @@ _CHANGES_END = "<!-- dww-user-changes:end -->"
 _ACCEPTANCE_START = "<!-- dww-overall-acceptance:start -->"
 _ACCEPTANCE_END = "<!-- dww-overall-acceptance:end -->"
 _ACCEPTANCE_VERSION_FIELD = "Accepted plan version"
+_ACCEPTANCE_INDEX_START = "<!-- dww-acceptance-index:start -->"
+_ACCEPTANCE_INDEX_END = "<!-- dww-acceptance-index:end -->"
+_ACCEPTANCE_INDEX_ITEM = re.compile(r"^- Item: (?P<value>[^\r\n]+)$")
+_ACCEPTANCE_EVIDENCE_ITEM = re.compile(r"^  - Item: (?P<value>[^\r\n]+)$")
+_ACCEPTANCE_ITEM_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+_ACCEPTANCE_INDEX_FINGERPRINT_FIELD = "Acceptance index fingerprint"
 _SECTION_MARKERS = {
     _PLAN_HEADING: (_PLAN_START, _PLAN_END),
     _CHANGES_HEADING: (_CHANGES_START, _CHANGES_END),
     _ACCEPTANCE_HEADING: (_ACCEPTANCE_START, _ACCEPTANCE_END),
+    _ACCEPTANCE_INDEX_HEADING: (_ACCEPTANCE_INDEX_START, _ACCEPTANCE_INDEX_END),
 }
 _REQUEST_COMMENT = re.compile(r"<!-- dww-root-request:([0-9a-f]{64}) -->")
 
@@ -76,6 +85,12 @@ def root_anchor_history_path(repo: GitRepo, *, root_id: str, version: int) -> Pa
     if version < 1:
         raise SoloAIError("Root anchor history version must be positive")
     return root_anchor_history_directory(repo, root_id) / f"{root_id}.v{version}.md"
+
+
+def root_close_receipt_path(repo: GitRepo, *, root_id: str) -> Path:
+    if not _ROOT_ID_PATTERN.fullmatch(root_id):
+        raise SoloAIError("Root anchor id is not safe")
+    return repo.local_dir / "root-close-receipts" / f"{root_id}.json"
 
 
 def _legacy_root_anchor_history_path(repo: GitRepo, *, root_id: str) -> Path:
@@ -256,6 +271,19 @@ def read_root_acceptance_evidence_input(repo: GitRepo, path: Path) -> str:
     return _read_plain_input(repo, path)
 
 
+def read_root_acceptance_index_input(repo: GitRepo, path: Path) -> list[dict[str, Any]]:
+    """读取宿主从完整方案提取的最小验收索引，不把方案正文再复制一遍。"""
+
+    content = _read_plan_input(repo, path)
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise SoloAIError("Acceptance index input must be a JSON object") from exc
+    if not isinstance(value, dict) or set(value) != {"items"}:
+        raise SoloAIError("Acceptance index input must contain only an items array")
+    return _validate_acceptance_index(value["items"], plan_version=None, plan=None)
+
+
 def _marker_pair(content: str, heading: str) -> tuple[int, int] | None:
     start_marker, end_marker = _SECTION_MARKERS[heading]
     starts = [match.start() for match in re.finditer(re.escape(start_marker), content)]
@@ -404,6 +432,21 @@ def _replace_section(content: str, heading: str, body: str) -> str:
     )
 
 
+def _remove_section(content: str, heading: str) -> str:
+    """删除受控派生区段，仅供受控协议升级时比较未变的计划合同。"""
+
+    bounds = _structural_section_bounds(content, heading)
+    if bounds is None:
+        raise SoloAIError(f"Root anchor must contain exactly one '{heading}' section")
+    heading_start, _, end = bounds
+    _, end_marker = _SECTION_MARKERS[heading]
+    return (
+        content[:heading_start].rstrip()
+        + "\n\n"
+        + content[end + len(end_marker) :].lstrip("\r\n")
+    )
+
+
 def _contract_without_progress_or_outcome(content: str) -> str:
     normalized = _replace_metadata_value(
         content, "Current progress", "<current-progress>"
@@ -411,6 +454,10 @@ def _contract_without_progress_or_outcome(content: str) -> str:
     if _section(normalized, _ACCEPTANCE_HEADING) is not None:
         normalized = _replace_section(
             normalized, _ACCEPTANCE_HEADING, "<overall-acceptance>"
+        )
+    if _marker_pair(normalized, _ACCEPTANCE_INDEX_HEADING) is not None:
+        normalized = _replace_section(
+            normalized, _ACCEPTANCE_INDEX_HEADING, "<acceptance-index>"
         )
     return normalized
 
@@ -465,6 +512,257 @@ def _acceptance_plan_version(content: str) -> int | None:
     if not value.isdecimal() or int(value) < 1:
         raise SoloAIError("Overall acceptance accepted plan version must be positive")
     return int(value)
+
+
+def _acceptance_index_fingerprint_recorded(content: str) -> str | None:
+    section = _section(content, _ACCEPTANCE_HEADING)
+    if section is None:
+        return None
+    matches = list(
+        re.finditer(
+            rf"(?m)^- {re.escape(_ACCEPTANCE_INDEX_FINGERPRINT_FIELD)}: (?P<value>[0-9a-f]{{64}})$",
+            section,
+        )
+    )
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise SoloAIError(
+            "Overall acceptance must contain at most one index fingerprint"
+        )
+    return matches[0].group("value")
+
+
+def _objective_protocol_version(content: str) -> int:
+    raw = _metadata_value(content, _OBJECTIVE_PROTOCOL_FIELD)
+    if raw is None:
+        return 0
+    if raw not in {"0", "1"}:
+        raise SoloAIError("Root anchor objective protocol is unsupported")
+    return int(raw)
+
+
+def _validate_acceptance_index(
+    items: Any, *, plan_version: int | None, plan: str | None
+) -> list[dict[str, Any]]:
+    if not isinstance(items, list) or not items:
+        raise SoloAIError("Acceptance index must contain at least one item")
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "locator",
+            "quote",
+            "required",
+            "plan_version",
+        }:
+            raise SoloAIError(
+                "Acceptance index items must contain id, locator, quote, required, and plan_version"
+            )
+        item_id = item.get("id")
+        locator = item.get("locator")
+        quote = item.get("quote")
+        required = item.get("required")
+        item_version = item.get("plan_version")
+        if not isinstance(item_id, str) or not _ACCEPTANCE_ITEM_ID.fullmatch(item_id):
+            raise SoloAIError("Acceptance index item id is invalid")
+        if item_id in seen:
+            raise SoloAIError("Acceptance index contains a duplicate item id")
+        if (
+            not isinstance(locator, str)
+            or not locator.strip()
+            or "\r" in locator
+            or "\n" in locator
+            or len(locator) > 512
+        ):
+            raise SoloAIError("Acceptance index item locator is invalid")
+        if (
+            not isinstance(quote, str)
+            or not quote.strip()
+            or "\r" in quote
+            or "\n" in quote
+            or len(quote) > 1024
+        ):
+            raise SoloAIError("Acceptance index item quote is invalid")
+        if not isinstance(required, bool):
+            raise SoloAIError("Acceptance index item required must be a boolean")
+        if plan_version is None:
+            if item_version is not None:
+                raise SoloAIError(
+                    "New acceptance-index input items must use plan_version null before DWW assigns the current version"
+                )
+            effective_version: int | None = None
+        else:
+            if item_version != plan_version:
+                raise SoloAIError(
+                    "Acceptance index item plan version does not match the effective plan"
+                )
+            effective_version = plan_version
+        if plan is not None and quote not in plan:
+            raise SoloAIError(
+                "Acceptance index quote is not present in the current confirmed plan"
+            )
+        seen.add(item_id)
+        normalized.append(
+            {
+                "id": item_id,
+                "locator": locator.strip(),
+                "quote": quote.strip(),
+                "required": required,
+                "plan_version": effective_version,
+            }
+        )
+    return sorted(normalized, key=lambda item: str(item["id"]))
+
+
+def _with_acceptance_index_version(
+    items: list[dict[str, Any]], *, plan_version: int, plan: str
+) -> list[dict[str, Any]]:
+    prepared = [{**item, "plan_version": plan_version} for item in items]
+    return _validate_acceptance_index(prepared, plan_version=plan_version, plan=plan)
+
+
+def _acceptance_index(content: str) -> list[dict[str, Any]] | None:
+    if _marker_pair(content, _ACCEPTANCE_INDEX_HEADING) is None:
+        return None
+    section = _section(content, _ACCEPTANCE_INDEX_HEADING)
+    assert section is not None
+    parsed: list[dict[str, Any]] = []
+    for line in section.splitlines():
+        if not line.strip():
+            continue
+        match = _ACCEPTANCE_INDEX_ITEM.fullmatch(line)
+        if match is None:
+            raise SoloAIError("Acceptance index contains an invalid record")
+        try:
+            item = json.loads(match.group("value"))
+        except json.JSONDecodeError as exc:
+            raise SoloAIError("Acceptance index contains invalid JSON") from exc
+        parsed.append(item)
+    plan_version, plan, _, _ = _require_structured_plan(content)
+    return _validate_acceptance_index(parsed, plan_version=plan_version, plan=plan)
+
+
+def _acceptance_index_fingerprint(items: list[dict[str, Any]] | None) -> str | None:
+    if items is None:
+        return None
+    rendered = json.dumps(
+        items, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _render_acceptance_index(items: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        "- Item: "
+        + json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for item in items
+    )
+
+
+def _acceptance_index_section(content: str, items: list[dict[str, Any]]) -> str:
+    rendered = _render_acceptance_index(items)
+    if _marker_pair(content, _ACCEPTANCE_INDEX_HEADING) is not None:
+        return _replace_section(content, _ACCEPTANCE_INDEX_HEADING, rendered)
+    return (
+        content.rstrip()
+        + "\n\n"
+        + _ACCEPTANCE_INDEX_HEADING
+        + "\n\n"
+        + _ACCEPTANCE_INDEX_START
+        + "\n"
+        + rendered
+        + "\n"
+        + _ACCEPTANCE_INDEX_END
+        + "\n"
+    )
+
+
+def _acceptance_evidence_items(section: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in section.splitlines():
+        match = _ACCEPTANCE_EVIDENCE_ITEM.fullmatch(line)
+        if match is None:
+            continue
+        try:
+            records.append(json.loads(match.group("value")))
+        except json.JSONDecodeError as exc:
+            raise SoloAIError(
+                "Overall acceptance item evidence contains invalid JSON"
+            ) from exc
+    return records
+
+
+def _validate_acceptance_evidence(
+    evidence: str, *, items: list[dict[str, Any]], status: str
+) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(evidence)
+    except json.JSONDecodeError as exc:
+        raise SoloAIError(
+            "Protocol root acceptance evidence must be a JSON object with an items array"
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != {"items"}:
+        raise SoloAIError("Acceptance evidence must contain only an items array")
+    values = payload["items"]
+    if not isinstance(values, list):
+        raise SoloAIError("Acceptance evidence items must be an array")
+    expected = {str(item["id"]): item for item in items}
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict) or set(value) != {
+            "id",
+            "status",
+            "observation",
+            "evidence",
+        }:
+            raise SoloAIError(
+                "Acceptance evidence item must contain id, status, observation, and evidence"
+            )
+        item_id = value.get("id")
+        item_status = value.get("status")
+        observation = value.get("observation")
+        location = value.get("evidence")
+        if item_id not in expected or item_id in seen:
+            raise SoloAIError("Acceptance evidence does not match the current index")
+        if item_status not in {"passed", "failed", "unverified", "cancelled"}:
+            raise SoloAIError("Acceptance evidence item status is invalid")
+        if (
+            not isinstance(observation, str)
+            or not observation.strip()
+            or "\r" in observation
+            or "\n" in observation
+            or not isinstance(location, str)
+            or not location.strip()
+            or "\r" in location
+            or "\n" in location
+        ):
+            raise SoloAIError(
+                "Acceptance evidence observation and location must be one-line text"
+            )
+        if (
+            status == "accepted"
+            and expected[item_id]["required"]
+            and item_status != "passed"
+        ):
+            raise SoloAIError(
+                f"Required acceptance item {item_id} is not passed and cannot complete the objective"
+            )
+        seen.add(item_id)
+        normalized.append(
+            {
+                "id": item_id,
+                "status": item_status,
+                "observation": observation.strip(),
+                "evidence": location.strip(),
+            }
+        )
+    if status == "accepted" and set(expected) != seen:
+        missing = ", ".join(sorted(set(expected) - seen))
+        raise SoloAIError("Acceptance evidence is missing indexed items: " + missing)
+    return sorted(normalized, key=lambda item: str(item["id"]))
 
 
 def _pending_acceptance() -> str:
@@ -552,6 +850,10 @@ def _shown_root_anchor(
         raise SoloAIError("Root anchor identity does not match its path")
     _, children = _linked_children(content)
     plan_version = _plan_version(content)
+    objective_protocol = _objective_protocol_version(content)
+    acceptance_index = _acceptance_index(content)
+    if objective_protocol == 1 and acceptance_index is None:
+        raise SoloAIError("Objective-protocol root requires an acceptance index")
     local_dir = (
         path.parent.parent
         if path.parent.name == "root-anchors"
@@ -566,9 +868,15 @@ def _shown_root_anchor(
         "sha256": hashlib.sha256(raw).hexdigest(),
         "linked_child_tasks": children,
         "plan_version": plan_version,
+        "objective_protocol_version": objective_protocol,
         "confirmed_plan": _section(content, _PLAN_HEADING),
+        "acceptance_index": acceptance_index,
+        "acceptance_index_fingerprint": _acceptance_index_fingerprint(acceptance_index),
         "overall_acceptance_status": _acceptance_status(content),
         "overall_acceptance_plan_version": _acceptance_plan_version(content),
+        "overall_acceptance_index_fingerprint": _acceptance_index_fingerprint_recorded(
+            content
+        ),
     }
 
 
@@ -620,6 +928,8 @@ def create_root_anchor(
     confirmed_plan: str | None = None,
     plan_source: str | None = None,
     request_id: str | None = None,
+    acceptance_index: list[dict[str, Any]] | None = None,
+    objective_protocol_version: int = 0,
 ) -> dict[str, Any]:
     if not _ROOT_ID_PATTERN.fullmatch(root_id):
         raise SoloAIError("Root anchor id is not safe")
@@ -632,6 +942,21 @@ def create_root_anchor(
         raise SoloAIError("Confirmed plan must not be empty")
     if confirmed_plan is not None and request_id is None:
         raise SoloAIError("Confirmed plan roots require a stable request id")
+    if objective_protocol_version not in {0, 1}:
+        raise SoloAIError("Unsupported root objective protocol")
+    if objective_protocol_version == 1 and confirmed_plan is None:
+        raise SoloAIError("Objective-protocol roots require a complete confirmed plan")
+    if objective_protocol_version == 1 and acceptance_index is None:
+        raise SoloAIError("Objective-protocol roots require an acceptance index")
+    if acceptance_index is not None and confirmed_plan is None:
+        raise SoloAIError("Acceptance index requires a complete confirmed plan")
+    indexed_plan = (
+        _with_acceptance_index_version(
+            acceptance_index or [], plan_version=1, plan=confirmed_plan or ""
+        )
+        if acceptance_index is not None
+        else None
+    )
     if confirmed_plan is not None and any(
         marker in confirmed_plan
         for marker in (
@@ -683,6 +1008,8 @@ def create_root_anchor(
                     not in (_section(existing_content, _CHANGES_HEADING) or "")
                 )
             )
+            or shown.get("objective_protocol_version") != objective_protocol_version
+            or shown.get("acceptance_index") != indexed_plan
         ):
             raise SoloAIError("Root anchor request conflicts with the existing root")
         return shown
@@ -709,6 +1036,7 @@ This local file is not committed. It is the coordinator's durable execution cont
 - Scope boundary: {scope}
 - Acceptance criteria: {acceptance}
 - Plan version: 1
+- Objective protocol: {objective_protocol_version}
 - Current progress: root anchor created at {utc_timestamp()}
 
 {request_marker}
@@ -731,6 +1059,12 @@ This local file is not committed. It is the coordinator's durable execution cont
 - Status: pending
 - Evidence: not checked
 {_ACCEPTANCE_END}
+
+{_ACCEPTANCE_INDEX_HEADING if indexed_plan is not None else ""}
+
+{_ACCEPTANCE_INDEX_START if indexed_plan is not None else ""}
+{_render_acceptance_index(indexed_plan) if indexed_plan is not None else ""}
+{_ACCEPTANCE_INDEX_END if indexed_plan is not None else ""}
 
 This local file is not committed. It is the objective's durable execution contract. Child tasks may read its current facts but do not alter candidate, batch, or scheduler ownership.
 """
@@ -919,6 +1253,8 @@ def _write_root_update_locked(
     content: str,
     expected_sha256: str,
     allow_acceptance_update: bool = False,
+    allow_acceptance_index_update: bool = False,
+    allow_objective_protocol_upgrade: bool = False,
 ) -> dict[str, Any]:
     """在根锚点锁已持有时验证并原子写入一份完整文档。"""
 
@@ -931,6 +1267,13 @@ def _write_root_update_locked(
     for field in _IMMUTABLE_FIELDS:
         if updated[field] != previous[field]:
             raise SoloAIError(f"Root anchor field cannot be changed: {field}")
+    previous_protocol = _objective_protocol_version(str(current["content"]))
+    updated_protocol = _objective_protocol_version(content)
+    protocol_upgrade = previous_protocol == 0 and updated_protocol == 1
+    if previous_protocol != updated_protocol and not (
+        allow_objective_protocol_upgrade and protocol_upgrade
+    ):
+        raise SoloAIError("Root anchor objective protocol cannot be changed")
     previous_registry, _ = _linked_children(str(current["content"]))
     updated_registry, _ = _linked_children(content)
     if updated_registry != previous_registry:
@@ -949,12 +1292,47 @@ def _write_root_update_locked(
             )
         _require_structured_plan(str(current["content"]))
         _, _, updated_changes, _ = _require_structured_plan(content)
+        current_index = (
+            _section(str(current["content"]), _ACCEPTANCE_INDEX_HEADING)
+            if _marker_pair(str(current["content"]), _ACCEPTANCE_INDEX_HEADING)
+            is not None
+            else None
+        )
+        updated_index = (
+            _section(content, _ACCEPTANCE_INDEX_HEADING)
+            if _marker_pair(content, _ACCEPTANCE_INDEX_HEADING) is not None
+            else None
+        )
         previous_contract = _contract_without_progress_or_outcome(
             str(current["content"])
         )
         updated_contract = _contract_without_progress_or_outcome(content)
-        contract_changed = previous_contract != updated_contract
-        if previous_contract == updated_contract:
+        if protocol_upgrade:
+            if current_index is not None or updated_index is None:
+                raise SoloAIError(
+                    "Objective protocol upgrade has an invalid index state"
+                )
+            if (
+                _metadata_value(str(current["content"]), _OBJECTIVE_PROTOCOL_FIELD)
+                is None
+            ):
+                restored = str(current["content"])
+            else:
+                restored = _remove_section(
+                    _replace_metadata_value(
+                        content, _OBJECTIVE_PROTOCOL_FIELD, str(previous_protocol)
+                    ),
+                    _ACCEPTANCE_INDEX_HEADING,
+                )
+            upgraded_contract = _contract_without_progress_or_outcome(restored)
+            if previous_contract.strip() != upgraded_contract.strip():
+                raise SoloAIError(
+                    "Objective protocol upgrade cannot change the confirmed plan contract"
+                )
+            contract_changed = False
+        else:
+            contract_changed = previous_contract != updated_contract
+        if not contract_changed:
             if updated_version != previous_version:
                 raise SoloAIError(
                     "Progress or outcome updates must not change plan version"
@@ -970,9 +1348,17 @@ def _write_root_update_locked(
                 )
         current_acceptance = _section(str(current["content"]), _ACCEPTANCE_HEADING)
         updated_acceptance = _section(content, _ACCEPTANCE_HEADING)
+        if current_index != updated_index and not allow_acceptance_index_update:
+            raise SoloAIError(
+                "Only root-anchor reindex or an explicit plan amendment may change the acceptance index"
+            )
         if contract_changed:
             # 所有会改变结构化目标的入口统一使既有总体验收失效；调用者
             # 不能借 generic update 保留或伪造 accepted/cancelled 状态。
+            content = _replace_section(
+                content, _ACCEPTANCE_HEADING, _pending_acceptance()
+            )
+        elif current_index != updated_index:
             content = _replace_section(
                 content, _ACCEPTANCE_HEADING, _pending_acceptance()
             )
@@ -1011,6 +1397,7 @@ def amend_root_anchor(
     target: str | None = None,
     scope: str | None = None,
     acceptance: str | None = None,
+    acceptance_index: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """按用户已确认的修订替换或原文附加有效方案，并保留版本化来源记录。"""
 
@@ -1085,6 +1472,10 @@ def amend_root_anchor(
             atomic_write_text(path, updated)
             return {**show_root_anchor(repo, root_id=root_id), "changed": True}
         version, current_plan, changes, _ = _require_structured_plan(content)
+        if current.get("objective_protocol_version") == 1 and acceptance_index is None:
+            raise SoloAIError(
+                "An objective-protocol plan amendment requires a replacement acceptance index"
+            )
         next_version = version + 1
         effective_plan = (
             confirmed_plan
@@ -1120,11 +1511,93 @@ def amend_root_anchor(
             "Current progress",
             f"plan version {next_version} recorded at {utc_timestamp()}",
         )
+        if acceptance_index is not None:
+            updated = _acceptance_index_section(
+                updated,
+                _with_acceptance_index_version(
+                    acceptance_index,
+                    plan_version=next_version,
+                    plan=str(effective_plan),
+                ),
+            )
         return _write_root_update_locked(
             repo,
             root_id=root_id,
             content=updated,
             expected_sha256=expected_sha256,
+            allow_acceptance_index_update=acceptance_index is not None,
+        )
+
+
+def reindex_root_acceptance(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    acceptance_index: list[dict[str, Any]],
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """修复同一有效方案的派生验收索引，不伪造一次用户方案修订。"""
+
+    path = root_anchor_path(repo, root_id)
+    with root_anchor_lock(path):
+        current = show_root_anchor(repo, root_id=root_id)
+        if current.get("objective_protocol_version") != 1:
+            raise SoloAIError(
+                "Only objective-protocol roots can replace an acceptance index"
+            )
+        plan_version = current.get("plan_version")
+        plan = current.get("confirmed_plan")
+        if not isinstance(plan_version, int) or not isinstance(plan, str):
+            raise SoloAIError("Objective-protocol root is missing its effective plan")
+        updated = _acceptance_index_section(
+            str(current["content"]),
+            _with_acceptance_index_version(
+                acceptance_index, plan_version=plan_version, plan=plan
+            ),
+        )
+        return _write_root_update_locked(
+            repo,
+            root_id=root_id,
+            content=updated,
+            expected_sha256=expected_sha256,
+            allow_acceptance_index_update=True,
+        )
+
+
+def upgrade_root_to_objective_protocol(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    acceptance_index: list[dict[str, Any]],
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """把已核对的结构化旧根升级为同一方案版本的验收协议根。"""
+
+    path = root_anchor_path(repo, root_id)
+    with root_anchor_lock(path):
+        current = show_root_anchor(repo, root_id=root_id)
+        if current.get("objective_protocol_version") != 0:
+            raise SoloAIError("Only legacy structured roots can be upgraded")
+        plan_version = current.get("plan_version")
+        plan = current.get("confirmed_plan")
+        if not isinstance(plan_version, int) or not isinstance(plan, str):
+            raise SoloAIError("Legacy root is missing its effective confirmed plan")
+        indexed_plan = _with_acceptance_index_version(
+            acceptance_index,
+            plan_version=plan_version,
+            plan=plan,
+        )
+        updated = _replace_metadata_value(
+            str(current["content"]), _OBJECTIVE_PROTOCOL_FIELD, "1"
+        )
+        updated = _acceptance_index_section(updated, indexed_plan)
+        return _write_root_update_locked(
+            repo,
+            root_id=root_id,
+            content=updated,
+            expected_sha256=expected_sha256,
+            allow_acceptance_index_update=True,
+            allow_objective_protocol_upgrade=True,
         )
 
 
@@ -1168,10 +1641,41 @@ def record_root_acceptance(
             raise SoloAIError(
                 "Legacy root anchors cannot record structured overall acceptance"
             )
+        index = current.get("acceptance_index")
+        evidence_items: list[dict[str, Any]] | None = None
+        if current.get("objective_protocol_version") == 1:
+            if not isinstance(index, list):
+                raise SoloAIError(
+                    "Objective-protocol root requires an acceptance index"
+                )
+            evidence_items = _validate_acceptance_evidence(
+                evidence, items=index, status=status
+            )
+        acceptance_body = (
+            f"- Status: {status}\n"
+            f"- {_ACCEPTANCE_VERSION_FIELD}: {plan_version}\n"
+            + (
+                f"- {_ACCEPTANCE_INDEX_FINGERPRINT_FIELD}: "
+                f"{current['acceptance_index_fingerprint']}\n"
+                + "- Evidence:\n"
+                + "\n".join(
+                    "  - Item: "
+                    + json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for item in evidence_items or []
+                )
+                if evidence_items is not None
+                else f"- Evidence: {evidence.strip()}"
+            )
+        )
         updated = _replace_section(
             content,
             _ACCEPTANCE_HEADING,
-            f"- Status: {status}\n- {_ACCEPTANCE_VERSION_FIELD}: {plan_version}\n- Evidence: {evidence.strip()}",
+            acceptance_body,
         )
         updated = _replace_metadata_value(
             updated,
@@ -1209,6 +1713,109 @@ def delete_root_anchor(repo: GitRepo, *, root_id: str, locked: bool = False) -> 
     path.unlink()
     if history.exists():
         shutil.rmtree(history)
+
+
+def write_root_close_receipt(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    plan_version: int | None,
+    acceptance_status: str | None,
+) -> dict[str, Any]:
+    """根删除前留下最小回执，供精确外部关联在下次读取时自清理。"""
+
+    if acceptance_status not in {"accepted", "cancelled", None}:
+        raise SoloAIError("Root close receipt acceptance status is invalid")
+    path = root_close_receipt_path(repo, root_id=root_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if is_link_or_junction(path.parent) or not path.parent.is_dir():
+        raise SoloAIError("Root close receipt directory is not a plain local directory")
+    receipt = {
+        "schema_version": 1,
+        "root_id": root_id,
+        "plan_version": plan_version,
+        "acceptance_status": acceptance_status,
+        "stage": "closed",
+    }
+    if path.exists():
+        try:
+            existing = json.loads(
+                _require_plain_file(
+                    path, root=repo.local_dir, label="Root close receipt"
+                ).read_text(encoding="utf-8")
+            )
+        except json.JSONDecodeError as exc:
+            raise SoloAIError("Root close receipt is invalid JSON") from exc
+        if existing != receipt:
+            raise SoloAIError("Root close receipt conflicts with this root close")
+        return receipt
+    atomic_write_text(
+        path,
+        json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+    )
+    return receipt
+
+
+def read_external_root_close_receipt(
+    root_anchor_file: Path, *, root_id: str
+) -> dict[str, Any] | None:
+    """只按已保存的源 common-dir 读取回执，绝不扫描其他仓库或猜测缺失根。"""
+
+    if not root_anchor_file.is_absolute() or root_anchor_file.name != f"{root_id}.md":
+        raise SoloAIError("External root anchor path does not match the root id")
+    if (
+        root_anchor_file.parent.name != "root-anchors"
+        or root_anchor_file.parent.parent.name != "solo-ai"
+    ):
+        raise SoloAIError("External root anchor path has an invalid DWW layout")
+    common_dir = root_anchor_file.parent.parent.parent
+    receipt = common_dir / "solo-ai" / "root-close-receipts" / f"{root_id}.json"
+    if not receipt.exists():
+        return None
+    try:
+        value = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SoloAIError("External root close receipt is unreadable") from exc
+    _validate_root_close_receipt(
+        value,
+        root_id=root_id,
+        label="External root close receipt",
+    )
+    return value
+
+
+def read_root_close_receipt(repo: GitRepo, *, root_id: str) -> dict[str, Any] | None:
+    """读取本仓库精确关闭回执，供删除后中断的本地关联恢复。"""
+
+    path = root_close_receipt_path(repo, root_id=root_id)
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(
+            _require_plain_file(
+                path, root=repo.local_dir, label="Root close receipt"
+            ).read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as exc:
+        raise SoloAIError("Root close receipt is invalid JSON") from exc
+    _validate_root_close_receipt(value, root_id=root_id, label="Root close receipt")
+    return value
+
+
+def _validate_root_close_receipt(value: Any, *, root_id: str, label: str) -> None:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("root_id") != root_id
+        or value.get("stage") != "closed"
+        or set(value)
+        != {"schema_version", "root_id", "plan_version", "acceptance_status", "stage"}
+    ):
+        raise SoloAIError(f"{label} does not match this root")
+    if value["plan_version"] is not None and not isinstance(value["plan_version"], int):
+        raise SoloAIError(f"{label} plan version is invalid")
+    if value["acceptance_status"] not in {"accepted", "cancelled", None}:
+        raise SoloAIError(f"{label} acceptance status is invalid")
 
 
 def register_external_root_child(

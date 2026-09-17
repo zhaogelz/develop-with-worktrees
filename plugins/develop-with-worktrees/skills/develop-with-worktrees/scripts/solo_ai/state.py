@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import RepoConfig
+from .host_context import normalize_host_reference
 from .repo import GitRepo
 from .util import (
     ActionableSoloAIError,
@@ -25,7 +26,8 @@ from .util import (
     utc_timestamp,
 )
 
-STATE_SCHEMA = 9
+STATE_SCHEMA = 11
+ROOT_BINDING_PROTOCOL_VERSION = 1
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 IN_PLACE_MODE = "in-place"
 
@@ -52,6 +54,7 @@ class StateStore:
             "schema_version": STATE_SCHEMA,
             "slots": {},
             "tasks": {},
+            "host_root_bindings": {},
             "pending_operation_outcomes": {},
             "updated_at": utc_timestamp(),
         }
@@ -67,7 +70,12 @@ class StateStore:
     def _guard(self) -> dict[str, Any]:
         return read_json(
             self.guard_path,
-            {"schema_version": 1, "quarantines": {}, "alerts": []},
+            {
+                "schema_version": 1,
+                "quarantines": {},
+                "alerts": [],
+                "root_context_refreshes": {},
+            },
         )
 
     def _mutate_guard(self, callback: Callable[[dict[str, Any]], Any]) -> Any:
@@ -158,6 +166,31 @@ class StateStore:
                 if isinstance(policy, dict):
                     policy.setdefault("candidate_validation", "ready")
             state["schema_version"] = STATE_SCHEMA
+        elif version == 9:
+            # 宿主与主锚点的关联只影响新协议任务；既有任务仍保持原有根绑定和
+            # 生命周期语义，不能因一次读取迁移而被自动认领。
+            state.setdefault("host_root_bindings", {})
+            state["schema_version"] = 10
+            version = 10
+        if version == 10:
+            # 不能根据旧任务碰巧有 root_anchor_id 就推断其已经承诺新门禁。
+            # 只有新版 Start 明确写入协议版本的任务才检查预期关联。
+            for task in state.get("tasks", {}).values():
+                task.setdefault("root_binding_protocol", 0)
+            for binding in state.get("host_root_bindings", {}).values():
+                if not isinstance(binding, dict):
+                    continue
+                binding.setdefault("status", "available")
+                binding.setdefault(
+                    "request_fingerprint",
+                    sha256_text(
+                        "legacy-host-root:"
+                        + str(binding.get("root_anchor_id", ""))
+                        + ":"
+                        + str(binding.get("root_anchor_file", ""))
+                    ),
+                )
+            state["schema_version"] = STATE_SCHEMA
         elif version != STATE_SCHEMA:
             raise SoloAIError(
                 "Unsupported local state schema; run doctor before changing this repository"
@@ -168,9 +201,14 @@ class StateStore:
             task.setdefault("integration_policy", None)
             task.setdefault("root_anchor_file", None)
             task.setdefault("host_origin", None)
+            task.setdefault("expected_root_anchor_id", None)
+            task.setdefault("expected_root_anchor_file", None)
+            task.setdefault("root_binding_protocol", 0)
+            task.setdefault("root_binding_exception", None)
             policy = task.get("integration_policy")
             if isinstance(policy, dict):
                 policy.setdefault("candidate_validation", "ready")
+        state.setdefault("host_root_bindings", {})
         state.setdefault("pending_operation_outcomes", {})
         self._apply_guard_quarantines(state)
         return state
@@ -274,6 +312,251 @@ class StateStore:
             state["updated_at"] = utc_timestamp()
             atomic_write_json(self.path, state)
             return result
+
+    @staticmethod
+    def _host_binding_key(host_origin: dict[str, str]) -> str:
+        """以精确宿主身份作为关联键，绝不从标题、目录或最近任务猜测。"""
+
+        return sha256_text(f"{host_origin['kind']}\0{host_origin['thread_id']}")
+
+    def host_root_binding(
+        self, host_origin: dict[str, str] | None
+    ) -> dict[str, Any] | None:
+        normalized = normalize_host_reference(host_origin)
+        if normalized is None:
+            return None
+        bindings = self.read().get("host_root_bindings", {})
+        if not isinstance(bindings, dict):
+            raise SoloAIError(
+                "Host root bindings are malformed; run doctor before continuing"
+            )
+        binding = bindings.get(self._host_binding_key(normalized))
+        if binding is None:
+            return None
+        if (
+            not isinstance(binding, dict)
+            or binding.get("host_origin") != normalized
+            or not isinstance(binding.get("root_anchor_id"), str)
+            or not binding["root_anchor_id"]
+            or (
+                binding.get("root_anchor_file") is not None
+                and not isinstance(binding.get("root_anchor_file"), str)
+            )
+            or binding.get("status") not in {"registering", "available"}
+            or not isinstance(binding.get("request_fingerprint"), str)
+        ):
+            raise SoloAIError(
+                "Host root binding is malformed; run doctor before continuing"
+            )
+        return copy.deepcopy(binding)
+
+    def begin_host_root_registration(
+        self,
+        host_origin: dict[str, str],
+        *,
+        root_anchor_id: str,
+        root_anchor_file: str | None,
+        request_fingerprint: str,
+    ) -> dict[str, Any]:
+        """先登记宿主的同一目标，避免根写入后丢失应关联对象。"""
+
+        normalized = normalize_host_reference(host_origin)
+        if normalized is None:
+            raise SoloAIError("Host root binding requires an exact host reference")
+        if not root_anchor_id:
+            raise SoloAIError("Host root binding requires a root anchor id")
+        if root_anchor_file is not None and not root_anchor_file:
+            raise SoloAIError("Host root binding path must be non-empty when supplied")
+        if (
+            not request_fingerprint
+            or len(request_fingerprint) > 256
+            or any(character.isspace() for character in request_fingerprint)
+        ):
+            raise SoloAIError("Host root binding requires a stable request fingerprint")
+        key = self._host_binding_key(normalized)
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            bindings = state.setdefault("host_root_bindings", {})
+            if not isinstance(bindings, dict):
+                raise SoloAIError(
+                    "Host root bindings are malformed; run doctor before continuing"
+                )
+            existing = bindings.get(key)
+            expected = {
+                "host_origin": normalized,
+                "root_anchor_id": root_anchor_id,
+                "root_anchor_file": root_anchor_file,
+                "request_fingerprint": request_fingerprint,
+            }
+            if existing is not None:
+                if not isinstance(existing, dict) or any(
+                    existing.get(name) != value for name, value in expected.items()
+                ):
+                    raise SoloAIError(
+                        "Host is already associated with a different active root anchor"
+                    )
+                return copy.deepcopy(existing)
+            bindings[key] = {
+                **expected,
+                "status": "registering",
+                "created_at": utc_timestamp(),
+            }
+            return copy.deepcopy(bindings[key])
+
+        return self.mutate(update)
+
+    def complete_host_root_registration(
+        self,
+        host_origin: dict[str, str],
+        *,
+        root_anchor_id: str,
+        root_anchor_file: str | None,
+        request_fingerprint: str,
+    ) -> dict[str, Any]:
+        """仅把同一请求的登记中关联转为可供 Start 继承的状态。"""
+
+        normalized = normalize_host_reference(host_origin)
+        if normalized is None:
+            raise SoloAIError("Host root binding requires an exact host reference")
+        key = self._host_binding_key(normalized)
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            bindings = state.setdefault("host_root_bindings", {})
+            current = bindings.get(key) if isinstance(bindings, dict) else None
+            expected = {
+                "host_origin": normalized,
+                "root_anchor_id": root_anchor_id,
+                "root_anchor_file": root_anchor_file,
+                "request_fingerprint": request_fingerprint,
+            }
+            if not isinstance(current, dict) or any(
+                current.get(name) != value for name, value in expected.items()
+            ):
+                raise SoloAIError(
+                    "Host root registration changed before it could be completed"
+                )
+            if current.get("status") not in {"registering", "available"}:
+                raise SoloAIError("Host root registration has an invalid status")
+            current["status"] = "available"
+            current["updated_at"] = utc_timestamp()
+            return copy.deepcopy(current)
+
+        return self.mutate(update)
+
+    def bind_host_root(
+        self,
+        host_origin: dict[str, str],
+        *,
+        root_anchor_id: str,
+        root_anchor_file: str | None,
+        request_fingerprint: str,
+    ) -> dict[str, Any]:
+        """为已核对根补建关联；重试不覆盖其他目标。"""
+
+        self.begin_host_root_registration(
+            host_origin,
+            root_anchor_id=root_anchor_id,
+            root_anchor_file=root_anchor_file,
+            request_fingerprint=request_fingerprint,
+        )
+        return self.complete_host_root_registration(
+            host_origin,
+            root_anchor_id=root_anchor_id,
+            root_anchor_file=root_anchor_file,
+            request_fingerprint=request_fingerprint,
+        )
+
+    def clear_host_root_bindings(
+        self, *, root_anchor_id: str, root_anchor_file: str | None
+    ) -> list[dict[str, Any]]:
+        """关闭一个精确根后删除仅属于它的本地宿主关联。"""
+
+        def update(state: dict[str, Any]) -> list[dict[str, Any]]:
+            bindings = state.setdefault("host_root_bindings", {})
+            if not isinstance(bindings, dict):
+                raise SoloAIError(
+                    "Host root bindings are malformed; run doctor before continuing"
+                )
+            removed: list[dict[str, Any]] = []
+            for key, value in list(bindings.items()):
+                if not isinstance(value, dict):
+                    raise SoloAIError(
+                        "Host root binding is malformed; run doctor before continuing"
+                    )
+                if (
+                    value.get("root_anchor_id") == root_anchor_id
+                    and value.get("root_anchor_file") == root_anchor_file
+                ):
+                    removed.append(copy.deepcopy(value))
+                    del bindings[key]
+            return removed
+
+        return self.mutate(update)
+
+    def clear_host_root_binding(
+        self,
+        host_origin: dict[str, str] | None,
+        *,
+        root_anchor_id: str,
+        root_anchor_file: str | None,
+    ) -> bool:
+        """只清除当前查询出的同一身份关联，避免关闭旧根误删新目标。"""
+
+        normalized = normalize_host_reference(host_origin)
+        if normalized is None:
+            return False
+        key = self._host_binding_key(normalized)
+
+        def update(state: dict[str, Any]) -> bool:
+            bindings = state.setdefault("host_root_bindings", {})
+            value = bindings.get(key) if isinstance(bindings, dict) else None
+            if not isinstance(value, dict):
+                return False
+            if (
+                value.get("root_anchor_id") != root_anchor_id
+                or value.get("root_anchor_file") != root_anchor_file
+            ):
+                return False
+            del bindings[key]
+            return True
+
+        return self.mutate(update)
+
+    def root_context_refresh_required(self, task_id: str) -> dict[str, Any] | None:
+        refreshes = self._guard().get("root_context_refreshes", {})
+        if not isinstance(refreshes, dict):
+            raise SoloAIError(
+                "Guard root context state is malformed; retry after dww doctor"
+            )
+        value = refreshes.get(task_id)
+        if value is None:
+            return None
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("reason"), str)
+            or not isinstance(value.get("generation"), str)
+        ):
+            raise SoloAIError(
+                "Guard root context state is malformed; retry after dww doctor"
+            )
+        return copy.deepcopy(value)
+
+    def clear_root_context_refresh(self, task_id: str, *, generation: str) -> bool:
+        """仅清除自己读取的恢复事件，不能覆盖刷新期间新到的恢复标记。"""
+
+        def update(guard: dict[str, Any]) -> bool:
+            refreshes = guard.setdefault("root_context_refreshes", {})
+            if not isinstance(refreshes, dict):
+                raise SoloAIError(
+                    "Guard root context state is malformed; retry after dww doctor"
+                )
+            current = refreshes.get(task_id)
+            if not isinstance(current, dict) or current.get("generation") != generation:
+                return False
+            refreshes.pop(task_id, None)
+            return True
+
+        return self._mutate_guard(update)
 
     def _assert_slot_layout(self, state: dict[str, Any], config: RepoConfig) -> None:
         """受管槽位目录在首次采用后不可被配置文件静默迁移。"""
@@ -401,6 +684,10 @@ class StateStore:
         supersedes: str | None = None,
         root_anchor_id: str | None = None,
         root_anchor_file: str | None = None,
+        expected_root_anchor_id: str | None = None,
+        expected_root_anchor_file: str | None = None,
+        root_binding_protocol: int = 0,
+        root_binding_exception: str | None = None,
         host_origin: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         task_id = f"task-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
@@ -421,6 +708,14 @@ class StateStore:
                         or existing.get("root_anchor_id") != root_anchor_id
                         or existing.get("root_anchor_file") != root_anchor_file
                         or existing.get("host_origin") != host_origin
+                        or existing.get("expected_root_anchor_id")
+                        != expected_root_anchor_id
+                        or existing.get("expected_root_anchor_file")
+                        != expected_root_anchor_file
+                        or existing.get("root_binding_protocol")
+                        != root_binding_protocol
+                        or existing.get("root_binding_exception")
+                        != root_binding_exception
                         or existing.get("anchor_contract", anchor_contract)
                         != anchor_contract
                     ):
@@ -464,6 +759,10 @@ class StateStore:
                 "anchor_contract": copy.deepcopy(anchor_contract),
                 "root_anchor_id": root_anchor_id,
                 "root_anchor_file": root_anchor_file,
+                "expected_root_anchor_id": expected_root_anchor_id,
+                "expected_root_anchor_file": expected_root_anchor_file,
+                "root_binding_protocol": root_binding_protocol,
+                "root_binding_exception": root_binding_exception,
                 "host_origin": copy.deepcopy(host_origin),
                 "candidate_head": None,
                 "status": "starting",
@@ -511,6 +810,10 @@ class StateStore:
         anchor_contract: dict[str, str],
         root_anchor_id: str | None = None,
         root_anchor_file: str | None = None,
+        expected_root_anchor_id: str | None = None,
+        expected_root_anchor_file: str | None = None,
+        root_binding_protocol: int = 0,
+        root_binding_exception: str | None = None,
     ) -> dict[str, Any]:
         """登记一次性当前工作树任务；不占槽位、不创建分支。"""
         if not session_id:
@@ -555,6 +858,10 @@ class StateStore:
                 "anchor_contract": copy.deepcopy(anchor_contract),
                 "root_anchor_id": root_anchor_id,
                 "root_anchor_file": root_anchor_file,
+                "expected_root_anchor_id": expected_root_anchor_id,
+                "expected_root_anchor_file": expected_root_anchor_file,
+                "root_binding_protocol": root_binding_protocol,
+                "root_binding_exception": root_binding_exception,
                 "candidate_head": head,
                 "status": "active",
                 "lease": lease,

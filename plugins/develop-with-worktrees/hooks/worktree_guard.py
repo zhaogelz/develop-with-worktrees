@@ -131,7 +131,12 @@ def read_guard_state(root: Path) -> tuple[dict[str, Any], Path | None]:
     try:
         return json.loads(path.read_text(encoding="utf-8")), path
     except (OSError, json.JSONDecodeError):
-        return {"schema_version": 1, "quarantines": {}, "alerts": []}, path
+        return {
+            "schema_version": 1,
+            "quarantines": {},
+            "alerts": [],
+            "root_context_refreshes": {},
+        }, path
 
 
 def _with_guard_lock(path: Path, update: Any) -> None:
@@ -163,7 +168,12 @@ def _with_guard_lock(path: Path, update: Any) -> None:
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            state = {"schema_version": 1, "quarantines": {}, "alerts": []}
+            state = {
+                "schema_version": 1,
+                "quarantines": {},
+                "alerts": [],
+                "root_context_refreshes": {},
+            }
         update(state)
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_text(
@@ -204,6 +214,25 @@ def _quarantine(root: Path, task_id: str, reason: str) -> None:
         quarantines = state.setdefault("quarantines", {})
         if isinstance(quarantines, dict):
             quarantines[task_id] = {"reason": reason, "observed_at": int(time.time())}
+
+    _with_guard_lock(path, update)
+
+
+def _mark_root_context_refresh(root: Path, task_id: str, *, reason: str) -> None:
+    """只记录本次恢复需读取的轻量标记，不在 Hook 中读完整方案。"""
+
+    _, path = read_guard_state(root)
+    if path is None:
+        return
+
+    def update(state: dict[str, Any]) -> None:
+        refreshes = state.setdefault("root_context_refreshes", {})
+        if isinstance(refreshes, dict):
+            refreshes[task_id] = {
+                "reason": reason,
+                "generation": uuid.uuid4().hex,
+                "observed_at": int(time.time()),
+            }
 
     _with_guard_lock(path, update)
 
@@ -907,6 +936,17 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
     guard, _ = read_guard_state(root)
     if event == "SessionStart":
         if action == "managed":
+            active = _task_for_worktree(state, guard, root)
+            if (
+                active
+                and active.get("mode", "isolated") == "isolated"
+                and active.get("root_anchor_id")
+            ):
+                _mark_root_context_refresh(
+                    root,
+                    str(active["id"]),
+                    reason="SessionStart",
+                )
             return _context(event, _session_context(root, state, guard, payload))
         return _context(
             event,
@@ -958,6 +998,16 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         )
     task = _task_for_worktree(state, guard, root)
     if task and task.get("mode", "isolated") == "isolated":
+        refreshes = guard.get("root_context_refreshes", {})
+        refresh = (
+            refreshes.get(str(task.get("id"))) if isinstance(refreshes, dict) else None
+        )
+        if isinstance(refresh, dict):
+            if dww_command == "anchor":
+                return None
+            return _deny(
+                "This task resumed with a bound root objective. Run the trusted dww anchor refresh-root command before writing so the current complete plan and task context are read again. Read-only queries remain allowed."
+            )
         return None
     if task and task.get("mode") == "in-place":
         if task.get("status") == "quarantined":

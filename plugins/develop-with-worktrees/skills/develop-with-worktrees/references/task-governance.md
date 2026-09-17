@@ -49,10 +49,37 @@ baseline, target/scope/acceptance, monotonically versioned explicit user
 amendments, current progress, and overall acceptance result. The source input is
 not another canonical document after creation.
 
+When the host supplies an exact task identity, create the root with that identity,
+a stable request ID, and an acceptance-index JSON file. DWW records only the
+host-to-root locator, never another copy of the plan. `root-anchor context` shows
+that one association without returning the plan, and `root-anchor bind-host` binds
+an already checked local or external root. A later `start` from the same exact
+host inherits the association when no root parameter is supplied; an explicit
+different root is rejected. A user-confirmed independent task may opt out only
+with its one-line `--independent-reason` recorded on that task.
+
+The acceptance-index JSON has an `items` array. Each item has a stable `id`, a
+one-line `locator`, an exact one-line `quote` from the effective plan, a boolean
+`required`, and `plan_version: null` on input. DWW assigns the current plan
+version. `root-anchor accept` for this protocol consumes JSON evidence for every
+indexed item; each record names `id`, `status`, `observation`, and `evidence`.
+Required items must pass before an accepted result can be recorded. Use
+`root-anchor reindex` only to correct this derived index for the same effective
+plan; it resets overall acceptance without inventing a user plan amendment.
+When a user explicitly continues a checked legacy structured root, use
+`root-anchor upgrade-objective` with that same-plan index. It upgrades only the
+derived protocol and index, resets overall acceptance, and cannot rewrite the
+confirmed plan or pretend that earlier evidence was accepted.
+
 A child starts with `--root-anchor <root-id>`. A cross-repository child must also
 supply the exact external root file; DWW records that one non-linked locator and
 does not discover repositories or copy the root. Root anchors do not define
 candidate membership, task dependencies, scheduler ownership, or batch scope.
+For a host-associated objective, Start also stores the expected root separately
+from the active task binding. Commit, Ready, and publishing Finish reject a lost
+or substituted binding before their existing version checks. The recovery action
+is the exact `anchor bind-root` followed, when needed, by `anchor refresh-root`;
+it does not ask the user to repeat the plan.
 
 Only an explicit user plan change may replace the effective plan through
 `root-anchor amend` or append the user's words as a change. Technical choices that
@@ -65,6 +92,11 @@ Start or `anchor bind-root` returns the complete current root once. On actual
 continuation, handoff, model/context recovery, root-plan change, or candidate
 repair, read the child anchor and run `anchor refresh-root` once. That command
 returns the current child and complete root, then records the reviewed version.
+For the trusted supported Codex SessionStart path, DWW records a lightweight
+refresh marker even when the plan version is unchanged. Supported writes wait for
+that one refresh; read-only queries and the trusted refresh command remain
+available. The marker is generation-aware, so a newer recovery event is never
+cleared by an older refresh.
 
 The record is not proof of understanding and does not ask the user again. Commit,
 actual Ready, and candidate-publishing Finish require the recorded root version
@@ -76,7 +108,12 @@ successful bind.
 candidate-published child, its exact supersession lineage must be integrated or
 explicitly withdrawn; publication alone is not delivery. A structured root also
 requires `root-anchor accept` to record accepted or cancelled evidence for its
-current plan version before closure.
+current plan version before closure. Protocol roots additionally require the
+recorded acceptance-index fingerprint to match the current index. Closing writes
+one minimal `root-close-receipts/<root-id>.json` receipt before deleting the
+root. An external host association is removed only after its next exact-context
+read finds this matching receipt; a missing external root without that receipt is
+unverifiable rather than assumed closed.
 
 ## Precedence and durable documents
 

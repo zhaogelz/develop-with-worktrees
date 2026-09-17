@@ -135,6 +135,8 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         "skills/develop-with-worktrees/scripts/solo_ai/config.py",
         "skills/develop-with-worktrees/scripts/solo_ai/lifecycle.py",
         "skills/develop-with-worktrees/scripts/solo_ai/root_context.py",
+        "skills/develop-with-worktrees/scripts/solo_ai/state.py",
+        "skills/develop-with-worktrees/scripts/solo_ai/host_context.py",
         "skills/develop-with-worktrees/scripts/solo_ai/task_context.py",
     )
     for relative_path in shipped_paths:
@@ -203,6 +205,23 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         "# 已安装完整方案 V1\n\n用于验证非交互式 UTF-8 输出。\n",
         encoding="utf-8",
     )
+    acceptance_index = smoke_repo / "installed-root-index.json"
+    acceptance_index.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "A01",
+                        "locator": "installed root plan",
+                        "quote": "UTF-8",
+                        "required": True,
+                        "plan_version": None,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     created_root = run_runner(
         "--json",
         "root-anchor",
@@ -219,6 +238,8 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         str(root_plan),
         "--plan-source",
         "installed test confirmed v1",
+        "--acceptance-index-file",
+        str(acceptance_index),
         "--request-id",
         "installed-runner-root-smoke",
     )
@@ -266,12 +287,15 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
         "installed test confirmed v2",
         "--summary",
         "append the installed exact correction",
+        "--acceptance-index-file",
+        str(acceptance_index),
         "--expected-sha256",
         created_root_payload["sha256"],
         "--content",
     )
     assert amended_root.returncode == 0, amended_root.stderr
     root_change.unlink()
+    acceptance_index.unlink()
     amended_payload = json.loads(amended_root.stdout)["result"]
     assert amended_payload["content"].count("Installed V2 exact correction.") == 1
     assert "confirmed_plan" not in amended_payload
@@ -394,9 +418,21 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     assert tail.returncode == 0, tail.stderr
     assert json.loads(tail.stdout)["result"]["status"] == "completed"
     assert (smoke_repo / "smoke.txt").exists()
-    root_evidence = smoke_repo / "installed-root-evidence.md"
+    root_evidence = smoke_repo / "installed-root-evidence.json"
     root_evidence.write_text(
-        "Installed V2 was checked after local delivery.\n", encoding="utf-8"
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "A01",
+                        "status": "passed",
+                        "observation": "Installed V2 was checked after local delivery.",
+                        "evidence": "installed runner smoke delivery",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
     )
     current_root = run_runner("--json", "root-anchor", "show", "--root", root_id)
     assert current_root.returncode == 0, current_root.stderr

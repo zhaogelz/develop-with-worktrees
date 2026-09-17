@@ -984,13 +984,46 @@ def managed_block() -> str:
 
 For every task that may modify repository files, use the installed `develop-with-worktrees` skill before editing. Run `start`, work only in its returned worktree, review exact paths before `commit`, then `finish`; do not bypass failed gates. DWW is local-only: do not fetch, pull, push, rebase, squash, amend, or rewrite history through it.
 
-Keep one task anchor per task. `Start` records the known purpose, scope, acceptance criteria, baseline, and progress; update it only when that execution contract or progress materially changes. When the user has confirmed a complete plan, create one root anchor before its child tasks: the root keeps the complete plan, full plan-changing history, amendments, and overall result without a content-size limit, while children keep only their execution slice.
+Keep one task anchor per task. `Start` records the known purpose, scope, acceptance criteria, baseline, and progress; update it only when that execution contract or progress materially changes. When the user has confirmed a complete plan, create one root anchor before its child tasks: the root keeps the complete plan, full plan-changing history, amendments, and overall result without a content-size limit, while children keep only their execution slice. When the host supplies an exact task identity, create that root with the identity, a stable request ID, and an acceptance index; DWW stores only the exact host-to-root locator. Later `Start` calls from that host inherit the root, reject a conflicting explicit root, and record an explicit independent task only with its one-line reason. Protocol-root acceptance needs evidence for every indexed required item; legacy roots remain compatible.
 
 Normal `Start` or `bind-root` prints the complete root context once without a separate acknowledgement step. After continuation, model/context recovery, a root-plan change, or candidate repair, use one `anchor refresh-root` operation to return the current task anchor and complete root context together; it records the current version without copying SHA or version parameters. This refresh is required before Commit, Ready, or Finish when the recorded root is stale, not on every edit. Close a structured root only after all children are terminal and accepted or cancelled evidence is recorded.
 
 An exact full batch freezes automatically. A smaller tail freezes only on an explicit `round-complete`, `user`, `deploy`, or `dependency` cause with one short reason; heartbeat, idle time, and task counts never seal a batch. Ordinary completion does not request immediate integration: without a cause, `Finish` publishes its candidate and releases its task worktree. Use `round-complete` only after the current round has ended and its candidate lane has no active producer; use `user` only when the user explicitly asks to integrate now without waiting. Do not infer that exception from ordinary completion or review wording. Candidate publication is not delivery: the coordinator that freezes a full batch or tail follows integration, inspects failures, and repairs deterministically within the agreed scope.
 {MANAGED_END}
 """
+
+
+def _pre_objective_protocol_managed_block() -> str:
+    """目标主锚点协议接入前的当前托管块；只用于无歧义升级。"""
+
+    current = managed_block()
+    current_rule = (
+        "Keep one task anchor per task. `Start` records the known purpose, scope, "
+        "acceptance criteria, baseline, and progress; update it only when that "
+        "execution contract or progress materially changes. When the user has "
+        "confirmed a complete plan, create one root anchor before its child tasks: "
+        "the root keeps the complete plan, full plan-changing history, amendments, "
+        "and overall result without a content-size limit, while children keep only "
+        "their execution slice. When the host supplies an exact task identity, "
+        "create that root with the identity, a stable request ID, and an acceptance "
+        "index; DWW stores only the exact host-to-root locator. Later `Start` calls "
+        "from that host inherit the root, reject a conflicting explicit root, and "
+        "record an explicit independent task only with its one-line reason. "
+        "Protocol-root acceptance needs evidence for every indexed required item; "
+        "legacy roots remain compatible."
+    )
+    previous_rule = (
+        "Keep one task anchor per task. `Start` records the known purpose, scope, "
+        "acceptance criteria, baseline, and progress; update it only when that "
+        "execution contract or progress materially changes. When the user has "
+        "confirmed a complete plan, create one root anchor before its child tasks: "
+        "the root keeps the complete plan, full plan-changing history, amendments, "
+        "and overall result without a content-size limit, while children keep only "
+        "their execution slice."
+    )
+    if current.count(current_rule) != 1:
+        raise RuntimeError("Current managed block no longer has the objective rule")
+    return current.replace(current_rule, previous_rule)
 
 
 def _pre_batch_delivery_managed_block() -> str:
@@ -1078,6 +1111,8 @@ def managed_agents_status(existing: str) -> str:
     block = existing[start:end].replace("\r\n", "\n") + "\n"
     if block == managed_block():
         return "current"
+    if block == _pre_objective_protocol_managed_block():
+        return "known-legacy-objective-protocol"
     if block == _pre_batch_delivery_managed_block():
         return "known-legacy-batch-delivery"
     if block == _pre_root_output_managed_block():

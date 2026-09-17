@@ -23,6 +23,14 @@ A mature workflow remains routing authority. Hook, idle, and session events may
 wake reconciliation but cannot select candidates, complete a task, delete an
 anchor, or release a slot.
 
+For an active isolated task with a bound root, the supported trusted
+`SessionStart` path records only a small “refresh required” marker. Before a
+supported write, the Hook requires `anchor refresh-root` to read the current task
+and complete root once; ordinary read-only queries and the trusted DWW `anchor`
+command remain available. This check is scoped to observed Hook events and tools,
+not an operating-system sandbox. The CLI binding and version gates remain the
+fallback when the Hook is not trusted or an event/tool is not covered.
+
 ## Identity and content protection
 
 Every managed Start, Commit, Ready, Finish, Recover, Abandon, and cleanup action

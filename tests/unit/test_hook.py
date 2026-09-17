@@ -9,7 +9,14 @@ from pathlib import Path
 from conftest import declare_delegated_adapter, git
 from solo_ai.cli import _doctor
 from solo_ai.config import CommandSpec
-from solo_ai.lifecycle import choose, initialize, resume_in_place, start
+from solo_ai.lifecycle import (
+    choose,
+    create_root_task_anchor,
+    initialize,
+    refresh_root_context,
+    resume_in_place,
+    start,
+)
 from solo_ai.repo import GitRepo
 from solo_ai.state import StateStore
 
@@ -421,6 +428,75 @@ def test_hook_hard_denies_adopted_base_write_and_allows_isolated_task(
         _payload(Path(task["worktree"]), tool="apply_patch", patch=task_patch)
     )
     assert allowed is None
+
+
+def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(
+    git_repo: Path,
+) -> None:
+    repo = _initialized(git_repo)
+    plan = git_repo / "hook-root-plan.md"
+    plan.write_text("# Hook root\n\n- Refresh before writing.\n", encoding="utf-8")
+    root = create_root_task_anchor(
+        repo,
+        purpose="recover root context on a new session",
+        target="block supported writes until refresh-root reads the current context",
+        scope="one isolated task and one SessionStart event",
+        acceptance="read-only and refresh remain available while writes wait",
+        plan_input_path=plan,
+        plan_source="user confirmed the root plan",
+        request_id="hook-root-refresh-test",
+    )
+    task = start(repo, name="hook root child", root_anchor_id=root["root_id"])
+    worktree = Path(task["worktree"])
+
+    started = HOOK.decide(
+        {
+            **_payload(worktree, tool="apply_patch"),
+            "hook_event_name": "SessionStart",
+        }
+    )
+    assert started is not None
+    marker = StateStore(repo).root_context_refresh_required(task["id"])
+    assert marker is not None and marker["reason"] == "SessionStart"
+    HOOK.decide(
+        {
+            **_payload(worktree, tool="apply_patch"),
+            "hook_event_name": "SessionStart",
+        }
+    )
+    newer_marker = StateStore(repo).root_context_refresh_required(task["id"])
+    assert (
+        newer_marker is not None and newer_marker["generation"] != marker["generation"]
+    )
+    assert (
+        StateStore(repo).clear_root_context_refresh(
+            task["id"], generation=marker["generation"]
+        )
+        is False
+    )
+    denied = HOOK.decide(_payload(worktree, tool="apply_patch"))
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert (
+        HOOK.decide(_payload(worktree, tool="Bash", command="git status --short"))
+        is None
+    )
+    assert (
+        HOOK.decide(
+            _payload(
+                worktree,
+                tool="Bash",
+                command=(
+                    f'uv run --script "{RUNNER_PATH}" --repo "{worktree}" '
+                    f"anchor refresh-root --task {task['id']} --lease {task['lease']}"
+                ),
+            )
+        )
+        is None
+    )
+
+    refresh_root_context(repo, task_id=task["id"], lease=task["lease"])
+    assert StateStore(repo).root_context_refresh_required(task["id"]) is None
+    assert HOOK.decide(_payload(worktree, tool="apply_patch")) is None
 
 
 def test_hook_uses_actual_apply_patch_targets_for_external_structural_files(

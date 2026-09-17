@@ -10,6 +10,7 @@ from solo_ai.root_context import (
     create_root_anchor,
     delete_root_anchor,
     record_root_acceptance,
+    reindex_root_acceptance,
     read_root_acceptance_evidence_input,
     read_root_change_input,
     read_root_plan_input,
@@ -20,6 +21,7 @@ from solo_ai.root_context import (
     show_root_anchor_history,
     update_root_progress,
     update_root_anchor,
+    upgrade_root_to_objective_protocol,
 )
 from solo_ai.util import SoloAIError
 
@@ -116,6 +118,106 @@ def test_confirmed_plan_root_requires_a_stable_request_id(git_repo: Path) -> Non
         )
 
 
+def test_objective_protocol_requires_indexed_evidence_and_reindex_invalidates_it(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    plan = "# Final plan\n\n- Preserve the objective.\n- Verify the result.\n"
+    index = [
+        {
+            "id": "A01",
+            "locator": "Final plan line 3",
+            "quote": "Preserve the objective.",
+            "required": True,
+            "plan_version": None,
+        },
+        {
+            "id": "A02",
+            "locator": "Final plan line 4",
+            "quote": "Verify the result.",
+            "required": True,
+            "plan_version": None,
+        },
+    ]
+    created = create_root_anchor(
+        repo,
+        root_id="root-20260912000000-indexed",
+        purpose="require exact evidence coverage",
+        target="protect total objective acceptance",
+        base_ref="main",
+        base_head=repo.head(repo.root),
+        scope="acceptance index only",
+        acceptance="every indexed item has evidence",
+        confirmed_plan=plan,
+        plan_source="user confirmed final plan",
+        request_id="indexed-objective-root-test",
+        acceptance_index=index,
+        objective_protocol_version=1,
+    )
+    assert created["objective_protocol_version"] == 1
+    assert created["acceptance_index_fingerprint"]
+
+    with pytest.raises(SoloAIError, match="JSON object"):
+        record_root_acceptance(
+            repo,
+            root_id=str(created["root_id"]),
+            status="accepted",
+            evidence="a non-empty sentence is no longer enough",
+            expected_sha256=str(created["sha256"]),
+        )
+    with pytest.raises(SoloAIError, match="missing indexed items"):
+        record_root_acceptance(
+            repo,
+            root_id=str(created["root_id"]),
+            status="accepted",
+            evidence='{"items": [{"id":"A01","status":"passed","observation":"pass","evidence":"tests"}]}',
+            expected_sha256=str(created["sha256"]),
+        )
+
+    accepted = record_root_acceptance(
+        repo,
+        root_id=str(created["root_id"]),
+        status="accepted",
+        evidence=(
+            '{"items": ['
+            '{"id":"A01","status":"passed","observation":"pass","evidence":"tests/a"},'
+            '{"id":"A02","status":"passed","observation":"pass","evidence":"tests/b"}'
+            "]}"
+        ),
+        expected_sha256=str(created["sha256"]),
+    )
+    assert (
+        accepted["overall_acceptance_index_fingerprint"]
+        == accepted["acceptance_index_fingerprint"]
+    )
+
+    reindexed = reindex_root_acceptance(
+        repo,
+        root_id=str(created["root_id"]),
+        acceptance_index=[index[0]],
+        expected_sha256=str(accepted["sha256"]),
+    )
+    assert reindexed["plan_version"] == 1
+    assert reindexed["overall_acceptance_status"] == "pending"
+    assert (
+        reindexed["acceptance_index_fingerprint"]
+        != accepted["acceptance_index_fingerprint"]
+    )
+
+    forged = git_repo / "forged-index-removal.md"
+    forged.write_text(
+        str(reindexed["content"]).replace("Final plan line 3", "forged locator"),
+        encoding="utf-8",
+    )
+    with pytest.raises(SoloAIError, match="cannot be changed|Only root-anchor reindex"):
+        update_root_anchor(
+            repo,
+            root_id=str(created["root_id"]),
+            input_path=forged,
+            expected_sha256=str(reindexed["sha256"]),
+        )
+
+
 def test_legacy_root_with_an_incidental_plan_heading_remains_readable(
     git_repo: Path,
 ) -> None:
@@ -173,6 +275,49 @@ def test_legacy_root_first_complete_amendment_becomes_structured_without_losing_
     )
     assert amended["plan_version"] == 2
     assert (history_directory / f"{created['root_id']}.v1.md").exists()
+
+
+def test_checked_legacy_structured_root_can_upgrade_to_objective_protocol(
+    git_repo: Path,
+) -> None:
+    repo = GitRepo(git_repo)
+    created = _create(repo)
+    structured = amend_root_anchor(
+        repo,
+        root_id=str(created["root_id"]),
+        confirmed_plan="# Confirmed plan\n\nKeep the user objective.",
+        change_text=None,
+        source="user confirmed the complete plan",
+        summary="record the initial complete plan",
+        expected_sha256=str(created["sha256"]),
+    )
+
+    upgraded = upgrade_root_to_objective_protocol(
+        repo,
+        root_id=str(created["root_id"]),
+        acceptance_index=[
+            {
+                "id": "A01",
+                "locator": "Confirmed plan line 3",
+                "quote": "Keep the user objective.",
+                "required": True,
+                "plan_version": None,
+            }
+        ],
+        expected_sha256=str(structured["sha256"]),
+    )
+
+    assert upgraded["plan_version"] == 1
+    assert upgraded["objective_protocol_version"] == 1
+    assert upgraded["overall_acceptance_status"] == "pending"
+    with pytest.raises(SoloAIError, match="JSON object"):
+        record_root_acceptance(
+            repo,
+            root_id=str(created["root_id"]),
+            status="accepted",
+            evidence="old unstructured evidence is insufficient",
+            expected_sha256=str(upgraded["sha256"]),
+        )
 
 
 def test_structured_root_keeps_complete_plan_and_versions_user_amendments(

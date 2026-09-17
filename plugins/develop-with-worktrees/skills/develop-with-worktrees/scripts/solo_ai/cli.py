@@ -43,10 +43,12 @@ from .lifecycle import (
     abandon,
     adopt_task_anchor,
     approve,
+    bind_host_root_anchor,
     bind_task_root_anchor,
     close_root_task_anchor,
     create_root_task_anchor,
     record_root_task_acceptance,
+    reindex_root_task_acceptance,
     refresh_root_context,
     show_task_anchor,
     update_task_anchor,
@@ -58,6 +60,7 @@ from .lifecycle import (
     disable,
     finish,
     handoff,
+    host_root_context,
     initialize,
     local_enabled,
     list_root_task_anchors,
@@ -72,6 +75,7 @@ from .lifecycle import (
     show_root_task_anchor,
     update_root_task_anchor,
     update_root_task_progress,
+    upgrade_root_task_to_objective_protocol,
     warm_slot,
 )
 from .orchestration import BatchStore
@@ -451,6 +455,10 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="explicit absolute external root-anchor file; requires --root-anchor",
     )
+    start_parser.add_argument(
+        "--independent-reason",
+        help="one-line user-confirmed reason this task is independent of the current host objective",
+    )
     _add_host_reference_arguments(start_parser, role="development task")
 
     root_anchor = sub.add_parser(
@@ -477,6 +485,11 @@ def _parser() -> argparse.ArgumentParser:
         "--plan-source", help="concise source for the user-confirmed plan"
     )
     root_create.add_argument(
+        "--acceptance-index-file",
+        type=Path,
+        help="JSON acceptance index extracted from the complete confirmed plan",
+    )
+    root_create.add_argument(
         "--request-id", help="stable caller id; repeated creation returns the same root"
     )
     root_create.add_argument(
@@ -484,6 +497,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include the complete root-anchor body in this response",
     )
+    _add_host_reference_arguments(root_create, role="confirmed objective")
     root_show = root_anchor_sub.add_parser(
         "show", help="show one root anchor summary; use --content for its full body"
     )
@@ -494,6 +508,22 @@ def _parser() -> argparse.ArgumentParser:
     root_show.add_argument(
         "--content", action="store_true", help="include the complete UTF-8 anchor body"
     )
+    root_bind_host = root_anchor_sub.add_parser(
+        "bind-host",
+        help="bind an exact existing root anchor to the current host objective",
+    )
+    root_bind_host.add_argument("--root", required=True)
+    root_bind_host.add_argument(
+        "--root-anchor-file",
+        type=Path,
+        help="explicit absolute external root-anchor file; omit for a local root",
+    )
+    _add_host_reference_arguments(root_bind_host, role="confirmed objective")
+    root_context = root_anchor_sub.add_parser(
+        "context",
+        help="show the current exact host-to-root association without returning plan text",
+    )
+    _add_host_reference_arguments(root_context, role="confirmed objective")
     root_update = root_anchor_sub.add_parser(
         "update", help="atomically update one root anchor from a UTF-8 file"
     )
@@ -528,6 +558,11 @@ def _parser() -> argparse.ArgumentParser:
     root_amend.add_argument("--scope")
     root_amend.add_argument("--acceptance")
     root_amend.add_argument(
+        "--acceptance-index-file",
+        type=Path,
+        help="replacement JSON acceptance index for an objective-protocol plan amendment",
+    )
+    root_amend.add_argument(
         "--content",
         action="store_true",
         help="include the complete root-anchor body in this response",
@@ -557,6 +592,22 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include the complete root-anchor body in this response",
     )
+    root_reindex = root_anchor_sub.add_parser(
+        "reindex",
+        help="replace a derived acceptance index without changing the confirmed plan",
+    )
+    root_reindex.add_argument("--root", required=True)
+    root_reindex.add_argument("--index-file", type=Path, required=True)
+    root_reindex.add_argument("--expected-sha256", required=True)
+    root_reindex.add_argument("--content", action="store_true")
+    root_upgrade = root_anchor_sub.add_parser(
+        "upgrade-objective",
+        help="upgrade one checked legacy structured root to the indexed objective protocol",
+    )
+    root_upgrade.add_argument("--root", required=True)
+    root_upgrade.add_argument("--index-file", type=Path, required=True)
+    root_upgrade.add_argument("--expected-sha256", required=True)
+    root_upgrade.add_argument("--content", action="store_true")
     root_close = root_anchor_sub.add_parser(
         "close", help="delete a root anchor after every child task is terminal"
     )
@@ -1851,6 +1902,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             supersedes=args.supersedes,
             root_anchor_id=args.root_anchor,
             root_anchor_file=args.root_anchor_file,
+            independent_reason=args.independent_reason,
             target=args.target,
             scope=args.scope,
             acceptance=args.acceptance,
@@ -1868,6 +1920,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 plan_input_path=args.plan_file,
                 plan_source=args.plan_source,
                 request_id=args.request_id,
+                acceptance_index_input_path=args.acceptance_index_file,
+                host_origin=_resolved_host_reference(args),
                 include_content=args.content,
             )
         if args.root_anchor_command == "show":
@@ -1877,6 +1931,15 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 version=args.version,
                 include_content=args.content,
             )
+        if args.root_anchor_command == "bind-host":
+            return bind_host_root_anchor(
+                repo,
+                root_id=args.root,
+                root_anchor_file=args.root_anchor_file,
+                host_origin=_resolved_host_reference(args),
+            )
+        if args.root_anchor_command == "context":
+            return host_root_context(repo, host_origin=_resolved_host_reference(args))
         if args.root_anchor_command == "update":
             return update_root_task_anchor(
                 repo,
@@ -1897,6 +1960,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 target=args.target,
                 scope=args.scope,
                 acceptance=args.acceptance,
+                acceptance_index_input_path=args.acceptance_index_file,
                 include_content=args.content,
             )
         if args.root_anchor_command == "progress":
@@ -1913,6 +1977,22 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 root_id=args.root,
                 status=args.status,
                 evidence_input_path=args.evidence_file,
+                expected_sha256=args.expected_sha256,
+                include_content=args.content,
+            )
+        if args.root_anchor_command == "reindex":
+            return reindex_root_task_acceptance(
+                repo,
+                root_id=args.root,
+                index_input_path=args.index_file,
+                expected_sha256=args.expected_sha256,
+                include_content=args.content,
+            )
+        if args.root_anchor_command == "upgrade-objective":
+            return upgrade_root_task_to_objective_protocol(
+                repo,
+                root_id=args.root,
+                index_input_path=args.index_file,
                 expected_sha256=args.expected_sha256,
                 include_content=args.content,
             )

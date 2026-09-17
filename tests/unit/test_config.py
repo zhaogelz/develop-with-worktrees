@@ -18,6 +18,7 @@ from solo_ai.config import (
 from solo_ai.config import (
     _legacy_managed_block,
     _pre_batch_delivery_managed_block,
+    _pre_objective_protocol_managed_block,
     _pre_root_output_managed_block,
     _pre_simplification_managed_block,
     _pre_refresh_root_context_managed_block,
@@ -116,6 +117,20 @@ def test_previous_batch_delivery_managed_block_can_be_upgraded() -> None:
     upgraded = render_agents(existing)
     assert managed_agents_status(upgraded) == "current"
     assert "Ordinary completion does not request immediate integration" in upgraded
+    assert upgraded.endswith("\nKeep this.\n")
+
+
+def test_previous_objective_protocol_managed_block_can_be_upgraded() -> None:
+    existing = (
+        "# User instructions\n\n"
+        + _pre_objective_protocol_managed_block()
+        + "\nKeep this.\n"
+    )
+
+    assert managed_agents_status(existing) == "known-legacy-objective-protocol"
+    upgraded = render_agents(existing)
+    assert managed_agents_status(upgraded) == "current"
+    assert "exact host-to-root locator" in upgraded
     assert upgraded.endswith("\nKeep this.\n")
 
 

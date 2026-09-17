@@ -68,6 +68,8 @@ from .root_context import (
     list_root_anchors,
     nonterminal_external_root_children,
     read_root_acceptance_evidence_input,
+    read_root_acceptance_index_input,
+    reindex_root_acceptance,
     require_candidate_delivery_terminal,
     read_root_change_input,
     read_root_plan_input,
@@ -81,6 +83,10 @@ from .root_context import (
     show_root_anchor_history,
     update_root_anchor,
     update_root_progress,
+    upgrade_root_to_objective_protocol,
+    write_root_close_receipt,
+    read_external_root_close_receipt,
+    read_root_close_receipt,
 )
 from .routing import decide_route, detect_existing_workflows
 from .safety import require_safe
@@ -88,6 +94,7 @@ from .state import (
     FINAL_TASK_STATES,
     IN_PLACE_MODE,
     ISOLATED_MODE,
+    ROOT_BINDING_PROTOCOL_VERSION,
     StateStore,
     candidate_admission_lock,
 )
@@ -826,6 +833,12 @@ def bind_task_root_anchor(
         )
         existing_id = task.get("root_anchor_id")
         existing_file = task.get("root_anchor_file")
+        expected_id = task.get("expected_root_anchor_id")
+        expected_file = task.get("expected_root_anchor_file")
+        if expected_id is not None and (
+            expected_id != root_id or expected_file != external_root_file
+        ):
+            raise SoloAIError("Task expects a different root anchor")
         if existing_id is not None:
             if existing_id != root_id or existing_file != external_root_file:
                 raise SoloAIError("Task is already bound to a different root anchor")
@@ -834,6 +847,10 @@ def bind_task_root_anchor(
                 task_id,
                 root_anchor_id=root_id,
                 root_anchor_file=external_root_file,
+                expected_root_anchor_id=root_id,
+                expected_root_anchor_file=external_root_file,
+                root_binding_protocol=ROOT_BINDING_PROTOCOL_VERSION,
+                root_binding_exception=None,
                 reviewed_root_plan_version=None,
                 reviewed_root_plan_sha256=None,
             )
@@ -910,9 +927,14 @@ def refresh_root_context(repo: GitRepo, *, task_id: str, lease: str) -> dict[str
             )
         task_anchor = read_anchor(repo, task)
         task_anchor["status"] = task.get("status")
+        refresh_marker = store.root_context_refresh_required(task_id)
         context = _read_root_context(repo, store=store, task=task)
         if not context:
             raise SoloAIError("Task is not bound to a root anchor")
+        if refresh_marker is not None:
+            store.clear_root_context_refresh(
+                task_id, generation=str(refresh_marker["generation"])
+            )
         return {
             "task_id": task_id,
             "root_id": task["root_anchor_id"],
@@ -922,21 +944,54 @@ def refresh_root_context(repo: GitRepo, *, task_id: str, lease: str) -> dict[str
 
 
 def _require_current_structured_root_review(
-    repo: GitRepo, task: dict[str, Any]
+    repo: GitRepo, task: dict[str, Any], *, store: StateStore
 ) -> None:
     """关键动作前只核验已记录的根方案版本，不把它变成人工批准。"""
 
     root_id = task.get("root_anchor_id")
+    root_file = task.get("root_anchor_file")
+    expected_root_id = task.get("expected_root_anchor_id")
+    expected_root_file = task.get("expected_root_anchor_file")
+    if (
+        task.get("root_binding_protocol") == ROOT_BINDING_PROTOCOL_VERSION
+        and expected_root_id is not None
+        and (root_id != expected_root_id or root_file != expected_root_file)
+    ):
+        raise ActionableSoloAIError(
+            "This task lost or changed its expected root anchor binding. Restore the exact recorded binding before continuing.",
+            code="ROOT_BINDING_MISSING",
+            context={
+                "task_id": str(task["id"]),
+                "expected_root_id": str(expected_root_id),
+            },
+            next_action={
+                "kind": "bind_expected_root",
+                "task_id": str(task["id"]),
+                "root_id": str(expected_root_id),
+                "retry": "after_action",
+            },
+        )
     if not root_id:
         return
+    if refresh := store.root_context_refresh_required(str(task["id"])):
+        raise ActionableSoloAIError(
+            "This task resumed after its root context was last read. Refresh the complete root context before changing files or continuing lifecycle work.",
+            code="ROOT_CONTEXT_REFRESH_REQUIRED",
+            context={
+                "task_id": str(task["id"]),
+                "root_id": str(root_id),
+                "reason": refresh["reason"],
+            },
+            next_action={
+                "kind": "refresh_root",
+                "task_id": str(task["id"]),
+                "retry": "after_action",
+            },
+        )
     root = resolve_root_anchor(
         repo,
         root_id=str(root_id),
-        external_path=(
-            Path(str(task["root_anchor_file"]))
-            if task.get("root_anchor_file")
-            else None
-        ),
+        external_path=(Path(str(root_file)) if root_file else None),
     )
     current_version = root.get("plan_version")
     if current_version is None:
@@ -1221,6 +1276,7 @@ def start(
     supersedes: str | None = None,
     root_anchor_id: str | None = None,
     root_anchor_file: Path | None = None,
+    independent_reason: str | None = None,
     target: str | None = None,
     scope: str | None = None,
     acceptance: str | None = None,
@@ -1239,6 +1295,67 @@ def start(
         store.ensure_slots(config)
         if root_anchor_file is not None and root_anchor_id is None:
             raise SoloAIError("--root-anchor-file requires --root-anchor")
+        if independent_reason is not None and (
+            not independent_reason.strip()
+            or "\r" in independent_reason
+            or "\n" in independent_reason
+        ):
+            raise SoloAIError("Independent task reason must be a non-empty single line")
+        if independent_reason is not None and root_anchor_id is not None:
+            raise SoloAIError(
+                "An independent task cannot also supply a root anchor reference"
+            )
+        host_context = (
+            host_root_context(repo, host_origin=host_origin)
+            if host_origin is not None
+            else None
+        )
+        if host_context is not None and host_context.get("status") == "unverifiable":
+            raise ActionableSoloAIError(
+                "The exact host objective cannot be verified. Preserve the existing association and restore or verify its root before starting a writable task.",
+                code="ROOT_BINDING_UNVERIFIABLE",
+                context={"reason": str(host_context["reason"])},
+                next_action=host_context["next_action"],
+            )
+        host_binding = (
+            host_context.get("binding")
+            if host_context is not None and host_context.get("associated")
+            else None
+        )
+        if host_binding is not None and host_binding.get("status") != "available":
+            raise ActionableSoloAIError(
+                "This host objective is still being registered. Retry the same root-anchor create request before starting a writable task.",
+                code="ROOT_BINDING_PENDING",
+                context={"root_id": str(host_binding["root_anchor_id"])},
+                next_action={"kind": "retry_root_create", "retry": "after_action"},
+            )
+        if independent_reason is not None and host_binding is None:
+            raise SoloAIError(
+                "An independent task reason is only valid when this exact host has an active objective"
+            )
+        if (
+            root_anchor_id is None
+            and host_binding is not None
+            and independent_reason is None
+        ):
+            root_anchor_id = str(host_binding["root_anchor_id"])
+            root_anchor_file = (
+                Path(str(host_binding["root_anchor_file"]))
+                if host_binding.get("root_anchor_file")
+                else None
+            )
+        elif root_anchor_id is not None and host_binding is not None:
+            bound_file = host_binding.get("root_anchor_file")
+            supplied_file = (
+                str(root_anchor_file.resolve()) if root_anchor_file else None
+            )
+            if (
+                host_binding.get("root_anchor_id") != root_anchor_id
+                or bound_file != supplied_file
+            ):
+                raise SoloAIError(
+                    "The supplied root anchor conflicts with this host's active objective"
+                )
         root_binding: dict[str, Any] | None = None
         external_root_file: str | None = None
         if root_anchor_id is not None:
@@ -1247,6 +1364,9 @@ def start(
             )
             if root_anchor_file is not None:
                 external_root_file = str(root_binding["root_anchor_path"])
+        root_binding_protocol = (
+            ROOT_BINDING_PROTOCOL_VERSION if root_anchor_id is not None else 0
+        )
         if in_place:
             if root_anchor_file is not None:
                 raise SoloAIError(
@@ -1345,6 +1465,14 @@ def start(
                         anchor_contract=anchor_contract,
                         root_anchor_id=root_anchor_id,
                         root_anchor_file=external_root_file,
+                        expected_root_anchor_id=root_anchor_id,
+                        expected_root_anchor_file=external_root_file,
+                        root_binding_protocol=root_binding_protocol,
+                        root_binding_exception=(
+                            independent_reason.strip()
+                            if independent_reason is not None
+                            else None
+                        ),
                     )
                 anchor = create_anchor(repo, task)
                 return {
@@ -1369,6 +1497,14 @@ def start(
                 supersedes=supersedes,
                 root_anchor_id=root_anchor_id,
                 root_anchor_file=external_root_file,
+                expected_root_anchor_id=root_anchor_id,
+                expected_root_anchor_file=external_root_file,
+                root_binding_protocol=root_binding_protocol,
+                root_binding_exception=(
+                    independent_reason.strip()
+                    if independent_reason is not None
+                    else None
+                ),
                 host_origin=host_origin,
             )
         if external_root_file is not None:
@@ -1598,7 +1734,7 @@ def commit_task(
             raise SoloAIError(
                 "Commit requires a task whose runtime activation has completed"
             )
-        _require_current_structured_root_review(repo, task)
+        _require_current_structured_root_review(repo, task, store=store)
         if repo.branch(worktree) != task["branch"]:
             raise SoloAIError(
                 "Task branch identity no longer matches its recorded task"
@@ -1844,7 +1980,7 @@ def ready(
             raise SoloAIError(f"Task cannot enter Ready from {task.get('status')}")
         if _is_in_place(task):
             _assert_in_place_binding(repo, store, task, session_id=session_id)
-        _require_current_structured_root_review(repo, task)
+        _require_current_structured_root_review(repo, task, store=store)
         if not repo.is_clean(worktree):
             raise SoloAIError("Commit all task changes before Ready")
         convergence_retries = 0
@@ -2083,11 +2219,18 @@ def create_root_task_anchor(
     plan_input_path: Path | None = None,
     plan_source: str | None = None,
     request_id: str | None = None,
+    acceptance_index_input_path: Path | None = None,
+    host_origin: dict[str, str] | None = None,
     include_content: bool = True,
 ) -> dict[str, Any]:
     """创建主会话长期执行合同；它不领取工作树也不创建候选。"""
 
     _config_and_mode(repo)
+    host_origin = normalize_host_reference(host_origin)
+    if host_origin is not None and not request_id:
+        raise SoloAIError(
+            "A host-associated confirmed objective requires a stable request id"
+        )
     with maintenance_lock(repo):
         base_ref = base or repo.branch(repo.root)
         if not base_ref:
@@ -2105,6 +2248,34 @@ def create_root_task_anchor(
             if request_id is not None
             else f"root-{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         )
+        store = StateStore(repo)
+        existing_host_binding = store.host_root_binding(host_origin)
+        request_fingerprint = sha256_text(request_id) if request_id else None
+        acceptance_index = (
+            read_root_acceptance_index_input(repo, acceptance_index_input_path)
+            if acceptance_index_input_path is not None
+            else None
+        )
+        if host_origin is not None and acceptance_index is None:
+            raise SoloAIError(
+                "A host-associated confirmed objective requires an acceptance index"
+            )
+        if existing_host_binding is not None and (
+            existing_host_binding.get("root_anchor_id") != root_id
+            or existing_host_binding.get("root_anchor_file") is not None
+            or existing_host_binding.get("request_fingerprint") != request_fingerprint
+        ):
+            raise SoloAIError(
+                "Host is already associated with a different active root anchor"
+            )
+        if host_origin is not None:
+            assert request_fingerprint is not None
+            store.begin_host_root_registration(
+                host_origin,
+                root_anchor_id=root_id,
+                root_anchor_file=None,
+                request_fingerprint=request_fingerprint,
+            )
         result = create_root_anchor(
             repo,
             root_id=root_id,
@@ -2117,8 +2288,125 @@ def create_root_task_anchor(
             confirmed_plan=confirmed_plan,
             plan_source=plan_source,
             request_id=request_id,
+            acceptance_index=acceptance_index,
+            objective_protocol_version=1 if host_origin is not None else 0,
         )
-        return _anchor_view(result, include_content=include_content)
+        if host_origin is not None:
+            store.complete_host_root_registration(
+                host_origin,
+                root_anchor_id=root_id,
+                root_anchor_file=None,
+                request_fingerprint=str(request_fingerprint),
+            )
+        return {
+            **_anchor_view(result, include_content=include_content),
+            "host_root_binding": (
+                store.host_root_binding(host_origin)
+                if host_origin is not None
+                else None
+            ),
+        }
+
+
+def bind_host_root_anchor(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    host_origin: dict[str, str] | None,
+    root_anchor_file: Path | None = None,
+) -> dict[str, Any]:
+    """把一个已核对的本地或外部根关联到精确宿主，供续作恢复使用。"""
+
+    _config_and_mode(repo)
+    normalized_host = normalize_host_reference(host_origin)
+    if normalized_host is None:
+        raise SoloAIError("Binding a root to a host requires an exact host reference")
+    with maintenance_lock(repo):
+        root = resolve_root_anchor(
+            repo, root_id=root_id, external_path=root_anchor_file
+        )
+        external_root_file = (
+            str(root["root_anchor_path"]) if root_anchor_file is not None else None
+        )
+        binding = StateStore(repo).bind_host_root(
+            normalized_host,
+            root_anchor_id=root_id,
+            root_anchor_file=external_root_file,
+            request_fingerprint=sha256_text(
+                f"explicit-host-root:{root_id}:{external_root_file or 'local'}"
+            ),
+        )
+        return {
+            "root_id": root_id,
+            "root_anchor_path": str(root["root_anchor_path"]),
+            "host_root_binding": binding,
+        }
+
+
+def host_root_context(
+    repo: GitRepo, *, host_origin: dict[str, str] | None
+) -> dict[str, Any]:
+    """查询一个精确宿主当前可用的目标关联；默认不返回完整方案。"""
+
+    _config_and_mode(repo)
+    normalized_host = normalize_host_reference(host_origin)
+    if normalized_host is None:
+        raise SoloAIError("Host root context requires an exact host reference")
+    store = StateStore(repo)
+    binding = store.host_root_binding(normalized_host)
+    if binding is None:
+        return {
+            "host_origin": normalized_host,
+            "associated": False,
+            "next_action": {"kind": "create_or_bind_root"},
+        }
+    root_file = binding.get("root_anchor_file")
+    try:
+        root = resolve_root_anchor(
+            repo,
+            root_id=str(binding["root_anchor_id"]),
+            external_path=Path(str(root_file)) if root_file else None,
+        )
+    except SoloAIError as exc:
+        receipt = (
+            read_external_root_close_receipt(
+                Path(str(root_file)), root_id=str(binding["root_anchor_id"])
+            )
+            if root_file
+            else read_root_close_receipt(repo, root_id=str(binding["root_anchor_id"]))
+        )
+        if receipt is not None:
+            store.clear_host_root_binding(
+                normalized_host,
+                root_anchor_id=str(binding["root_anchor_id"]),
+                root_anchor_file=str(root_file),
+            )
+            return {
+                "host_origin": normalized_host,
+                "associated": False,
+                "closed_root_receipt": receipt,
+                "next_action": {"kind": "create_or_bind_root"},
+            }
+        return {
+            "host_origin": normalized_host,
+            "associated": True,
+            "binding": binding,
+            "status": "unverifiable",
+            "reason": str(exc),
+            "next_action": {"kind": "restore_or_verify_root"},
+        }
+    return {
+        "host_origin": normalized_host,
+        "associated": True,
+        "binding": binding,
+        "status": str(binding["status"]),
+        "root": _anchor_view(root, include_content=False),
+        "next_action": (
+            {"kind": "retry_root_create"}
+            if binding["status"] == "registering"
+            else {"kind": "start_or_refresh"}
+        ),
+    }
 
 
 def show_root_task_anchor(
@@ -2168,6 +2456,7 @@ def amend_root_task_anchor(
     target: str | None = None,
     scope: str | None = None,
     acceptance: str | None = None,
+    acceptance_index_input_path: Path | None = None,
     include_content: bool = True,
 ) -> dict[str, Any]:
     _config_and_mode(repo)
@@ -2191,6 +2480,11 @@ def amend_root_task_anchor(
             target=target,
             scope=scope,
             acceptance=acceptance,
+            acceptance_index=(
+                read_root_acceptance_index_input(repo, acceptance_index_input_path)
+                if acceptance_index_input_path is not None
+                else None
+            ),
         )
         return _anchor_view(result, include_content=include_content)
 
@@ -2235,6 +2529,44 @@ def record_root_task_acceptance(
         return _anchor_view(result, include_content=include_content)
 
 
+def reindex_root_task_acceptance(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    index_input_path: Path,
+    expected_sha256: str,
+    include_content: bool = True,
+) -> dict[str, Any]:
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        result = reindex_root_acceptance(
+            repo,
+            root_id=root_id,
+            acceptance_index=read_root_acceptance_index_input(repo, index_input_path),
+            expected_sha256=expected_sha256,
+        )
+        return _anchor_view(result, include_content=include_content)
+
+
+def upgrade_root_task_to_objective_protocol(
+    repo: GitRepo,
+    *,
+    root_id: str,
+    index_input_path: Path,
+    expected_sha256: str,
+    include_content: bool = True,
+) -> dict[str, Any]:
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        result = upgrade_root_to_objective_protocol(
+            repo,
+            root_id=root_id,
+            acceptance_index=read_root_acceptance_index_input(repo, index_input_path),
+            expected_sha256=expected_sha256,
+        )
+        return _anchor_view(result, include_content=include_content)
+
+
 def close_root_task_anchor(
     repo: GitRepo, *, root_id: str, confirm: str
 ) -> dict[str, Any]:
@@ -2245,9 +2577,10 @@ def close_root_task_anchor(
         root_path = root_anchor_path(repo, root_id)
         with root_anchor_lock(root_path):
             shown_root = show_root_anchor(repo, root_id=root_id)
+            store = StateStore(repo)
             root_tasks = [
                 task
-                for task in StateStore(repo).read()["tasks"].values()
+                for task in store.read()["tasks"].values()
                 if task.get("root_anchor_id") == root_id
             ]
             active = [
@@ -2294,7 +2627,22 @@ def close_root_task_anchor(
                 raise SoloAIError(
                     "Root anchor acceptance must be recorded for the current plan version before closing"
                 )
+            if shown_root.get("objective_protocol_version") == 1 and shown_root.get(
+                "overall_acceptance_index_fingerprint"
+            ) != shown_root.get("acceptance_index_fingerprint"):
+                raise SoloAIError(
+                    "Root anchor acceptance must cover the current acceptance index before closing"
+                )
+            write_root_close_receipt(
+                repo,
+                root_id=root_id,
+                plan_version=shown_root.get("plan_version"),
+                acceptance_status=shown_root.get("overall_acceptance_status"),
+            )
             delete_root_anchor(repo, root_id=root_id, locked=True)
+            store.clear_host_root_bindings(
+                root_anchor_id=root_id, root_anchor_file=None
+            )
             return {"root_id": root_id, "status": "closed"}
 
 
@@ -3002,7 +3350,7 @@ def finish(
                 return result
             else:
                 if policy.get("mode") == "batched":
-                    _require_current_structured_root_review(repo, task)
+                    _require_current_structured_root_review(repo, task, store=store)
                 candidate_requires_ready = _candidate_requires_ready(task)
                 if candidate_requires_ready and task.get("status") != "ready":
                     raise SoloAIError("Finish requires a successful Ready")

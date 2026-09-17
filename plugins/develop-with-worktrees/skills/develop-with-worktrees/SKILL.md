@@ -34,9 +34,12 @@ content, or use DWW to fetch, pull, push, deploy, rebase, squash, amend, or
 rewrite history.
 
 A confirmed complete plan needs one root anchor before its first child. The root
-retains the full plan; each child retains its execution slice. Start or
-`bind-root` returns it once. After continuation, context recovery, root change,
-or candidate repair, refresh it before a gate when stale.
+retains the full plan; each child retains its execution slice. With an exact host
+task identity, create the root with its stable request ID and derived acceptance
+index; later Start inherits that one root automatically. Start or `bind-root`
+returns it once. After continuation, context recovery, root change, or candidate
+repair, refresh it before a gate when stale. Read [Task governance](references/task-governance.md)
+before using root, host association, reindex, or close commands.
 
 ## Finish and follow delivery
 

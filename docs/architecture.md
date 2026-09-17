@@ -44,6 +44,8 @@ coordinator.
   moved reference preserves the scene instead of adopting or deleting it.
 - A confirmed objective has one root anchor. It retains the complete plan and
   explicit amendments; its child anchors retain only their execution slices.
+  Exact host identity may map to that root as a locator only; it never stores a
+  second plan or becomes a scheduler.
 - An exact-path commit creates the only eligible task change. Candidate
   publication is immutable source preservation, not delivery.
 - New repositories publish source candidates, automatically freeze an exact
@@ -65,6 +67,7 @@ tracked checkout. The important groups are:
 |---|---|
 | `solo-ai/state.json` | slots, task identity, leases, direct transactions |
 | `solo-ai/task-anchors/` and `root-anchors/` | active execution contracts and confirmed objectives |
+| `solo-ai/state.json` host-root fields and `root-close-receipts/` | exact host locator, expected task binding, and minimal cross-repository close recovery |
 | `solo-ai/proofs/` | validation evidence and logs |
 | `solo-ai/candidate-batches.json` | immutable candidates, batches, and reusable workspace ownership |
 | `solo-ai/runtime-adapter/` | content-addressed Adapter receipts |

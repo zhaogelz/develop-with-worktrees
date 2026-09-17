@@ -10,6 +10,8 @@ task contract locally, and carries reviewed changes through local integration.
 - An isolated worktree for every managed modifying task.
 - A local task anchor that preserves the objective, scope, baseline, and
   acceptance criteria across continuation or handoff.
+- One confirmed plan kept at its root, so related work can resume from the same
+  objective instead of asking you to copy it into every task.
 - Exact-path commits and immutable source candidates.
 - Combined validation and protected local promotion for compatible work.
 - A recoverable record when composition or validation fails; the base branch

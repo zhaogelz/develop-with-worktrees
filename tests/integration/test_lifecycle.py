@@ -33,6 +33,7 @@ from solo_ai.lifecycle import (
     abandon,
     adopt_task_anchor,
     approve,
+    bind_host_root_anchor,
     bind_task_root_anchor,
     close_root_task_anchor,
     create_root_task_anchor,
@@ -44,6 +45,7 @@ from solo_ai.lifecycle import (
     disable,
     finish,
     handoff,
+    host_root_context,
     initialize,
     local_enabled,
     ready,
@@ -54,6 +56,7 @@ from solo_ai.lifecycle import (
     show_task_anchor,
     show_root_task_anchor,
     update_task_anchor,
+    upgrade_root_task_to_objective_protocol,
     retarget,
     set_local_enabled,
     start,
@@ -166,6 +169,183 @@ def test_root_anchor_binds_child_task_and_closes_only_after_terminal_child(
     plain = start(repo, name="ordinary task")
     assert "Root anchor:" not in show_task_anchor(repo, task_id=plain["id"])["content"]
     abandon(repo, task_id=plain["id"], lease=plain["lease"], confirm=plain["id"])
+
+
+def test_host_objective_binding_inherits_root_and_recovers_a_lost_task_binding(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    repo = initialized(git_repo)
+    host = {"kind": "codex", "thread_id": "objective-host-a"}
+    plan = tmp_path / "objective-plan.md"
+    plan.write_text("# Final objective\n\n- Keep the exact root.\n", encoding="utf-8")
+    index = tmp_path / "objective-index.json"
+    index.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "A01",
+                        "locator": "Final objective",
+                        "quote": "Keep the exact root.",
+                        "required": True,
+                        "plan_version": None,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    root = create_root_task_anchor(
+        repo,
+        purpose="bind one exact host objective",
+        target="inherit the confirmed root without copying it",
+        scope="host association and one child task",
+        acceptance="the task is bound, recoverable, and evidence-indexed",
+        plan_input_path=plan,
+        plan_source="user confirmed the final objective",
+        request_id="host-objective-binding-test",
+        acceptance_index_input_path=index,
+        host_origin=host,
+    )
+    assert root["host_root_binding"]["status"] == "available"
+    context = host_root_context(repo, host_origin=host)
+    assert context["root"]["root_id"] == root["root_id"]
+    assert "content" not in context["root"]
+
+    task = start(repo, name="host inherited child", host_origin=host)
+    stored = StateStore(repo).task(task["id"])
+    assert stored["root_anchor_id"] == root["root_id"]
+    assert stored["expected_root_anchor_id"] == root["root_id"]
+    assert stored["root_binding_protocol"] == 1
+    assert (
+        "Keep the exact root."
+        not in show_task_anchor(repo, task_id=task["id"])["content"]
+    )
+
+    StateStore(repo).update_task(task["id"], root_anchor_id=None, root_anchor_file=None)
+    with pytest.raises(ActionableSoloAIError) as missing:
+        commit_task(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            message="test: reject a lost expected root before commit",
+            paths=["README.md"],
+        )
+    assert missing.value.code == "ROOT_BINDING_MISSING"
+    restored = bind_task_root_anchor(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        root_id=root["root_id"],
+    )
+    assert restored["root_id"] == root["root_id"]
+
+    other_host = {"kind": "codex", "thread_id": "objective-host-b"}
+    other_plan = tmp_path / "other-plan.md"
+    other_plan.write_text("# Other\n\n- Stay separate.\n", encoding="utf-8")
+    other_index = tmp_path / "other-index.json"
+    other_index.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "A01",
+                        "locator": "Other",
+                        "quote": "Stay separate.",
+                        "required": True,
+                        "plan_version": None,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    other_root = create_root_task_anchor(
+        repo,
+        purpose="separate host objective",
+        target="prove exact hosts do not use the recent root",
+        scope="one separate root",
+        acceptance="conflicting host root is rejected",
+        plan_input_path=other_plan,
+        plan_source="user confirmed separate objective",
+        request_id="host-objective-other-test",
+        acceptance_index_input_path=other_index,
+        host_origin=other_host,
+    )
+    with pytest.raises(SoloAIError, match="conflicts with this host"):
+        start(
+            repo,
+            name="wrong explicit root",
+            root_anchor_id=other_root["root_id"],
+            host_origin=host,
+        )
+
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    evidence = git_repo / "indexed-evidence.json"
+    evidence.write_text(
+        '{"items":[{"id":"A01","status":"passed","observation":"checked","evidence":"test"}]}',
+        encoding="utf-8",
+    )
+    current = show_root_task_anchor(repo, root_id=root["root_id"])
+    record_root_task_acceptance(
+        repo,
+        root_id=root["root_id"],
+        status="accepted",
+        evidence_input_path=evidence,
+        expected_sha256=current["sha256"],
+    )
+    assert close_root_task_anchor(
+        repo, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
+    assert host_root_context(repo, host_origin=host)["associated"] is False
+    other_current = show_root_task_anchor(repo, root_id=other_root["root_id"])
+    record_root_task_acceptance(
+        repo,
+        root_id=other_root["root_id"],
+        status="accepted",
+        evidence_input_path=evidence,
+        expected_sha256=other_current["sha256"],
+    )
+    assert close_root_task_anchor(
+        repo, root_id=other_root["root_id"], confirm=other_root["root_id"]
+    ) == {"root_id": other_root["root_id"], "status": "closed"}
+
+
+def test_external_host_binding_clears_only_after_the_exact_root_close_receipt(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    owner = initialized(git_repo)
+    root = create_root_task_anchor(
+        owner,
+        purpose="close an externally referenced root safely",
+        target="leave a minimal receipt for exact external host cleanup",
+        scope="one owner root and one external host binding",
+        acceptance="missing roots are not assumed closed without a matching receipt",
+    )
+    child_path = tmp_path / "external-host-binding"
+    child_path.mkdir()
+    git(child_path, "init", "-b", "main")
+    git(child_path, "config", "user.name", "Test User")
+    git(child_path, "config", "user.email", "test@example.invalid")
+    (child_path / "README.md").write_text("# child\n", encoding="utf-8")
+    git(child_path, "add", "README.md")
+    git(child_path, "commit", "-m", "initial")
+    child = initialized(child_path)
+    host = {"kind": "codex", "thread_id": "external-host-objective"}
+    bind_host_root_anchor(
+        child,
+        root_id=root["root_id"],
+        root_anchor_file=Path(root["root_anchor_path"]),
+        host_origin=host,
+    )
+    assert host_root_context(child, host_origin=host)["associated"] is True
+
+    assert close_root_task_anchor(
+        owner, root_id=root["root_id"], confirm=root["root_id"]
+    ) == {"root_id": root["root_id"], "status": "closed"}
+    cleaned = host_root_context(child, host_origin=host)
+    assert cleaned["associated"] is False
+    assert cleaned["closed_root_receipt"]["root_id"] == root["root_id"]
 
 
 def test_active_and_ready_task_can_bind_one_existing_root_idempotently(
@@ -480,6 +660,59 @@ def test_structured_legacy_acceptance_without_version_must_be_recorded_again(
     assert close_root_task_anchor(
         repo, root_id=root["root_id"], confirm=root["root_id"]
     ) == {"root_id": root["root_id"], "status": "closed"}
+
+
+def test_explicitly_continued_legacy_root_can_upgrade_to_indexed_protocol(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    plan = git_repo / "continued-legacy-plan.md"
+    plan.write_text("# V1\n\nKeep the confirmed objective.\n", encoding="utf-8")
+    root = create_root_task_anchor(
+        repo,
+        purpose="continue a checked legacy objective",
+        target="upgrade only its derived acceptance protocol",
+        scope="preserve the confirmed plan and reset overall acceptance",
+        acceptance="indexed current evidence is required after upgrade",
+        plan_input_path=plan,
+        plan_source="user confirmed v1",
+        request_id="continued-legacy-objective-test",
+    )
+    index = git_repo / "continued-legacy-index.json"
+    index.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "A01",
+                        "locator": "V1 line 3",
+                        "quote": "Keep the confirmed objective.",
+                        "required": True,
+                        "plan_version": None,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    upgraded = upgrade_root_task_to_objective_protocol(
+        repo,
+        root_id=root["root_id"],
+        index_input_path=index,
+        expected_sha256=root["sha256"],
+    )
+    assert upgraded["objective_protocol_version"] == 1
+    evidence = git_repo / "continued-legacy-evidence.md"
+    evidence.write_text("旧格式证据", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="JSON object"):
+        record_root_task_acceptance(
+            repo,
+            root_id=root["root_id"],
+            status="accepted",
+            evidence_input_path=evidence,
+            expected_sha256=upgraded["sha256"],
+        )
 
 
 def test_root_child_refuses_a_missing_root_anchor(git_repo: Path) -> None:
