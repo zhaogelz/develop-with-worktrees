@@ -61,7 +61,12 @@ def _valid_events(worktree: str) -> list[dict[str, object]]:
         _turn("owner-turn"),
         {
             "method": "dww/nativePathForms",
-            "params": {"forms": ["relative", "absolute"]},
+            "params": {
+                "source": "codex-session-jsonl",
+                "turnId": "owner-turn",
+                "forms": ["relative", "absolute"],
+                "sequence": ["relative", "absolute", "absolute"],
+            },
         },
     ]
 

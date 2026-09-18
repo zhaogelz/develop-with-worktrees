@@ -93,16 +93,25 @@ def _item_paths(item: dict[str, Any]) -> set[str]:
     return paths
 
 
-def _path_forms(events: list[dict[str, Any]]) -> list[str]:
-    """只接受控制器明确记录的原始路径形式，不能从归一化结果猜测。"""
+def _path_forms(events: list[dict[str, Any]], owner_turn: str) -> list[str]:
+    """只接受 owner session JSONL 明确记录的原始路径形式。"""
 
     for event in events:
         if _event_method(event) != "dww/nativePathForms":
             continue
-        forms = (event.get("params") or {}).get("forms")
-        if isinstance(forms, list) and all(
-            form in {"relative", "absolute"} for form in forms
+        params = event.get("params") or {}
+        if (
+            params.get("source") != "codex-session-jsonl"
+            or str(params.get("turnId") or "") != owner_turn
         ):
+            continue
+        forms = params.get("forms")
+        sequence = params.get("sequence")
+        if forms == ["relative", "absolute"] and sequence == [
+            "relative",
+            "absolute",
+            "absolute",
+        ]:
             return [str(form) for form in forms]
     return []
 
@@ -220,13 +229,13 @@ def verify_trace(
     if not ordered_owner_changes:
         reasons.append("owner 三次目标文件补丁证据不完整")
 
-    forms = _path_forms(events)
+    forms = _path_forms(events, owner_turn)
     forms_ok = forms == ["relative", "absolute"]
     checks.append(
         Check(
             "PATH_FORMS",
             "passed" if forms_ok else "unverified",
-            "原始补丁形式已由控制器明确记录"
+            "原始补丁形式已由 owner session JSONL 明确记录"
             if forms_ok
             else "宿主只提供归一化目标路径，无法证明相对/绝对输入形式",
             "dww/nativePathForms" if forms_ok else "missing",
