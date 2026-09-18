@@ -1508,6 +1508,56 @@ class StateStore:
 
         return self.mutate(update)
 
+    def complete_retained_abandonment(
+        self, task_id: str, *, transaction_id: str
+    ) -> dict[str, Any]:
+        """保留工作树地终止任务，并让原槽位持续不可分配。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            abandonment = task.get("abandonment") if task else None
+            if (
+                not task
+                or task.get("status") != "abandoning"
+                or not abandonment
+                or abandonment.get("transaction_id") != transaction_id
+                or abandonment.get("retained_worktree") is not True
+            ):
+                raise SoloAIError("Retained abandonment transaction identity changed")
+            slot = state["slots"][task["slot_id"]]
+            if slot.get("task_id") != task_id or slot.get("status") != "abandoning":
+                raise SoloAIError("Retained abandonment slot ownership changed")
+            reason = str((abandonment.get("audit") or {}).get("reason") or "")
+            if not reason:
+                raise SoloAIError("Retained abandonment requires an audit reason")
+            now = utc_timestamp()
+            quarantine_reason = f"Retained worktree: {reason}"
+            abandonment.update(
+                {
+                    "phase": "completed",
+                    "completed_at": abandonment.get("completed_at") or now,
+                }
+            )
+            task.update(
+                {
+                    "status": "abandoned",
+                    "lease": None,
+                    "lease_owner": None,
+                    "active_operation": None,
+                    "quarantine_reason": quarantine_reason,
+                    "updated_at": now,
+                }
+            )
+            slot.update(
+                {
+                    "status": "quarantined",
+                    "quarantine_reason": quarantine_reason,
+                }
+            )
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     def publish_abandonment_release(
         self, task_id: str, *, transaction_id: str
     ) -> dict[str, Any]:

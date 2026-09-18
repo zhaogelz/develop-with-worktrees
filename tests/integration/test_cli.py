@@ -98,6 +98,77 @@ def test_candidate_status_human_output_is_compact_and_reasons_are_required() -> 
                 "task-one",
             ]
         )
+    retained_intent = parser.parse_args(
+        [
+            "abandon",
+            "--task",
+            "task-one",
+            "--lease",
+            "lease",
+            "--confirm",
+            "task-one",
+            "--reason",
+            "keep the reviewed worktree for a later audit",
+            "--retain-worktree",
+        ]
+    )
+    assert retained_intent.retain_worktree is True
+
+
+def test_abandon_dispatch_forwards_retain_worktree_flag(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_abandon(repo: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"task_id": "task-one", "status": "abandoned"}
+
+    monkeypatch.setattr(cli_module, "abandon", fake_abandon)
+    args = cli_module._parser().parse_args(
+        [
+            "--repo",
+            str(git_repo),
+            "abandon",
+            "--task",
+            "task-one",
+            "--lease",
+            "lease",
+            "--confirm",
+            "task-one",
+            "--reason",
+            "preserve the reviewed worktree",
+            "--retain-worktree",
+        ]
+    )
+
+    result = cli_module._dispatch(args)
+
+    assert result["status"] == "abandoned"
+    assert captured["retain_worktree"] is True
+
+
+def test_task_status_human_output_shows_retained_worktree_reason() -> None:
+    rendered = _human(
+        "status",
+        {
+            "scope": "task",
+            "task": {
+                "id": "task-retained",
+                "status": "abandoned",
+                "next_action": {"kind": "retained_worktree_terminal"},
+                "retained_worktree": {
+                    "path": "C:/worktrees/retained",
+                    "slot_id": "01",
+                    "reason": "Retained worktree: keep the reviewed patch",
+                },
+            },
+        },
+    )
+
+    assert "Retained worktree: C:/worktrees/retained" in rendered
+    assert "Quarantined slot: 01" in rendered
+    assert "Reason: Retained worktree: keep the reviewed patch" in rendered
 
 
 def test_human_recover_output_accepts_candidate_publication_without_a_lease() -> None:

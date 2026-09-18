@@ -135,9 +135,15 @@ registered candidate records with the DWW ref namespace.
 `candidate withdraw --candidate <id> --reason <one-line>` removes an eligible
 pending or retained candidate from future integration after exact SHA checking.
 It keeps the immutable candidate ref and frozen withdrawal audit facts. It is not
-task abandonment. `abandon --reason <one-line>` applies to an active task,
-preserves tracked and protected content, and refuses a candidate already held by
-an active batch. Neither operation uses blanket cleanup.
+task abandonment. The normal `abandon --reason <one-line>` requires a releasable
+worktree, then performs its recorded cleanup and releases the slot; it refuses a
+candidate already held by an active batch. When a reviewed isolated worktree must
+remain exactly in place, use `abandon --retain-worktree --reason <one-line>` with
+the exact task confirmation. It requires no registered development process or
+runtime-adapter activation, rechecks the branch, HEAD, and full worktree status,
+then records the task as terminal while retaining every file and quarantining the
+slot with the supplied reason. It never cleans, resets, detaches, deletes the
+branch, or releases that worktree. Neither operation uses blanket cleanup.
 
 ## Compatibility modes
 

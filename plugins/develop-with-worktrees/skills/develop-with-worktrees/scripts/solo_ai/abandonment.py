@@ -127,6 +127,18 @@ def in_place_audit(
     return _audit_metadata(reason=reason, source=source, action="abandon")
 
 
+def assert_retained_worktree_safe(task: dict[str, Any]) -> None:
+    """保留式终止不接管仍可能改写现场的受管资源。"""
+
+    if task.get("processes"):
+        raise SoloAIError("Retained abandon requires no registered development process")
+    activation = task.get("runtime_activation")
+    if isinstance(activation, dict) and activation.get("configured") is not False:
+        raise SoloAIError(
+            "Retained abandon requires a task without runtime adapter activation"
+        )
+
+
 def new_transaction(
     repo: GitRepo,
     store: StateStore,
@@ -134,6 +146,7 @@ def new_transaction(
     task: dict[str, Any],
     reason: str | None,
     source: str,
+    retain_worktree: bool = False,
 ) -> dict[str, Any]:
     active = task.get("active_operation") or {}
     operation_id = str(active.get("id") or "")
@@ -171,26 +184,33 @@ def new_transaction(
     tracked_status = repo.git(
         ["status", "--porcelain=v1", "--untracked-files=no"], cwd=worktree
     ).stdout
-    if tracked_status:
-        raise SoloAIError(
-            "Tracked worktree changes block abandon; preserve or commit them first"
-        )
-    inventory = inspect_untracked(repo, cwd=worktree)
-    blocked = [
-        *inventory["keep"],
-        *inventory["protected"],
-        *inventory["unknown_ignored"],
-    ]
-    if blocked:
-        raise SoloAIError(
-            "Retained, protected, or unknown ignored content blocks abandon:\n"
-            + "\n".join(f"- {item}" for item in blocked[:20])
-        )
-    ordinary = {
-        relative: snapshot_plain_path(worktree / relative)
-        for relative in inventory["ordinary"]
-    }
-    return {
+    ordinary: dict[str, dict[str, Any]] = {}
+    retained_status: str | None = None
+    if retain_worktree:
+        retained_status = repo.git(
+            ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
+        ).stdout
+    else:
+        if tracked_status:
+            raise SoloAIError(
+                "Tracked worktree changes block abandon; preserve or commit them first"
+            )
+        inventory = inspect_untracked(repo, cwd=worktree)
+        blocked = [
+            *inventory["keep"],
+            *inventory["protected"],
+            *inventory["unknown_ignored"],
+        ]
+        if blocked:
+            raise SoloAIError(
+                "Retained, protected, or unknown ignored content blocks abandon:\n"
+                + "\n".join(f"- {item}" for item in blocked[:20])
+            )
+        ordinary = {
+            relative: snapshot_plain_path(worktree / relative)
+            for relative in inventory["ordinary"]
+        }
+    transaction = {
         "schema_version": ABANDONMENT_SCHEMA,
         "transaction_id": uuid.uuid4().hex,
         "phase": "prepared",
@@ -212,6 +232,14 @@ def new_transaction(
         "audit": _audit_metadata(reason=reason, source=source, action="abandon"),
         "prepared_at": utc_timestamp(),
     }
+    if retain_worktree:
+        transaction.update(
+            {
+                "retained_worktree": True,
+                "retained_status": retained_status,
+            }
+        )
+    return transaction
 
 
 def _assert_identity(task: dict[str, Any], transaction: dict[str, Any]) -> None:
@@ -264,6 +292,32 @@ def prepare(
     with candidate_admission_lock(repo):
         transaction = new_transaction(
             repo, store, task=task, reason=reason, source=source
+        )
+        return store.prepare_abandonment(
+            task["id"],
+            operation_id=str(transaction["prepared_by_operation_id"]),
+            abandonment=transaction,
+        )
+
+
+def prepare_retained(
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    reason: str,
+    source: str,
+) -> dict[str, Any]:
+    """登记保留式终止，但绝不清理、重置或删除任务工作树。"""
+
+    with candidate_admission_lock(repo):
+        transaction = new_transaction(
+            repo,
+            store,
+            task=task,
+            reason=reason,
+            source=source,
+            retain_worktree=True,
         )
         return store.prepare_abandonment(
             task["id"],
@@ -371,6 +425,54 @@ def resume(repo: GitRepo, *, store: StateStore, task: dict[str, Any]) -> dict[st
         "task_id": task["id"],
         "status": "abandoned",
         "transaction_id": receipt["transaction_id"],
+    }
+
+
+def resume_retained(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any]:
+    """完成保留式终止，只变更 DWW 记录并把槽位留在隔离状态。"""
+
+    transaction = task.get("abandonment")
+    if not transaction or transaction.get("retained_worktree") is not True:
+        raise SoloAIError("Task has no retained-worktree abandonment transaction")
+    _assert_identity(task, transaction)
+    assert_retained_worktree_safe(task)
+    worktree = Path(str(transaction["worktree"]))
+    resolved_worktree = require_managed_directory_identity(
+        worktree,
+        managed_root=Path(str(transaction["managed_root"])),
+        expected_resolved=str(transaction["worktree_resolved"]),
+        expected_root_resolved=str(transaction["managed_root_resolved"]),
+        expected_identity=dict(transaction["worktree_identity"]),
+        expected_root_identity=dict(transaction["managed_root_identity"]),
+    )
+    if not worktree.is_dir() or not any(
+        item.path == resolved_worktree for item in repo.worktrees()
+    ):
+        raise SoloAIError("Retained abandonment worktree is missing or unregistered")
+    expected_tip = str(transaction["branch_tip"])
+    if (
+        repo.branch(worktree) != transaction["branch"]
+        or repo.head(worktree) != expected_tip
+        or repo.ref_head(f"refs/heads/{transaction['branch']}") != expected_tip
+    ):
+        raise SoloAIError("Task worktree or branch changed during retained abandonment")
+    current_status = repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
+    ).stdout
+    if current_status != transaction.get("retained_status"):
+        raise SoloAIError("Worktree content changed during retained abandonment")
+    completed = store.complete_retained_abandonment(
+        task["id"], transaction_id=str(transaction["transaction_id"])
+    )
+    receipt = write_completed_receipt(repo, completed)
+    return {
+        "task_id": task["id"],
+        "status": "abandoned",
+        "transaction_id": receipt["transaction_id"],
+        "retained_worktree": True,
+        "quarantine_reason": completed.get("quarantine_reason"),
     }
 
 

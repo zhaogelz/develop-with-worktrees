@@ -22,11 +22,14 @@ from typing import Any
 import psutil
 
 from .abandonment import (
+    assert_retained_worktree_safe,
     assert_task_not_held_by_candidate_delivery,
     in_place_audit,
     prepare as prepare_abandonment,
+    prepare_retained as prepare_retained_abandonment,
 )
 from .abandonment import resume as resume_abandonment
+from .abandonment import resume_retained as resume_retained_abandonment
 from .abandonment import write_completed_receipt as write_abandonment_receipt
 from .cleanup import inspect_untracked, require_managed_directory_identity
 from .config import (
@@ -2018,6 +2021,11 @@ def ready(
                 task_id,
                 validation_attempt=attempt_id,
                 validation_attempts=attempts,
+                # _sync_base 只更新本轮内存任务；记录验证尝试时必须一并
+                # 持久化已经同步的基线，否则验证后的收敛检查会重新读取旧值，
+                # 将已稳定的基线误判为再次推进。
+                base_head=task["base_head"],
+                candidate_head=expected_candidate_head,
             )
             try:
                 proof = validate(
@@ -3955,8 +3963,13 @@ def recover(
                     "recovered_ready_proof": True,
                 }
             if task.get("abandonment"):
-                _stop_registered_processes(store, task)
-                result = resume_abandonment(repo, store=store, task=store.task(task_id))
+                if task["abandonment"].get("retained_worktree") is True:
+                    result = resume_retained_abandonment(repo, store=store, task=task)
+                else:
+                    _stop_registered_processes(store, task)
+                    result = resume_abandonment(
+                        repo, store=store, task=store.task(task_id)
+                    )
                 delete_anchor(repo, task_id)
                 return result
             integration = task.get("integration")
@@ -4181,14 +4194,21 @@ def abandon(
     reason: str | None = None,
     source: str = "api",
     session_id: str | None = None,
+    retain_worktree: bool = False,
 ) -> dict[str, Any]:
     if confirm != task_id:
         raise SoloAIError("Abandon requires --confirm with the exact task id")
+    if retain_worktree and not (reason or "").strip():
+        raise SoloAIError("Retained abandon requires one non-empty audit reason")
     config, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     result: dict[str, Any] | None = None
     with store.operation(task_id, lease, "abandon") as task:
         if _is_in_place(task):
+            if retain_worktree:
+                raise SoloAIError(
+                    "--retain-worktree applies only to isolated tasks; in-place tasks are already preserved"
+                )
             _assert_in_place_binding(repo, store, task, session_id=session_id)
             worktree = Path(str(task["worktree"]))
             if not repo.is_clean(worktree):
@@ -4224,13 +4244,19 @@ def abandon(
                         "An integration transaction exists; Recover must resolve it before Abandon"
                     )
                 if task.get("abandonment"):
-                    from .runtime_adapter import release_task_runtime
-
-                    runtime_release = release_task_runtime(
-                        repo, task=task, reason="abandon"
-                    )
                     with candidate_admission_lock(repo):
-                        result = resume_abandonment(repo, store=store, task=task)
+                        if task["abandonment"].get("retained_worktree") is True:
+                            result = resume_retained_abandonment(
+                                repo, store=store, task=task
+                            )
+                            runtime_release = None
+                        else:
+                            from .runtime_adapter import release_task_runtime
+
+                            runtime_release = release_task_runtime(
+                                repo, task=task, reason="abandon"
+                            )
+                            result = resume_abandonment(repo, store=store, task=task)
                 else:
                     with candidate_admission_lock(repo):
                         assert_task_not_held_by_candidate_delivery(repo, task=task)
@@ -4238,23 +4264,41 @@ def abandon(
                         Path(task["worktree"]),
                         repo.primary_path / config.worktree_directory,
                     )
-                    _stop_registered_processes(store, task)
-                    task = store.task(task_id)
-                    from .runtime_adapter import release_task_runtime
+                    if retain_worktree:
+                        assert_retained_worktree_safe(task)
+                        prepared = prepare_retained_abandonment(
+                            repo,
+                            store=store,
+                            task=task,
+                            reason=str(reason).strip(),
+                            source=source,
+                        )
+                        runtime_release = None
+                    else:
+                        _stop_registered_processes(store, task)
+                        task = store.task(task_id)
+                        from .runtime_adapter import release_task_runtime
 
-                    runtime_release = release_task_runtime(
-                        repo, task=task, reason="abandon"
-                    )
-                    prepared = prepare_abandonment(
-                        repo,
-                        store=store,
-                        task=task,
-                        reason=reason,
-                        source=source,
-                    )
+                        runtime_release = release_task_runtime(
+                            repo, task=task, reason="abandon"
+                        )
+                        prepared = prepare_abandonment(
+                            repo,
+                            store=store,
+                            task=task,
+                            reason=reason,
+                            source=source,
+                        )
                     with candidate_admission_lock(repo):
-                        result = resume_abandonment(repo, store=store, task=prepared)
-                result["runtime_release"] = runtime_release
+                        result = (
+                            resume_retained_abandonment(
+                                repo, store=store, task=prepared
+                            )
+                            if retain_worktree
+                            else resume_abandonment(repo, store=store, task=prepared)
+                        )
+                if runtime_release is not None:
+                    result["runtime_release"] = runtime_release
                 delete_anchor(repo, task_id)
     if result is None:
         raise SoloAIError("Abandonment did not produce a durable result")

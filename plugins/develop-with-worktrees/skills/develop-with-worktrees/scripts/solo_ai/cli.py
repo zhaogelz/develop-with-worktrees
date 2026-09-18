@@ -1036,6 +1036,11 @@ def _parser() -> argparse.ArgumentParser:
     abandoned.add_argument(
         "--reason", required=True, help="one-line reason retained with the abandonment"
     )
+    abandoned.add_argument(
+        "--retain-worktree",
+        action="store_true",
+        help="mark an isolated task terminal while preserving every worktree file and quarantining its slot",
+    )
     abandoned.add_argument("--session")
 
     resume = sub.add_parser(
@@ -2480,6 +2485,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             reason=args.reason,
             source="cli",
             session_id=args.session,
+            retain_worktree=args.retain_worktree,
         )
     if args.command == "warm-slot":
         return warm_slot(repo, slot_id=args.slot)
@@ -2747,10 +2753,20 @@ def _status_view_human(result: dict[str, Any]) -> str:
         return "\n".join(lines)
     if scope == "task":
         task = result["task"]
-        return (
+        lines = [
             f"Task {task.get('id')}: {task.get('status')}\n"
-            f"Next: {task.get('next_action', {}).get('kind')}"
-        )
+            f"Next: {task.get('next_action', {}).get('kind')}",
+        ]
+        retained = task.get("retained_worktree")
+        if isinstance(retained, dict):
+            lines.extend(
+                (
+                    f"Retained worktree: {retained.get('path')}",
+                    f"Quarantined slot: {retained.get('slot_id')}",
+                    f"Reason: {retained.get('reason')}",
+                )
+            )
+        return "\n".join(lines)
     if scope == "batch":
         batch = result["batch"]
         return (

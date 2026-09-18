@@ -65,6 +65,7 @@ from solo_ai.lifecycle import (
 )
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
+from solo_ai.status_views import status_view
 from solo_ai.util import (
     ActionableSoloAIError,
     SoloAIError,
@@ -2630,6 +2631,119 @@ def test_abandon_blocks_preexisting_tracked_changes_without_preparing_transactio
         abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
     assert (worktree / "README.md").read_text(encoding="utf-8") == "first dirty value\n"
     assert StateStore(repo).task(task["id"])["status"] == "active"
+
+
+def test_retained_abandonment_keeps_dirty_worktree_and_closes_root_child(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    root = create_root_task_anchor(
+        repo,
+        purpose="retain reviewed worktree without losing root closure",
+        target="terminal state retains the exact quarantined worktree",
+        scope="isolated abandonment state and status projection only",
+        acceptance="files stay in place, the slot stays quarantined, and the root sees a terminal child",
+    )
+    task = start(repo, name="retained dirty worktree", root_anchor_id=root["root_id"])
+    worktree = Path(task["worktree"])
+    tracked = worktree / "README.md"
+    scratch = worktree / "review-notes.txt"
+    tracked.write_text("reviewed tracked change\n", encoding="utf-8")
+    scratch.write_text("reviewed untracked note\n", encoding="utf-8")
+    branch = repo.branch(worktree)
+    head = repo.head(worktree)
+    branch_head = repo.ref_head(f"refs/heads/{task['branch']}")
+    status_before = repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
+    ).stdout
+
+    result = abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="withdrawn test candidate must remain available for review",
+        retain_worktree=True,
+    )
+
+    assert result["status"] == "abandoned"
+    assert result["retained_worktree"] is True
+    assert tracked.read_text(encoding="utf-8") == "reviewed tracked change\n"
+    assert scratch.read_text(encoding="utf-8") == "reviewed untracked note\n"
+    assert repo.branch(worktree) == branch == task["branch"]
+    assert repo.head(worktree) == head
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == branch_head
+    assert (
+        repo.git(
+            ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
+        ).stdout
+        == status_before
+    )
+    recorded = StateStore(repo).task(task["id"])
+    slot = StateStore(repo).read()["slots"][task["slot_id"]]
+    assert recorded["status"] == "abandoned"
+    assert recorded["lease"] is None
+    assert recorded["abandonment"]["retained_worktree"] is True
+    assert slot["status"] == "quarantined"
+    assert slot["task_id"] == task["id"]
+    assert "withdrawn test candidate" in slot["quarantine_reason"]
+
+    task_status = status_view(repo, task_id=task["id"])["task"]
+    assert task_status["next_action"] == {"kind": "retained_worktree_terminal"}
+    assert task_status["retained_worktree"] == {
+        "path": task["worktree"],
+        "slot_id": task["slot_id"],
+        "reason": slot["quarantine_reason"],
+    }
+    root_status = status_view(repo, root_id=root["root_id"])
+    assert root_status["root"]["next_action"] == {"kind": "record_root_acceptance"}
+
+
+def test_recover_keeps_retained_worktree_after_interrupted_completion(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="recover retained worktree")
+    worktree = Path(task["worktree"])
+    reviewed = worktree / "README.md"
+    reviewed.write_text("keep this reviewed state\n", encoding="utf-8")
+    status_before = repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
+    ).stdout
+    original_complete = StateStore.complete_retained_abandonment
+
+    def interrupt_completion(
+        self: StateStore, task_id: str, *, transaction_id: str
+    ) -> dict[str, object]:
+        raise RuntimeError("stop after retained preparation")
+
+    monkeypatch.setattr(
+        StateStore, "complete_retained_abandonment", interrupt_completion
+    )
+    with pytest.raises(RuntimeError, match="stop after retained preparation"):
+        abandon(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            confirm=task["id"],
+            reason="simulate interruption before retained terminal state",
+            retain_worktree=True,
+        )
+    assert StateStore(repo).task(task["id"])["status"] == "abandoning"
+    monkeypatch.setattr(StateStore, "complete_retained_abandonment", original_complete)
+
+    result = recover(repo, task_id=task["id"])
+
+    assert result["status"] == "abandoned"
+    assert result["retained_worktree"] is True
+    assert reviewed.read_text(encoding="utf-8") == "keep this reviewed state\n"
+    assert (
+        repo.git(
+            ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
+        ).stdout
+        == status_before
+    )
+    assert StateStore(repo).read()["slots"][task["slot_id"]]["status"] == "quarantined"
 
 
 def test_abandon_preserves_ordinary_file_replaced_at_conditional_delete(

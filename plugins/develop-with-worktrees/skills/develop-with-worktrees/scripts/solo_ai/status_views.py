@@ -241,6 +241,15 @@ def _task_projection(
         task.get("validation_attempts"),
     ):
         projected["validation"] = validation
+    abandonment = task.get("abandonment")
+    if isinstance(abandonment, dict) and abandonment.get("retained_worktree") is True:
+        projected["retained_worktree"] = {
+            "path": task.get("worktree"),
+            "slot_id": task.get("slot_id"),
+            "reason": task.get("quarantine_reason"),
+        }
+        if task.get("status") in FINAL_TASK_STATES:
+            projected["next_action"] = {"kind": "retained_worktree_terminal"}
     return projected
 
 
