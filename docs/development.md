@@ -67,11 +67,21 @@ uv run python scripts/verify_native_patch_owner.py --events <证据目录>/appse
 ```
 
 判定器只接受真实 `turn/completed`、`hook/completed`、`item/completed` 事件和
-最终字节/Git 状态；它要求 B/C 按顺序实际完成一次拒绝，并要求宿主明确记录
-相对、绝对两种原始路径形式。缺少原始路径证据时状态为 `BLOCKED_HOST`，不从
-归一化后的目标路径推断通过；真实断言失败为 `FAIL_ASSERTION`，事件身份或顺序
-不完整为 `INVALID_RUN`。验收控制器在宿主退出后必须通过正式 DWW
+最终字节/Git 状态；它核对 owner、B、C 各自独立的 thread/turn 身份，并要求
+owner 前两次写入、B 拒绝及其 turn 完成、C 拒绝及其 turn 完成、owner 的
+`dww_test_barrier` 至少须有一个开始或请求事件，且出现的每个开始/请求都必须与同一
+owner item 关联；其完成、owner 第三次写入和 owner turn 完成保持严格顺序。目标文件出现
+任何非 owner 的成功 `fileChange` 也会使断言失败，即使另有三条合法 owner 写入。
+最终现场要求 W 的 porcelain 仅允许 `probe.txt`，R 必须完全 clean；Git 查询非零
+退出或文件读取失败均不能当作 clean。宿主必须明确记录相对、绝对两种原始路径形式。
+缺少原始路径证据时状态为 `BLOCKED_HOST`，不从归一化后的目标路径推断通过；真实
+断言失败为 `FAIL_ASSERTION`，事件身份或顺序不完整为 `INVALID_RUN`。验收控制器在
+宿主退出后必须通过正式 DWW
 `abandon --retain-worktree` 保留失败现场，不能只打印模型回复作为 PASS。
+
+`dww/nativePathForms` 是控制器从 owner 的 session JSONL 提取的派生证据，用于说明
+原始相对/绝对输入形式；判定器不宣称独立核验原始 JSONL，也不把该派生事件当作
+原始审计文件本身。
 
 ## Keep one source of truth
 
