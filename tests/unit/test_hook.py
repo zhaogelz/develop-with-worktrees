@@ -733,6 +733,39 @@ def test_hook_checks_actual_patch_targets_and_isolated_owner_before_writing(
     assert "mixes targets" in moved["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+def test_hook_infers_unique_owner_worktree_when_patch_payload_omits_cwd(
+    git_repo: Path, monkeypatch
+) -> None:
+    repo = _initialized(git_repo, slots=1)
+    task = start(
+        repo,
+        name="nested apply_patch owner",
+        host_origin={"kind": "codex", "thread_id": "nested-owner"},
+    )
+    worktree = Path(task["worktree"])
+    monkeypatch.chdir(git_repo)
+
+    payload = _payload(
+        git_repo,
+        tool="apply_patch",
+        patch="*** Begin Patch\n*** Add File: inferred-owner.md\n+owned\n*** End Patch",
+        session="nested-owner",
+    )
+    payload.pop("cwd")
+
+    assert HOOK.decide(payload) is None
+    assert not (worktree / "inferred-owner.md").exists()
+
+    denied = dict(payload)
+    denied["session_id"] = "another-session"
+    result = HOOK.decide(denied)
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert (
+        "could not be determined safely"
+        in result["hookSpecificOutput"]["permissionDecisionReason"]
+    )
+
+
 def test_hook_allows_only_owned_task_targets_inside_codex_home(
     tmp_path: Path, monkeypatch
 ) -> None:

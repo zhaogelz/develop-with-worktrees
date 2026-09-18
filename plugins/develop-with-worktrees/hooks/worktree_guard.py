@@ -852,6 +852,51 @@ def _patch_target_task(
     return task, None
 
 
+def _patch_payload_with_inferred_owner_cwd(
+    state: dict[str, Any], payload: dict[str, Any], root: Path
+) -> dict[str, Any]:
+    """为未携带 cwd 的宿主补丁调用推断唯一的当前隔离工作树。
+
+    某些宿主会把 ``apply_patch`` 包在另一层工具调用中，传到 PreToolUse
+    的 payload 没有执行目录。缺少目录时不能把相对路径当作安全路径；只有
+    当前会话恰好拥有同一 common-dir 下唯一一个 active/ready 隔离任务时，
+    才把该任务的真实 worktree 注入到本次只读解析用的 payload 副本中。
+    其他会话、多个并行任务和无效工作树继续走原有拒绝路径。
+    """
+
+    if _patch_execution_directory(payload, root) is not None:
+        return payload
+    source_common = common_dir(root)
+    if source_common is None:
+        return payload
+
+    candidates: list[dict[str, Any]] = []
+    tasks = state.get("tasks", {})
+    task_values = tasks.values() if isinstance(tasks, dict) else ()
+    for task in task_values:
+        if not isinstance(task, dict) or task.get("mode", "isolated") != "isolated":
+            continue
+        if task.get("status") not in {"active", "ready"}:
+            continue
+        worktree = task.get("worktree")
+        if not isinstance(worktree, str):
+            continue
+        try:
+            task_root = Path(worktree).resolve()
+        except OSError:
+            continue
+        if common_dir(task_root) != source_common:
+            continue
+        if _is_valid_isolated_owner(task, payload)[0]:
+            candidates.append(task)
+
+    if len(candidates) != 1:
+        return payload
+    effective = dict(payload)
+    effective["cwd"] = str(candidates[0]["worktree"])
+    return effective
+
+
 def _is_valid_in_place(
     root: Path, task: dict[str, Any], payload: dict[str, Any]
 ) -> tuple[bool, str]:
@@ -1440,7 +1485,8 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             )
         return None
     if tool.lower() == "apply_patch":
-        patch_scope = _apply_patch_scope(payload, root)
+        patch_payload = _patch_payload_with_inferred_owner_cwd(state, payload, root)
+        patch_scope = _apply_patch_scope(patch_payload, root)
         if patch_scope in {PATCH_SCOPE_EXTERNAL, PATCH_SCOPE_SESSION_ARTIFACT}:
             return None
         if patch_scope not in {PATCH_SCOPE_PROTECTED, PATCH_SCOPE_CODEX_HOME}:
@@ -1459,7 +1505,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
                 )
                 + ". Protected base-worktree writes remain blocked."
             )
-        patch_task, patch_reason = _patch_target_task(state, guard, payload, root)
+        patch_task, patch_reason = _patch_target_task(state, guard, patch_payload, root)
         if patch_task is None:
             if patch_scope == PATCH_SCOPE_CODEX_HOME:
                 return _deny(
@@ -1471,7 +1517,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
                 + ". Protected worktree writes remain blocked."
             )
         if patch_task.get("mode", "isolated") == "isolated":
-            if denial := _isolated_write_denial(guard, patch_task, payload):
+            if denial := _isolated_write_denial(guard, patch_task, patch_payload):
                 return _deny(denial)
             return None
         patch_root = Path(str(patch_task["worktree"])).resolve()
