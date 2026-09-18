@@ -1284,6 +1284,13 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         planned["ready"]["fingerprint"]
         == ready_proof["profile_proofs"][0]["fingerprint"]
     )
+    reused_ready_plan = call_json(
+        "plan", "--task", task_id, "--level", "ready", repo_path=worktree
+    )
+    reused_ready_profile = reused_ready_plan["phase_estimates"][0]["profiles"][0]
+    assert reused_ready_profile["execution"]["action"] == "reuse"
+    assert reused_ready_profile["estimated_seconds"] is None
+    assert reused_ready_plan["phase_estimates"][0]["estimated_execution_seconds"] == 0
     full = call_json(
         "verify",
         "--task",

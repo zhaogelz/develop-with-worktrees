@@ -2511,19 +2511,36 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     else {}
                 ),
             )
-            estimate = estimate_validation(
-                [
-                    (
-                        profile.profile_id,
-                        [command.fingerprint for command in profile.commands],
-                    )
-                    for profile, _, _ in phase_records
-                ]
-            )
+            decisions = [
+                profile_execution_decision(
+                    repo,
+                    profile=profile,
+                    inputs=profile_inputs,
+                    fingerprint=fingerprint,
+                )
+                for profile, profile_inputs, fingerprint in phase_records
+            ]
+            executable = [
+                (
+                    profile.profile_id,
+                    [command.fingerprint for command in profile.commands],
+                )
+                for (profile, _, _), decision in zip(
+                    phase_records, decisions, strict=True
+                )
+                if decision["action"] == "execute"
+            ]
+            estimate = estimate_validation(executable)
+            executable_estimates = iter(estimate["profile_seconds"])
             phase_profiles = []
-            for index, (profile, profile_inputs, fingerprint) in enumerate(
-                phase_records
+            for (profile, profile_inputs, fingerprint), decision in zip(
+                phase_records, decisions, strict=True
             ):
+                profile_estimate = (
+                    next(executable_estimates)
+                    if decision["action"] == "execute"
+                    else None
+                )
                 profile_view = {
                     "id": profile.profile_id,
                     "level": profile.level,
@@ -2531,14 +2548,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     "timeout_seconds": profile.timeout_seconds,
                     "commands": [command.redacted() for command in profile.commands],
                     "fingerprint": fingerprint,
-                    "estimated_seconds": estimate["profile_seconds"][index],
+                    "estimated_seconds": profile_estimate,
                     "selection": profile_selection_reason(profile, inputs["files"]),
-                    "execution": profile_execution_decision(
-                        repo,
-                        profile=profile,
-                        inputs=profile_inputs,
-                        fingerprint=fingerprint,
-                    ),
+                    "execution": decision,
                 }
                 phase_profiles.append(profile_view)
                 profiles_by_id.setdefault(profile.profile_id, profile_view)
@@ -2547,8 +2559,17 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     "level": phase_level,
                     "full_scope": full_scope if phase_level == "full" else None,
                     "profiles": phase_profiles,
-                    "estimated_execution_seconds": estimate["estimated_seconds"],
+                    "estimated_execution_seconds": (
+                        None
+                        if any(
+                            decision["action"] == "blocked" for decision in decisions
+                        )
+                        else estimate["estimated_seconds"]
+                    ),
                     "advisory": estimate["advisory"],
+                    "blocked_profile_count": sum(
+                        decision["action"] == "blocked" for decision in decisions
+                    ),
                     "queue_wait_seconds": None,
                     "estimate_notice": "仅估计实际命令执行时间；队列等待取决于查询时的资源占用，未被猜测为固定时长。",
                 }

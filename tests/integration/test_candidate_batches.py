@@ -14,6 +14,7 @@ from solo_ai import candidate_batches as batch_module
 from solo_ai import batch_workspace
 from solo_ai import cleanup as cleanup_module
 from solo_ai import lifecycle as lifecycle_module
+from solo_ai import status_views
 from solo_ai import validation_queue
 from solo_ai.cli import _status
 from solo_ai.candidate_batches import (
@@ -806,28 +807,112 @@ def test_compact_status_projects_only_the_linked_validation_attempt(
 
     view = status_view(repo, task_id=task["id"])
 
-    assert view["task"]["validation"] == {
-        "id": attempt_id,
-        "level": "ready",
-        "full_scope": "integration",
-        "state": "waiting",
-        "result": None,
-        "started_at": "2026-09-17T00:00:00Z",
-        "finished_at": None,
-        "error": None,
-        "profiles": [
-            {
-                "id": "fast",
-                "state": "waiting",
-                "reused": False,
-                "execution_reason": "no_matching_successful_proof",
-                "error_reason": None,
-                "queue": {"resource_class": "normal"},
-                "executed_commands": 0,
-            }
-        ],
-    }
+    validation = view["task"]["validation"]
+    assert validation["id"] == attempt_id
+    assert validation["state"] == "unknown"
+    assert validation["result"] is None
+    assert validation["profiles"] == [
+        {
+            "id": "fast",
+            "state": "unknown",
+            "reused": False,
+            "execution_reason": "no_matching_successful_proof",
+            "execution_details": None,
+            "error_reason": "queue_ticket_not_confirmed",
+            "queue": {"resource_class": "normal"},
+            "current_command": None,
+            "executed_commands": 0,
+        }
+    ]
     assert state_path.read_bytes() == before
+
+
+def test_compact_status_marks_unconfirmed_running_receipts_unknown(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    task = start(repo, name="unconfirmed running status")
+    attempt_id = "ready-attempt-unconfirmed-running"
+    atomic_write_json(
+        repo.local_dir / "validation-attempts" / f"{attempt_id}.json",
+        {
+            "schema_version": 1,
+            "id": attempt_id,
+            "level": "ready",
+            "full_scope": "integration",
+            "state": "running",
+            "result": None,
+            "profiles": [
+                {
+                    "id": "fast",
+                    "state": "running",
+                    "current_command": {
+                        "index": 1,
+                        "count": 1,
+                        "process": {"pid": 12345, "create_time": 1.0},
+                    },
+                    "runs": [],
+                }
+            ],
+        },
+    )
+    StateStore(repo).update_task(task["id"], validation_attempt=attempt_id)
+    monkeypatch.setattr(status_views, "process_matches", lambda snapshot: False)
+    state_path = repo.local_dir / "state.json"
+    before = state_path.read_bytes()
+
+    view = status_view(repo, task_id=task["id"])
+
+    validation = view["task"]["validation"]
+    assert validation["state"] == "unknown"
+    assert validation["profiles"][0]["state"] == "unknown"
+    assert validation["profiles"][0]["error_reason"] == "running_process_not_confirmed"
+    assert state_path.read_bytes() == before
+
+
+def test_compact_status_shows_confirmed_running_command_progress(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    task = start(repo, name="confirmed running status")
+    attempt_id = "ready-attempt-confirmed-running"
+    atomic_write_json(
+        repo.local_dir / "validation-attempts" / f"{attempt_id}.json",
+        {
+            "schema_version": 1,
+            "id": attempt_id,
+            "level": "ready",
+            "full_scope": "integration",
+            "state": "running",
+            "result": None,
+            "profiles": [
+                {
+                    "id": "fast",
+                    "state": "running",
+                    "current_command": {
+                        "index": 2,
+                        "count": 3,
+                        "elapsed_seconds": 12.5,
+                        "process": {"pid": 12345, "create_time": 1.0},
+                    },
+                    "runs": [{}],
+                }
+            ],
+        },
+    )
+    StateStore(repo).update_task(task["id"], validation_attempt=attempt_id)
+    monkeypatch.setattr(status_views, "process_matches", lambda snapshot: True)
+
+    validation = status_view(repo, task_id=task["id"])["task"]["validation"]
+
+    assert validation["state"] == "running"
+    assert validation["profiles"][0]["state"] == "running"
+    assert validation["profiles"][0]["current_command"] == {
+        "index": 2,
+        "count": 3,
+        "elapsed_seconds": 12.5,
+    }
+    assert validation["profiles"][0]["executed_commands"] == 1
 
 
 def test_live_operation_error_has_a_safe_structured_wait_action(git_repo: Path) -> None:

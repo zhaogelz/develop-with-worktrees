@@ -137,6 +137,7 @@ def run_logged(
     heartbeat_seconds: float = 30.0,
     termination_grace_seconds: float = 5.0,
     environment: dict[str, str] | None = None,
+    on_start: Callable[[dict[str, Any]], None] | None = None,
     on_heartbeat: Callable[[dict[str, Any]], None] | None = None,
     receipt_path: Path | None = None,
     receipt_metadata: dict[str, Any] | None = None,
@@ -195,6 +196,8 @@ def run_logged(
                 receipt["metadata"] = receipt_metadata
             if receipt_path and receipt is not None:
                 atomic_write_json(receipt_path, receipt)
+            if on_start:
+                on_start({"status": "running", "process": snapshot})
             output: Queue[str | None] = Queue()
             reader = threading.Thread(
                 target=_stream_reader, args=(process.stdout, output), daemon=True

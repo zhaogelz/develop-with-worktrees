@@ -19,7 +19,8 @@ from .proof import read_validation_attempt
 from .repo import GitRepo
 from .root_context import show_root_anchor
 from .state import FINAL_TASK_STATES, StateStore
-from .util import ActionableSoloAIError
+from .util import ActionableSoloAIError, process_matches
+from .validation_queue import queue_ticket_snapshot
 
 
 VIEW_SCHEMA = 1
@@ -326,27 +327,76 @@ def _validation_projection(
     attempt = read_validation_attempt(repo, attempt_id)
     if not attempt:
         return {"id": attempt_id, "state": "not_recorded"}
+    profiles = [
+        _validation_profile_projection(profile)
+        for profile in attempt.get("profiles", [])
+    ]
+    state = attempt.get("state")
+    if state in {"waiting", "running"}:
+        active_states = {profile["state"] for profile in profiles}
+        if "running" in active_states:
+            state = "running"
+        elif "waiting" in active_states:
+            state = "waiting"
+        elif "preparing" in active_states:
+            state = "preparing"
+        else:
+            state = "unknown"
     return {
         "id": attempt_id,
         "level": attempt.get("level"),
         "full_scope": attempt.get("full_scope"),
-        "state": attempt.get("state"),
+        "state": state,
         "result": attempt.get("result"),
         "started_at": attempt.get("started_at"),
         "finished_at": attempt.get("finished_at"),
         "error": attempt.get("error"),
-        "profiles": [
-            {
-                "id": profile.get("id"),
-                "state": profile.get("state"),
-                "reused": profile.get("reused"),
-                "execution_reason": profile.get("execution_reason"),
-                "error_reason": profile.get("error_reason"),
-                "queue": copy.deepcopy(profile.get("queue")),
-                "executed_commands": len(profile.get("runs") or []),
+        "profiles": profiles,
+    }
+
+
+def _validation_profile_projection(profile: dict[str, Any]) -> dict[str, Any]:
+    state = profile.get("state")
+    error_reason = profile.get("error_reason")
+    queue = copy.deepcopy(profile.get("queue"))
+    current_command = profile.get("current_command")
+    projected_command: dict[str, Any] | None = None
+    if state == "waiting":
+        ticket = queue.get("ticket") if isinstance(queue, dict) else None
+        observation = queue_ticket_snapshot(ticket) if isinstance(ticket, str) else None
+        if observation and observation.get("state") == "waiting":
+            queue = observation
+        elif observation and observation.get("state") == "active":
+            state = "preparing"
+            queue = observation
+        else:
+            state = "unknown"
+            error_reason = "queue_ticket_not_confirmed"
+    elif state == "running":
+        process = (
+            current_command.get("process")
+            if isinstance(current_command, dict)
+            else None
+        )
+        if isinstance(process, dict) and process_matches(process):
+            projected_command = {
+                key: current_command.get(key)
+                for key in ("index", "count", "elapsed_seconds")
+                if current_command.get(key) is not None
             }
-            for profile in attempt.get("profiles", [])
-        ],
+        else:
+            state = "unknown"
+            error_reason = "running_process_not_confirmed"
+    return {
+        "id": profile.get("id"),
+        "state": state,
+        "reused": profile.get("reused"),
+        "execution_reason": profile.get("execution_reason"),
+        "execution_details": copy.deepcopy(profile.get("decision")),
+        "error_reason": error_reason,
+        "queue": queue,
+        "current_command": projected_command,
+        "executed_commands": len(profile.get("runs") or []),
     }
 
 

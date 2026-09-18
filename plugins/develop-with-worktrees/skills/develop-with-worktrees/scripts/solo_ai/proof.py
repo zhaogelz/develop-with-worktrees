@@ -47,6 +47,7 @@ LOCKFILES = (
 )
 PROOF_SCHEMA = 3
 VALIDATION_ATTEMPT_SCHEMA = 1
+PROFILE_HISTORY_SCHEMA = 1
 # 审批计划和验证收据的演进速度不同：前者描述可执行的策略，后者绑定现场证据。
 # 5 将验证命令从本机审批记录中改为“脱敏展示 + 原始参数指纹”。
 # 旧计划可能含有原始命令参数，不能继续当作当前审批契约。
@@ -1264,6 +1265,85 @@ def _content_address_log(repo: GitRepo, temporary: Path) -> tuple[Path, str]:
     return target, digest
 
 
+def _profile_history_path(repo: GitRepo, profile_id: str) -> Path:
+    """为同一仓库中的单个 profile 保留最近可比较成功证明的精确定位。"""
+    return repo.local_dir / "profile-proof-history" / f"{sha256_text(profile_id)}.json"
+
+
+def _record_profile_history(
+    repo: GitRepo, *, profile_id: str, fingerprint: str
+) -> None:
+    atomic_write_json(
+        _profile_history_path(repo, profile_id),
+        {
+            "schema_version": PROFILE_HISTORY_SCHEMA,
+            "profile_id": profile_id,
+            "fingerprint": fingerprint,
+            "recorded_at": utc_timestamp(),
+        },
+    )
+
+
+def _previous_profile_inputs(
+    repo: GitRepo, *, profile_id: str, fingerprint: str
+) -> dict[str, Any] | None:
+    """读取一个可核验的同 profile 成功证明；历史缺失不会阻止新的执行。"""
+    try:
+        pointer = read_json(_profile_history_path(repo, profile_id), {})
+        if (
+            not isinstance(pointer, dict)
+            or not isinstance(pointer.get("fingerprint"), str)
+            or pointer.get("schema_version") != PROFILE_HISTORY_SCHEMA
+            or pointer.get("profile_id") != profile_id
+            or pointer["fingerprint"] == fingerprint
+        ):
+            return None
+        proof = read_json(
+            repo.local_dir / "profile-proofs" / f"{pointer['fingerprint']}.json", {}
+        )
+    except SoloAIError:
+        return None
+    if not isinstance(proof, dict) or (
+        proof.get("schema_version") != PROOF_SCHEMA
+        or proof.get("fingerprint") != pointer["fingerprint"]
+        or proof.get("result") != "passed"
+        or (proof.get("inputs") or {}).get("profile_id") != profile_id
+        or not _logs_exist(proof)
+    ):
+        return None
+    inputs = proof.get("inputs")
+    return inputs if isinstance(inputs, dict) else None
+
+
+def _profile_input_change_reasons(
+    previous: dict[str, Any], current: dict[str, Any]
+) -> list[str]:
+    labels = {
+        "tracked_inputs": "declared_inputs_changed",
+        "candidate_head": "candidate_snapshot_changed",
+        "base_head": "base_snapshot_changed",
+        "command_digests": "command_changed",
+        "tools": "tool_changed",
+        "platform": "platform_changed",
+        "environment": "environment_changed",
+        "dww_validation_environment": "validation_environment_changed",
+        "lockfiles": "dependency_lockfile_changed",
+        "paths": "selection_rule_changed",
+        "external_state": "external_state_changed",
+        "input_closure": "input_closure_changed",
+        "timeout_seconds": "timeout_changed",
+        "resource_class": "resource_class_changed",
+        "level": "validation_level_changed",
+        "reuse_scope": "reuse_scope_changed",
+        "reuse_contract": "reuse_contract_changed",
+        "full_execution": "new_full_execution_required",
+    }
+    changes = [
+        label for key, label in labels.items() if previous.get(key) != current.get(key)
+    ]
+    return changes or ["profile_inputs_changed"]
+
+
 def profile_execution_decision(
     repo: GitRepo,
     *,
@@ -1308,7 +1388,15 @@ def profile_execution_decision(
         reason = "new_full_execution_required"
     else:
         reason = "no_matching_successful_proof"
-    return {"action": "execute", "reason": reason, "proof": str(proof_path)}
+    decision = {"action": "execute", "reason": reason, "proof": str(proof_path)}
+    previous = _previous_profile_inputs(
+        repo, profile_id=profile.profile_id, fingerprint=fingerprint
+    )
+    if previous is not None:
+        decision["previous_input_changes"] = _profile_input_change_reasons(
+            previous, inputs
+        )
+    return decision
 
 
 def profile_selection_reason(
@@ -1352,6 +1440,9 @@ def _run_profile(
         )
         existing["reused_at"] = utc_timestamp()
         atomic_write_json(proof_path, existing)
+        _record_profile_history(
+            repo, profile_id=profile.profile_id, fingerprint=fingerprint
+        )
         _update_validation_attempt_profile(
             repo,
             attempt_id,
@@ -1402,7 +1493,7 @@ def _run_profile(
             repo,
             attempt_id,
             profile.profile_id,
-            state="running",
+            state="preparing",
             queue={
                 "resource_class": profile.resource_class,
                 "ticket": queue_claim["id"],
@@ -1429,6 +1520,38 @@ def _run_profile(
             environment = _execution_environment(profile)
             environment.update(validation_environment)
             environment.update(inherited_claim_environment(queue_claim))
+
+            def command_started(start: dict[str, Any]) -> None:
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state="running",
+                    current_command={
+                        "index": index,
+                        "count": len(profile.commands),
+                        "command_digest": command.fingerprint,
+                        "receipt": str(receipt_path),
+                        "process": copy.deepcopy(start.get("process")),
+                    },
+                )
+
+            def command_heartbeat(heartbeat: dict[str, Any]) -> None:
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state="running",
+                    current_command={
+                        "index": index,
+                        "count": len(profile.commands),
+                        "command_digest": command.fingerprint,
+                        "receipt": str(receipt_path),
+                        "process": copy.deepcopy(heartbeat.get("process")),
+                        "elapsed_seconds": heartbeat.get("elapsed_seconds"),
+                    },
+                )
+
             try:
                 result = run_logged(
                     command.argv,
@@ -1436,6 +1559,8 @@ def _run_profile(
                     log_path=pending,
                     timeout_seconds=profile.timeout_seconds,
                     environment=environment,
+                    on_start=command_started,
+                    on_heartbeat=command_heartbeat,
                     receipt_path=receipt_path,
                     receipt_metadata={
                         "task_id": task_id,
@@ -1446,27 +1571,27 @@ def _run_profile(
                 )
             except BaseException:
                 receipt = read_json(receipt_path, {})
-                _update_validation_attempt_profile(
-                    repo,
-                    attempt_id,
-                    profile.profile_id,
-                    state="interrupted",
-                    runs=[
+                if receipt:
+                    runs.append(
                         {
                             "command_digest": command.fingerprint,
                             "command": command.redacted(),
                             "receipt": str(receipt_path),
                             "duration_seconds": receipt.get("duration_seconds"),
                             "status": receipt.get("status", "interrupted"),
+                            "process": receipt.get("process"),
+                            "log": receipt.get("log"),
                         }
-                    ],
+                    )
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state="interrupted",
+                    current_command=None,
+                    runs=copy.deepcopy(runs),
                 )
                 raise
-            _require_expected_candidate_head(
-                repo, cwd=cwd, expected_candidate_head=expected_candidate_head
-            )
-            check_inputs()
-            log_path, log_digest = _content_address_log(repo, pending)
             run_record = {
                 "command_digest": command.fingerprint,
                 "command": command.redacted(),
@@ -1475,16 +1600,51 @@ def _run_profile(
                 "timed_out": result.timed_out,
                 "process": result.process,
                 "receipt": str(receipt_path),
-                "log": str(log_path),
-                "log_sha256": log_digest,
+                "log": str(pending),
+                "log_sha256": None,
             }
             runs.append(run_record)
             _update_validation_attempt_profile(
                 repo,
                 attempt_id,
                 profile.profile_id,
+                current_command=None,
                 runs=copy.deepcopy(runs),
             )
+            try:
+                log_path, log_digest = _content_address_log(repo, pending)
+                run_record["log"] = str(log_path)
+                run_record["log_sha256"] = log_digest
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state="preparing",
+                    runs=copy.deepcopy(runs),
+                )
+                _require_expected_candidate_head(
+                    repo, cwd=cwd, expected_candidate_head=expected_candidate_head
+                )
+                check_inputs()
+            except BaseException as error:
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state=(
+                        "interrupted"
+                        if isinstance(error, (KeyboardInterrupt, SystemExit))
+                        else "failed"
+                    ),
+                    current_command=None,
+                    error_reason=(
+                        "interrupted_after_command"
+                        if isinstance(error, (KeyboardInterrupt, SystemExit))
+                        else "post_command_input_check_failed"
+                    ),
+                    runs=copy.deepcopy(runs),
+                )
+                raise
             if result.returncode != 0:
                 # 旧基线上的失败不是当前候选的有效结论；交给 Ready 同步后重试。
                 _require_expected_base_head(
@@ -1535,6 +1695,9 @@ def _run_profile(
         "created_at": utc_timestamp(),
     }
     atomic_write_json(proof_path, proof)
+    _record_profile_history(
+        repo, profile_id=profile.profile_id, fingerprint=fingerprint
+    )
     _update_validation_attempt_profile(
         repo,
         attempt_id,

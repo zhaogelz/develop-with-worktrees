@@ -116,6 +116,11 @@ def test_input_changed_without_commit_cannot_receive_success_proof(git_repo: Pat
     with pytest.raises(SoloAIError, match="inputs changed"):
         validate(repo)
     assert not list((repo.local_dir / "profile-proofs").glob("*.json"))
+    attempts = list((repo.local_dir / "validation-attempts").glob("*.json"))
+    assert len(attempts) == 1
+    attempt = json.loads(attempts[0].read_text(encoding="utf-8"))
+    assert attempt["profiles"][0]["runs"][0]["duration_seconds"] >= 0
+    assert attempt["profiles"][0]["runs"][0]["receipt"]
 
 
 def test_failed_validation_keeps_an_attempt_receipt_with_executed_cost(
@@ -141,6 +146,96 @@ def test_failed_validation_keeps_an_attempt_receipt_with_executed_cost(
     assert attempt["result"] == "failed"
     assert attempt["profiles"][0]["state"] == "failed"
     assert attempt["profiles"][0]["runs"][0]["duration_seconds"] >= 0
+
+
+def test_interrupted_second_command_keeps_all_prior_attempt_costs(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = configure(git_repo, "print('first')", external="unknown")
+    policy = git_repo / ".solo-ai/verification.toml"
+    first_command = json.dumps([sys.executable, "-c", "print('first')"])
+    second_command = json.dumps([sys.executable, "-c", "print('second')"])
+    policy.write_text(
+        policy.read_text(encoding="utf-8").replace(
+            f"commands = [{first_command}]",
+            f"commands = [{first_command}, {second_command}]",
+        ),
+        encoding="utf-8",
+    )
+    original_run = proof.run_logged
+    calls = 0
+
+    def interrupt_after_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = original_run(*args, **kwargs)
+        if calls == 2:
+            raise KeyboardInterrupt("synthetic interruption after second command")
+        return result
+
+    monkeypatch.setattr(proof, "run_logged", interrupt_after_second)
+    attempt_id = "full-attempt-second-command-interrupted"
+
+    with pytest.raises(KeyboardInterrupt, match="second command"):
+        proof.validate(
+            repo,
+            cwd=repo.root,
+            base="main",
+            task_id="same-batch",
+            verification=load_verification_config(repo),
+            level="full",
+            expected_candidate_head=repo.head(repo.root),
+            attempt_id=attempt_id,
+        )
+
+    attempt = proof.read_validation_attempt(repo, attempt_id)
+    runs = attempt["profiles"][0]["runs"]
+    assert attempt["result"] == "interrupted"
+    assert len(runs) == 2
+    assert all(isinstance(run["duration_seconds"], (int, float)) for run in runs)
+
+
+def test_execution_decision_explains_a_verified_previous_command_change(
+    git_repo: Path,
+) -> None:
+    repo = configure(git_repo, "print('first')")
+    policy = git_repo / ".solo-ai/verification.toml"
+    policy.write_text(
+        policy.read_text(encoding="utf-8").replace('level = "full"', 'level = "ready"'),
+        encoding="utf-8",
+    )
+    verification = load_verification_config(repo)
+    proof.validate(
+        repo,
+        cwd=repo.root,
+        base="main",
+        task_id="same-task",
+        verification=verification,
+        level="ready",
+        expected_candidate_head=repo.head(repo.root),
+    )
+    first_command = json.dumps([sys.executable, "-c", "print('first')"])
+    second_command = json.dumps([sys.executable, "-c", "print('second')"])
+    policy.write_text(
+        policy.read_text(encoding="utf-8").replace(first_command, second_command),
+        encoding="utf-8",
+    )
+    _, records = proof.proof_inputs(
+        repo,
+        cwd=repo.root,
+        base="main",
+        verification=load_verification_config(repo),
+        task_id="same-task",
+        levels=("ready",),
+    )
+    profile, inputs, fingerprint = records[0]
+
+    decision = proof.profile_execution_decision(
+        repo, profile=profile, inputs=inputs, fingerprint=fingerprint
+    )
+
+    assert decision["action"] == "execute"
+    assert "command_changed" in decision["previous_input_changes"]
 
 
 def test_input_drift_during_cached_log_check_cannot_receive_success(

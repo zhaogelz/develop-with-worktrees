@@ -259,6 +259,32 @@ def queue_status() -> dict[str, Any]:
     }
 
 
+def queue_ticket_snapshot(ticket_id: str) -> dict[str, Any] | None:
+    """只读确认一个精确票据仍在等待或占用资源，不清理任何队列状态。"""
+    if not ticket_id:
+        return None
+    state = read_json(_queue_state_path(), _default_queue_state())
+    if state.get("schema_version") != QUEUE_SCHEMA:
+        raise SoloAIError("Unsupported machine validation queue schema")
+    active = state.get("active", {}).get(ticket_id)
+    if isinstance(active, dict) and process_matches(active.get("owner", {})):
+        return {
+            "state": "active",
+            "resource_class": active.get("resource_class"),
+            "queued_at": active.get("queued_at"),
+            "acquired_at": active.get("acquired_at"),
+            "wait_seconds": active.get("wait_seconds"),
+        }
+    ticket = _read_ticket(_ticket_root() / f"{ticket_id}.json")
+    if ticket and process_matches(ticket.get("owner", {})):
+        return {
+            "state": "waiting",
+            "resource_class": ticket.get("resource_class"),
+            "queued_at": ticket.get("queued_at"),
+        }
+    return None
+
+
 @contextmanager
 def claim_validation_slot(resource_class: str) -> Iterator[dict[str, Any]]:
     """按全机 FIFO 领取验证资源；等待期间不持有仓库状态锁。"""
