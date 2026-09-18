@@ -327,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     checks = trace.checks + snapshot
     status = trace.status
     if any(check.status == "failed" for check in snapshot):
-        status = "FAIL_ASSERTION"
+        status = "INVALID_RUN" if trace.status == "INVALID_RUN" else "FAIL_ASSERTION"
     result = Verification(status, checks, trace.reasons).as_dict()
     args.result.parent.mkdir(parents=True, exist_ok=True)
     args.result.write_text(

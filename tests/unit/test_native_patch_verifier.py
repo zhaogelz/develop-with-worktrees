@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
-from scripts.verify_native_patch_owner import verify_trace
+from scripts.verify_native_patch_owner import main, verify_trace
 
 
 def _hook(thread_id: str, status: str, text: str) -> dict[str, object]:
@@ -143,4 +144,38 @@ def test_verifier_rejects_file_change_sequence_without_barrier_boundary() -> Non
     assert any(
         check.id == "OWNER_CHANGES" and check.status == "failed"
         for check in result.checks
+    )
+
+
+def test_cli_preserves_invalid_run_when_snapshot_also_fails(tmp_path: Path) -> None:
+    events = tmp_path / "events.json"
+    turn_ids = tmp_path / "turn-ids.json"
+    result_path = tmp_path / "result.json"
+    events.write_text(json.dumps([_turn("owner-turn")]), encoding="utf-8")
+    turn_ids.write_text(
+        json.dumps(
+            {"owner_turn": "owner-turn", "b_turn": "b-turn", "c_turn": "c-turn"}
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "--events",
+                str(events),
+                "--turn-ids",
+                str(turn_ids),
+                "--repo",
+                str(tmp_path / "repo"),
+                "--worktree",
+                str(tmp_path / "worktree"),
+                "--result",
+                str(result_path),
+            ]
+        )
+        == 1
+    )
+    assert (
+        json.loads(result_path.read_text(encoding="utf-8"))["status"] == "INVALID_RUN"
     )
