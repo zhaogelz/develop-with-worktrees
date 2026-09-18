@@ -1590,6 +1590,173 @@ class StateStore:
 
         return self.mutate(update)
 
+    def prepare_preactivation_release(
+        self, task_id: str, *, operation_id: str, recovery: dict[str, Any]
+    ) -> dict[str, Any]:
+        """冻结一次尚未激活、已验证无独有内容的脏槽位归还。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            if (
+                not task
+                or self.mode(task) != ISOLATED_MODE
+                or task.get("status") != "quarantined"
+            ):
+                raise SoloAIError(
+                    "Only a quarantined isolated pre-activation task can be released"
+                )
+            active = task.get("active_operation") or {}
+            if active.get("id") != operation_id or active.get("kind") != "recover":
+                raise SoloAIError("Pre-activation release lost its recovery operation")
+            if task.get("preactivation_release"):
+                raise SoloAIError("A pre-activation release transaction already exists")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "quarantined"
+            ):
+                raise SoloAIError(
+                    "Pre-activation release lost its exact quarantined slot"
+                )
+            task.update(
+                {
+                    "status": "preactivation-releasing",
+                    "preactivation_release": copy.deepcopy(recovery),
+                    "updated_at": utc_timestamp(),
+                }
+            )
+            slot["status"] = "preactivation-releasing"
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def mark_preactivation_release_reset(
+        self, task_id: str, *, transaction_id: str
+    ) -> dict[str, Any]:
+        """记录文件已回到已接收基线；重试不再重新解释旧现场。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            recovery = task.get("preactivation_release") if task else None
+            if (
+                not recovery
+                or recovery.get("transaction_id") != transaction_id
+                or task.get("status") != "preactivation-releasing"
+                or recovery.get("phase") not in {"prepared", "reset"}
+            ):
+                raise SoloAIError(
+                    "Pre-activation release identity changed before reset"
+                )
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "preactivation-releasing"
+            ):
+                raise SoloAIError("Pre-activation release slot changed before reset")
+            recovery["phase"] = "reset"
+            recovery["reset_at"] = recovery.get("reset_at") or utc_timestamp()
+            task["updated_at"] = utc_timestamp()
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def complete_preactivation_release(
+        self, task_id: str, *, transaction_id: str
+    ) -> dict[str, Any]:
+        """将无候选的失败 Start 记为终态，仍先保留槽位终检窗口。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            recovery = task.get("preactivation_release") if task else None
+            if (
+                not recovery
+                or recovery.get("transaction_id") != transaction_id
+                or task.get("status") != "preactivation-releasing"
+                or recovery.get("phase") != "reset"
+            ):
+                raise SoloAIError(
+                    "Pre-activation release identity changed before completion"
+                )
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "preactivation-releasing"
+            ):
+                raise SoloAIError(
+                    "Pre-activation release slot changed before completion"
+                )
+            now = utc_timestamp()
+            recovery.update(
+                {
+                    "phase": "completed",
+                    "completed_at": recovery.get("completed_at") or now,
+                }
+            )
+            task.update(
+                {
+                    "status": "abandoned",
+                    "lease": None,
+                    "lease_owner": None,
+                    "active_operation": None,
+                    "updated_at": now,
+                }
+            )
+            slot.update(
+                {
+                    "status": "release-checking",
+                    "quarantine_reason": None,
+                    "released_worktree_identity": copy.deepcopy(
+                        recovery["worktree_identity"]
+                    ),
+                    "released_managed_root_identity": copy.deepcopy(
+                        recovery["managed_root_identity"]
+                    ),
+                    "released_worktree_resolved": recovery["worktree_resolved"],
+                    "released_managed_root_resolved": recovery["managed_root_resolved"],
+                }
+            )
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def publish_preactivation_release(
+        self, task_id: str, *, transaction_id: str
+    ) -> dict[str, Any]:
+        """通过终检后才把失败 Start 占用的槽位重新开放。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            recovery = task.get("preactivation_release") if task else None
+            if (
+                not task
+                or task.get("status") != "abandoned"
+                or not recovery
+                or recovery.get("transaction_id") != transaction_id
+                or recovery.get("phase") != "completed"
+            ):
+                raise SoloAIError("Pre-activation release completion identity changed")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "release-checking"
+            ):
+                raise SoloAIError("Pre-activation release slot state changed")
+            slot.update(
+                {
+                    "status": "idle",
+                    "task_id": None,
+                    "last_used": time.time(),
+                    "quarantine_reason": None,
+                }
+            )
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     @contextmanager
     def operation(
         self, task_id: str, lease: str, kind: str

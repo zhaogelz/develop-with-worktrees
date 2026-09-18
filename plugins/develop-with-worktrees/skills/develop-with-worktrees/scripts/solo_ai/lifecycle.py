@@ -134,6 +134,7 @@ from .util import (
 
 BOOTSTRAP_SCHEMA = 1
 TASK_GRANT_SCHEMA = 1
+PREACTIVATION_RELEASE_SCHEMA = 1
 MAX_READY_CONVERGENCE_RETRIES = 5
 LOCKFILE_NAMES = (
     "uv.lock",
@@ -1266,6 +1267,334 @@ def _resume_quarantined_start(
     prepared["request_reused"] = request_reused
     create_anchor(repo, prepared)
     return _complete_runtime_activation(repo, store=store, task=prepared)
+
+
+def _is_dirty_preactivation_failure(task: dict[str, Any]) -> bool:
+    """只识别尚未创建任务分支、由旧脏槽位直接阻断的 Start。"""
+
+    return (
+        not _is_in_place(task)
+        and task.get("status") == "quarantined"
+        and str(task.get("quarantine_reason") or "").startswith(
+            "Idle slot is not clean:"
+        )
+        and not task.get("candidate_head")
+        and not task.get("candidate_publication")
+        and not task.get("integration")
+        and not task.get("abandonment")
+        and not task.get("preactivation_release")
+        and task.get("ready_proof") is None
+        and task.get("runtime_activation") is None
+        and task.get("runtime_activation_pending") is not True
+    )
+
+
+def _preactivation_release_result(task: dict[str, Any]) -> dict[str, Any]:
+    recovery = dict(task["preactivation_release"])
+    return {
+        "id": task["id"],
+        "status": "abandoned",
+        "recovery": "preactivation-dirty-slot-release",
+        "transaction_id": recovery["transaction_id"],
+        "release_head": recovery["release_head"],
+        "released_slot": task["slot_id"],
+    }
+
+
+def _preactivation_release_worktree(
+    repo: GitRepo, task: dict[str, Any]
+) -> tuple[Path, Path, Path]:
+    worktree = Path(str(task["worktree"]))
+    managed_root = worktree.absolute().parent
+    identity_fields = (
+        task.get("slot_worktree_identity"),
+        task.get("slot_managed_root_identity"),
+        task.get("slot_worktree_resolved"),
+        task.get("slot_managed_root_resolved"),
+    )
+    if not all(identity_fields):
+        raise SoloAIError(
+            "Pre-activation release requires complete recorded directory identity"
+        )
+    resolved = require_managed_directory_identity(
+        worktree,
+        managed_root=managed_root,
+        expected_resolved=str(task["slot_worktree_resolved"]),
+        expected_root_resolved=str(task["slot_managed_root_resolved"]),
+        expected_identity=dict(task["slot_worktree_identity"]),
+        expected_root_identity=dict(task["slot_managed_root_identity"]),
+    )
+    if not any(item.path == resolved for item in repo.worktrees()):
+        raise SoloAIError("Pre-activation release worktree is no longer registered")
+    return worktree, managed_root, resolved
+
+
+def _preactivation_release_paths(
+    repo: GitRepo, worktree: Path, *, base: str
+) -> list[dict[str, str]]:
+    if repo.git(["diff", "--cached", "--quiet"], cwd=worktree, check=False).returncode:
+        raise SoloAIError(
+            "Pre-activation release refuses staged content; preserve it in a new task"
+        )
+    changed = repo.git(["diff", "--name-only", "-z"], cwd=worktree).stdout
+    paths = [path for path in changed.split("\0") if path]
+    if not paths:
+        raise SoloAIError(
+            "Pre-activation release requires tracked dirty content; use ordinary recovery"
+        )
+    records: list[dict[str, str]] = []
+    for path in paths:
+        relative = Path(path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SoloAIError("Pre-activation release found an unsafe tracked path")
+        expected = repo.git(["rev-parse", f"{base}:{path}"], cwd=worktree, check=False)
+        if expected.returncode:
+            raise SoloAIError(
+                f"Pre-activation content is not present in the accepted base: {path}"
+            )
+        actual = repo.git(["hash-object", "--", path], cwd=worktree).stdout.strip()
+        base_blob = expected.stdout.strip()
+        if actual != base_blob:
+            raise SoloAIError(
+                "Dirty pre-activation content is not already accepted by current base: "
+                + path
+            )
+        records.append({"path": path, "worktree_blob": actual, "base_blob": base_blob})
+    return records
+
+
+def _new_preactivation_release(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any], operation_id: str
+) -> dict[str, Any]:
+    if not _is_dirty_preactivation_failure(task):
+        raise SoloAIError("Task is not an eligible dirty pre-activation Start failure")
+    worktree, managed_root, resolved = _preactivation_release_worktree(repo, task)
+    if repo.branch(worktree) is not None:
+        raise SoloAIError(
+            "Pre-activation release requires the old slot to stay detached"
+        )
+    if repo.ref_head(f"refs/heads/{task['branch']}") is not None:
+        raise SoloAIError("Pre-activation release found an unexpected task branch")
+    if (repo.local_dir / "task-anchors" / f"{task['id']}.md").exists():
+        raise SoloAIError("Pre-activation release found an unexpected task anchor")
+    if repo.is_clean(worktree):
+        raise SoloAIError("Pre-activation slot is clean; use ordinary Start recovery")
+    if ordinary := repo.git(
+        ["ls-files", "--others", "--exclude-standard"], cwd=worktree
+    ).stdout.splitlines():
+        raise SoloAIError(
+            "Pre-activation release refuses ordinary untracked content:\n"
+            + "\n".join(f"- {item}" for item in ordinary[:20])
+        )
+    if unknown := _unknown_ignored(repo, worktree):
+        raise SoloAIError(
+            "Pre-activation release found protected or unknown ignored content:\n"
+            + "\n".join(f"- {item}" for item in unknown[:20])
+        )
+    release_head = repo.ref_head(f"refs/heads/{task['base_ref']}")
+    if release_head is None:
+        raise SoloAIError("Pre-activation release base branch is missing")
+    if not repo.is_ancestor(str(task["base_head"]), release_head):
+        raise SoloAIError(
+            "Pre-activation release requires the current base to descend from task baseline"
+        )
+    state = store.read()
+    slot = state["slots"].get(str(task["slot_id"]))
+    if (
+        not slot
+        or slot.get("task_id") != task["id"]
+        or slot.get("status") != "quarantined"
+    ):
+        raise SoloAIError("Pre-activation release lost its exact quarantined slot")
+    return {
+        "schema_version": PREACTIVATION_RELEASE_SCHEMA,
+        "transaction_id": uuid.uuid4().hex,
+        "phase": "prepared",
+        "task_id": task["id"],
+        "slot_id": task["slot_id"],
+        "slot_generation": int(slot["generation"]),
+        "worktree": str(worktree),
+        "worktree_resolved": str(resolved),
+        "managed_root": str(managed_root),
+        "managed_root_resolved": str(managed_root.resolve()),
+        "worktree_identity": path_identity(worktree),
+        "managed_root_identity": path_identity(managed_root),
+        "base_ref": task["base_ref"],
+        "task_base_head": task["base_head"],
+        "release_head": release_head,
+        "worktree_head": repo.head(worktree),
+        "tracked_status": repo.git(
+            ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
+        ).stdout,
+        "tracked_files": _preactivation_release_paths(
+            repo, worktree, base=release_head
+        ),
+        "prepared_by_operation_id": operation_id,
+        "prepared_at": utc_timestamp(),
+    }
+
+
+def _assert_preactivation_release_transaction(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> tuple[dict[str, Any], Path]:
+    transaction = task.get("preactivation_release")
+    if not isinstance(transaction, dict):
+        raise SoloAIError("Pre-activation release transaction is missing")
+    expected = {
+        "task_id": task["id"],
+        "slot_id": task["slot_id"],
+        "worktree": task["worktree"],
+        "base_ref": task["base_ref"],
+        "task_base_head": task["base_head"],
+    }
+    if transaction.get("schema_version") != PREACTIVATION_RELEASE_SCHEMA:
+        raise SoloAIError("Unsupported pre-activation release transaction schema")
+    if transaction.get("phase") not in {"prepared", "reset", "completed"}:
+        raise SoloAIError("Unsupported pre-activation release transaction phase")
+    for key, value in expected.items():
+        if transaction.get(key) != value:
+            raise SoloAIError(f"Pre-activation release identity changed: {key}")
+    worktree = Path(str(transaction["worktree"]))
+    resolved = require_managed_directory_identity(
+        worktree,
+        managed_root=Path(str(transaction["managed_root"])),
+        expected_resolved=str(transaction["worktree_resolved"]),
+        expected_root_resolved=str(transaction["managed_root_resolved"]),
+        expected_identity=dict(transaction["worktree_identity"]),
+        expected_root_identity=dict(transaction["managed_root_identity"]),
+    )
+    if not any(item.path == resolved for item in repo.worktrees()):
+        raise SoloAIError("Pre-activation release worktree is missing or unregistered")
+    slot = store.read()["slots"].get(str(transaction["slot_id"]))
+    if not slot or int(slot.get("generation", -1)) != int(
+        transaction["slot_generation"]
+    ):
+        raise SoloAIError("Pre-activation release slot generation changed")
+    return transaction, worktree
+
+
+def _assert_preactivation_content_unchanged(
+    repo: GitRepo, *, transaction: dict[str, Any], worktree: Path
+) -> None:
+    if (
+        repo.ref_head(f"refs/heads/{transaction['base_ref']}")
+        != transaction["release_head"]
+    ):
+        raise SoloAIError("Pre-activation release base head changed during recovery")
+    if (
+        repo.branch(worktree) is not None
+        or repo.head(worktree) != transaction["worktree_head"]
+    ):
+        raise SoloAIError(
+            "Pre-activation release worktree HEAD changed during recovery"
+        )
+    current_status = repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
+    ).stdout
+    if current_status != transaction["tracked_status"]:
+        raise SoloAIError(
+            "Pre-activation release file fingerprint changed during recovery"
+        )
+    if repo.git(["diff", "--cached", "--quiet"], cwd=worktree, check=False).returncode:
+        raise SoloAIError(
+            "Pre-activation release received staged content during recovery"
+        )
+    if repo.git(["ls-files", "--others", "--exclude-standard"], cwd=worktree).stdout:
+        raise SoloAIError(
+            "Pre-activation release received untracked content during recovery"
+        )
+    if _unknown_ignored(repo, worktree):
+        raise SoloAIError("Pre-activation release received protected ignored content")
+    for item in transaction["tracked_files"]:
+        path = str(item["path"])
+        actual = repo.git(["hash-object", "--", path], cwd=worktree).stdout.strip()
+        if actual != item["worktree_blob"] or actual != item["base_blob"]:
+            raise SoloAIError(
+                "Pre-activation release file fingerprint changed during recovery"
+            )
+
+
+def _assert_preactivation_release_reset(
+    repo: GitRepo, *, transaction: dict[str, Any], worktree: Path
+) -> None:
+    if (
+        repo.ref_head(f"refs/heads/{transaction['base_ref']}")
+        != transaction["release_head"]
+    ):
+        raise SoloAIError("Pre-activation release base head changed during recovery")
+    if (
+        repo.branch(worktree) is not None
+        or repo.head(worktree) != transaction["release_head"]
+        or not repo.is_clean(worktree)
+    ):
+        raise SoloAIError("Pre-activation release worktree changed before finalization")
+    if repo.git(["ls-files", "--others", "--exclude-standard"], cwd=worktree).stdout:
+        raise SoloAIError("Pre-activation release found untracked content after reset")
+    if _unknown_ignored(repo, worktree):
+        raise SoloAIError(
+            "Pre-activation release found protected ignored content after reset"
+        )
+
+
+def _resume_preactivation_release(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any]:
+    transaction, worktree = _assert_preactivation_release_transaction(
+        repo, store=store, task=task
+    )
+    phase = transaction["phase"]
+    if task.get("status") == "preactivation-releasing":
+        if phase == "prepared":
+            if (
+                repo.branch(worktree) is None
+                and repo.head(worktree) == transaction["release_head"]
+                and repo.is_clean(worktree)
+            ):
+                _assert_preactivation_release_reset(
+                    repo, transaction=transaction, worktree=worktree
+                )
+            else:
+                _assert_preactivation_content_unchanged(
+                    repo, transaction=transaction, worktree=worktree
+                )
+                repo.git(
+                    ["reset", "--hard", str(transaction["release_head"])], cwd=worktree
+                )
+                _assert_preactivation_release_reset(
+                    repo, transaction=transaction, worktree=worktree
+                )
+            task = store.mark_preactivation_release_reset(
+                task["id"], transaction_id=str(transaction["transaction_id"])
+            )
+            transaction = dict(task["preactivation_release"])
+            phase = transaction["phase"]
+        if phase == "reset":
+            _assert_preactivation_release_reset(
+                repo, transaction=transaction, worktree=worktree
+            )
+            task = store.complete_preactivation_release(
+                task["id"], transaction_id=str(transaction["transaction_id"])
+            )
+            transaction = dict(task["preactivation_release"])
+    if task.get("status") != "abandoned" or transaction.get("phase") != "completed":
+        raise SoloAIError(
+            "Pre-activation release did not reach a resumable terminal state"
+        )
+    _assert_preactivation_release_reset(
+        repo, transaction=transaction, worktree=worktree
+    )
+    slot = store.read()["slots"].get(str(task["slot_id"]))
+    if (
+        slot
+        and slot.get("status") == "release-checking"
+        and slot.get("task_id") == task["id"]
+    ):
+        store.publish_preactivation_release(
+            task["id"], transaction_id=str(transaction["transaction_id"])
+        )
+    elif not (slot and slot.get("status") == "idle" and slot.get("task_id") is None):
+        raise SoloAIError("Pre-activation release slot changed before publication")
+    return _preactivation_release_result(task)
 
 
 def start(
@@ -3749,6 +4078,12 @@ def recover(
     host_actor = normalize_host_reference(host_actor)
     store.reconcile_operation_receipts()
     task = store.task(task_id)
+    if task.get("status") in {
+        "preactivation-releasing",
+        "abandoned",
+    } and task.get("preactivation_release"):
+        with maintenance_lock(repo):
+            return _resume_preactivation_release(repo, store=store, task=task)
     if repair_runtime_adapter_paths is not None:
         with maintenance_lock(repo):
             if task.get("status") == "publishing" and task.get("candidate_publication"):
@@ -3869,6 +4204,21 @@ def recover(
         with store.recovery_operation(task_id) as recovery_task:
             operation_id = str(recovery_task["active_operation"]["id"])
             with maintenance_lock(repo):
+                if _is_dirty_preactivation_failure(store.task(task_id)):
+                    transaction = _new_preactivation_release(
+                        repo,
+                        store=store,
+                        task=store.task(task_id),
+                        operation_id=operation_id,
+                    )
+                    prepared = store.prepare_preactivation_release(
+                        task_id,
+                        operation_id=operation_id,
+                        recovery=transaction,
+                    )
+                    return _resume_preactivation_release(
+                        repo, store=store, task=prepared
+                    )
                 return _resume_quarantined_start(
                     repo,
                     store=store,

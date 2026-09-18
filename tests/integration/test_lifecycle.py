@@ -1526,6 +1526,132 @@ def test_recover_rejects_a_task_that_was_already_active(git_repo: Path) -> None:
     assert StateStore(repo).task(task["id"])["status"] == "quarantined"
 
 
+def _dirty_preactivation_task(
+    git_repo: Path,
+) -> tuple[GitRepo, dict[str, object], Path, str]:
+    """构造旧 detached 槽位中已有、但已被 main 接收的跟踪内容。"""
+
+    repo = initialized(git_repo)
+    config = git_repo / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        .replace("slots = 3", "slots = 1")
+        .replace(
+            'mode = "direct", worktree_mode = "dedicated"',
+            'mode = "batched", worktree_mode = "reusable"',
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: retain one reusable slot")
+    approve(repo, load_verification_config(repo))
+    previous = start(repo, name="release a reusable slot")
+    worktree = Path(str(previous["worktree"]))
+    abandon(
+        repo,
+        task_id=str(previous["id"]),
+        lease=str(previous["lease"]),
+        confirm=str(previous["id"]),
+    )
+    assert repo.branch(worktree) is None
+
+    accepted = "accepted by current main\n"
+    readme = git_repo / "README.md"
+    readme.write_text(accepted, encoding="utf-8")
+    git(git_repo, "add", "README.md")
+    git(git_repo, "commit", "-m", "test: accept recovered slot content")
+    release_head = repo.head(git_repo)
+    (worktree / "README.md").write_text(accepted, encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="Idle slot is not clean"):
+        start(repo, name="blocked before activation", request_id="dirty-preactivation")
+    task = next(
+        item
+        for item in StateStore(repo).read()["tasks"].values()
+        if item.get("request_id") == "dirty-preactivation"
+    )
+    assert task["status"] == "quarantined"
+    assert task["candidate_head"] is None
+    assert task.get("runtime_activation_pending") is not True
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+    assert not (repo.local_dir / "task-anchors" / f"{task['id']}.md").exists()
+    return repo, task, worktree, release_head
+
+
+def test_recover_releases_dirty_preactivation_slot_only_when_content_is_accepted(
+    git_repo: Path,
+) -> None:
+    repo, task, worktree, release_head = _dirty_preactivation_task(git_repo)
+
+    recovered = recover(repo, task_id=str(task["id"]))
+    stored = StateStore(repo).task(str(task["id"]))
+    slot = StateStore(repo).read()["slots"][str(task["slot_id"])]
+
+    assert recovered == {
+        "id": task["id"],
+        "status": "abandoned",
+        "recovery": "preactivation-dirty-slot-release",
+        "transaction_id": stored["preactivation_release"]["transaction_id"],
+        "release_head": release_head,
+        "released_slot": task["slot_id"],
+    }
+    assert stored["status"] == "abandoned"
+    assert stored["preactivation_release"]["phase"] == "completed"
+    assert repo.branch(worktree) is None
+    assert repo.head(worktree) == release_head
+    assert repo.is_clean(worktree)
+    assert not repo.ref_head(f"refs/heads/{task['branch']}")
+    assert slot["status"] == "idle"
+    assert slot["task_id"] is None
+    assert recover(repo, task_id=str(task["id"])) == recovered
+
+
+def test_recover_preserves_unaccepted_dirty_preactivation_content(
+    git_repo: Path,
+) -> None:
+    repo, task, worktree, _ = _dirty_preactivation_task(git_repo)
+    target = worktree / "README.md"
+    target.write_text("unique unaccepted content\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="not already accepted by current base"):
+        recover(repo, task_id=str(task["id"]))
+
+    stored = StateStore(repo).task(str(task["id"]))
+    slot = StateStore(repo).read()["slots"][str(task["slot_id"])]
+    assert target.read_text(encoding="utf-8") == "unique unaccepted content\n"
+    assert stored["status"] == "quarantined"
+    assert not stored.get("preactivation_release")
+    assert slot["status"] == "quarantined"
+    assert slot["task_id"] == task["id"]
+
+
+def test_recover_preactivation_release_resumes_only_while_reset_scene_is_unchanged(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, task, worktree, _ = _dirty_preactivation_task(git_repo)
+    original_complete = StateStore.complete_preactivation_release
+
+    def interrupted(*args: object, **kwargs: object) -> dict[str, object]:
+        raise OSError("simulated interruption after exact reset")
+
+    monkeypatch.setattr(StateStore, "complete_preactivation_release", interrupted)
+    with pytest.raises(OSError, match="simulated interruption"):
+        recover(repo, task_id=str(task["id"]))
+    interrupted_task = StateStore(repo).task(str(task["id"]))
+    assert interrupted_task["status"] == "preactivation-releasing"
+    assert interrupted_task["preactivation_release"]["phase"] == "reset"
+    assert repo.is_clean(worktree)
+
+    (worktree / "README.md").write_text("late mutation\n", encoding="utf-8")
+    monkeypatch.setattr(StateStore, "complete_preactivation_release", original_complete)
+    with pytest.raises(SoloAIError, match="worktree changed before finalization"):
+        recover(repo, task_id=str(task["id"]))
+
+    preserved = StateStore(repo).task(str(task["id"]))
+    assert preserved["status"] == "preactivation-releasing"
+    assert (worktree / "README.md").read_text(encoding="utf-8") == "late mutation\n"
+
+
 def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
     git_repo: Path,
 ) -> None:
