@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -46,6 +48,14 @@ class GitStatus:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class PathFormsEvidence:
+    """owner 原始会话中可复核的补丁路径形式。"""
+
+    sequence: tuple[str, ...]
+    evidence: str
+
+
 def _event_method(event: dict[str, Any]) -> str:
     return str(event.get("method") or "")
 
@@ -73,30 +83,88 @@ def _item_paths(item: dict[str, Any]) -> set[str]:
     return paths
 
 
-def _path_forms(
-    events: list[dict[str, Any]], owner_thread: str, owner_turn: str
-) -> list[str]:
-    """只接受 owner session JSONL 明确记录的原始路径形式。"""
+def _apply_patch_target(raw_input: str) -> str | None:
+    """从原生 custom_tool_call 的 JS 输入中提取唯一补丁目标。"""
 
-    for event in events:
-        if _event_method(event) != "dww/nativePathForms":
+    marker = "tools.apply_patch("
+    offset = raw_input.find(marker)
+    if offset < 0:
+        return None
+    encoded = raw_input[offset + len(marker) :].lstrip()
+    if not encoded.startswith('"'):
+        return None
+    try:
+        patch, _ = json.JSONDecoder().raw_decode(encoded)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(patch, str):
+        return None
+    targets = re.findall(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.M)
+    return targets[0].strip() if len(targets) == 1 else None
+
+
+def _owner_path_forms(
+    session_jsonl: Path | None,
+    *,
+    owner_thread: str,
+    owner_turn: str,
+    expected_worktree: str,
+) -> PathFormsEvidence | None:
+    """从 owner 原始会话 JSONL 读取实际 apply_patch 输入，拒绝派生事件。"""
+
+    if session_jsonl is None:
+        return None
+    try:
+        raw = session_jsonl.read_bytes()
+        entries = [
+            json.loads(line)
+            for line in raw.decode("utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(entries, list):
+        return None
+
+    session_ids = {
+        str((entry.get("payload") or {}).get("session_id") or "")
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("type") == "session_meta"
+    }
+    if session_ids != {owner_thread}:
+        return None
+
+    expected_target = _normalise_path(expected_worktree + "\\probe.txt")
+    sequence: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("type") != "response_item":
             continue
-        params = event.get("params") or {}
+        item = entry.get("payload") or {}
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("internal_chat_message_metadata_passthrough") or {}
         if (
-            params.get("source") != "codex-session-jsonl"
-            or str(params.get("threadId") or "") != owner_thread
-            or str(params.get("turnId") or "") != owner_turn
+            item.get("type") != "custom_tool_call"
+            or item.get("name") != "exec"
+            or str(metadata.get("turn_id") or "") != owner_turn
         ):
             continue
-        forms = params.get("forms")
-        sequence = params.get("sequence")
-        if forms == ["relative", "absolute"] and sequence == [
-            "relative",
-            "absolute",
-            "absolute",
-        ]:
-            return [str(form) for form in forms]
-    return []
+        target = _apply_patch_target(str(item.get("input") or ""))
+        if target is None:
+            continue
+        if target == "probe.txt":
+            sequence.append("relative")
+        elif _normalise_path(target) == expected_target:
+            sequence.append("absolute")
+        else:
+            sequence.append("unexpected")
+
+    if not sequence:
+        return None
+    digest = hashlib.sha256(raw).hexdigest()
+    return PathFormsEvidence(
+        tuple(sequence), f"owner session JSONL raw custom_tool_call SHA-256:{digest}"
+    )
 
 
 def verify_trace(
@@ -104,6 +172,7 @@ def verify_trace(
     turn_ids: dict[str, str],
     *,
     expected_worktree: str,
+    owner_session_jsonl: Path | None = None,
 ) -> Verification:
     """验证顺序、身份、Hook 拒绝和原始路径证据。"""
 
@@ -387,20 +456,29 @@ def verify_trace(
     if not barrier_order_ok:
         reasons.append("barrier 开始/请求没有覆盖 B/C 的等待区间")
 
-    forms = _path_forms(events, owner_thread, owner_turn)
-    forms_ok = forms == ["relative", "absolute"]
+    path_forms = _owner_path_forms(
+        owner_session_jsonl,
+        owner_thread=owner_thread,
+        owner_turn=owner_turn,
+        expected_worktree=expected_worktree,
+    )
+    forms_ok = path_forms is not None and path_forms.sequence == (
+        "relative",
+        "absolute",
+        "absolute",
+    )
     checks.append(
         Check(
             "PATH_FORMS",
             "passed" if forms_ok else "unverified",
-            "原始补丁形式已由 owner session JSONL 明确记录"
+            "owner 原始会话已记录相对、绝对、绝对三次补丁形式"
             if forms_ok
-            else "宿主只提供归一化目标路径，无法证明相对/绝对输入形式",
-            "dww/nativePathForms" if forms_ok else "missing",
+            else "缺少可绑定 owner thread/turn 的原始补丁输入，无法证明路径形式",
+            path_forms.evidence if forms_ok and path_forms else "missing",
         )
     )
     if not forms_ok:
-        reasons.append("宿主事件没有可信的原始相对/绝对路径形式证据")
+        reasons.append("没有可信的 owner 原始会话相对/绝对路径形式证据")
 
     if any(check.status == "failed" for check in checks):
         status = "FAIL_ASSERTION" if valid_turns else "INVALID_RUN"
@@ -520,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--events", type=Path, required=True)
     parser.add_argument("--turn-ids", type=Path, required=True)
+    parser.add_argument("--owner-session-jsonl", type=Path, required=True)
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--worktree", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
@@ -529,7 +608,10 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(events, list) or not isinstance(turn_ids, dict):
         raise SystemExit("事件或 turn-ids 不是预期 JSON")
     trace = verify_trace(
-        events, turn_ids, expected_worktree=str(args.worktree.resolve())
+        events,
+        turn_ids,
+        expected_worktree=str(args.worktree.resolve()),
+        owner_session_jsonl=args.owner_session_jsonl,
     )
     snapshot = verify_snapshot(args.repo.resolve(), args.worktree.resolve())
     checks = trace.checks + snapshot

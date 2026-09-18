@@ -107,17 +107,45 @@ def _valid_events(worktree: str) -> list[dict[str, object]]:
         _change(worktree, "after-denials"),
         _hook("owner-turn", "completed", ""),
         _turn("owner-turn"),
-        {
-            "method": "dww/nativePathForms",
-            "params": {
-                "source": "codex-session-jsonl",
-                "threadId": "owner-thread",
-                "turnId": "owner-turn",
-                "forms": ["relative", "absolute"],
-                "sequence": ["relative", "absolute", "absolute"],
-            },
-        },
     ]
+
+
+def _owner_session_jsonl(
+    tmp_path: Path,
+    worktree: str,
+    *,
+    session_id: str = "owner-thread",
+    turn_id: str = "owner-turn",
+    targets: tuple[str, ...] | None = None,
+) -> Path:
+    targets = targets or (
+        "probe.txt",
+        f"{worktree}\\probe.txt",
+        f"{worktree}\\probe.txt",
+    )
+    entries: list[dict[str, object]] = [
+        {"type": "session_meta", "payload": {"session_id": session_id}}
+    ]
+    for target in targets:
+        patch = f"*** Begin Patch\n*** Update File: {target}\n*** End Patch"
+        entries.append(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "input": f"await tools.apply_patch({json.dumps(patch)});",
+                    "internal_chat_message_metadata_passthrough": {
+                        "turn_id": turn_id
+                    },
+                },
+            }
+        )
+    path = tmp_path / "owner-session.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n", encoding="utf-8"
+    )
+    return path
 
 
 def test_verifier_rejects_owner_completion_without_b_and_c() -> None:
@@ -140,9 +168,20 @@ def test_verifier_rejects_owner_completion_without_b_and_c() -> None:
     )
 
 
-def test_verifier_requires_explicit_path_form_evidence() -> None:
+def test_verifier_rejects_derived_path_form_event_without_raw_jsonl() -> None:
     events = _valid_events(r"C:\repo\.worktrees\slot")
-    events = [event for event in events if event.get("method") != "dww/nativePathForms"]
+    events.append(
+        {
+            "method": "dww/nativePathForms",
+            "params": {
+                "source": "codex-session-jsonl",
+                "threadId": "owner-thread",
+                "turnId": "owner-turn",
+                "forms": ["relative", "absolute"],
+                "sequence": ["relative", "absolute", "absolute"],
+            },
+        }
+    )
 
     result = verify_trace(
         events,
@@ -164,9 +203,10 @@ def test_verifier_requires_explicit_path_form_evidence() -> None:
     )
 
 
-def test_verifier_passes_only_with_complete_trace() -> None:
+def test_verifier_passes_only_with_bound_raw_owner_session(tmp_path: Path) -> None:
+    worktree = r"C:\repo\.worktrees\slot"
     result = verify_trace(
-        _valid_events(r"C:\repo\.worktrees\slot"),
+        _valid_events(worktree),
         {
             "owner_thread": "owner-thread",
             "owner_turn": "owner-turn",
@@ -175,7 +215,8 @@ def test_verifier_passes_only_with_complete_trace() -> None:
             "c_thread": "c-thread",
             "c_turn": "c-turn",
         },
-        expected_worktree=r"C:\repo\.worktrees\slot",
+        expected_worktree=worktree,
+        owner_session_jsonl=_owner_session_jsonl(tmp_path, worktree),
     )
 
     assert result.status == "PASS"
@@ -187,6 +228,24 @@ def test_verifier_passes_only_with_complete_trace() -> None:
         "OWNER_CHANGES",
         "PATH_FORMS",
     }
+
+
+def test_verifier_rejects_raw_owner_calls_from_another_turn(tmp_path: Path) -> None:
+    worktree = r"C:\repo\.worktrees\slot"
+    result = verify_trace(
+        _valid_events(worktree),
+        _turn_ids(),
+        expected_worktree=worktree,
+        owner_session_jsonl=_owner_session_jsonl(
+            tmp_path, worktree, turn_id="other-owner-turn"
+        ),
+    )
+
+    assert result.status == "BLOCKED_HOST"
+    assert any(
+        check.id == "PATH_FORMS" and check.status == "unverified"
+        for check in result.checks
+    )
 
 
 def test_verifier_rejects_file_change_sequence_without_barrier_boundary() -> None:
@@ -233,6 +292,7 @@ def test_cli_preserves_invalid_run_when_snapshot_also_fails(tmp_path: Path) -> N
     events = tmp_path / "events.json"
     turn_ids = tmp_path / "turn-ids.json"
     result_path = tmp_path / "result.json"
+    owner_session = _owner_session_jsonl(tmp_path, str(tmp_path / "worktree"))
     events.write_text(json.dumps([_turn("owner-turn")]), encoding="utf-8")
     turn_ids.write_text(
         json.dumps(
@@ -255,6 +315,8 @@ def test_cli_preserves_invalid_run_when_snapshot_also_fails(tmp_path: Path) -> N
                 str(events),
                 "--turn-ids",
                 str(turn_ids),
+                "--owner-session-jsonl",
+                str(owner_session),
                 "--repo",
                 str(tmp_path / "repo"),
                 "--worktree",

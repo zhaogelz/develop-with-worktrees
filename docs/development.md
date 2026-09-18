@@ -63,7 +63,7 @@ prove a different desktop-host executable loaded the updated Hook.
 原生 App Server 验收由仓库外的控制器驱动；源码仓库只提供可重复的严格判定器：
 
 ```text
-uv run python scripts/verify_native_patch_owner.py --events <证据目录>/appserver-events.json --turn-ids <证据目录>/turn-ids.json --repo <测试主工作树> --worktree <owner 隔离工作树> --result <证据目录>/verification.json
+uv run python scripts/verify_native_patch_owner.py --events <证据目录>/appserver-events.json --turn-ids <证据目录>/turn-ids.json --owner-session-jsonl <owner 原始会话 JSONL> --repo <测试主工作树> --worktree <owner 隔离工作树> --result <证据目录>/verification.json
 ```
 
 判定器只接受真实 `turn/completed`、`hook/completed`、`item/completed` 事件和
@@ -73,15 +73,15 @@ owner 前两次写入、B 拒绝及其 turn 完成、C 拒绝及其 turn 完成�
 owner item 关联；其完成、owner 第三次写入和 owner turn 完成保持严格顺序。目标文件出现
 任何非 owner 的成功 `fileChange` 也会使断言失败，即使另有三条合法 owner 写入。
 最终现场要求 W 的 porcelain 仅允许 `probe.txt`，R 必须完全 clean；Git 查询非零
-退出或文件读取失败均不能当作 clean。宿主必须明确记录相对、绝对两种原始路径形式。
-缺少原始路径证据时状态为 `BLOCKED_HOST`，不从归一化后的目标路径推断通过；真实
-断言失败为 `FAIL_ASSERTION`，事件身份或顺序不完整为 `INVALID_RUN`。验收控制器在
+退出或文件读取失败均不能当作 clean。控制器必须传入 owner 的本地原始会话 JSONL；
+判定器将其 `session_id` 和每次 `custom_tool_call` 的 `turn_id` 与 owner 身份绑定，并从
+三次原始 `apply_patch` 输入中严格读取“相对、绝对、绝对”路径序列。它不接受控制器
+写入的派生路径形式事件，也不从归一化后的 `fileChange` 目标路径推断通过。原始会话
+JSONL 可能包含敏感上下文，应只在本机作为输入保留，不随证据包或提交发布。缺少或无法
+绑定原始路径证据时状态为 `BLOCKED_HOST`；真实断言失败为 `FAIL_ASSERTION`，事件身份
+或顺序不完整为 `INVALID_RUN`。验收控制器在
 宿主退出后必须通过正式 DWW
 `abandon --retain-worktree` 保留失败现场，不能只打印模型回复作为 PASS。
-
-`dww/nativePathForms` 是控制器从 owner 的 session JSONL 提取的派生证据，用于说明
-原始相对/绝对输入形式；判定器不宣称独立核验原始 JSONL，也不把该派生事件当作
-原始审计文件本身。
 
 ## Keep one source of truth
 

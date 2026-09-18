@@ -5116,7 +5116,7 @@ def test_ready_rejects_worktree_directory_change_before_it_can_integrate(
     ).read_text(encoding="utf-8")
 
 
-def test_approval_rejects_invalid_branch_prefix_before_ready_or_integration(
+def test_commit_rejects_invalid_branch_prefix_before_ready_or_integration(
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
@@ -5130,15 +5130,14 @@ def test_approval_rejects_invalid_branch_prefix_before_ready_or_integration(
         ),
         encoding="utf-8",
     )
-    commit_task(
-        repo,
-        task_id=task["id"],
-        lease=task["lease"],
-        message="test: change branch prefix",
-        paths=[".solo-ai/config.toml"],
-    )
     with pytest.raises(SoloAIError, match="branch_prefix"):
-        approve(repo, load_verification_config(repo, cwd=worktree), cwd=worktree)
+        commit_task(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            message="test: change branch prefix",
+            paths=[".solo-ai/config.toml"],
+        )
 
     assert StateStore(repo).task(task["id"])["status"] == "active"
     assert 'branch_prefix = "codex/"' in (
