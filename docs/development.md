@@ -58,6 +58,21 @@ denied before writing. Record the executable path and version with the source
 commit and installed hook hash: a passing PATH CLI installation test does not
 prove a different desktop-host executable loaded the updated Hook.
 
+### 原生连续性验收
+
+原生 App Server 验收由仓库外的控制器驱动；源码仓库只提供可重复的严格判定器：
+
+```text
+uv run python scripts/verify_native_patch_owner.py --events <证据目录>/appserver-events.json --turn-ids <证据目录>/turn-ids.json --repo <测试主工作树> --worktree <owner 隔离工作树> --result <证据目录>/verification.json
+```
+
+判定器只接受真实 `turn/completed`、`hook/completed`、`item/completed` 事件和
+最终字节/Git 状态；它要求 B/C 按顺序实际完成一次拒绝，并要求宿主明确记录
+相对、绝对两种原始路径形式。缺少原始路径证据时状态为 `BLOCKED_HOST`，不从
+归一化后的目标路径推断通过；真实断言失败为 `FAIL_ASSERTION`，事件身份或顺序
+不完整为 `INVALID_RUN`。验收控制器在宿主退出后必须通过正式 DWW
+`abandon --retain-worktree` 保留失败现场，不能只打印模型回复作为 PASS。
+
 ## Keep one source of truth
 
 Use [architecture.md](architecture.md) for durable product and architecture
