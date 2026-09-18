@@ -1189,6 +1189,104 @@ def test_hook_allows_only_a_real_dww_runner_for_this_worktree(git_repo: Path) ->
     assert invalid["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_hook_accepts_runner_targeting_same_common_dir_task_from_session_checkout(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    repo = _initialized(git_repo)
+    task = start(
+        repo,
+        name="runner target from session checkout",
+        host_origin={"kind": "codex", "thread_id": "task-owner"},
+    )
+    worktree = Path(task["worktree"])
+
+    for command in (
+        f'uv run --script "{RUNNER_PATH}" --repo "{worktree}" status',
+        f"uv run --script '{RUNNER_PATH}' --repo={worktree} status",
+    ):
+        assert (
+            HOOK.decide(
+                _payload(
+                    git_repo,
+                    tool="Bash",
+                    command=command,
+                    session="task-owner",
+                )
+            )
+            is None
+        )
+
+    mutation = HOOK.decide(
+        _payload(
+            git_repo,
+            tool="Bash",
+            command=(
+                f'uv run --script "{RUNNER_PATH}" --repo "{worktree}" '
+                f"anchor show --task {task['id']}"
+            ),
+            session="other-session",
+        )
+    )
+    assert mutation is not None
+    assert mutation["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    foreign = tmp_path / "foreign-repository"
+    foreign.mkdir()
+    git(foreign, "init")
+    denied = HOOK.decide(
+        _payload(
+            git_repo,
+            tool="Bash",
+            command=f'uv run --script "{RUNNER_PATH}" --repo "{foreign}" status',
+            session="task-owner",
+        )
+    )
+    assert denied is not None
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_dww_runner_parser_requires_literal_shape_and_supports_power_shell_quotes(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    spaced = tmp_path / "中文 仓库"
+    spaced.mkdir()
+    git(spaced, "init")
+
+    assert (
+        HOOK._dww_subcommand(
+            f"uv run --script {RUNNER_PATH} --repo='{spaced}' status", spaced
+        )
+        == "status"
+    )
+    assert (
+        HOOK._dww_subcommand(
+            f'uv run --script "{RUNNER_PATH}" --repo "{spaced}" --json version',
+            spaced,
+        )
+        == "version"
+    )
+    assert (
+        HOOK._dww_subcommand(
+            f"uv run --script {RUNNER_PATH} --repo {git_repo} status", git_repo
+        )
+        == "status"
+    )
+
+    for command in (
+        f'python x/dww.py --repo "{git_repo}" status',
+        f'Write-Output "{RUNNER_PATH}" --repo "{git_repo}" status',
+        (
+            f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
+            "status; Get-Content README.md"
+        ),
+        f'uv run --script "{RUNNER_PATH}" --repo "$env:DWW_REPO" status',
+        f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}',
+        f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" status --repo "{spaced}"',
+        f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" status --repo={spaced}',
+    ):
+        assert HOOK._dww_subcommand(command, git_repo) is None
+
+
 def test_hook_dirty_base_alert_is_visible_in_doctor(git_repo: Path) -> None:
     repo = _initialized(git_repo)
     (git_repo / "escaped.txt").write_text("preserve\n", encoding="utf-8")
@@ -1248,6 +1346,8 @@ def test_read_only_parser_accepts_common_repository_enumeration() -> None:
     assert HOOK._strict_read_only_bash("git ls-files")
     assert HOOK._strict_read_only_bash("git ls-files --cached --full-name")
     assert HOOK._strict_read_only_bash("git worktree list --porcelain")
+    assert HOOK._strict_read_only_bash("Get-FileHash -LiteralPath README.md")
+    assert HOOK._strict_read_only_bash("Get-FileHash -Path README.md -Algorithm SHA256")
 
 
 def test_read_only_parser_rejects_writes_and_external_rg_preprocessors() -> None:
@@ -1300,6 +1400,10 @@ def test_read_only_parser_limits_content_and_select_arguments() -> None:
     )
     assert not HOOK._strict_read_only_bash("Get-ChildItem -Recurse")
     assert not HOOK._strict_read_only_bash("git ls-files --with-tree=HEAD")
+    assert not HOOK._strict_read_only_bash("Get-FileHash -Recurse README.md")
+    assert not HOOK._strict_read_only_bash(
+        "Get-FileHash -Algorithm SHA256 README.md other.md"
+    )
 
 
 def test_hook_allows_every_contract_command_and_rejects_a_spoofed_runner(

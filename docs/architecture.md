@@ -48,6 +48,12 @@ coordinator.
   `CODEX_HOME` still needs its exact directory identity, branch, candidate head,
   and owner session to match. Neither narrow exception grants access to other
   Codex data, Git-tracked content, nested repositories, links, or mixed targets.
+- Hook events use the session checkout as the repository domain, while a DWW
+  runner's literal `--repo` selects the lifecycle target. The Hook accepts that
+  target only when the installed runner is exact and both worktrees share the
+  same Git common directory; the target task still passes the existing owner,
+  root-refresh, branch, HEAD, and directory-identity checks. It never treats an
+  arbitrary command argument or a foreign repository as an execution context.
 - A confirmed objective has one root anchor. It retains the complete plan and
   explicit amendments; its child anchors retain only their execution slices.
   Exact host identity may map to that root as a locator only; it never stores a

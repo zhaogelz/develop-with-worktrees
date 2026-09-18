@@ -26,6 +26,13 @@ anchor, or release a slot.
 For an isolated-task write, the Hook requires the event's exact Codex session
 identifier to equal the task's recorded `host_origin.thread_id`. An absent,
 malformed, or different owner fails closed before the supported write runs.
+Hook `cwd` is the Codex session checkout, not a per-command exec workdir. For a
+DWW runner command, the Hook therefore parses the literal `uv run --script`
+shape and uses its `--repo` target only after verifying the installed runner and
+the same Git common directory. A target task then goes through the existing
+owner, root-refresh, branch, HEAD, and directory-identity checks; a foreign
+repository, fake runner, shell control syntax, duplicate/missing repo option,
+or malformed quoting remains denied.
 For `apply_patch`, the current Codex Hook contract carries the patch in
 `tool_input.command`. DWW also recognizes its older explicit `patch` field and
 direct-string form for compatibility, but rejects missing, malformed, or

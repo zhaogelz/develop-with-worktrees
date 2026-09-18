@@ -43,8 +43,14 @@ FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
 DWW_SUBCOMMANDS = TOP_LEVEL_COMMANDS
 DWW_QUARANTINE_SUBCOMMANDS = {"doctor", "status", "plan", "resume-in-place"}
-DWW_READ_ONLY_SUBCOMMANDS = {"version", "doctor", "route", "status", "plan"}
-SHELL_CONTROL = (";", "|", "&", "`", "$", "(", ")", "<", ">", "\n", "\r")
+DWW_READ_ONLY_SUBCOMMANDS = {
+    "version",
+    "doctor",
+    "route",
+    "status",
+    "plan",
+    "help",
+}
 PATCH_SCOPE_EXTERNAL = "external"
 PATCH_SCOPE_PROTECTED = "protected"
 PATCH_SCOPE_SESSION_ARTIFACT = "session-artifact"
@@ -1153,6 +1159,36 @@ def _safe_get_child_item(tokens: list[_ReadToken]) -> bool:
     return True
 
 
+def _safe_get_file_hash(tokens: list[_ReadToken]) -> bool:
+    """Allow exact file hashing used to compare source and installed packages."""
+    options_with_values = {"-literalpath", "-path", "-algorithm"}
+    algorithms = {"md5", "sha1", "sha256", "sha384", "sha512"}
+    seen: set[str] = set()
+    path_seen = False
+    index = 1
+    while index < len(tokens):
+        argument = tokens[index].value
+        lowered = argument.lower()
+        if lowered in options_with_values:
+            if lowered in seen or index + 1 >= len(tokens):
+                return False
+            value = tokens[index + 1].value
+            if lowered in {"-literalpath", "-path"}:
+                if path_seen or value.startswith("-"):
+                    return False
+                path_seen = True
+            elif lowered == "-algorithm" and value.lower() not in algorithms:
+                return False
+            seen.add(lowered)
+            index += 2
+            continue
+        if argument.startswith("-") or path_seen:
+            return False
+        path_seen = True
+        index += 1
+    return path_seen
+
+
 def _safe_git_ls_files(tokens: list[_ReadToken]) -> bool:
     """Keep Git file enumeration read-only without accepting Git config injection."""
     allowed = {
@@ -1200,6 +1236,8 @@ def _safe_read_only_command(tokens: list[_ReadToken]) -> bool:
         return _safe_get_content(tokens)
     if name == "get-childitem":
         return _safe_get_child_item(tokens)
+    if name == "get-filehash":
+        return _safe_get_file_hash(tokens)
     if name in {"where", "get-command", "test-path"}:
         return len(tokens) > 1
     if name != "git" or len(tokens) < 2:
@@ -1277,26 +1315,24 @@ def _read_only_rejection_reason(command: str) -> str:
     return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."
 
 
-def _dww_subcommand(command: str, root: Path) -> str | None:
-    """只识别已安装插件的真实 runner、当前工作树和已知子命令。"""
-    value = command.strip()
-    if not value or any(argument in value for argument in SHELL_CONTROL):
+def _dww_invocation(command: str, root: Path) -> tuple[str, Path] | None:
+    """Parse one literal DWW runner call and return its target worktree root.
+
+    Hook ``cwd`` is the Codex session directory. ``--repo`` is an explicit DWW
+    target, so it is accepted only after the real runner and literal
+    PowerShell command shape have been checked, and only when its Git common
+    directory matches the session repository.
+    """
+    tokens = _tokenize_read_only(command)
+    if not tokens or any(token.value == "|" and not token.quoted for token in tokens):
         return None
-    try:
-        tokens = shlex.split(value, posix=False)
-    except ValueError:
+    if len(tokens) < 4:
         return None
-    runner_index = next(
-        (
-            index
-            for index, argument in enumerate(tokens)
-            if argument.strip('"').replace("\\", "/").lower().endswith("/dww.py")
-        ),
-        None,
-    )
-    if runner_index is None:
+    if _command_name(tokens[0]) not in {"uv", "uv.exe"}:
         return None
-    runner = Path(tokens[runner_index].strip('"')).resolve()
+    if tokens[1].value.lower() != "run" or tokens[2].value.lower() != "--script":
+        return None
+    runner = Path(tokens[3].value).resolve()
     expected_runner = (
         Path(__file__).resolve().parents[1]
         / "skills"
@@ -1307,19 +1343,63 @@ def _dww_subcommand(command: str, root: Path) -> str | None:
     if runner != expected_runner:
         return None
     repo_value: str | None = None
-    for index, argument in enumerate(tokens):
-        if argument == "--repo" and index + 1 < len(tokens):
-            repo_value = tokens[index + 1].strip('"')
+    subcommand: str | None = None
+    index = 4
+    while index < len(tokens):
+        argument = tokens[index].value
+        lowered = argument.lower()
+        if lowered == "--repo":
+            if repo_value is not None or index + 1 >= len(tokens):
+                return None
+            value = tokens[index + 1].value
+            if not value or value.startswith("-"):
+                return None
+            repo_value = value
+            index += 2
+            continue
+        if lowered.startswith("--repo="):
+            if repo_value is not None:
+                return None
+            value = argument.partition("=")[2]
+            if not value:
+                return None
+            repo_value = value
+            index += 1
+            continue
+        if lowered == "--json":
+            index += 1
+            continue
+        if lowered == "--help":
+            if index != len(tokens) - 1:
+                return None
+            subcommand = "help"
             break
-        if argument.startswith("--repo="):
-            repo_value = argument.split("=", 1)[1].strip('"')
+        if lowered in DWW_SUBCOMMANDS:
+            if any(
+                token.value.lower() == "--repo"
+                or token.value.lower().startswith("--repo=")
+                for token in tokens[index + 1 :]
+            ):
+                return None
+            subcommand = lowered
             break
-    if repo_value is None or git_root(repo_value) != root.resolve():
         return None
-    for argument in tokens[runner_index + 1 :]:
-        if argument in DWW_SUBCOMMANDS:
-            return argument
-    return None
+    if subcommand is None:
+        return None
+    target_root = root.resolve() if repo_value is None else git_root(repo_value)
+    if target_root is None:
+        return None
+    session_common = common_dir(root)
+    target_common = common_dir(target_root)
+    if session_common is None or target_common != session_common:
+        return None
+    return subcommand, target_root
+
+
+def _dww_subcommand(command: str, root: Path) -> str | None:
+    """Return the subcommand only for a real same-common-dir DWW invocation."""
+    invocation = _dww_invocation(command, root)
+    return invocation[0] if invocation is not None else None
 
 
 def _is_git_command(command: str) -> bool:
@@ -1529,16 +1609,30 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
                 "and the in-place task was quarantined: " + reason
             )
         return None
-    dww_command = _dww_subcommand(command, root) if tool == "Bash" else None
+    dww_invocation = _dww_invocation(command, root) if tool == "Bash" else None
+    dww_command = dww_invocation[0] if dww_invocation is not None else None
+    dww_target_root = dww_invocation[1] if dww_invocation is not None else None
     if tool == "Bash" and _strict_read_only_bash(command):
         return None
     if action == "ask":
-        if dww_command in {"init", "choose", "doctor", "route", "status", "version"}:
+        if dww_command in {
+            "init",
+            "choose",
+            "doctor",
+            "route",
+            "status",
+            "version",
+            "help",
+        }:
             return None
         return _deny(
             "Potential repository write is blocked until the user chooses how this repository should be modified. Show the one compact three-choice question, then use the matching trusted dww choose command."
         )
-    task = _task_for_worktree(state, guard, root)
+    task = (
+        _task_for_worktree(state, guard, dww_target_root)
+        if dww_target_root is not None
+        else None
+    ) or _task_for_worktree(state, guard, root)
     if task and task.get("mode", "isolated") == "isolated":
         if dww_command in DWW_READ_ONLY_SUBCOMMANDS:
             return None
@@ -1557,11 +1651,12 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             return _deny(
                 "In-place task is quarantined. Preserve the worktree and use only dww doctor/status/plan or explicit resume-in-place after manual restoration."
             )
-        valid, reason = _is_valid_in_place(root, task, payload)
+        task_root = Path(str(task["worktree"])).resolve()
+        valid, reason = _is_valid_in_place(task_root, task, payload)
         if not valid:
             if dww_command == "resume-in-place":
                 return None
-            _quarantine(root, str(task.get("id")), reason)
+            _quarantine(task_root, str(task.get("id")), reason)
             return _deny(
                 "Current-worktree authorization is no longer valid; files were preserved and the in-place task was quarantined: "
                 + reason
@@ -1575,7 +1670,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         # Current-worktree tasks may run their test/tool commands and edit files;
         # branch and HEAD are checked again after the call.
         return None
-    if dww_command in DWW_SUBCOMMANDS:
+    if dww_invocation is not None:
         return None
     if tool == "Bash" and "dww.py" in command.replace("\\", "/"):
         return _deny(
