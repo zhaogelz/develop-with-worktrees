@@ -252,18 +252,38 @@ def command_from(payload: dict[str, Any]) -> str:
 
 
 def patch_from(payload: dict[str, Any]) -> str:
-    tool_input = (
-        payload.get("tool_input")
-        or payload.get("toolInput")
-        or payload.get("input")
-        or {}
-    )
-    if isinstance(tool_input, str):
-        return tool_input
-    if not isinstance(tool_input, dict):
+    """读取补丁正文；Codex 当前契约使用 tool_input.command。"""
+
+    values: list[str] = []
+    for key in ("tool_input", "toolInput", "input"):
+        if key not in payload:
+            continue
+        tool_input = payload[key]
+        if isinstance(tool_input, str):
+            values.append(tool_input)
+            continue
+        if not isinstance(tool_input, dict):
+            return ""
+        has_command = "command" in tool_input
+        has_patch = "patch" in tool_input
+        command = tool_input.get("command")
+        patch = tool_input.get("patch")
+        if has_command and not isinstance(command, str):
+            return ""
+        if has_patch and not isinstance(patch, str):
+            return ""
+        if has_command and has_patch and command != patch:
+            return ""
+        if has_command:
+            values.append(command)
+        elif has_patch:
+            # 兼容已安装旧版本和早期测试夹具的字段形状。
+            values.append(patch)
+        else:
+            return ""
+    if not values or len(set(values)) != 1:
         return ""
-    value = tool_input.get("patch")
-    return value if isinstance(value, str) else ""
+    return values[0]
 
 
 _PATCH_TARGET = re.compile(
@@ -280,9 +300,27 @@ def _nearest_existing_directory(path: Path) -> Path | None:
     return current if current.exists() and current.is_dir() else None
 
 
+def _patch_execution_directory(payload: dict[str, Any], root: Path) -> Path | None:
+    value = payload.get("cwd")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        cwd = Path(value).resolve()
+        cwd.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    return cwd if cwd.is_dir() else None
+
+
 def _apply_patch_targets(payload: dict[str, Any], root: Path) -> list[Path] | None:
     patch = patch_from(payload)
-    if not patch or "*** Begin Patch" not in patch or "*** End Patch" not in patch:
+    execution_directory = _patch_execution_directory(payload, root)
+    if (
+        not patch
+        or execution_directory is None
+        or "*** Begin Patch" not in patch
+        or "*** End Patch" not in patch
+    ):
         return None
     raw_targets = [
         match.group("path").strip()
@@ -298,7 +336,9 @@ def _apply_patch_targets(payload: dict[str, Any], root: Path) -> list[Path] | No
         target = Path(raw_target)
         try:
             targets.append(
-                (target if target.is_absolute() else root / target).resolve()
+                (
+                    target if target.is_absolute() else execution_directory / target
+                ).resolve()
             )
         except OSError:
             return None

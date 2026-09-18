@@ -50,6 +50,14 @@ It may be skipped when the Codex CLI is unavailable. A skip is not evidence of
 a successful local installation. Broad Full and Stress verification remain
 explicit diagnostic work; do not add them to every documentation edit.
 
+When changing Hook parsing, matcher definitions, or the guard, run the focused
+Hook tests first. After a formal plugin installation, use the same Codex
+executable that users run to verify a harmless `apply_patch` in its owner task,
+then verify that a different session and a protected base-worktree target are
+denied before writing. Record the executable path and version with the source
+commit and installed hook hash: a passing PATH CLI installation test does not
+prove a different desktop-host executable loaded the updated Hook.
+
 ## Keep one source of truth
 
 Use [architecture.md](architecture.md) for durable product and architecture

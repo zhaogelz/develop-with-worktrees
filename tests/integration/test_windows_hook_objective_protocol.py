@@ -96,7 +96,7 @@ def test_windows_hook_command_enforces_and_clears_root_recovery_marker(
         "tool_name": "apply_patch",
         "session_id": "windows-objective-session",
         "tool_input": {
-            "patch": "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch"
+            "command": "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch"
         },
     }
     denied = _run_windows_hook(command, protected_patch)

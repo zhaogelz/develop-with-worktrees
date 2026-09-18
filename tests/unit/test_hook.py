@@ -50,8 +50,18 @@ def _payload(
     command: str = "",
     patch: str = "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch",
     session: str = "",
+    patch_transport: str = "command",
 ) -> dict[str, object]:
-    tool_input = {"command": command} if tool == "Bash" else {"patch": patch}
+    if tool == "Bash":
+        tool_input: object = {"command": command}
+    elif patch_transport == "command":
+        tool_input = {"command": patch}
+    elif patch_transport == "patch":
+        tool_input = {"patch": patch}
+    elif patch_transport == "raw":
+        tool_input = patch
+    else:
+        raise ValueError(f"unknown patch transport: {patch_transport}")
     return {
         "cwd": str(repo),
         "hook_event_name": "PreToolUse",
@@ -137,7 +147,7 @@ def test_hook_defers_to_existing_workflow_without_writing(git_repo: Path) -> Non
     assert not (git_repo / ".solo-ai").exists()
 
 
-def test_hook_parses_actual_apply_patch_payload_and_all_move_targets(
+def test_hook_parses_documented_apply_patch_payload_and_all_move_targets(
     git_repo: Path, tmp_path: Path
 ) -> None:
     external = tmp_path / "draft.md"
@@ -153,7 +163,7 @@ def test_hook_parses_actual_apply_patch_payload_and_all_move_targets(
         "cwd": str(git_repo),
         "hook_event_name": "PreToolUse",
         "tool_name": "apply_patch",
-        "tool_input": raw_patch,
+        "tool_input": {"command": raw_patch},
     }
 
     assert HOOK.patch_from(payload) == raw_patch
@@ -183,9 +193,45 @@ def test_hook_parses_actual_apply_patch_payload_and_all_move_targets(
             "*** End Patch",
         )
     )
-    mixed = {**payload, "tool_input": move_patch}
+    mixed = {**payload, "tool_input": {"command": move_patch}}
     assert HOOK._apply_patch_scope(mixed, git_repo) is None
     assert HOOK.decide(mixed)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_hook_keeps_explicit_legacy_patch_compatibility_and_rejects_conflicts(
+    git_repo: Path,
+) -> None:
+    patch = "*** Begin Patch\n*** Add File: legacy.md\n+legacy\n*** End Patch"
+    legacy = _payload(
+        git_repo,
+        tool="apply_patch",
+        patch=patch,
+        patch_transport="patch",
+    )
+    assert HOOK.patch_from(legacy) == patch
+
+    direct = _payload(
+        git_repo,
+        tool="apply_patch",
+        patch=patch,
+        patch_transport="raw",
+    )
+    assert HOOK.patch_from(direct) == patch
+
+    conflicting = {
+        **_payload(git_repo, tool="apply_patch", patch=patch),
+        "tool_input": {"command": patch, "patch": patch + "\n"},
+    }
+    assert HOOK.patch_from(conflicting) == ""
+    denied = HOOK.decide(conflicting)
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    invalid = {
+        **_payload(git_repo, tool="apply_patch", patch=patch),
+        "tool_input": {"command": None},
+    }
+    assert HOOK.patch_from(invalid) == ""
+    assert HOOK.decide(invalid)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_hook_steps_aside_only_for_an_approved_delegated_adapter(
@@ -580,6 +626,21 @@ def test_hook_checks_actual_patch_targets_and_isolated_owner_before_writing(
         )
         is None
     )
+
+    nested = first_worktree / "nested"
+    nested.mkdir()
+    relative = _payload(
+        nested,
+        tool="apply_patch",
+        patch=(
+            "*** Begin Patch\n*** Add File: owner-relative.md\n+owned\n*** End Patch"
+        ),
+        session="first-session",
+    )
+    assert HOOK._apply_patch_targets(relative, first_worktree) == [
+        (nested / "owner-relative.md").resolve()
+    ]
+    assert HOOK.decide(relative) is None
 
     wrong_session = HOOK.decide(
         _payload(
