@@ -66,8 +66,19 @@ current-base delivery, and runtime effectiveness are separate facts.
 Report in the user's language and lead with the useful fact, not internal DWW
 state. Say plainly whether the change is being made, ready and waiting for local
 integration, integrated into the current base, or installed and verified by the
-current host. A published candidate is not delivery. Do not expose leases, raw
-state records, or lifecycle logs unless the user asks for diagnostic detail.
+current host. A published candidate is not delivery. If installation or host
+verification is not established, say so instead of implying that the current
+installation changed. Distinguish code committed but not integrated,
+integrated but not installed, installed but not verified in a real host session,
+and an installed version verified by the current host. Ask the user to review
+or trust a Hook only when the host explicitly reports a first-install or
+changed-definition review. A plugin version change, a parse/path/owner/lease
+error, or a single denial does not by itself justify repeated trust, a new
+session, or user-run validation. For those errors, state the actual cause and
+the next safe action instead of suggesting that trust might fix them. If host
+trust state cannot be read, say that the need for review is currently
+unconfirmed. Do not expose leases, raw state records, or lifecycle logs unless
+the user asks for diagnostic detail.
 
 ## Read one reference for the active scenario
 

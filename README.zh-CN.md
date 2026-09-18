@@ -21,7 +21,7 @@ codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-安装或更新后新开一个 Codex 会话，使新版技能稳定生效。源码版本是 `0.5.0-beta.7`；插件缓存构建可能额外带有 `+codex.<build>` 后缀。
+安装或更新后，当前宿主需要先加载已安装的技能，正在运行的任务才会看到新内容。只有当前宿主仍显示旧版行为、且没有可用的重新加载方式时，才新开一个 Codex 会话；不要仅因版本号变化、一次拒绝或解析/路径/owner/lease 错误而重开会话或重跑验收。加载技能与 Hook 信任是两件事：版本更新本身不等于需要重新信任。只有宿主明确报告首次安装或 Hook 定义变化待审查时，才通过宿主支持的方式审查一次准确的定义；DWW 不读取或修改宿主信任存储。源码版本是 `0.5.0-beta.7`；插件缓存构建可能额外带有 `+codex.<build>` 后缀。
 
 ## 默认怎么工作
 

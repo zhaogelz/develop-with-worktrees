@@ -1471,8 +1471,11 @@ def _doctor(repo: GitRepo) -> dict[str, Any]:
         "against the exact hook definition. Ordinary updates keep "
         "hooks/hooks.json stable and need no repeated review. Only when Codex reports a "
         "new or changed hook pending review should the AI explain it, ask once, and use "
-        "available host UI control after approval. Otherwise it must not claim the hard "
-        "guard is active."
+        "available host UI control after approval. If the host's review state cannot be "
+        "read, report that the need for review is unconfirmed. A version change, "
+        "parse/path/owner/lease error, or single denial is not evidence that review is "
+        "needed; report the actual error and safe next action instead. Otherwise it "
+        "must not claim the hard guard is active."
     )
     return report
 

@@ -29,9 +29,16 @@ codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-Start a new Codex session after installing or updating so it loads the current
-skill. The source version is `0.5.0-beta.7`; a plugin cache build may append a
-`+codex.<build>` suffix.
+After installing or updating, the current host must load the installed skill
+before a running task can use it. If the host still shows the old skill
+behavior, use its supported reload path; start a new Codex session only when
+that host has no reload path. This is separate from Hook trust: a version
+change, a single denial, or a parse/path/owner/lease error is not evidence that
+Hook review is needed. Ask for review only when the host explicitly reports a
+first-install or changed-definition review, and use the host's supported
+control for that exact definition once. DWW cannot inspect or change host trust
+storage. The source version is `0.5.0-beta.7`; a plugin cache build may append
+a `+codex.<build>` suffix.
 
 ## Default flow
 
