@@ -69,7 +69,12 @@ def test_windows_hook_command_enforces_and_clears_root_recovery_marker(
         plan_source="user confirmed the final plan",
         request_id="windows-hook-objective-protocol",
     )
-    task = start(repo, name="windows hook child", root_anchor_id=str(root["root_id"]))
+    task = start(
+        repo,
+        name="windows hook child",
+        root_anchor_id=str(root["root_id"]),
+        host_origin={"kind": "codex", "thread_id": "windows-objective-session"},
+    )
     worktree = Path(str(task["worktree"]))
     command = _hook_command()
 
@@ -154,6 +159,18 @@ def test_windows_hook_command_enforces_and_clears_root_recovery_marker(
     assert refreshed.returncode == 0, refreshed.stderr
     assert json.loads(refreshed.stdout)["result"]["root_id"] == root["root_id"]
     assert StateStore(repo).root_context_refresh_required(str(task["id"])) is None
+
+    foreign_owner = _run_windows_hook(
+        command,
+        {**protected_patch, "session_id": "unrelated-owner"},
+    )
+    assert foreign_owner.returncode == 0, foreign_owner.stderr
+    foreign_result = json.loads(foreign_owner.stdout)
+    assert foreign_result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert (
+        "does not own this isolated task"
+        in foreign_result["hookSpecificOutput"]["permissionDecisionReason"]
+    )
 
     allowed = _run_windows_hook(command, protected_patch)
     assert allowed.returncode == 0, allowed.stderr

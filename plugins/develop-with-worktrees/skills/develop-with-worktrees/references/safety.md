@@ -23,6 +23,19 @@ A mature workflow remains routing authority. Hook, idle, and session events may
 wake reconciliation but cannot select candidates, complete a task, delete an
 anchor, or release a slot.
 
+For an isolated-task write, the Hook requires the event's exact Codex session
+identifier to equal the task's recorded `host_origin.thread_id`. An absent,
+malformed, or different owner fails closed before the supported write runs.
+For `apply_patch`, it resolves every declared Add, Update, Delete, and Move
+source/destination path first: all repository targets must resolve to one active
+task in the same Git common directory. This permits an owner's absolute-path
+patch from the base worktree and rejects a cross-task or mixed-target patch as a
+whole. `Bash`, `Edit`, and `Write` receive the same owner check for the current
+working directory, but DWW does not infer arbitrary shell side effects or invent
+target fields the host did not provide. A host that omits a reliable Hook event,
+session identifier, or target path remains outside this protection and must be
+reported as such in native-host verification.
+
 For an active isolated task with a bound root, the supported trusted
 `SessionStart` path records only a small “refresh required” marker. Before a
 supported write, the Hook requires `anchor refresh-root` to read the current task

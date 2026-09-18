@@ -61,11 +61,11 @@ def _payload(
     }
 
 
-def _initialized(path: Path) -> GitRepo:
+def _initialized(path: Path, *, slots: int = 1) -> GitRepo:
     repo = GitRepo(path)
     result = initialize(
         repo,
-        slots=1,
+        slots=slots,
         commands=[CommandSpec(("git", "diff", "--check", "main...HEAD"))],
         accept=True,
         accept_static_only=False,
@@ -410,14 +410,18 @@ def test_hook_session_start_uses_the_single_plain_language_choice(
     assert "static mode" not in message
 
 
-def test_hook_hard_denies_adopted_base_write_and_allows_isolated_task(
+def test_hook_hard_denies_adopted_base_write_and_allows_isolated_owner(
     git_repo: Path,
 ) -> None:
     repo = _initialized(git_repo)
     denied = HOOK.decide(_payload(git_repo, tool="apply_patch"))
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    task = start(repo, name="isolated")
+    task = start(
+        repo,
+        name="isolated",
+        host_origin={"kind": "codex", "thread_id": "isolated-owner"},
+    )
     task_patch = (
         "*** Begin Patch\n"
         "*** Add File: task-local.md\n"
@@ -425,7 +429,12 @@ def test_hook_hard_denies_adopted_base_write_and_allows_isolated_task(
         "*** End Patch"
     )
     allowed = HOOK.decide(
-        _payload(Path(task["worktree"]), tool="apply_patch", patch=task_patch)
+        _payload(
+            Path(task["worktree"]),
+            tool="apply_patch",
+            patch=task_patch,
+            session="isolated-owner",
+        )
     )
     assert allowed is None
 
@@ -446,12 +455,26 @@ def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(
         plan_source="user confirmed the root plan",
         request_id="hook-root-refresh-test",
     )
-    task = start(repo, name="hook root child", root_anchor_id=root["root_id"])
+    task = start(
+        repo,
+        name="hook root child",
+        root_anchor_id=root["root_id"],
+        host_origin={"kind": "codex", "thread_id": "root-owner"},
+    )
     worktree = Path(task["worktree"])
+
+    wrong_session_start = HOOK.decide(
+        {
+            **_payload(worktree, tool="apply_patch", session="unrelated-owner"),
+            "hook_event_name": "SessionStart",
+        }
+    )
+    assert wrong_session_start is not None
+    assert StateStore(repo).root_context_refresh_required(task["id"]) is None
 
     started = HOOK.decide(
         {
-            **_payload(worktree, tool="apply_patch"),
+            **_payload(worktree, tool="apply_patch", session="root-owner"),
             "hook_event_name": "SessionStart",
         }
     )
@@ -460,7 +483,7 @@ def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(
     assert marker is not None and marker["reason"] == "SessionStart"
     HOOK.decide(
         {
-            **_payload(worktree, tool="apply_patch"),
+            **_payload(worktree, tool="apply_patch", session="root-owner"),
             "hook_event_name": "SessionStart",
         }
     )
@@ -474,10 +497,17 @@ def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(
         )
         is False
     )
-    denied = HOOK.decide(_payload(worktree, tool="apply_patch"))
+    denied = HOOK.decide(_payload(worktree, tool="apply_patch", session="root-owner"))
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert (
-        HOOK.decide(_payload(worktree, tool="Bash", command="git status --short"))
+        HOOK.decide(
+            _payload(
+                worktree,
+                tool="Bash",
+                command="git status --short",
+                session="root-owner",
+            )
+        )
         is None
     )
     assert (
@@ -485,6 +515,7 @@ def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(
             _payload(
                 worktree,
                 tool="Bash",
+                session="root-owner",
                 command=(
                     f'uv run --script "{RUNNER_PATH}" --repo "{worktree}" '
                     f"anchor refresh-root --task {task['id']} --lease {task['lease']}"
@@ -494,9 +525,156 @@ def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(
         is None
     )
 
+    wrong_refresh = HOOK.decide(
+        _payload(
+            worktree,
+            tool="Bash",
+            session="unrelated-owner",
+            command=(
+                f'uv run --script "{RUNNER_PATH}" --repo "{worktree}" '
+                f"anchor refresh-root --task {task['id']} --lease {task['lease']}"
+            ),
+        )
+    )
+    assert wrong_refresh["hookSpecificOutput"]["permissionDecision"] == "deny"
+
     refresh_root_context(repo, task_id=task["id"], lease=task["lease"])
     assert StateStore(repo).root_context_refresh_required(task["id"]) is None
-    assert HOOK.decide(_payload(worktree, tool="apply_patch")) is None
+    assert (
+        HOOK.decide(_payload(worktree, tool="apply_patch", session="root-owner"))
+        is None
+    )
+
+
+def test_hook_checks_actual_patch_targets_and_isolated_owner_before_writing(
+    git_repo: Path,
+) -> None:
+    repo = _initialized(git_repo, slots=2)
+    first = start(
+        repo,
+        name="first owner",
+        host_origin={"kind": "codex", "thread_id": "first-session"},
+    )
+    second = start(
+        repo,
+        name="second owner",
+        host_origin={"kind": "codex", "thread_id": "second-session"},
+    )
+    first_worktree = Path(first["worktree"])
+    second_worktree = Path(second["worktree"])
+
+    own_absolute = (
+        "*** Begin Patch\n"
+        f"*** Add File: {first_worktree / 'owner-only.md'}\n"
+        "+owned\n"
+        "*** End Patch"
+    )
+    assert (
+        HOOK.decide(
+            _payload(
+                git_repo,
+                tool="apply_patch",
+                patch=own_absolute,
+                session="first-session",
+            )
+        )
+        is None
+    )
+
+    wrong_session = HOOK.decide(
+        _payload(
+            first_worktree,
+            tool="apply_patch",
+            patch=(
+                "*** Begin Patch\n"
+                "*** Add File: denied.md\n"
+                "+must not write\n"
+                "*** End Patch"
+            ),
+            session="second-session",
+        )
+    )
+    assert wrong_session["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert (
+        "does not own this isolated task"
+        in wrong_session["hookSpecificOutput"]["permissionDecisionReason"]
+    )
+
+    mixed_targets = (
+        "*** Begin Patch\n"
+        f"*** Add File: {first_worktree / 'first.md'}\n"
+        "+first\n"
+        f"*** Add File: {second_worktree / 'second.md'}\n"
+        "+second\n"
+        "*** End Patch"
+    )
+    mixed = HOOK.decide(
+        _payload(
+            git_repo,
+            tool="apply_patch",
+            patch=mixed_targets,
+            session="first-session",
+        )
+    )
+    assert mixed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "mixes targets" in mixed["hookSpecificOutput"]["permissionDecisionReason"]
+    assert git(first_worktree, "status", "--porcelain") == ""
+    assert git(second_worktree, "status", "--porcelain") == ""
+
+    cross_task_move = (
+        "*** Begin Patch\n"
+        f"*** Update File: {first_worktree / 'README.md'}\n"
+        f"*** Move to: {second_worktree / 'README.md'}\n"
+        "@@\n"
+        "-fixture\n"
+        "+fixture\n"
+        "*** End Patch"
+    )
+    moved = HOOK.decide(
+        _payload(
+            git_repo,
+            tool="apply_patch",
+            patch=cross_task_move,
+            session="first-session",
+        )
+    )
+    assert moved["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "mixes targets" in moved["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_hook_fails_closed_for_an_isolated_task_without_host_owner(
+    git_repo: Path,
+) -> None:
+    repo = _initialized(git_repo)
+    task = start(repo, name="legacy isolated task")
+
+    denied = HOOK.decide(
+        _payload(
+            Path(task["worktree"]),
+            tool="apply_patch",
+            session="unrelated-session",
+        )
+    )
+
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert (
+        "no verifiable Codex host owner"
+        in denied["hookSpecificOutput"]["permissionDecisionReason"]
+    )
+    assert (
+        HOOK.decide(
+            _payload(
+                Path(task["worktree"]),
+                tool="Bash",
+                command=(
+                    f'uv run --script "{RUNNER_PATH}" --repo "{task["worktree"]}" '
+                    "status"
+                ),
+                session="unrelated-session",
+            )
+        )
+        is None
+    )
 
 
 def test_hook_uses_actual_apply_patch_targets_for_external_structural_files(

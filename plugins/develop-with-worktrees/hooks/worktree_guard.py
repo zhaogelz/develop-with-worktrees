@@ -76,6 +76,7 @@ DWW_SUBCOMMANDS = {
     "handoff",
 }
 DWW_QUARANTINE_SUBCOMMANDS = {"doctor", "status", "plan", "resume-in-place"}
+DWW_READ_ONLY_SUBCOMMANDS = {"version", "doctor", "route", "status", "plan"}
 SHELL_CONTROL = (";", "|", "&", "`", "$", "(", ")", "<", ">", "\n", "\r")
 
 
@@ -266,7 +267,7 @@ def patch_from(payload: dict[str, Any]) -> str:
 
 
 _PATCH_TARGET = re.compile(
-    r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (?P<path>.+?)\s*$"
+    r"^\*\*\* (?:(?:Add|Update|Delete) File|Move (?:from|to)): (?P<path>.+?)\s*$"
 )
 
 
@@ -279,36 +280,60 @@ def _nearest_existing_directory(path: Path) -> Path | None:
     return current if current.exists() and current.is_dir() else None
 
 
-def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
-    """区分补丁实际目标，避免把仓库外的方案/报告误判为基线写入。"""
-
+def _apply_patch_targets(payload: dict[str, Any], root: Path) -> list[Path] | None:
     patch = patch_from(payload)
     if not patch or "*** Begin Patch" not in patch or "*** End Patch" not in patch:
         return None
-    targets = [
+    raw_targets = [
         match.group("path").strip()
         for line in patch.splitlines()
         if (match := _PATCH_TARGET.fullmatch(line))
     ]
-    if not targets:
+    if not raw_targets:
         return None
-    base = root.resolve()
-    external = False
-    protected = False
-    for raw_target in targets:
+    targets: list[Path] = []
+    for raw_target in raw_targets:
         if not raw_target:
             return None
         target = Path(raw_target)
-        resolved = (target if target.is_absolute() else root / target).resolve()
+        try:
+            targets.append(
+                (target if target.is_absolute() else root / target).resolve()
+            )
+        except OSError:
+            return None
+    return targets
+
+
+def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
+    """区分补丁实际目标，避免把仓库外的方案/报告误判为基线写入。"""
+
+    targets = _apply_patch_targets(payload, root)
+    if targets is None:
+        return None
+    base = root.resolve()
+    source_common = common_dir(root)
+    if source_common is None:
+        return None
+    external = False
+    protected = False
+    for resolved in targets:
         try:
             resolved.relative_to(base)
         except ValueError:
             parent = _nearest_existing_directory(resolved)
             # 允许由宿主权限已授权的、非仓库中的方案/报告目标；不能借此
-            # 改写另一个仓库或让路径无法判断的补丁通过。
-            if parent is None or git_root(str(parent)) is not None:
+            # 改写另一个仓库或让路径无法判断的补丁通过。同一 common-dir
+            # 的其他工作树仍属于受保护目标，后续必须按任务归属核验。
+            if parent is None:
                 return None
-            external = True
+            target_root = git_root(str(parent))
+            if target_root is not None:
+                if common_dir(target_root) != source_common:
+                    return None
+                protected = True
+            else:
+                external = True
         else:
             protected = True
     # 一个补丁只能在受保护工作树内，或只修改一个明确的仓库外文件；混合目标
@@ -318,6 +343,28 @@ def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
     if protected:
         return "protected"
     return "external" if external else None
+
+
+def _patch_target_worktrees(payload: dict[str, Any], root: Path) -> list[Path] | None:
+    """返回补丁涉及的同一 Git common-dir 下实际工作树。"""
+
+    targets = _apply_patch_targets(payload, root)
+    source_common = common_dir(root)
+    if targets is None or source_common is None:
+        return None
+    worktrees: list[Path] = []
+    for target in targets:
+        parent = _nearest_existing_directory(target)
+        if parent is None:
+            return None
+        target_root = git_root(str(parent))
+        if target_root is None:
+            continue
+        if common_dir(target_root) != source_common:
+            return None
+        if target_root not in worktrees:
+            worktrees.append(target_root)
+    return worktrees
 
 
 def _session(payload: dict[str, Any]) -> str:
@@ -372,13 +419,17 @@ def task_bypass_active(root: Path, payload: dict[str, Any]) -> bool:
 def _task_for_worktree(
     state: dict[str, Any], guard: dict[str, Any], root: Path
 ) -> dict[str, Any] | None:
-    target = str(root.resolve())
+    target = root.resolve()
     quarantines = guard.get("quarantines", {})
     for task in state.get("tasks", {}).values():
-        if (
-            task.get("worktree") == target
-            and task.get("status") not in FINAL_TASK_STATES
-        ):
+        worktree = task.get("worktree")
+        try:
+            matches_worktree = (
+                isinstance(worktree, str) and Path(worktree).resolve() == target
+            )
+        except OSError:
+            matches_worktree = False
+        if matches_worktree and task.get("status") not in FINAL_TASK_STATES:
             effective = dict(task)
             guard_quarantine = (
                 quarantines.get(str(task.get("id")))
@@ -390,6 +441,65 @@ def _task_for_worktree(
                 effective["quarantine_reason"] = guard_quarantine.get("reason")
             return effective
     return None
+
+
+def _is_valid_isolated_owner(
+    task: dict[str, Any], payload: dict[str, Any]
+) -> tuple[bool, str]:
+    if task.get("status") not in {"active", "ready"}:
+        return False, "isolated task is not active"
+    owner = task.get("host_origin")
+    if (
+        not isinstance(owner, dict)
+        or set(owner) != {"kind", "thread_id"}
+        or owner.get("kind") != "codex"
+        or not isinstance(owner.get("thread_id"), str)
+        or not owner["thread_id"]
+    ):
+        return False, "isolated task has no verifiable Codex host owner"
+    session = _session(payload)
+    if not session or session != owner["thread_id"]:
+        return False, "Codex session does not own this isolated task"
+    return True, ""
+
+
+def _isolated_write_denial(
+    guard: dict[str, Any], task: dict[str, Any], payload: dict[str, Any]
+) -> str | None:
+    refreshes = guard.get("root_context_refreshes", {})
+    refresh = (
+        refreshes.get(str(task.get("id"))) if isinstance(refreshes, dict) else None
+    )
+    if isinstance(refresh, dict):
+        return (
+            "This task resumed with a bound root objective. Run the trusted dww "
+            "anchor refresh-root command before writing so the current complete plan "
+            "and task context are read again. Read-only queries remain allowed."
+        )
+    valid, reason = _is_valid_isolated_owner(task, payload)
+    if not valid:
+        return "Isolated-worktree authorization is invalid: " + reason
+    return None
+
+
+def _patch_target_task(
+    state: dict[str, Any], guard: dict[str, Any], payload: dict[str, Any], root: Path
+) -> tuple[dict[str, Any] | None, str | None]:
+    worktrees = _patch_target_worktrees(payload, root)
+    if not worktrees:
+        return None, "apply_patch target worktree could not be determined safely"
+    tasks: dict[str, dict[str, Any]] = {}
+    for worktree in worktrees:
+        task = _task_for_worktree(state, guard, worktree)
+        if task is None:
+            return None, "apply_patch target is not an active managed worktree"
+        task_id = task.get("id")
+        if not isinstance(task_id, str) or not task_id:
+            return None, "apply_patch target task has no stable identity"
+        tasks[task_id] = task
+    if len(tasks) != 1:
+        return None, "apply_patch mixes targets from different managed tasks"
+    return next(iter(tasks.values())), None
 
 
 def _is_valid_in_place(
@@ -941,6 +1051,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
                 active
                 and active.get("mode", "isolated") == "isolated"
                 and active.get("root_anchor_id")
+                and _is_valid_isolated_owner(active, payload)[0]
             ):
                 _mark_root_context_refresh(
                     root,
@@ -987,6 +1098,25 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
                 "apply_patch target paths could not be determined safely, or include another repository. "
                 "Protected base-worktree writes remain blocked."
             )
+        patch_task, patch_reason = _patch_target_task(state, guard, payload, root)
+        if patch_task is None:
+            return _deny(
+                (patch_reason or "apply_patch target task could not be verified")
+                + ". Protected worktree writes remain blocked."
+            )
+        if patch_task.get("mode", "isolated") == "isolated":
+            if denial := _isolated_write_denial(guard, patch_task, payload):
+                return _deny(denial)
+            return None
+        patch_root = Path(str(patch_task["worktree"])).resolve()
+        valid, reason = _is_valid_in_place(patch_root, patch_task, payload)
+        if not valid:
+            _quarantine(patch_root, str(patch_task.get("id")), reason)
+            return _deny(
+                "Current-worktree authorization is no longer valid; files were preserved "
+                "and the in-place task was quarantined: " + reason
+            )
+        return None
     dww_command = _dww_subcommand(command, root) if tool == "Bash" else None
     if tool == "Bash" and _strict_read_only_bash(command):
         return None
@@ -998,16 +1128,15 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         )
     task = _task_for_worktree(state, guard, root)
     if task and task.get("mode", "isolated") == "isolated":
-        refreshes = guard.get("root_context_refreshes", {})
-        refresh = (
-            refreshes.get(str(task.get("id"))) if isinstance(refreshes, dict) else None
-        )
-        if isinstance(refresh, dict):
-            if dww_command == "anchor":
-                return None
-            return _deny(
-                "This task resumed with a bound root objective. Run the trusted dww anchor refresh-root command before writing so the current complete plan and task context are read again. Read-only queries remain allowed."
-            )
+        if dww_command in DWW_READ_ONLY_SUBCOMMANDS:
+            return None
+        if dww_command == "anchor":
+            valid, reason = _is_valid_isolated_owner(task, payload)
+            if not valid:
+                return _deny("Isolated-worktree authorization is invalid: " + reason)
+            return None
+        if denial := _isolated_write_denial(guard, task, payload):
+            return _deny(denial)
         return None
     if task and task.get("mode") == "in-place":
         if task.get("status") == "quarantined":
