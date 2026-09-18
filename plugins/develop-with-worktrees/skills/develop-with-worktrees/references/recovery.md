@@ -11,7 +11,7 @@ from a title, a worktree count, or a quiet log.
 |---|---|---|---|
 | Bound root is stale | child anchor and current root | `anchor refresh-root`, then retry the blocked command | task worktree and current plan |
 | Start remains `starting` | activation receipt, worktree identity, contamination | retry the same request ID or `recover` after the cause is known | task, slot, anchor, and unexpected files |
-| Start was quarantined before activation because an old idle slot was dirty | task has no branch, anchor, activation, candidate, or ordinary untracked content; each tracked dirty blob equals the current descendant base | `recover` records and resumes the bounded pre-activation release | original scene, exact content fingerprints, slot generation, and ignored/protected content |
+| Start was quarantined before activation because an old idle slot was dirty | task has no branch, anchor, activation, candidate, or ordinary untracked content; each tracked dirty blob equals the current descendant base or an exact blob in its post-baseline first-parent history | `recover` records and resumes the bounded pre-activation release | original scene, exact content fingerprints, accepted commit, slot generation, and ignored/protected content |
 | Candidate is `held` | publication and release receipt | repair or recover the exact release path | candidate ref, task anchor, and base |
 | Batch is interrupted but not failed | batch phase and live operation | `batch recover` for that recorded generation | batch, base, and validation receipt |
 | Composition conflict | failed batch and attributed candidate | prepare the exact candidate repair | retained candidates and conflict worktree |
@@ -93,10 +93,13 @@ uncertain, the safe result is a recoverable blocked state with the base unchange
 `recover` may return a quarantined isolated task only when Start failed before
 creating its branch or anchor because an already detached idle slot was dirty.
 It accepts no content merely because a backup exists: there must be no ordinary
-untracked or protected ignored files, and every tracked dirty file must have the
-same Git blob as the current base ref, which itself must descend from the task
-baseline. The recorded transaction pins the worktree and managed-root identities,
-slot generation, old detached HEAD, base HEAD, porcelain status, and each blob.
+untracked or protected ignored files. Every tracked dirty file must either have
+the same Git blob as the current base ref, or have that exact blob at the same
+path in the current base's first-parent history after the task baseline. The
+recorded transaction pins the worktree and managed-root identities, slot
+generation, old detached HEAD, base HEAD, porcelain status, each blob, and the
+accepting commit. A matching blob only in an older baseline, another ref, or
+similar text is not enough.
 
 The release uses `reset --hard` only after those checks prove the tracked content
 is already in the accepted base. It never runs `clean`, never removes ignored

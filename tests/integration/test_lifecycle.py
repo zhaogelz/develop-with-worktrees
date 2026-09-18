@@ -1605,6 +1605,74 @@ def test_recover_releases_dirty_preactivation_slot_only_when_content_is_accepted
     assert slot["task_id"] is None
     assert recover(repo, task_id=str(task["id"])) == recovered
 
+    reused = start(repo, name="verify released slot can run normally")
+    assert Path(str(reused["worktree"])) == worktree
+    ready(repo, task_id=str(reused["id"]), lease=str(reused["lease"]))
+    published = finish(repo, task_id=str(reused["id"]), lease=str(reused["lease"]))
+    assert published["status"] == "candidate-published"
+    assert StateStore(repo).read()["slots"][str(reused["slot_id"])]["status"] == "idle"
+
+
+def test_recover_releases_content_accepted_then_evolved_on_base_history(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    config = git_repo / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        .replace("slots = 3", "slots = 1")
+        .replace(
+            'mode = "direct", worktree_mode = "dedicated"',
+            'mode = "batched", worktree_mode = "reusable"',
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: retain one reusable slot")
+    approve(repo, load_verification_config(repo))
+    previous = start(repo, name="release a reusable slot")
+    worktree = Path(str(previous["worktree"]))
+    abandon(
+        repo,
+        task_id=str(previous["id"]),
+        lease=str(previous["lease"]),
+        confirm=str(previous["id"]),
+    )
+
+    first_version = "accepted first version\n"
+    evolved_version = "accepted evolved version\n"
+    (worktree / "README.md").write_text(first_version, encoding="utf-8")
+    with pytest.raises(SoloAIError, match="Idle slot is not clean"):
+        start(repo, name="blocked before historical acceptance", request_id="history")
+    task = next(
+        item
+        for item in StateStore(repo).read()["tasks"].values()
+        if item.get("request_id") == "history"
+    )
+
+    (git_repo / "README.md").write_text(first_version, encoding="utf-8")
+    git(git_repo, "add", "README.md")
+    git(git_repo, "commit", "-m", "test: accept first preactivation version")
+    accepted_commit = repo.head(git_repo)
+    assert task["base_head"] != accepted_commit
+    assert repo.is_ancestor(str(task["base_head"]), accepted_commit)
+    (git_repo / "README.md").write_text(evolved_version, encoding="utf-8")
+    git(git_repo, "add", "README.md")
+    git(git_repo, "commit", "-m", "test: evolve accepted preactivation version")
+    release_head = repo.head(git_repo)
+
+    recovered = recover(repo, task_id=str(task["id"]))
+    transaction = StateStore(repo).task(str(task["id"]))["preactivation_release"]
+    record = transaction["tracked_files"][0]
+
+    assert recovered["release_head"] == release_head
+    assert record["path"] == "README.md"
+    assert record["acceptance"] == "post-baseline-first-parent"
+    assert record["accepted_commit"] == accepted_commit
+    assert record["worktree_blob"] != record["base_blob"]
+    assert repo.head(worktree) == release_head
+    assert repo.is_clean(worktree)
+
 
 def test_recover_preserves_unaccepted_dirty_preactivation_content(
     git_repo: Path,
@@ -1619,6 +1687,32 @@ def test_recover_preserves_unaccepted_dirty_preactivation_content(
     stored = StateStore(repo).task(str(task["id"]))
     slot = StateStore(repo).read()["slots"][str(task["slot_id"])]
     assert target.read_text(encoding="utf-8") == "unique unaccepted content\n"
+    assert stored["status"] == "quarantined"
+    assert not stored.get("preactivation_release")
+    assert slot["status"] == "quarantined"
+    assert slot["task_id"] == task["id"]
+
+
+def test_recover_rejects_preactivation_content_found_only_on_foreign_ref(
+    git_repo: Path,
+) -> None:
+    repo, task, worktree, _ = _dirty_preactivation_task(git_repo)
+    target = worktree / "README.md"
+    foreign_content = "accepted only on a foreign ref\n"
+    target.write_text(foreign_content, encoding="utf-8")
+
+    git(git_repo, "switch", "-c", "foreign-preactivation-evidence")
+    (git_repo / "README.md").write_text(foreign_content, encoding="utf-8")
+    git(git_repo, "add", "README.md")
+    git(git_repo, "commit", "-m", "test: foreign preactivation evidence")
+    git(git_repo, "switch", "main")
+
+    with pytest.raises(SoloAIError, match="post-baseline first-parent history"):
+        recover(repo, task_id=str(task["id"]))
+
+    stored = StateStore(repo).task(str(task["id"]))
+    slot = StateStore(repo).read()["slots"][str(task["slot_id"])]
+    assert target.read_text(encoding="utf-8") == foreign_content
     assert stored["status"] == "quarantined"
     assert not stored.get("preactivation_release")
     assert slot["status"] == "quarantined"

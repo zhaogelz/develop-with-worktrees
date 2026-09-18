@@ -134,7 +134,7 @@ from .util import (
 
 BOOTSTRAP_SCHEMA = 1
 TASK_GRANT_SCHEMA = 1
-PREACTIVATION_RELEASE_SCHEMA = 1
+PREACTIVATION_RELEASE_SCHEMA = 2
 MAX_READY_CONVERGENCE_RETRIES = 5
 LOCKFILE_NAMES = (
     "uv.lock",
@@ -1329,8 +1329,32 @@ def _preactivation_release_worktree(
     return worktree, managed_root, resolved
 
 
+def _preactivation_history_blob_commit(
+    repo: GitRepo,
+    *,
+    task_base: str,
+    release_head: str,
+    path: str,
+    worktree_blob: str,
+) -> str | None:
+    """只接受当前 base 第一父历史中、任务基线之后的逐文件精确副本。"""
+
+    commits = repo.git(
+        ["rev-list", "--first-parent", f"{task_base}..{release_head}"]
+    ).stdout.splitlines()
+    for commit in commits:
+        blob = repo.git(["rev-parse", f"{commit}:{path}"], check=False)
+        if blob.returncode == 0 and blob.stdout.strip() == worktree_blob:
+            return commit
+    return None
+
+
 def _preactivation_release_paths(
-    repo: GitRepo, worktree: Path, *, base: str
+    repo: GitRepo,
+    worktree: Path,
+    *,
+    task_base: str,
+    release_head: str,
 ) -> list[dict[str, str]]:
     if repo.git(["diff", "--cached", "--quiet"], cwd=worktree, check=False).returncode:
         raise SoloAIError(
@@ -1347,19 +1371,41 @@ def _preactivation_release_paths(
         relative = Path(path)
         if relative.is_absolute() or ".." in relative.parts:
             raise SoloAIError("Pre-activation release found an unsafe tracked path")
-        expected = repo.git(["rev-parse", f"{base}:{path}"], cwd=worktree, check=False)
+        expected = repo.git(
+            ["rev-parse", f"{release_head}:{path}"], cwd=worktree, check=False
+        )
         if expected.returncode:
             raise SoloAIError(
-                f"Pre-activation content is not present in the accepted base: {path}"
+                f"Pre-activation content is not present in the current base: {path}"
             )
         actual = repo.git(["hash-object", "--", path], cwd=worktree).stdout.strip()
         base_blob = expected.stdout.strip()
+        accepted_commit = release_head
+        acceptance = "current-base"
         if actual != base_blob:
-            raise SoloAIError(
-                "Dirty pre-activation content is not already accepted by current base: "
-                + path
+            accepted_commit = _preactivation_history_blob_commit(
+                repo,
+                task_base=task_base,
+                release_head=release_head,
+                path=path,
+                worktree_blob=actual,
             )
-        records.append({"path": path, "worktree_blob": actual, "base_blob": base_blob})
+            acceptance = "post-baseline-first-parent"
+        if accepted_commit is None:
+            raise SoloAIError(
+                "Dirty pre-activation content is not already accepted by current base "
+                "or its post-baseline first-parent history: " + path
+            )
+        records.append(
+            {
+                "path": path,
+                "worktree_blob": actual,
+                "base_blob": base_blob,
+                "accepted_blob": actual,
+                "accepted_commit": accepted_commit,
+                "acceptance": acceptance,
+            }
+        )
     return records
 
 
@@ -1427,7 +1473,10 @@ def _new_preactivation_release(
             ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
         ).stdout,
         "tracked_files": _preactivation_release_paths(
-            repo, worktree, base=release_head
+            repo,
+            worktree,
+            task_base=str(task["base_head"]),
+            release_head=release_head,
         ),
         "prepared_by_operation_id": operation_id,
         "prepared_at": utc_timestamp(),
@@ -1508,9 +1557,41 @@ def _assert_preactivation_content_unchanged(
     for item in transaction["tracked_files"]:
         path = str(item["path"])
         actual = repo.git(["hash-object", "--", path], cwd=worktree).stdout.strip()
-        if actual != item["worktree_blob"] or actual != item["base_blob"]:
+        if actual != item["worktree_blob"] or actual != item["accepted_blob"]:
             raise SoloAIError(
                 "Pre-activation release file fingerprint changed during recovery"
+            )
+        accepted_commit = str(item["accepted_commit"])
+        acceptance = str(item["acceptance"])
+        if acceptance == "current-base":
+            if accepted_commit != transaction["release_head"]:
+                raise SoloAIError(
+                    "Pre-activation release current-base evidence changed"
+                )
+        elif acceptance == "post-baseline-first-parent":
+            if not repo.is_ancestor(accepted_commit, transaction["release_head"]):
+                raise SoloAIError(
+                    "Pre-activation release accepted-history evidence is no longer reachable"
+                )
+            first_parent = repo.git(
+                [
+                    "rev-list",
+                    "--first-parent",
+                    f"{transaction['task_base_head']}..{transaction['release_head']}",
+                ]
+            ).stdout.splitlines()
+            if accepted_commit not in first_parent:
+                raise SoloAIError(
+                    "Pre-activation release accepted-history evidence left the first-parent path"
+                )
+        else:
+            raise SoloAIError("Pre-activation release has unknown acceptance evidence")
+        accepted_blob = repo.git(
+            ["rev-parse", f"{accepted_commit}:{path}"], check=False
+        )
+        if accepted_blob.returncode or accepted_blob.stdout.strip() != actual:
+            raise SoloAIError(
+                "Pre-activation release accepted-history evidence changed during recovery"
             )
 
 
