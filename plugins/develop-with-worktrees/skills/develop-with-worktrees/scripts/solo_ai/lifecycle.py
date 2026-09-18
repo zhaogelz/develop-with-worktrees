@@ -3927,7 +3927,22 @@ def finish(
                     _assert_exact_candidate(
                         repo, task, candidate_head=str(task["candidate_head"])
                     )
+                    recorded_candidate_head = task["candidate_head"]
+                    recorded_base_head = task["base_head"]
                     task = _sync_base(repo, task)
+                    task = store.update_task(
+                        task_id,
+                        candidate_head=task["candidate_head"],
+                        base_head=task["base_head"],
+                        # 只有同步实际改变候选或基线时，既有 Ready 证明才不再对应
+                        # 当前状态；无变化时，发布前清理失败必须保留该证明以便重试。
+                        ready_proof=(
+                            None
+                            if task["candidate_head"] != recorded_candidate_head
+                            or task["base_head"] != recorded_base_head
+                            else task.get("ready_proof")
+                        ),
+                    )
                 candidate_head = repo.head(worktree)
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)
                 # 候选固定前仍核验配置、机密与工作区安全；项目检查由新批次
@@ -4670,10 +4685,19 @@ def _assert_handoff_validation_idle(repo: GitRepo, task_id: str) -> None:
         )
 
 
-def handoff(repo: GitRepo, *, task_id: str, confirm: str) -> dict[str, Any]:
+def handoff(
+    repo: GitRepo,
+    *,
+    task_id: str,
+    confirm: str,
+    host_origin: dict[str, str] | None,
+) -> dict[str, Any]:
     """显式转交中断会话遗留的隔离任务，不改变其 Git 或文件现场。"""
 
     _, _, _ = _config_and_mode(repo)
+    host_origin = normalize_host_reference(host_origin)
+    if host_origin is None:
+        raise SoloAIError("Handoff requires an exact recipient host reference")
     store = StateStore(repo)
     store.reconcile_operation_receipts()
     task = store.task(task_id)
@@ -4727,6 +4751,7 @@ def handoff(repo: GitRepo, *, task_id: str, confirm: str) -> dict[str, Any]:
                 operation_id=operation_id,
                 expected_branch=str(confirmed_branch),
                 expected_head=str(confirmed_head),
+                host_origin=host_origin,
             )
 
 

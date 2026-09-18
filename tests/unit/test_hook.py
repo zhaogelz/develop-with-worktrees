@@ -11,8 +11,10 @@ from solo_ai.cli import _doctor, _parser
 from solo_ai.command_contract import TOP_LEVEL_COMMANDS
 from solo_ai.config import CommandSpec
 from solo_ai.lifecycle import (
+    abandon,
     choose,
     create_root_task_anchor,
+    handoff,
     initialize,
     refresh_root_context,
     resume_in_place,
@@ -484,6 +486,33 @@ def test_hook_hard_denies_adopted_base_write_and_allows_isolated_owner(
         )
     )
     assert allowed is None
+
+
+def test_hook_applies_formal_isolated_handoff_owner_transfer(git_repo: Path) -> None:
+    repo = _initialized(git_repo)
+    original_host = {"kind": "codex", "thread_id": "formal-source"}
+    receiving_host = {"kind": "codex", "thread_id": "formal-recipient"}
+    task = start(repo, name="formal isolated handoff", host_origin=original_host)
+    worktree = Path(task["worktree"])
+
+    received = handoff(
+        repo,
+        task_id=task["id"],
+        confirm=f"{task['id']}:{task['branch']}:{task['candidate_head']}",
+        host_origin=receiving_host,
+    )
+
+    denied = HOOK.decide(
+        _payload(worktree, tool="apply_patch", session=original_host["thread_id"])
+    )
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert (
+        HOOK.decide(
+            _payload(worktree, tool="apply_patch", session=receiving_host["thread_id"])
+        )
+        is None
+    )
+    abandon(repo, task_id=task["id"], lease=received["lease"], confirm=task["id"])
 
 
 def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(

@@ -1057,6 +1057,7 @@ def _parser() -> argparse.ArgumentParser:
     handoff_parser.add_argument(
         "--confirm", required=True, help="exactly TASK_ID:BRANCH:HEAD"
     )
+    _add_host_reference_arguments(handoff_parser, role="isolated handoff recipient")
 
     abandoned = sub.add_parser(
         "abandon", help="explicitly discard one task after exact confirmation"
@@ -2687,7 +2688,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             host_actor=_resolved_host_reference(args),
         )
     if args.command == "handoff":
-        return handoff(repo, task_id=args.task, confirm=args.confirm)
+        return handoff(
+            repo,
+            task_id=args.task,
+            confirm=args.confirm,
+            host_origin=_resolved_host_reference(args),
+        )
     if args.command == "resume-in-place":
         return resume_in_place(
             repo,

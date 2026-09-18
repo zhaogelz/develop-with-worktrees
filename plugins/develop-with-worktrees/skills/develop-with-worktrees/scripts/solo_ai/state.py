@@ -135,29 +135,35 @@ class StateStore:
                 task.setdefault("integration", None)
                 task.setdefault("abandonment", None)
             state["schema_version"] = STATE_SCHEMA
+            version = STATE_SCHEMA
         elif version == 3:
             for task in state.get("tasks", {}).values():
                 task.setdefault("integration", None)
                 task.setdefault("abandonment", None)
             state["schema_version"] = STATE_SCHEMA
+            version = STATE_SCHEMA
         elif version == 4:
             for task in state.get("tasks", {}).values():
                 task.setdefault("request_id", None)
                 task.setdefault("supersedes", None)
                 task.setdefault("candidate_publication", None)
             state["schema_version"] = STATE_SCHEMA
+            version = STATE_SCHEMA
         elif version == 5:
             for task in state.get("tasks", {}).values():
                 task.setdefault("integration_policy", None)
             state["schema_version"] = STATE_SCHEMA
+            version = STATE_SCHEMA
         elif version == 6:
             for task in state.get("tasks", {}).values():
                 task.setdefault("root_anchor_file", None)
             state["schema_version"] = STATE_SCHEMA
+            version = STATE_SCHEMA
         elif version == 7:
             for task in state.get("tasks", {}).values():
                 task.setdefault("host_origin", None)
             state["schema_version"] = STATE_SCHEMA
+            version = STATE_SCHEMA
         elif version == 8:
             # 已经启动的旧任务仍必须保留 Ready 作为候选发布门禁；新策略只
             # 对新建的 schema 3 policy 生效，不能在活动现场热替换语义。
@@ -166,6 +172,7 @@ class StateStore:
                 if isinstance(policy, dict):
                     policy.setdefault("candidate_validation", "ready")
             state["schema_version"] = STATE_SCHEMA
+            version = STATE_SCHEMA
         elif version == 9:
             # 宿主与主锚点的关联只影响新协议任务；既有任务仍保持原有根绑定和
             # 生命周期语义，不能因一次读取迁移而被自动认领。
@@ -2124,8 +2131,13 @@ class StateStore:
         operation_id: str,
         expected_branch: str,
         expected_head: str,
+        host_origin: dict[str, str],
     ) -> dict[str, Any]:
-        """在生命周期已复核脏工作树现场后，原子轮换隔离任务租约。"""
+        """在已复核现场后，原子轮换隔离任务租约和精确宿主所有者。"""
+
+        recipient = normalize_host_reference(host_origin)
+        if recipient is None:
+            raise SoloAIError("Isolated handoff requires an exact recipient host reference")
 
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
@@ -2160,6 +2172,7 @@ class StateStore:
                 {
                     "lease": uuid.uuid4().hex,
                     "lease_owner": process_snapshot(),
+                    "host_origin": copy.deepcopy(recipient),
                     "updated_at": utc_timestamp(),
                 }
             )

@@ -4055,7 +4055,11 @@ def test_handoff_preserves_dirty_isolated_task_and_rotates_its_lease(
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
-    task = start(repo, name="handoff dirty worktree")
+    original_host = {"kind": "codex", "thread_id": "handoff-source"}
+    receiving_host = {"kind": "codex", "thread_id": "handoff-recipient"}
+    task = start(
+        repo, name="handoff dirty worktree", host_origin=original_host
+    )
     worktree = Path(task["worktree"])
     draft = worktree / "draft.txt"
     draft.write_text("preserve this work\n", encoding="utf-8")
@@ -4064,9 +4068,11 @@ def test_handoff_preserves_dirty_isolated_task_and_rotates_its_lease(
         repo,
         task_id=task["id"],
         confirm=f"{task['id']}:{task['branch']}:{task['candidate_head']}",
+        host_origin=receiving_host,
     )
 
     assert received["lease"] != task["lease"]
+    assert received["host_origin"] == receiving_host
     assert received["status"] == "active"
     assert draft.read_text(encoding="utf-8") == "preserve this work\n"
     assert repo.branch(worktree) == task["branch"]
@@ -4087,7 +4093,12 @@ def test_handoff_transfers_ready_task_without_invalidating_its_proof(
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
-    task = start(repo, name="handoff ready task")
+    receiving_host = {"kind": "codex", "thread_id": "ready-recipient"}
+    task = start(
+        repo,
+        name="handoff ready task",
+        host_origin={"kind": "codex", "thread_id": "ready-source"},
+    )
     commit_one(repo, task, "ready.txt", "ready\n", "test: handoff ready")
     prepared = ready(repo, task_id=task["id"], lease=task["lease"])
     current = StateStore(repo).task(task["id"])
@@ -4096,9 +4107,11 @@ def test_handoff_transfers_ready_task_without_invalidating_its_proof(
         repo,
         task_id=task["id"],
         confirm=f"{task['id']}:{current['branch']}:{current['candidate_head']}",
+        host_origin=receiving_host,
     )
 
     assert received["lease"] != task["lease"]
+    assert received["host_origin"] == receiving_host
     assert received["status"] == "ready"
     assert received["ready_proof"] == prepared["ready_proof"]
     finish(repo, task_id=task["id"], lease=received["lease"])
@@ -4108,18 +4121,32 @@ def test_handoff_rejects_bad_confirmation_live_operation_and_live_validation(
     git_repo: Path,
 ) -> None:
     repo = initialized(git_repo)
-    task = start(repo, name="handoff guards")
+    original_host = {"kind": "codex", "thread_id": "guard-source"}
+    receiving_host = {"kind": "codex", "thread_id": "guard-recipient"}
+    task = start(repo, name="handoff guards", host_origin=original_host)
     confirmation = f"{task['id']}:{task['branch']}:{task['candidate_head']}"
 
     with pytest.raises(SoloAIError, match="Handoff requires"):
-        handoff(repo, task_id=task["id"], confirm=f"{task['id']}:wrong")
-    assert StateStore(repo).task(task["id"])["lease"] == task["lease"]
+        handoff(
+            repo,
+            task_id=task["id"],
+            confirm=f"{task['id']}:wrong",
+            host_origin=receiving_host,
+        )
+    preserved = StateStore(repo).task(task["id"])
+    assert preserved["lease"] == task["lease"]
+    assert preserved["host_origin"] == original_host
 
     with (
         StateStore(repo).operation(task["id"], task["lease"], "test"),
         pytest.raises(SoloAIError, match="live operation"),
     ):
-        handoff(repo, task_id=task["id"], confirm=confirmation)
+        handoff(
+            repo,
+            task_id=task["id"],
+            confirm=confirmation,
+            host_origin=receiving_host,
+        )
 
     receipt_path = repo.local_dir / "validation-runs" / "handoff" / "01.json"
     atomic_write_json(
@@ -4132,9 +4159,40 @@ def test_handoff_rejects_bad_confirmation_live_operation_and_live_validation(
         },
     )
     with pytest.raises(SoloAIError, match="live validation"):
-        handoff(repo, task_id=task["id"], confirm=confirmation)
-    assert StateStore(repo).task(task["id"])["lease"] == task["lease"]
+        handoff(
+            repo,
+            task_id=task["id"],
+            confirm=confirmation,
+            host_origin=receiving_host,
+        )
+    preserved = StateStore(repo).task(task["id"])
+    assert preserved["lease"] == task["lease"]
+    assert preserved["host_origin"] == original_host
     receipt_path.unlink()
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_handoff_requires_a_verified_recipient_without_changing_ownership(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    original_host = {"kind": "codex", "thread_id": "missing-recipient-source"}
+    task = start(repo, name="handoff recipient required", host_origin=original_host)
+    confirmation = f"{task['id']}:{task['branch']}:{task['candidate_head']}"
+
+    with pytest.raises(SoloAIError, match="exact recipient host reference"):
+        handoff(repo, task_id=task["id"], confirm=confirmation, host_origin=None)
+    with pytest.raises(SoloAIError, match="contain exactly kind and thread_id"):
+        handoff(
+            repo,
+            task_id=task["id"],
+            confirm=confirmation,
+            host_origin={"kind": "codex", "thread_id": "recipient", "extra": "no"},
+        )
+
+    preserved = StateStore(repo).task(task["id"])
+    assert preserved["lease"] == task["lease"]
+    assert preserved["host_origin"] == original_host
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
@@ -4142,7 +4200,11 @@ def test_handoff_rejects_identity_changed_after_confirmation(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = initialized(git_repo)
-    task = start(repo, name="handoff confirmation drift")
+    original_host = {"kind": "codex", "thread_id": "drift-source"}
+    receiving_host = {"kind": "codex", "thread_id": "drift-recipient"}
+    task = start(
+        repo, name="handoff confirmation drift", host_origin=original_host
+    )
     original_head = task["candidate_head"]
     original_assert = lifecycle._assert_handoff_validation_idle
 
@@ -4160,8 +4222,11 @@ def test_handoff_rejects_identity_changed_after_confirmation(
             repo,
             task_id=task["id"],
             confirm=f"{task['id']}:{task['branch']}:{original_head}",
+            host_origin=receiving_host,
         )
-    assert StateStore(repo).task(task["id"])["lease"] == task["lease"]
+    preserved = StateStore(repo).task(task["id"])
+    assert preserved["lease"] == task["lease"]
+    assert preserved["host_origin"] == original_host
     StateStore(repo).update_task(task["id"], candidate_head=original_head)
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 

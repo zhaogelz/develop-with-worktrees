@@ -33,8 +33,11 @@ unchanged plan.
 
 For an ended host session with an unchanged active task, use the exact handoff
 path after verifying that no operation, process, or validation remains alive.
-Never reuse an old lease, abandon real uncommitted work, or create a replacement
-task merely to avoid identity checks. See [task governance](task-governance.md).
+The receiving host must be resolved from trusted context or supplied exactly
+with `--host-kind` and `--host-thread`; a successful handoff atomically rotates
+the lease and replaces the task's `host_origin`. Never reuse an old lease,
+abandon real uncommitted work, or create a replacement task merely to avoid
+identity checks. See [task governance](task-governance.md).
 
 ## Validation and batch recovery
 

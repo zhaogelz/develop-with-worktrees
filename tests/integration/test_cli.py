@@ -148,6 +148,41 @@ def test_abandon_dispatch_forwards_retain_worktree_flag(
     assert captured["retain_worktree"] is True
 
 
+def test_handoff_dispatch_forwards_the_exact_receiving_host(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handoff(repo: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"task_id": "task-one", "status": "active"}
+
+    monkeypatch.setattr(cli_module, "handoff", fake_handoff)
+    args = cli_module._parser().parse_args(
+        [
+            "--repo",
+            str(git_repo),
+            "handoff",
+            "--task",
+            "task-one",
+            "--confirm",
+            "task-one:branch:head",
+            "--host-kind",
+            "codex",
+            "--host-thread",
+            "receiving-session",
+        ]
+    )
+
+    result = cli_module._dispatch(args)
+
+    assert result["status"] == "active"
+    assert captured["host_origin"] == {
+        "kind": "codex",
+        "thread_id": "receiving-session",
+    }
+
+
 def test_task_status_human_output_shows_retained_worktree_reason() -> None:
     rendered = _human(
         "status",
