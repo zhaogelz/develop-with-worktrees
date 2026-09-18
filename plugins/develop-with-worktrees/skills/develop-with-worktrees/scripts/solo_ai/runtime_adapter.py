@@ -53,13 +53,23 @@ def _adapter_input_hashes(
     return hashes
 
 
-def _require_approval(repo: GitRepo, *, cwd: Path) -> None:
+def _require_approval(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    operation: str,
+    approval_target: dict[str, str],
+) -> None:
+    operation_key = operation.replace("-", "_")
     verification = load_verification_config(repo, cwd=cwd)
     require_approved_plan(
         repo,
         cwd=cwd,
         verification=verification,
-        message="This machine has not approved the runtime Adapter plan.",
+        message="This machine has not approved the Runtime Adapter command required by this step.",
+        scope=f"runtime-{operation}",
+        adapter_operations=(operation_key,),
+        approval_target=approval_target,
     )
 
 
@@ -198,7 +208,12 @@ def _task_activation_request(
         raise SoloAIError(
             "runtime_adapter.activate requires an isolated task with a managed slot"
         )
-    _require_approval(repo, cwd=worktree)
+    _require_approval(
+        repo,
+        cwd=worktree,
+        operation="activate",
+        approval_target={"task": str(task["id"])},
+    )
     adapter_inputs = _adapter_input_hashes(
         repo, cwd=worktree, patterns=config.runtime_adapter.input_paths
     )
@@ -288,7 +303,12 @@ def release_task_runtime(
         raise SoloAIError("Runtime Adapter repair removed its required release command")
     if command is None:
         return {"configured": False, "operation": "release"}
-    _require_approval(repo, cwd=source_root)
+    _require_approval(
+        repo,
+        cwd=source_root,
+        operation="release",
+        approval_target={"task": str(task["id"])},
+    )
     selected_candidate = candidate or {}
     adapter_inputs = _adapter_input_hashes(
         repo, cwd=source_root, patterns=config.runtime_adapter.input_paths
@@ -442,7 +462,12 @@ def activate_batch_runtime(
     command = config.runtime_adapter.batch_activate
     if command is None:
         return {"configured": False, "operation": "batch-activate"}
-    _require_approval(repo, cwd=worktree)
+    _require_approval(
+        repo,
+        cwd=worktree,
+        operation="batch-activate",
+        approval_target={"batch": str(batch["id"])},
+    )
     config, context = _batch_context(repo, batch=batch, worktree=worktree)
     receipt = _invoke(
         repo,
@@ -468,7 +493,12 @@ def release_batch_runtime(
     command = config.runtime_adapter.batch_release
     if command is None:
         return {"configured": False, "operation": "batch-release"}
-    _require_approval(repo, cwd=worktree)
+    _require_approval(
+        repo,
+        cwd=worktree,
+        operation="batch-release",
+        approval_target={"batch": str(batch["id"])},
+    )
     config, context = _batch_context(repo, batch=batch, worktree=worktree)
     receipt = _invoke(
         repo,
@@ -574,7 +604,12 @@ def verify_runtime_effective(repo: GitRepo, *, candidate_id: str) -> dict[str, A
     command = config.runtime_adapter.verify_effective
     if command is None:
         raise SoloAIError("No runtime_adapter.verify_effective command is configured")
-    _require_approval(repo, cwd=base_worktree)
+    _require_approval(
+        repo,
+        cwd=base_worktree,
+        operation="verify-effective",
+        approval_target={"candidate": candidate_id},
+    )
     adapter_inputs = _adapter_input_hashes(
         repo, cwd=base_worktree, patterns=config.runtime_adapter.input_paths
     )

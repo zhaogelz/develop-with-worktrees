@@ -51,6 +51,9 @@ coordinator.
 - New repositories publish source candidates, automatically freeze an exact
   compatible group of three, and run affected combined checks before protected
   local promotion. A smaller tail requires a recorded cause and reason.
+- Local approval covers only the commands a lifecycle step will execute; an
+  unchanged complete approval can cover a smaller step. Approval does not include
+  proof-only facts such as lockfiles or tool versions.
 - A passed pure proof is reusable only under matching declared inputs,
   environment, tools, and logs. Runtime effects and required artifacts are not
   replaced by a prior success report.

@@ -35,19 +35,27 @@ conservative integration Full profile. The fallback does not claim cross-task
 reuse; if no command is found, the resulting static-only limitation remains
 explicit. `--verification-file` and `--verify` are mutually exclusive.
 
-Machine-local approval covers the normalized execution policy: commands, relevant
-configuration, tool and lockfile identity, declared environment names, profile
-closure, and Runtime Adapter inputs. Comments and line-ending-only policy edits
-do not change that normalized policy. A semantic command, scope, permission,
-runtime, or configuration change produces an approval mismatch and must be
-reviewed before execution.
+Machine-local approval covers only the repository-declared commands that the
+requested lifecycle step will execute. An approval for the complete policy also
+covers an unchanged smaller step. Use an explicit target when approving one
+step, for example:
 
-Approval is not a profile proof. A profile's own reuse identity is narrower and
-depends on its declared inputs and execution facts. A change to an unrelated
-profile or formatting-only bytes does not by itself rerun a profile whose own
-identity still matches; a changed command, relevant input, environment, tool
-fact, frozen base, missing log, incomplete closure, or mutable external state
-does. See [verification reuse](verification-reuse.md).
+```text
+dww approve --accept --scope ready --task <task-id>
+dww approve --accept --scope warm --slot 01
+dww approve --accept --scope batch-full --batch <batch-id>
+```
+
+A changed selected command, its execution configuration, secret scanner, dev or
+warm command, or Runtime Adapter input requires a new approval. An unrelated
+profile such as explicit Stress does not block Ready. Comments and line-ending
+only policy edits do not change the normalized command contract.
+
+Approval is not a profile proof. Proof reuse still depends on the profile's
+actual inputs and execution facts, including lockfiles, tool identity,
+environment, frozen base, logs, input closure, and external state. Those facts
+can require a check to run again without asking again to approve the same
+command. See [verification reuse](verification-reuse.md).
 
 ## `config.toml`
 

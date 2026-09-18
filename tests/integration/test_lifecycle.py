@@ -3622,6 +3622,61 @@ def test_comment_only_validation_policy_change_keeps_local_approval(
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
+def test_unrelated_stress_policy_change_does_not_block_ready(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="ready survives unrelated stress policy")
+    commit_one(repo, task, "candidate.txt", "candidate\n", "test: candidate")
+    stress = git_repo / ".solo-ai" / "stress-verification.toml"
+    stress.write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "new-explicit-stress-only"
+paths = ["**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["**"]
+environment = []
+commands = [["git", "diff", "--check"]]
+input_closure = "complete"
+timeout_seconds = 30
+resource_class = "normal"
+level = "stress"
+""",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/stress-verification.toml")
+    git(git_repo, "commit", "-m", "test: add unrelated stress policy")
+
+    assert ready(repo, task_id=task["id"], lease=task["lease"])["status"] == "ready"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_approval_plan_excludes_proof_only_tool_and_lockfile_facts(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    verification = load_verification_config(repo)
+    before = proof_module.approval_plan(repo, cwd=git_repo, verification=verification)
+
+    assert "tools" not in before["policy"]
+    assert "platform" not in before["policy"]
+    assert "lockfiles" not in before["policy"]
+    (git_repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    git(git_repo, "add", "uv.lock")
+    git(git_repo, "commit", "-m", "test: change proof lockfile fact")
+
+    after = proof_module.approval_plan(
+        repo,
+        cwd=git_repo,
+        verification=load_verification_config(repo),
+    )
+    assert after == before
+
+
 def test_validation_policy_change_requires_full_local_reapproval(
     git_repo: Path,
 ) -> None:
@@ -3659,7 +3714,7 @@ commands = [["git", "diff", "--check"]]
     assert report["difference_count"] == len(report["differences"])
     assert report["difference_count"] > 0
     assert any(
-        difference["path"].startswith("$.policy.configuration.verification")
+        difference["path"].startswith("$.policy.profiles")
         for difference in report["differences"]
     )
     assert str(reports[0]) in str(approval_error.value)
@@ -3695,14 +3750,12 @@ commands = [["git", "diff", "--check", "{token}"]]
     approval = approve(repo, verification)
     approvals_path = repo.local_dir / "approvals.json"
     assert token not in approvals_path.read_text(encoding="utf-8")
-    assert approval["plan"]["policy"]["configuration"]["verification"]["profiles"][0][
-        "commands"
-    ][0]["fingerprint"]
+    assert approval["plan"]["policy"]["profiles"][0]["commands"][0]["fingerprint"]
     # 模拟 schema 4 在本机遗留的原始 argv；下一次计划检查必须清理它。
     approvals = read_json(approvals_path, {"accepted": {}})
-    approvals["accepted"][approval["fingerprint"]]["plan"]["policy"]["configuration"][
-        "verification"
-    ]["profiles"][0]["commands"] = [["git", "diff", "--check", token]]
+    approvals["accepted"][approval["fingerprint"]]["plan"]["policy"]["profiles"][0][
+        "commands"
+    ] = [["git", "diff", "--check", token]]
     atomic_write_json(approvals_path, approvals)
 
     changed = verification_path.read_text(encoding="utf-8").replace(
@@ -5115,9 +5168,17 @@ timeout_seconds = 1
     git(git_repo, "commit", "-m", "test: configure local command approval")
     approve(repo, load_verification_config(repo))
     task = start(repo, name="reject stale local command approval")
+    worktree = Path(task["worktree"])
+    task_config = worktree / ".solo-ai" / "config.toml"
+    task_config.write_text(
+        task_config.read_text(encoding="utf-8").replace(
+            "dev-command-ran.txt", "changed-dev-command-ran.txt"
+        ),
+        encoding="utf-8",
+    )
     config.write_text(
         config.read_text(encoding="utf-8").replace(
-            "dev-command-ran.txt", "changed-dev-command-ran.txt"
+            "warm-command-ran.txt", "changed-warm-command-ran.txt"
         ),
         encoding="utf-8",
     )
@@ -5127,7 +5188,6 @@ timeout_seconds = 1
     with pytest.raises(SoloAIError, match="approval"):
         warm_slot(repo, slot_id="01")
 
-    worktree = Path(task["worktree"])
     assert not (worktree / "dev-command-ran.txt").exists()
     assert not (worktree / "warm-command-ran.txt").exists()
     assert StateStore(repo).task(task["id"])["processes"] == []

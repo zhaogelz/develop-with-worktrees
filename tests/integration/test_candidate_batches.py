@@ -1277,8 +1277,13 @@ def test_runtime_adapter_activate_prepares_the_exact_slot_before_start_returns(
         repo, cwd=repo.root, verification=load_verification_config(repo)
     )
     assert task["status"] == "active"
-    assert plan["runtime_adapter"]["activate"][-1] == activate_script
-    assert plan["runtime_adapter"]["input_hashes"]
+    activation_policy = next(
+        item
+        for item in plan["policy"]["runtime_adapter"]
+        if item["operation"] == "activate"
+    )
+    assert activation_policy["command"]["argv"][-1] == activate_script
+    assert activation_policy["input_hashes"]
     assert task["runtime_activation"]["operation"] == "activate"
     assert context["operation"] == "activate"
     assert context["task_id"] == task["id"]

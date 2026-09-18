@@ -61,6 +61,7 @@ from .proof import (
     approval_plan,
     new_validation_attempt_id,
     require_approved_plan,
+    selected_profile_ids,
     require_exact_passed_proof,
     validate,
 )
@@ -350,17 +351,55 @@ def _approval_path(repo: GitRepo) -> Path:
 
 
 def _approval_fingerprint(
-    repo: GitRepo, verification: VerificationConfig, *, cwd: Path
+    repo: GitRepo,
+    verification: VerificationConfig,
+    *,
+    cwd: Path,
+    scope: str = "all",
+    profile_ids: tuple[str, ...] | None = None,
+    include_secret_scanner: bool = False,
+    include_warm_commands: bool = False,
+    include_dev_start: bool = False,
+    adapter_operations: tuple[str, ...] = (),
 ) -> tuple[str, dict[str, Any]]:
-    plan = approval_plan(repo, cwd=cwd, verification=verification)
+    plan = approval_plan(
+        repo,
+        cwd=cwd,
+        verification=verification,
+        scope=scope,
+        profile_ids=profile_ids,
+        include_secret_scanner=include_secret_scanner,
+        include_warm_commands=include_warm_commands,
+        include_dev_start=include_dev_start,
+        adapter_operations=adapter_operations,
+    )
     return sha256_text(stable_json(plan)), plan
 
 
 def approve(
-    repo: GitRepo, verification: VerificationConfig, *, cwd: Path | None = None
+    repo: GitRepo,
+    verification: VerificationConfig,
+    *,
+    cwd: Path | None = None,
+    scope: str = "all",
+    profile_ids: tuple[str, ...] | None = None,
+    include_secret_scanner: bool = False,
+    include_warm_commands: bool = False,
+    include_dev_start: bool = False,
+    adapter_operations: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     policy = cwd or repo.policy_path()
-    fingerprint, plan = _approval_fingerprint(repo, verification, cwd=policy)
+    fingerprint, plan = _approval_fingerprint(
+        repo,
+        verification,
+        cwd=policy,
+        scope=scope,
+        profile_ids=profile_ids,
+        include_secret_scanner=include_secret_scanner,
+        include_warm_commands=include_warm_commands,
+        include_dev_start=include_dev_start,
+        adapter_operations=adapter_operations,
+    )
     approvals = read_json(_approval_path(repo), {"schema_version": 2, "accepted": {}})
     approvals["accepted"][fingerprint] = {"accepted_at": utc_timestamp(), "plan": plan}
     atomic_write_json(_approval_path(repo), approvals)
@@ -368,14 +407,71 @@ def approve(
 
 
 def require_approval(
-    repo: GitRepo, verification: VerificationConfig, *, cwd: Path | None = None
+    repo: GitRepo,
+    verification: VerificationConfig,
+    *,
+    cwd: Path | None = None,
+    scope: str = "all",
+    profile_ids: tuple[str, ...] | None = None,
+    include_secret_scanner: bool = False,
+    include_warm_commands: bool = False,
+    include_dev_start: bool = False,
+    adapter_operations: tuple[str, ...] = (),
+    approval_target: dict[str, str] | None = None,
 ) -> None:
     policy = cwd or repo.policy_path()
     require_approved_plan(
         repo,
         cwd=policy,
         verification=verification,
-        message=("This machine has not approved the full normalized validation plan."),
+        message="This machine has not approved the commands required by this lifecycle step.",
+        scope=scope,
+        profile_ids=profile_ids,
+        include_secret_scanner=include_secret_scanner,
+        include_warm_commands=include_warm_commands,
+        include_dev_start=include_dev_start,
+        adapter_operations=adapter_operations,
+        approval_target=approval_target,
+    )
+
+
+def _require_validation_approval(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    base: str,
+    verification: VerificationConfig,
+    level: str,
+    full_scope: str | None,
+    scope: str,
+    include_secret_scanner: bool,
+    approval_target: dict[str, str],
+) -> None:
+    levels = (
+        ("ready",)
+        if level == "ready"
+        else (("stress",) if level == "stress" else ("ready", "full"))
+    )
+    full_scopes = (
+        ("integration", "complete")
+        if level == "full" and full_scope == "complete"
+        else ((full_scope,) if level == "full" and full_scope else None)
+    )
+    require_approval(
+        repo,
+        verification,
+        cwd=cwd,
+        scope=scope,
+        profile_ids=selected_profile_ids(
+            repo,
+            cwd=cwd,
+            base=base,
+            verification=verification,
+            levels=levels,
+            full_scopes=full_scopes,
+        ),
+        include_secret_scanner=include_secret_scanner,
+        approval_target=approval_target,
     )
 
 
@@ -1138,13 +1234,6 @@ def _complete_runtime_activation(
         store.quarantine(str(task["id"]), str(exc))
         raise
     from .runtime_adapter import activate_task_runtime
-
-    worktree = Path(str(task["worktree"]))
-    activation_config = load_repo_config(repo, cwd=worktree)
-    if activation_config.runtime_adapter.activate is not None:
-        require_approval(
-            repo, load_verification_config(repo, cwd=worktree), cwd=worktree
-        )
 
     runtime_activation = activate_task_runtime(repo, task=task)
     refreshed = store.task(str(task["id"]))
@@ -2136,7 +2225,7 @@ def commit_task(
     paths: list[str],
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    config, _, _ = _config_and_mode(repo)
+    _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     with store.operation(task_id, lease, "commit") as task:
         worktree = Path(task["worktree"])
@@ -2206,13 +2295,24 @@ def commit_task(
             raise SoloAIError(
                 "Task changes changed while staging; inspect the task diff and retry"
             )
-        _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
+        task_config = load_repo_config(repo, cwd=worktree)
+        require_approval(
+            repo,
+            load_verification_config(repo, cwd=worktree),
+            cwd=worktree,
+            scope="commit",
+            include_secret_scanner=task_config.secret_scanner is not None,
+            approval_target={"task": task_id},
+        )
+        _run_declared_secret_scanner(
+            repo, cwd=worktree, scanner=task_config.secret_scanner
+        )
         require_safe(
             repo,
             cwd=worktree,
             base=None,
             staged=True,
-            allowlist=config.sensitive_allowlist,
+            allowlist=task_config.sensitive_allowlist,
         )
         if merge_head.returncode == 0:
             preparation = task.get("repair_preparation") or {}
@@ -2409,8 +2509,18 @@ def ready(
             config = load_repo_config(repo, cwd=worktree)
             store.require_slot_layout(config)
             verification = load_verification_config(repo, cwd=worktree)
-            require_approval(repo, verification, cwd=worktree)
             base_ref = _verification_base(task)
+            _require_validation_approval(
+                repo,
+                cwd=worktree,
+                base=base_ref,
+                verification=verification,
+                level="ready",
+                full_scope=None,
+                scope="ready",
+                include_secret_scanner=config.secret_scanner is not None,
+                approval_target={"task": task_id},
+            )
             _run_declared_secret_scanner(
                 repo, cwd=worktree, scanner=config.secret_scanner
             )
@@ -3160,7 +3270,17 @@ def _finish_in_place(
     config = load_repo_config(repo, cwd=worktree)
     store.require_slot_layout(config)
     verification = load_verification_config(repo, cwd=worktree)
-    require_approval(repo, verification, cwd=worktree)
+    _require_validation_approval(
+        repo,
+        cwd=worktree,
+        base=_verification_base(task),
+        verification=verification,
+        level="ready",
+        full_scope=None,
+        scope="finish",
+        include_secret_scanner=config.secret_scanner is not None,
+        approval_target={"task": str(task["id"])},
+    )
     _run_declared_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
     _assert_in_place_binding(repo, store, task, session_id=session_id)
     require_safe(
@@ -3815,7 +3935,29 @@ def finish(
                 candidate_config = load_repo_config(repo, cwd=worktree)
                 store.require_slot_layout(candidate_config)
                 verification = load_verification_config(repo, cwd=worktree)
-                require_approval(repo, verification, cwd=worktree)
+                if candidate_requires_ready:
+                    _require_validation_approval(
+                        repo,
+                        cwd=worktree,
+                        base=str(task["base_ref"]),
+                        verification=verification,
+                        level="ready",
+                        full_scope=None,
+                        scope="finish",
+                        include_secret_scanner=candidate_config.secret_scanner
+                        is not None,
+                        approval_target={"task": task_id},
+                    )
+                else:
+                    require_approval(
+                        repo,
+                        verification,
+                        cwd=worktree,
+                        scope="finish",
+                        include_secret_scanner=candidate_config.secret_scanner
+                        is not None,
+                        approval_target={"task": task_id},
+                    )
                 _run_declared_secret_scanner(
                     repo, cwd=worktree, scanner=candidate_config.secret_scanner
                 )
@@ -4776,12 +4918,7 @@ def _ready(kind: str, target: str | None, *, port: int) -> bool:
 
 
 def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
-    config, verification, policy = _config_and_mode(repo)
-    if not config.dev_start or not config.readiness:
-        raise SoloAIError(
-            "No lifecycle.dev_start plus readiness configuration is declared"
-        )
-    require_approval(repo, verification, cwd=policy)
+    _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
     with store.operation(task_id, lease, "dev-start") as task:
         if _is_in_place(task):
@@ -4794,6 +4931,21 @@ def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
             )
         if task.get("processes"):
             raise SoloAIError("Task already has a registered development process")
+        worktree = Path(str(task["worktree"]))
+        config = load_repo_config(repo, cwd=worktree)
+        verification = load_verification_config(repo, cwd=worktree)
+        if not config.dev_start or not config.readiness:
+            raise SoloAIError(
+                "No lifecycle.dev_start plus readiness configuration is declared"
+            )
+        require_approval(
+            repo,
+            verification,
+            cwd=worktree,
+            scope="development",
+            include_dev_start=True,
+            approval_target={"task": task_id},
+        )
         block = config.port_base + (int(task["slot_id"]) - 1) * 100
         for port in range(block, block + 100):
             if not _port_free(port):
@@ -4882,7 +5034,14 @@ def warm_slot(repo: GitRepo, *, slot_id: str) -> dict[str, Any]:
         if slot_id not in {f"{number:02d}" for number in range(1, config.slots + 1)}:
             raise SoloAIError("WarmSlot requires an active configured slot id")
         if config.warm_commands:
-            require_approval(repo, verification, cwd=policy)
+            require_approval(
+                repo,
+                verification,
+                cwd=policy,
+                scope="warm",
+                include_warm_commands=True,
+                approval_target={"slot": slot_id},
+            )
         store = StateStore(repo)
         state = store.ensure_slots(config)
         slot = state["slots"][slot_id]

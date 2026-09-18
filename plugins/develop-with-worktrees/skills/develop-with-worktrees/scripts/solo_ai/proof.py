@@ -50,7 +50,7 @@ VALIDATION_ATTEMPT_SCHEMA = 1
 # 审批计划和验证收据的演进速度不同：前者描述可执行的策略，后者绑定现场证据。
 # 5 将验证命令从本机审批记录中改为“脱敏展示 + 原始参数指纹”。
 # 旧计划可能含有原始命令参数，不能继续当作当前审批契约。
-APPROVAL_PLAN_SCHEMA = 5
+APPROVAL_PLAN_SCHEMA = 6
 _EXECUTION_BASELINE = (
     "PATH",
     "SYSTEMROOT",
@@ -244,6 +244,25 @@ def select_profiles(
         ):
             selected.append(profile)
     return selected
+
+
+def selected_profile_ids(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    base: str,
+    verification: VerificationConfig,
+    levels: tuple[str, ...] = ("ready",),
+    full_scopes: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """返回本次验证实际会运行的检查 ID，供批准和执行共用。"""
+    files = changed_files(repo, cwd=cwd, base=base)
+    return tuple(
+        profile.profile_id
+        for profile in select_profiles(
+            verification, files, levels=levels, full_scopes=full_scopes
+        )
+    )
 
 
 def unmapped_files(
@@ -501,11 +520,16 @@ def _redact_legacy_approval_plan(plan: dict[str, Any]) -> dict[str, Any]:
     to inspect or share.
     """
     sanitized = copy.deepcopy(plan)
-    configuration = sanitized.get("policy", {}).get("configuration", {})
-    verification = configuration.get("verification", {})
+    policy = sanitized.get("policy", {})
+    configuration = policy.get("configuration", {}) if isinstance(policy, dict) else {}
+    verification = (
+        configuration.get("verification", {}) if isinstance(configuration, dict) else {}
+    )
     profiles = (
         verification.get("profiles", []) if isinstance(verification, dict) else []
     )
+    if isinstance(policy, dict) and isinstance(policy.get("profiles"), list):
+        profiles = [*profiles, *policy["profiles"]]
     if not isinstance(profiles, list):
         return sanitized
     for profile in profiles:
@@ -616,80 +640,132 @@ def _profile_validation_environment(
     return environment
 
 
-def approval_plan(
-    repo: GitRepo, *, cwd: Path, verification: VerificationConfig
+def _profile_policy(profile: VerificationProfile) -> dict[str, Any]:
+    return {
+        "id": profile.profile_id,
+        "paths": list(profile.paths),
+        "commands": [_command_policy(command) for command in profile.commands],
+        "cross_task_reuse": profile.cross_task_reuse,
+        "external_state": profile.external_state,
+        "input_paths": list(profile.input_paths),
+        "environment": list(profile.environment),
+        "input_closure": profile.input_closure,
+        "timeout_seconds": profile.timeout_seconds,
+        "resource_class": profile.resource_class,
+        "level": profile.level,
+        "frozen_base": profile.frozen_base,
+        "full_scope": profile.full_scope,
+    }
+
+
+def _runtime_adapter_policy(
+    repo: GitRepo, *, cwd: Path, operation: str, adapter: Any
 ) -> dict[str, Any]:
-    repo_config = load_repo_config(repo, cwd=cwd)
-    runtime_adapter = repo_config.runtime_adapter
-    adapter_commands = [
-        command
-        for command in (
-            runtime_adapter.activate,
-            runtime_adapter.release,
-            runtime_adapter.batch_activate,
-            runtime_adapter.batch_release,
-            runtime_adapter.verify_effective,
-        )
-        if command is not None
-    ]
-    adapter_input_hashes = _matching_hashes(
-        cwd,
-        _tracked(repo, cwd),
-        runtime_adapter.input_paths,
-    )
-    if adapter_commands and not adapter_input_hashes:
+    command = getattr(adapter, operation)
+    input_hashes = _matching_hashes(cwd, _tracked(repo, cwd), adapter.input_paths)
+    if command is not None and not input_hashes:
         raise SoloAIError("Runtime Adapter input_paths did not match any tracked file")
-    commands = [*verification.commands, *adapter_commands]
-    shared = _shared_inputs(repo, cwd, commands, verification)
+    return {
+        "operation": operation,
+        "command": _command_policy(command),
+        "input_paths": list(adapter.input_paths),
+        "input_hashes": input_hashes,
+        "timeout_seconds": adapter.timeout_seconds,
+        "context_contract": "dww-runtime-adapter-v1" if command else None,
+    }
+
+
+def approval_plan(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    verification: VerificationConfig,
+    scope: str = "all",
+    profile_ids: tuple[str, ...] | None = None,
+    include_secret_scanner: bool = False,
+    include_warm_commands: bool = False,
+    include_dev_start: bool = False,
+    adapter_operations: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """生成本次动作将执行的最小批准契约，不混入证明现场事实。"""
+    repo_config = load_repo_config(repo, cwd=cwd)
+    profiles_by_id = {profile.profile_id: profile for profile in verification.profiles}
+    if scope == "all":
+        profile_ids = tuple(profile.profile_id for profile in verification.profiles)
+        include_secret_scanner = repo_config.secret_scanner is not None
+        include_warm_commands = bool(repo_config.warm_commands)
+        include_dev_start = repo_config.dev_start is not None
+        adapter_operations = (
+            "activate",
+            "release",
+            "batch_activate",
+            "batch_release",
+            "verify_effective",
+        )
+    requested_ids = tuple(profile_ids or ())
+    unknown_profiles = sorted(set(requested_ids) - set(profiles_by_id))
+    if unknown_profiles:
+        raise SoloAIError(
+            "Approval requested unknown verification profiles: "
+            + ", ".join(unknown_profiles)
+        )
+    unknown_operations = sorted(
+        set(adapter_operations)
+        - {"activate", "release", "batch_activate", "batch_release", "verify_effective"}
+    )
+    if unknown_operations:
+        raise SoloAIError(
+            "Approval requested unknown Runtime Adapter operations: "
+            + ", ".join(unknown_operations)
+        )
+    selected_profiles = [
+        _profile_policy(profiles_by_id[item]) for item in requested_ids
+    ]
+    adapter = repo_config.runtime_adapter
+    selected_adapters = [
+        _runtime_adapter_policy(repo, cwd=cwd, operation=operation, adapter=adapter)
+        for operation in adapter_operations
+        if getattr(adapter, operation) is not None
+    ]
+    readiness = repo_config.readiness
+    dev_start = (
+        {
+            "command": _command_policy(repo_config.dev_start),
+            "readiness": (
+                {
+                    "kind": readiness.kind,
+                    "target": readiness.target,
+                    "timeout_seconds": readiness.timeout_seconds,
+                }
+                if readiness is not None
+                else None
+            ),
+            "port_base": repo_config.port_base,
+        }
+        if include_dev_start and repo_config.dev_start is not None
+        else None
+    )
     return {
         "schema_version": APPROVAL_PLAN_SCHEMA,
-        "contract": "execution-policy-v1",
+        "contract": "execution-policy-v2",
         "git_common_dir": sha256_text(str(repo.common_dir)),
-        "policy": _approval_policy_inputs(
-            shared, repo_config=repo_config, verification=verification
-        ),
-        "profiles": [
-            {
-                "id": profile.profile_id,
-                "paths": list(profile.paths),
-                "commands": [command.redacted() for command in profile.commands],
-                "command_digests": [
-                    command.fingerprint for command in profile.commands
-                ],
-                "cross_task_reuse": profile.cross_task_reuse,
-                "external_state": profile.external_state,
-                "input_paths": list(profile.input_paths),
-                "environment": list(profile.environment),
-                "input_closure": profile.input_closure,
-                "timeout_seconds": profile.timeout_seconds,
-                "resource_class": profile.resource_class,
-                "level": profile.level,
-            }
-            for profile in verification.profiles
-        ],
-        "runtime_adapter": {
-            "activate": runtime_adapter.activate.redacted()
-            if runtime_adapter.activate
-            else None,
-            "release": runtime_adapter.release.redacted()
-            if runtime_adapter.release
-            else None,
-            "batch_activate": runtime_adapter.batch_activate.redacted()
-            if runtime_adapter.batch_activate
-            else None,
-            "batch_release": runtime_adapter.batch_release.redacted()
-            if runtime_adapter.batch_release
-            else None,
-            "verify_effective": runtime_adapter.verify_effective.redacted()
-            if runtime_adapter.verify_effective
-            else None,
-            "command_digests": [command.fingerprint for command in adapter_commands],
-            "input_paths": list(runtime_adapter.input_paths),
-            "input_hashes": adapter_input_hashes,
-            "timeout_seconds": runtime_adapter.timeout_seconds,
-            "context_contract": "dww-runtime-adapter-v1",
+        "scope": scope,
+        "policy": {
+            "static_only": verification.static_only,
+            "profiles": selected_profiles,
+            "secret_scanner": (
+                _command_policy(repo_config.secret_scanner)
+                if include_secret_scanner and repo_config.secret_scanner is not None
+                else None
+            ),
+            "warm_commands": (
+                [_command_policy(command) for command in repo_config.warm_commands]
+                if include_warm_commands
+                else []
+            ),
+            "dev_start": dev_start,
+            "runtime_adapter": selected_adapters,
         },
-        "static_only": verification.static_only,
     }
 
 
@@ -754,22 +830,146 @@ def _approval_plan_differences(
     return [{"path": path, "approved": approved, "current": current}]
 
 
+def _approved_policy_covers(approved: dict[str, Any], current: dict[str, Any]) -> bool:
+    if approved.get("contract") != "execution-policy-v2":
+        return False
+    if approved.get("git_common_dir") != current.get("git_common_dir"):
+        return False
+    approved_policy = approved.get("policy")
+    current_policy = current.get("policy")
+    if not isinstance(approved_policy, dict) or not isinstance(current_policy, dict):
+        return False
+    if approved_policy.get("static_only") != current_policy.get("static_only"):
+        return False
+    approved_profiles = {
+        item.get("id"): item
+        for item in approved_policy.get("profiles", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for profile in current_policy.get("profiles", []):
+        if (
+            not isinstance(profile, dict)
+            or approved_profiles.get(profile.get("id")) != profile
+        ):
+            return False
+    for field in ("secret_scanner", "dev_start"):
+        requested = current_policy.get(field)
+        if requested is not None and approved_policy.get(field) != requested:
+            return False
+    requested_warm = current_policy.get("warm_commands", [])
+    if requested_warm and approved_policy.get("warm_commands") != requested_warm:
+        return False
+    approved_adapter = {
+        item.get("operation"): item
+        for item in approved_policy.get("runtime_adapter", [])
+        if isinstance(item, dict) and isinstance(item.get("operation"), str)
+    }
+    for operation in current_policy.get("runtime_adapter", []):
+        if (
+            not isinstance(operation, dict)
+            or approved_adapter.get(operation.get("operation")) != operation
+        ):
+            return False
+    return True
+
+
+def _legacy_approval_covers(approved: dict[str, Any], current: dict[str, Any]) -> bool:
+    """仅在旧全量计划能逐项证明覆盖当前步骤时兼容。"""
+    if approved.get("contract") != "execution-policy-v1":
+        return False
+    if approved.get("git_common_dir") != current.get("git_common_dir"):
+        return False
+    configuration = approved.get("policy", {}).get("configuration", {})
+    repository = (
+        configuration.get("repository", {}) if isinstance(configuration, dict) else {}
+    )
+    verification = (
+        configuration.get("verification", {}) if isinstance(configuration, dict) else {}
+    )
+    if not isinstance(repository, dict) or not isinstance(verification, dict):
+        return False
+    current_policy = current.get("policy", {})
+    if verification.get("static_only") != current_policy.get("static_only"):
+        return False
+    old_profiles = {
+        item.get("id"): item
+        for item in verification.get("profiles", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for profile in current_policy.get("profiles", []):
+        if old_profiles.get(profile.get("id")) != profile:
+            return False
+    if current_policy.get("secret_scanner") is not None and repository.get(
+        "secret_scanner"
+    ) != current_policy.get("secret_scanner"):
+        return False
+    if current_policy.get("warm_commands") and repository.get(
+        "warm_commands"
+    ) != current_policy.get("warm_commands"):
+        return False
+    requested_dev = current_policy.get("dev_start")
+    if requested_dev is not None:
+        old_dev = {
+            "command": repository.get("dev_start"),
+            "readiness": repository.get("readiness"),
+            "port_base": repository.get("port_base"),
+        }
+        if old_dev != requested_dev:
+            return False
+    return not current_policy.get("runtime_adapter")
+
+
+def _approval_command(scope: str, target: dict[str, str] | None) -> str:
+    selectors = target or {}
+    suffix = "".join(
+        f" --{key.replace('_', '-')} {value}"
+        for key, value in sorted(selectors.items())
+    )
+    return f"approve --accept --scope {scope}{suffix}"
+
+
 def require_approved_plan(
     repo: GitRepo,
     *,
     cwd: Path,
     verification: VerificationConfig,
     message: str,
+    scope: str = "all",
+    profile_ids: tuple[str, ...] | None = None,
+    include_secret_scanner: bool = False,
+    include_warm_commands: bool = False,
+    include_dev_start: bool = False,
+    adapter_operations: tuple[str, ...] = (),
+    approval_target: dict[str, str] | None = None,
 ) -> str:
-    """Require an exact approval and persist a field-level drift report on failure."""
-    plan = approval_plan(repo, cwd=cwd, verification=verification)
+    """要求覆盖本步骤的本机批准，并在失败时保存精确差异。"""
+    plan = approval_plan(
+        repo,
+        cwd=cwd,
+        verification=verification,
+        scope=scope,
+        profile_ids=profile_ids,
+        include_secret_scanner=include_secret_scanner,
+        include_warm_commands=include_warm_commands,
+        include_dev_start=include_dev_start,
+        adapter_operations=adapter_operations,
+    )
+    policy = plan["policy"]
+    if not any(
+        (
+            policy["profiles"],
+            policy["secret_scanner"],
+            policy["warm_commands"],
+            policy["dev_start"],
+            policy["runtime_adapter"],
+        )
+    ):
+        return sha256_text(stable_json(plan))
     fingerprint = sha256_text(stable_json(plan))
     approvals = read_json(repo.local_dir / "approvals.json", {"accepted": {}})
     accepted = approvals.get("accepted", {})
     if not isinstance(accepted, dict):
         accepted = {}
-    # 清理旧版审批记录中的原始命令参数，即使本次审批尚未匹配也不继续
-    # 留存敏感值。保留原记录键，避免把清理动作伪装成一次新审批。
     sanitized_accepted: dict[str, Any] = {}
     approval_record_changed = False
     for approved_fingerprint, record in accepted.items():
@@ -787,15 +987,17 @@ def require_approved_plan(
     if approval_record_changed:
         approvals = {**approvals, "accepted": sanitized_accepted}
         atomic_write_json(repo.local_dir / "approvals.json", approvals)
-    accepted = sanitized_accepted
-    if fingerprint in accepted:
+    if fingerprint in sanitized_accepted:
         return fingerprint
-
     comparisons: list[tuple[int, str, str, list[dict[str, Any]]]] = []
-    for approved_fingerprint, record in accepted.items():
+    for approved_fingerprint, record in sanitized_accepted.items():
         approved_plan = record.get("plan") if isinstance(record, dict) else None
         if not isinstance(approved_plan, dict):
             continue
+        if _approved_policy_covers(approved_plan, plan) or _legacy_approval_covers(
+            approved_plan, plan
+        ):
+            return str(approved_fingerprint)
         differences = _approval_plan_differences(approved_plan, plan)
         comparisons.append(
             (
@@ -813,12 +1015,14 @@ def require_approved_plan(
             key=lambda item: (item[1], item[2]),
         )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "current_fingerprint": fingerprint,
         "nearest_approved_fingerprint": nearest[2] if nearest else None,
         "nearest_approved_at": nearest[1] if nearest else None,
         "difference_count": nearest[0] if nearest else None,
         "differences": nearest[3] if nearest else [],
+        "scope": scope,
+        "target": approval_target or {},
     }
     report_path = repo.local_dir / "approval-mismatches" / f"{fingerprint}.json"
     atomic_write_json(report_path, report)
@@ -827,9 +1031,15 @@ def require_approved_plan(
         if nearest
         else "no accepted plan exists"
     )
-    raise SoloAIError(
-        f"{message} {detail}. Local report: {report_path}. "
-        "Review `doctor` then run `approve --accept`."
+    raise ActionableSoloAIError(
+        f"{message} {detail}. Local report: {report_path}. Review doctor then run {_approval_command(scope, approval_target)}.",
+        code="APPROVAL_REQUIRED",
+        context={"scope": scope, **(approval_target or {})},
+        next_action={
+            "kind": "approve_scope",
+            "scope": scope,
+            **(approval_target or {}),
+        },
     )
 
 

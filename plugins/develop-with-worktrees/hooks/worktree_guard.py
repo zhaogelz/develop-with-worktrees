@@ -34,47 +34,13 @@ SKILL_SCRIPTS = (
 if str(SKILL_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SKILL_SCRIPTS))
 
+from solo_ai.command_contract import TOP_LEVEL_COMMANDS
 from solo_ai.delegated import inspect_delegated
 from solo_ai.routing import decide_route, detect_existing_workflows
 
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
-DWW_SUBCOMMANDS = {
-    "version",
-    "init",
-    "choose",
-    "approve",
-    "disable",
-    "enable",
-    "settings",
-    "doctor",
-    "route",
-    "delegated",
-    "orchestrate",
-    "candidate",
-    "batch",
-    "host-handoff",
-    "start",
-    "commit",
-    "ready",
-    "finish",
-    "retarget",
-    "plan",
-    "verify",
-    "status",
-    "recover",
-    "abandon",
-    "resume-in-place",
-    "warm-slot",
-    "dev",
-    "prune-proofs",
-    "prune-logs",
-    "prune-slot",
-    "deinit",
-    "anchor",
-    "root-anchor",
-    "handoff",
-}
+DWW_SUBCOMMANDS = TOP_LEVEL_COMMANDS
 DWW_QUARANTINE_SUBCOMMANDS = {"doctor", "status", "plan", "resume-in-place"}
 DWW_READ_ONLY_SUBCOMMANDS = {"version", "doctor", "route", "status", "plan"}
 SHELL_CONTROL = (";", "|", "&", "`", "$", "(", ")", "<", ">", "\n", "\r")

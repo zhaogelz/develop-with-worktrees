@@ -26,6 +26,7 @@ from .proof import (
     new_validation_attempt_id,
     read_validation_attempt,
     require_approved_plan,
+    selected_profile_ids,
     require_exact_passed_proof,
     start_validation_attempt,
     validate,
@@ -1756,13 +1757,31 @@ def _run_secret_scanner(
         )
 
 
-def _require_approval(repo: GitRepo, *, cwd: Path) -> None:
-    verification = load_verification_config(repo, cwd=cwd)
+def _require_approval(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    base: str,
+    verification: Any,
+    include_secret_scanner: bool,
+    batch_id: str,
+) -> None:
     require_approved_plan(
         repo,
         cwd=cwd,
         verification=verification,
-        message="This machine has not approved the combined validation plan.",
+        message="This machine has not approved the combined validation commands.",
+        scope="batch-full",
+        profile_ids=selected_profile_ids(
+            repo,
+            cwd=cwd,
+            base=base,
+            verification=verification,
+            levels=("ready", "full"),
+            full_scopes=("integration",),
+        ),
+        include_secret_scanner=include_secret_scanner,
+        approval_target={"batch": batch_id},
     )
 
 
@@ -2102,7 +2121,14 @@ def _validate_batch(
         if policy.get("mode") != "batched":
             raise SoloAIError("The sealed generation has no batched integration policy")
         verification = load_verification_config(repo, cwd=worktree)
-        _require_approval(repo, cwd=worktree)
+        _require_approval(
+            repo,
+            cwd=worktree,
+            base=str(batch["base_ref"]),
+            verification=verification,
+            include_secret_scanner=config.secret_scanner is not None,
+            batch_id=str(batch["id"]),
+        )
         _run_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
         require_safe(
             repo,

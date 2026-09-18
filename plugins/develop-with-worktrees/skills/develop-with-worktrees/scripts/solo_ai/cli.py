@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import VERSION
+from .command_contract import TOP_LEVEL_COMMANDS
 from .candidate_batches import (
     EXPLICIT_TAIL_CAUSES,
     CandidateBatchStore,
@@ -87,7 +88,9 @@ from .proof import (
     new_validation_attempt_id,
     profile_execution_decision,
     profile_selection_reason,
+    require_approved_plan,
     proof_inputs,
+    selected_profile_ids,
     validate,
 )
 from .repo import GitRepo
@@ -231,12 +234,40 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     approval = sub.add_parser(
-        "approve", help="locally approve the current full normalized validation plan"
+        "approve",
+        help="locally approve only the commands required by one lifecycle step",
     )
     approval.add_argument("--accept", action="store_true", required=True)
     approval.add_argument(
-        "--task",
-        help="approve the exact committed candidate policy of one active task",
+        "--scope",
+        default="all",
+        choices=(
+            "all",
+            "ready",
+            "full",
+            "complete",
+            "stress",
+            "commit",
+            "finish",
+            "development",
+            "warm",
+            "batch-full",
+            "runtime-activate",
+            "runtime-release",
+            "runtime-batch-activate",
+            "runtime-batch-release",
+            "runtime-verify-effective",
+        ),
+        help="the exact lifecycle step whose declared commands are approved",
+    )
+    approval_target = approval.add_mutually_exclusive_group()
+    approval_target.add_argument("--task", help="task that will execute the step")
+    approval_target.add_argument("--slot", help="managed slot that will be warmed")
+    approval_target.add_argument(
+        "--batch", help="combined batch that will execute the step"
+    )
+    approval_target.add_argument(
+        "--candidate", help="delivered candidate whose runtime will be checked"
     )
 
     sub.add_parser(
@@ -1088,7 +1119,174 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="repository-conventional cleanup commit message",
     )
+    registered_commands = frozenset(sub.choices)
+    if registered_commands != TOP_LEVEL_COMMANDS:
+        missing = sorted(TOP_LEVEL_COMMANDS - registered_commands)
+        unexpected = sorted(registered_commands - TOP_LEVEL_COMMANDS)
+        raise RuntimeError(
+            "DWW top-level command contract drift: "
+            + ", ".join(
+                [
+                    *(f"missing {item}" for item in missing),
+                    *(f"unexpected {item}" for item in unexpected),
+                ]
+            )
+        )
     return parser
+
+
+def _approval_request(repo: GitRepo, args: argparse.Namespace) -> dict[str, Any]:
+    """将 CLI 选择器转换为实际执行目录和最小批准计划。"""
+    selectors = {
+        key: value
+        for key, value in {
+            "task": args.task,
+            "slot": args.slot,
+            "batch": args.batch,
+            "candidate": args.candidate,
+        }.items()
+        if value
+    }
+    if args.scope != "all" and not selectors:
+        raise SoloAIError(
+            "approve --scope requires one of --task, --slot, --batch, or --candidate"
+        )
+    if not selectors:
+        verification = load_verification_config(repo)
+        return {
+            "verification": verification,
+            "cwd": repo.policy_path(),
+            "scope": args.scope,
+        }
+    if args.task:
+        task = StateStore(repo).task(args.task)
+        cwd = Path(str(task["worktree"]))
+        verification = load_verification_config(repo, cwd=cwd)
+        config = load_repo_config(repo, cwd=cwd)
+        profile_ids: tuple[str, ...] = ()
+        level_for_scope = {
+            "ready": ("ready", None),
+            "finish": ("ready", None),
+            "full": ("full", "integration"),
+            "complete": ("full", "complete"),
+            "stress": ("stress", None),
+        }.get(args.scope)
+        if level_for_scope is not None:
+            level, full_scope = level_for_scope
+            if args.scope == "finish":
+                policy = task.get("integration_policy") or {}
+                requires_ready = (
+                    policy.get("mode") != "batched"
+                    or policy.get("candidate_validation", "ready") != "batch"
+                )
+                if not requires_ready:
+                    level_for_scope = None
+            if level_for_scope is not None:
+                levels = (
+                    ("ready",)
+                    if level == "ready"
+                    else (("stress",) if level == "stress" else ("ready", "full"))
+                )
+                profile_ids = selected_profile_ids(
+                    repo,
+                    cwd=cwd,
+                    base=str(task.get("start_head") or task["base_ref"]),
+                    verification=verification,
+                    levels=levels,
+                    full_scopes=(
+                        ("integration", "complete")
+                        if full_scope == "complete"
+                        else ((full_scope,) if full_scope else None)
+                    ),
+                )
+        adapter_operations = {
+            "runtime-activate": ("activate",),
+            "runtime-release": ("release",),
+        }.get(args.scope, ())
+        return {
+            "verification": verification,
+            "cwd": cwd,
+            "scope": args.scope,
+            "profile_ids": profile_ids,
+            "include_secret_scanner": args.scope in {"ready", "commit", "finish"}
+            and config.secret_scanner is not None,
+            "include_dev_start": args.scope == "development",
+            "adapter_operations": adapter_operations,
+        }
+    if args.slot:
+        if args.scope != "warm":
+            raise SoloAIError("--slot is only valid with approve --scope warm")
+        cwd = repo.policy_path()
+        return {
+            "verification": load_verification_config(repo, cwd=cwd),
+            "cwd": cwd,
+            "scope": args.scope,
+            "include_warm_commands": True,
+        }
+    if args.batch:
+        if args.scope not in {
+            "batch-full",
+            "runtime-batch-activate",
+            "runtime-batch-release",
+            "all",
+        }:
+            raise SoloAIError("--batch requires a batch approval scope")
+        batch = CandidateBatchStore(repo).batch(args.batch)
+        cwd = Path(str(batch["worktree"]))
+        verification = load_verification_config(repo, cwd=cwd)
+        config = load_repo_config(repo, cwd=cwd)
+        adapter_operations = {
+            "runtime-batch-activate": ("batch_activate",),
+            "runtime-batch-release": ("batch_release",),
+        }.get(args.scope, ())
+        profile_ids = ()
+        if args.scope == "batch-full":
+            profile_ids = selected_profile_ids(
+                repo,
+                cwd=cwd,
+                base=str(batch["base_ref"]),
+                verification=verification,
+                levels=("ready", "full"),
+                full_scopes=("integration",),
+            )
+        return {
+            "verification": verification,
+            "cwd": cwd,
+            "scope": args.scope,
+            "profile_ids": profile_ids,
+            "include_secret_scanner": args.scope == "batch-full"
+            and config.secret_scanner is not None,
+            "adapter_operations": adapter_operations,
+        }
+    if args.candidate:
+        if args.scope not in {"runtime-verify-effective", "all"}:
+            raise SoloAIError(
+                "--candidate is only valid with runtime verification approval"
+            )
+        candidate = CandidateBatchStore(repo).candidate(args.candidate)
+        if not candidate.get("integrated_batch"):
+            raise SoloAIError("Candidate runtime approval requires an integrated batch")
+        batch = CandidateBatchStore(repo).batch(str(candidate["integrated_batch"]))
+        base_ref = str(batch["base_ref"])
+        matching = [
+            item.path
+            for item in repo.worktrees()
+            if not item.bare and repo.branch(item.path) == base_ref
+        ]
+        if len(matching) != 1:
+            raise SoloAIError(
+                "Candidate runtime approval requires one stable delivered base worktree"
+            )
+        cwd = matching[0]
+        return {
+            "verification": load_verification_config(repo, cwd=cwd),
+            "cwd": cwd,
+            "scope": args.scope,
+            "adapter_operations": ("verify_effective",)
+            if args.scope == "runtime-verify-effective"
+            else (),
+        }
+    raise SoloAIError("No approval target was resolved")
 
 
 def _parse_commands(values: list[str] | None) -> list[CommandSpec] | None:
@@ -1892,13 +2090,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "version":
         return _version()
     if args.command == "approve":
-        if args.task:
-            task = StateStore(repo).task(args.task)
-            worktree = Path(str(task["worktree"]))
-            verification = load_verification_config(repo, cwd=worktree)
-            return approve(repo, verification, cwd=worktree)
-        verification = load_verification_config(repo)
-        return approve(repo, verification)
+        request = _approval_request(repo, args)
+        return approve(repo, **request)
     if args.command == "disable":
         return disable(repo)
     if args.command == "enable":
@@ -2395,6 +2588,32 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     "Commit task changes before producing reusable verification evidence"
                 )
             verification = load_verification_config(repo, cwd=worktree)
+            levels = ("ready", "full") if args.level == "full" else (args.level,)
+            full_scope = "complete" if args.complete else "integration"
+            full_scopes = (
+                ("integration", "complete")
+                if args.level == "full" and args.complete
+                else (("integration",) if args.level == "full" else None)
+            )
+            approval_scope = (
+                "complete" if args.level == "full" and args.complete else args.level
+            )
+            require_approved_plan(
+                repo,
+                cwd=worktree,
+                verification=verification,
+                message="This machine has not approved the commands required by this verification.",
+                scope=approval_scope,
+                profile_ids=selected_profile_ids(
+                    repo,
+                    cwd=worktree,
+                    base=str(task.get("start_head") or task["base_ref"]),
+                    verification=verification,
+                    levels=levels,
+                    full_scopes=full_scopes,
+                ),
+                approval_target={"task": str(task["id"])},
+            )
             attempt_id = new_validation_attempt_id(args.level)
             attempts = [
                 str(item)

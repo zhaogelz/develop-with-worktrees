@@ -37,6 +37,7 @@ _DWW_FAST_MODULES = frozenset(
         "tests/unit/test_host_context.py",
         "tests/unit/test_host_handoff_state.py",
         "tests/unit/test_test_layers.py",
+        "tests/unit/test_hook.py",
     }
 )
 _TEST_ROOT = Path(__file__).parents[1].resolve()

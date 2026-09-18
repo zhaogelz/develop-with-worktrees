@@ -14,6 +14,7 @@ task contract locally, and carries reviewed changes through local integration.
   objective instead of asking you to copy it into every task.
 - Exact-path commits and immutable source candidates.
 - Combined validation and protected local promotion for compatible work.
+- One local approval can cover the commands of the next unchanged step, without repeating approval for unrelated checks.
 - A recoverable record when composition or validation fails; the base branch
   stays unchanged until a batch succeeds.
 

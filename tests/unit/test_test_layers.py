@@ -12,6 +12,7 @@ _REPOSITORY_ROOT = Path(__file__).parents[2]
 def test_known_local_contract_tests_are_fast() -> None:
     assert dww_test_layer(Path("tests/unit/test_config.py")) == "dww_fast"
     assert dww_test_layer(Path("tests/unit/test_proof.py")) == "dww_fast"
+    assert dww_test_layer(Path("tests/unit/test_hook.py")) == "dww_fast"
 
 
 def test_new_test_modules_default_to_full() -> None:

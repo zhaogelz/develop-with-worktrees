@@ -7,7 +7,8 @@ import subprocess
 from pathlib import Path
 
 from conftest import declare_delegated_adapter, git
-from solo_ai.cli import _doctor
+from solo_ai.cli import _doctor, _parser
+from solo_ai.command_contract import TOP_LEVEL_COMMANDS
 from solo_ai.config import CommandSpec
 from solo_ai.lifecycle import (
     choose,
@@ -1015,27 +1016,36 @@ def test_read_only_parser_limits_content_and_select_arguments() -> None:
     assert not HOOK._strict_read_only_bash("git ls-files --with-tree=HEAD")
 
 
-def test_hook_allows_recognized_host_handoff_and_rejects_a_spoofed_runner(
+def test_hook_allows_every_contract_command_and_rejects_a_spoofed_runner(
     git_repo: Path,
 ) -> None:
     _initialized(git_repo)
-    allowed = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            command=(
-                f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
-                "host-handoff status"
-            ),
+    for command_name in TOP_LEVEL_COMMANDS:
+        allowed = HOOK.decide(
+            _payload(
+                git_repo,
+                tool="Bash",
+                command=(
+                    f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
+                    f"{command_name}"
+                ),
+            )
         )
-    )
+        assert allowed is None, command_name
     denied = HOOK.decide(
         _payload(
             git_repo,
             tool="Bash",
-            command=(f'python x/dww.py --repo "{git_repo}" host-handoff status'),
+            command=(f'python x/dww.py --repo "{git_repo}" runtime'),
         )
     )
 
-    assert allowed is None
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_cli_and_hook_share_the_same_top_level_command_contract() -> None:
+    parser = _parser()
+    command_action = next(
+        action for action in parser._actions if action.dest == "command"
+    )
+    assert frozenset(command_action.choices) == TOP_LEVEL_COMMANDS
