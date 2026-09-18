@@ -22,7 +22,8 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
+from datetime import date
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 SKILL_SCRIPTS = (
@@ -44,6 +45,15 @@ DWW_SUBCOMMANDS = TOP_LEVEL_COMMANDS
 DWW_QUARANTINE_SUBCOMMANDS = {"doctor", "status", "plan", "resume-in-place"}
 DWW_READ_ONLY_SUBCOMMANDS = {"version", "doctor", "route", "status", "plan"}
 SHELL_CONTROL = (";", "|", "&", "`", "$", "(", ")", "<", ">", "\n", "\r")
+PATCH_SCOPE_EXTERNAL = "external"
+PATCH_SCOPE_PROTECTED = "protected"
+PATCH_SCOPE_SESSION_ARTIFACT = "session-artifact"
+PATCH_SCOPE_INVALID = "invalid"
+PATCH_SCOPE_OTHER_SESSION = "other-session-artifact"
+PATCH_SCOPE_CODEX_HOME = "codex-home-protected"
+PATCH_SCOPE_ARTIFACT_ESCAPE = "artifact-link-escape"
+PATCH_SCOPE_MIXED = "mixed-targets"
+PATCH_SCOPE_FOREIGN_REPOSITORY = "foreign-repository"
 
 
 def _run_git(cwd: str, *args: str) -> str | None:
@@ -266,6 +276,203 @@ def _nearest_existing_directory(path: Path) -> Path | None:
     return current if current.exists() and current.is_dir() else None
 
 
+def _path_within(path: Path, parent: Path) -> bool:
+    """按路径组件而非字符串前缀判断包含关系。"""
+
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _unsafe_patch_path(raw_target: str) -> bool:
+    """拒绝 Windows 不能可靠归一化的补丁目标表示。"""
+
+    if not raw_target or raw_target.startswith(("\\\\?\\", "\\\\.\\")):
+        return True
+    windows_path = PureWindowsPath(raw_target)
+    if windows_path.drive.startswith("\\\\"):
+        return True
+    if windows_path.drive and not windows_path.root:
+        return True
+    if ".." in windows_path.parts:
+        return True
+    return any(
+        ":" in part
+        for part in windows_path.parts
+        if part not in {windows_path.drive, windows_path.anchor}
+    )
+
+
+def _has_link_or_reparse_component(path: Path, boundary: Path) -> bool:
+    """已有组件中的符号链接或 Windows reparse point 都不能承载例外。"""
+
+    if not _path_within(path, boundary):
+        return True
+    current = boundary
+    for part in path.relative_to(boundary).parts:
+        current /= part
+        if not current.exists():
+            continue
+        try:
+            metadata = current.lstat()
+        except OSError:
+            return True
+        if current.is_symlink() or bool(
+            getattr(metadata, "st_file_attributes", 0) & 0x400
+        ):
+            return True
+    return False
+
+
+def _git_root_probe(cwd: Path) -> tuple[Path | None, bool]:
+    """返回 Git 根与查询是否可靠；失败绝不伪装成非仓库。"""
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None, False
+    if completed.returncode == 0 and completed.stdout.strip():
+        try:
+            return Path(completed.stdout.strip()).resolve(), True
+        except OSError:
+            return None, False
+    if "not a git repository" in completed.stderr.lower():
+        return None, True
+    return None, False
+
+
+def _trusted_codex_home() -> Path | None:
+    """只从 Hook 进程环境确认 CODEX_HOME，不读取补丁载荷声明。"""
+
+    configured = os.environ.get("CODEX_HOME")
+    candidate = Path(configured) if configured else Path.home() / ".codex"
+    try:
+        if not candidate.is_absolute() or not candidate.is_dir():
+            return None
+        if candidate.is_symlink() or bool(
+            getattr(candidate.lstat(), "st_file_attributes", 0) & 0x400
+        ):
+            return None
+        home = candidate.resolve()
+    except OSError:
+        return None
+    git_home, reliable = _git_root_probe(home)
+    # CODEX_HOME 自己作为仓库是实际支持的部署形态；被更大仓库覆盖则保守拒绝。
+    if not reliable or (git_home is not None and git_home != home):
+        return None
+    return home
+
+
+def _configured_codex_home() -> Path | None:
+    configured = os.environ.get("CODEX_HOME")
+    candidate = Path(configured) if configured else Path.home() / ".codex"
+    return candidate if candidate.is_absolute() else None
+
+
+def _git_path_is_protected(repository: Path, target: Path) -> bool | None:
+    """例外不能改写 CODEX_HOME Git 索引中的跟踪或暂存目标。"""
+
+    try:
+        relative = str(target.relative_to(repository))
+        tracked = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                relative,
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        staged = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "diff",
+                "--cached",
+                "--quiet",
+                "--",
+                relative,
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if tracked.returncode == 0 or staged.returncode == 1:
+        return True
+    if tracked.returncode not in {0, 1} or staged.returncode not in {0, 1}:
+        return None
+    return False
+
+
+def _session_artifact_scope(target: Path, session: str) -> str | None:
+    """验证当前会话唯一的 visualizations 产物目录，返回拒绝类别或通过。"""
+
+    home = _trusted_codex_home()
+    if home is None:
+        candidate = _configured_codex_home()
+        return (
+            PATCH_SCOPE_INVALID
+            if candidate and _path_within(target, candidate)
+            else None
+        )
+    if not _path_within(target, home):
+        return None
+    if _has_link_or_reparse_component(target, home):
+        return PATCH_SCOPE_ARTIFACT_ESCAPE
+    parts = target.relative_to(home).parts
+    if not parts or parts[0].casefold() != "visualizations":
+        return PATCH_SCOPE_CODEX_HOME
+    if len(parts) < 5 or not session:
+        return PATCH_SCOPE_OTHER_SESSION
+    try:
+        date(int(parts[1]), int(parts[2]), int(parts[3]))
+    except ValueError:
+        return PATCH_SCOPE_OTHER_SESSION
+    if parts[4] != session or ".git" in parts:
+        return PATCH_SCOPE_OTHER_SESSION
+    artifact_root = home.joinpath(*parts[:5])
+    nested_root, reliable = _git_root_probe(
+        _nearest_existing_directory(target) or target
+    )
+    if not reliable:
+        return PATCH_SCOPE_INVALID
+    if nested_root is not None and nested_root != home:
+        return PATCH_SCOPE_FOREIGN_REPOSITORY
+    if nested_root == home:
+        protected = _git_path_is_protected(home, target)
+        if protected is None:
+            return PATCH_SCOPE_INVALID
+        if protected:
+            return PATCH_SCOPE_CODEX_HOME
+    # target 必须真实落在本次会话目录之下，而非目录本身。
+    return (
+        PATCH_SCOPE_SESSION_ARTIFACT
+        if target != artifact_root
+        else PATCH_SCOPE_OTHER_SESSION
+    )
+
+
 def _patch_execution_directory(payload: dict[str, Any], root: Path) -> Path | None:
     value = payload.get("cwd")
     if not isinstance(value, str) or not value:
@@ -297,7 +504,7 @@ def _apply_patch_targets(payload: dict[str, Any], root: Path) -> list[Path] | No
         return None
     targets: list[Path] = []
     for raw_target in raw_targets:
-        if not raw_target:
+        if _unsafe_patch_path(raw_target):
             return None
         target = Path(raw_target)
         try:
@@ -323,7 +530,15 @@ def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
         return None
     external = False
     protected = False
+    artifact = False
+    session = _session(payload)
     for resolved in targets:
+        artifact_scope = _session_artifact_scope(resolved, session)
+        if artifact_scope is not None:
+            if artifact_scope != PATCH_SCOPE_SESSION_ARTIFACT:
+                return artifact_scope
+            artifact = True
+            continue
         try:
             resolved.relative_to(base)
         except ValueError:
@@ -336,7 +551,7 @@ def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
             target_root = git_root(str(parent))
             if target_root is not None:
                 if common_dir(target_root) != source_common:
-                    return None
+                    return PATCH_SCOPE_FOREIGN_REPOSITORY
                 protected = True
             else:
                 external = True
@@ -344,11 +559,13 @@ def _apply_patch_scope(payload: dict[str, Any], root: Path) -> str | None:
             protected = True
     # 一个补丁只能在受保护工作树内，或只修改一个明确的仓库外文件；混合目标
     # 会让隔离任务借内部路径越过外部写入判断，因此保守拒绝。
-    if protected and external:
-        return None
+    if sum((protected, external, artifact)) != 1:
+        return PATCH_SCOPE_MIXED
     if protected:
-        return "protected"
-    return "external" if external else None
+        return PATCH_SCOPE_PROTECTED
+    if artifact:
+        return PATCH_SCOPE_SESSION_ARTIFACT
+    return PATCH_SCOPE_EXTERNAL if external else PATCH_SCOPE_INVALID
 
 
 def _patch_target_worktrees(payload: dict[str, Any], root: Path) -> list[Path] | None:
@@ -1097,12 +1314,23 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if tool.lower() == "apply_patch":
         patch_scope = _apply_patch_scope(payload, root)
-        if patch_scope == "external":
+        if patch_scope in {PATCH_SCOPE_EXTERNAL, PATCH_SCOPE_SESSION_ARTIFACT}:
             return None
-        if patch_scope is None:
+        if patch_scope != PATCH_SCOPE_PROTECTED:
+            reasons = {
+                PATCH_SCOPE_INVALID: "apply_patch 补丁字段、执行目录或可信会话产物根无法确认",
+                PATCH_SCOPE_OTHER_SESSION: "apply_patch 目标属于其他或无效的 Codex 会话产物目录",
+                PATCH_SCOPE_CODEX_HOME: "apply_patch 目标属于受保护的 CODEX_HOME 配置、索引或非产物路径",
+                PATCH_SCOPE_ARTIFACT_ESCAPE: "apply_patch 会话产物目标经过链接或 junction，无法安全确认",
+                PATCH_SCOPE_MIXED: "apply_patch 混合了会话产物、仓库或普通外部目标",
+                PATCH_SCOPE_FOREIGN_REPOSITORY: "apply_patch 目标属于其他或嵌套 Git 仓库",
+            }
             return _deny(
-                "apply_patch target paths could not be determined safely, or include another repository. "
-                "Protected base-worktree writes remain blocked."
+                reasons.get(
+                    patch_scope,
+                    "apply_patch target paths could not be determined safely",
+                )
+                + ". Protected base-worktree writes remain blocked."
             )
         patch_task, patch_reason = _patch_target_task(state, guard, payload, root)
         if patch_task is None:

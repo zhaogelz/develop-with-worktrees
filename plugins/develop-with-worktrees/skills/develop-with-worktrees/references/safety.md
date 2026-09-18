@@ -40,6 +40,17 @@ host that omits a reliable Hook event, session identifier, or complete patch
 remains outside this protection and must be reported as such in native-host
 verification.
 
+For `apply_patch` only, a verified current-session delivery artifact under
+`CODEX_HOME/visualizations/YYYY/MM/DD/<session-id>/` may be written even when
+`CODEX_HOME` is itself a Git repository. The Hook derives CODEX_HOME from its own
+process environment and the session identifier from the host event; it never
+trusts a tool-input allowlist, environment, or session claim. Every patch target
+must be in that one artifact root. Other sessions, CODEX_HOME configuration,
+plugins, skills, sessions, Git metadata, tracked or staged files, nested
+repositories, links, junctions, special paths, and mixed target sets remain
+denied. This is a delivery-artifact exception, not a general external-write
+allowlist or an operating-system sandbox.
+
 For an active isolated task with a bound root, the supported trusted
 `SessionStart` path records only a small “refresh required” marker. Before a
 supported write, the Hook requires `anchor refresh-root` to read the current task

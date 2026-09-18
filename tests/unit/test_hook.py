@@ -195,7 +195,7 @@ def test_hook_parses_documented_apply_patch_payload_and_all_move_targets(
         )
     )
     mixed = {**payload, "tool_input": {"command": move_patch}}
-    assert HOOK._apply_patch_scope(mixed, git_repo) is None
+    assert HOOK._apply_patch_scope(mixed, git_repo) == "mixed-targets"
     assert HOOK.decide(mixed)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
@@ -777,6 +777,117 @@ def test_hook_uses_actual_apply_patch_targets_for_external_structural_files(
         _payload(git_repo, tool="apply_patch", patch=foreign_patch)
     )
     assert foreign_denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_hook_allows_only_the_current_codex_session_artifact_root(
+    git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    _initialized(git_repo)
+    codex_home = tmp_path / "custom codex home"
+    codex_home.mkdir()
+    git(codex_home, "init")
+    session = "session-2026-中文"
+    artifact = codex_home / "visualizations" / "2026" / "09" / "17" / session
+    artifact.mkdir(parents=True)
+    allowed = artifact / "方案 报告.md"
+    patch = f"*** Begin Patch\n*** Add File: {allowed}\n+# 验收\n*** End Patch"
+    payload = {
+        "cwd": str(git_repo),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "session_id": session,
+        "tool_input": {"command": patch},
+    }
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert HOOK.patch_from(payload) == patch
+    assert HOOK._apply_patch_scope(payload, git_repo) == "session-artifact"
+    assert HOOK.decide(payload) is None
+
+    other = artifact.parent / "other-session" / "报告.md"
+    denied = HOOK.decide(
+        {
+            **payload,
+            "tool_input": {"command": patch.replace(str(allowed), str(other))},
+        }
+    )
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert (
+        "其他或无效的 Codex 会话"
+        in denied["hookSpecificOutput"]["permissionDecisionReason"]
+    )
+
+    mixed = "\n".join(
+        (
+            "*** Begin Patch",
+            f"*** Add File: {allowed}",
+            "+artifact",
+            "*** Add File: README.md",
+            "+protected",
+            "*** End Patch",
+        )
+    )
+    assert (
+        HOOK._apply_patch_scope({**payload, "tool_input": {"command": mixed}}, git_repo)
+        == "mixed-targets"
+    )
+
+    ordinary = tmp_path / "ordinary-report.md"
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing-codex-home"))
+    assert (
+        HOOK._apply_patch_scope(
+            {
+                **payload,
+                "tool_input": {
+                    "command": "*** Begin Patch\n"
+                    f"*** Add File: {ordinary}\n+report\n*** End Patch"
+                },
+            },
+            git_repo,
+        )
+        == "external"
+    )
+
+
+def test_hook_keeps_codex_home_git_content_and_nested_repositories_protected(
+    git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    _initialized(git_repo)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    git(codex_home, "init")
+    session = "current-session"
+    artifact = codex_home / "visualizations" / "2026" / "09" / "18" / session
+    artifact.mkdir(parents=True)
+    tracked = artifact / "tracked.md"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    git(codex_home, "add", "--", str(tracked.relative_to(codex_home)))
+    git(codex_home, "commit", "-m", "test: track artifact")
+    nested = artifact / "nested"
+    nested.mkdir()
+    git(nested, "init")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    def payload_for(target: Path) -> dict[str, object]:
+        return {
+            "cwd": str(git_repo),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "session_id": session,
+            "tool_input": {
+                "command": "*** Begin Patch\n"
+                f"*** Update File: {target}\n@@\n-old\n+new\n*** End Patch"
+            },
+        }
+
+    for target, expected in (
+        (tracked, "CODEX_HOME"),
+        (nested / "report.md", "其他或嵌套 Git 仓库"),
+        (codex_home / "config.toml", "CODEX_HOME"),
+    ):
+        denied = HOOK.decide(payload_for(target))
+        assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert expected in denied["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_hook_allows_only_bound_in_place_session_and_quarantines_mismatch(
