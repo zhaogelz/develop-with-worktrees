@@ -51,6 +51,13 @@ repositories, links, junctions, special paths, and mixed target sets remain
 denied. This is a delivery-artifact exception, not a general external-write
 allowlist or an operating-system sandbox.
 
+An active DWW task worktree can itself be located beneath `CODEX_HOME`. That
+does not make CODEX_HOME writable: every patch target must still be inside that
+one registered task worktree, and the Hook rechecks its exact directory identity,
+branch, candidate head, and owning session. This task-worktree rule is separate
+from the delivery-artifact exception; a CODEX_HOME setting, plugin, skill, Git
+metadata path, foreign worktree, or mixed patch never inherits task permission.
+
 For an active isolated task with a bound root, the supported trusted
 `SessionStart` path records only a small “refresh required” marker. Before a
 supported write, the Hook requires `anchor refresh-root` to read the current task

@@ -48,6 +48,12 @@ set of files: `commit` requires a reviewed exact path manifest and preserves any
 unreviewed content. See [task governance](task-governance.md) for anchor update
 and continuation details.
 
+When a command needs a temporary input file, create that one exact file inside
+the active authorized task or base worktree, run the command, confirm the result
+was persisted, and delete the same file before Finish while authorization is
+still active. Do not rely on a terminal-time deletion exception or recursively
+remove a temporary directory; preserved historical inputs remain preserved.
+
 ## Ready and Finish
 
 Ready remains available for development evidence and legacy policies. It checks

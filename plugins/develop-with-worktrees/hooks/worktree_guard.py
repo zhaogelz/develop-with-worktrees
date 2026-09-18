@@ -326,6 +326,90 @@ def _has_link_or_reparse_component(path: Path, boundary: Path) -> bool:
     return False
 
 
+def _has_link_or_reparse_ancestor(path: Path) -> bool:
+    """拒绝任何现有祖先中的符号链接或 junction。"""
+
+    current = _nearest_existing_directory(path)
+    if current is None:
+        return True
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError:
+            return True
+        if current.is_symlink() or bool(
+            getattr(metadata, "st_file_attributes", 0) & 0x400
+        ):
+            return True
+        if current == current.parent:
+            return False
+        current = current.parent
+
+
+def _directory_identity(path: Path) -> dict[str, int] | None:
+    """取得与 DWW 状态相同的目录对象身份，不跟随链接。"""
+
+    try:
+        details = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if os.name != "nt":
+        return {
+            "device": int(details.st_dev),
+            "inode": int(details.st_ino),
+            "mode": int(details.st_mode),
+        }
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", wintypes.DWORD),
+                ("ftCreationTime", wintypes.FILETIME),
+                ("ftLastAccessTime", wintypes.FILETIME),
+                ("ftLastWriteTime", wintypes.FILETIME),
+                ("dwVolumeSerialNumber", wintypes.DWORD),
+                ("nFileSizeHigh", wintypes.DWORD),
+                ("nFileSizeLow", wintypes.DWORD),
+                ("nNumberOfLinks", wintypes.DWORD),
+                ("nFileIndexHigh", wintypes.DWORD),
+                ("nFileIndexLow", wintypes.DWORD),
+            ]
+
+        create_file = ctypes.windll.kernel32.CreateFileW
+        create_file.restype = wintypes.HANDLE
+        invalid = wintypes.HANDLE(-1).value
+        handle = create_file(
+            str(path),
+            0x0080,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x00200000
+            | (0x02000000 if getattr(details, "st_file_attributes", 0) & 0x0010 else 0),
+            None,
+        )
+        if handle == invalid:
+            return None
+        try:
+            information = _ByHandleFileInformation()
+            if not ctypes.windll.kernel32.GetFileInformationByHandle(
+                handle, ctypes.byref(information)
+            ):
+                return None
+            return {
+                "device": int(information.dwVolumeSerialNumber),
+                "inode": (int(information.nFileIndexHigh) << 32)
+                | int(information.nFileIndexLow),
+                "mode": int(details.st_mode),
+            }
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except (AttributeError, OSError):
+        return None
+
+
 def _git_root_probe(cwd: Path) -> tuple[Path | None, bool]:
     """返回 Git 根与查询是否可靠；失败绝不伪装成非仓库。"""
 
@@ -508,11 +592,12 @@ def _apply_patch_targets(payload: dict[str, Any], root: Path) -> list[Path] | No
             return None
         target = Path(raw_target)
         try:
-            targets.append(
-                (
-                    target if target.is_absolute() else execution_directory / target
-                ).resolve()
-            )
+            unresolved = (
+                target if target.is_absolute() else execution_directory / target
+            ).absolute()
+            if _has_link_or_reparse_ancestor(unresolved):
+                return None
+            targets.append(unresolved.resolve())
         except OSError:
             return None
     return targets
@@ -683,6 +768,32 @@ def _is_valid_isolated_owner(
     session = _session(payload)
     if not session or session != owner["thread_id"]:
         return False, "Codex session does not own this isolated task"
+    worktree = task.get("worktree")
+    expected_resolved = task.get("slot_worktree_resolved")
+    expected_identity = task.get("slot_worktree_identity")
+    if (
+        not isinstance(worktree, str)
+        or not isinstance(expected_resolved, str)
+        or not isinstance(expected_identity, dict)
+    ):
+        return False, "isolated task has no verifiable worktree identity"
+    try:
+        raw_worktree = Path(worktree).absolute()
+        resolved_worktree = raw_worktree.resolve()
+    except OSError:
+        return False, "isolated task worktree is unreadable"
+    if _has_link_or_reparse_ancestor(raw_worktree):
+        return False, "isolated task worktree contains a link or junction"
+    if str(resolved_worktree) != expected_resolved:
+        return False, "isolated task worktree path identity changed"
+    if _directory_identity(raw_worktree) != expected_identity:
+        return False, "isolated task worktree directory object was replaced"
+    branch = _run_git(str(resolved_worktree), "branch", "--show-current")
+    head = _run_git(str(resolved_worktree), "rev-parse", "HEAD")
+    if branch != task.get("branch"):
+        return False, "isolated task checked-out branch changed"
+    if head != task.get("candidate_head"):
+        return False, "isolated task HEAD changed outside exact-path dww commit"
     return True, ""
 
 
@@ -722,7 +833,23 @@ def _patch_target_task(
         tasks[task_id] = task
     if len(tasks) != 1:
         return None, "apply_patch mixes targets from different managed tasks"
-    return next(iter(tasks.values())), None
+    task = next(iter(tasks.values()))
+    worktree = task.get("worktree")
+    if not isinstance(worktree, str):
+        return None, "apply_patch target task has no worktree path"
+    try:
+        task_root = Path(worktree).resolve()
+    except OSError:
+        return None, "apply_patch target task worktree is unreadable"
+    targets = _apply_patch_targets(payload, root)
+    if targets is None:
+        return None, "apply_patch target paths could not be determined safely"
+    for target in targets:
+        if not _path_within(target, task_root):
+            return None, "apply_patch target escapes its managed task worktree"
+        if _path_within(target, task_root / ".git"):
+            return None, "apply_patch cannot modify managed task Git metadata"
+    return task, None
 
 
 def _is_valid_in_place(
@@ -1316,7 +1443,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         patch_scope = _apply_patch_scope(payload, root)
         if patch_scope in {PATCH_SCOPE_EXTERNAL, PATCH_SCOPE_SESSION_ARTIFACT}:
             return None
-        if patch_scope != PATCH_SCOPE_PROTECTED:
+        if patch_scope not in {PATCH_SCOPE_PROTECTED, PATCH_SCOPE_CODEX_HOME}:
             reasons = {
                 PATCH_SCOPE_INVALID: "apply_patch 补丁字段、执行目录或可信会话产物根无法确认",
                 PATCH_SCOPE_OTHER_SESSION: "apply_patch 目标属于其他或无效的 Codex 会话产物目录",
@@ -1334,6 +1461,11 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             )
         patch_task, patch_reason = _patch_target_task(state, guard, payload, root)
         if patch_task is None:
+            if patch_scope == PATCH_SCOPE_CODEX_HOME:
+                return _deny(
+                    "apply_patch 目标属于受保护的 CODEX_HOME 配置、索引或非产物路径. "
+                    "Protected worktree writes remain blocked."
+                )
             return _deny(
                 (patch_reason or "apply_patch target task could not be verified")
                 + ". Protected worktree writes remain blocked."

@@ -61,6 +61,14 @@ within scope. The host that freezes a batch remains responsible for that follow
 through. Use `status --compact` for a read-only view; candidate publication,
 current-base delivery, and runtime effectiveness are separate facts.
 
+## User-facing status
+
+Report in the user's language and lead with the useful fact, not internal DWW
+state. Say plainly whether the change is being made, ready and waiting for local
+integration, integrated into the current base, or installed and verified by the
+current host. A published candidate is not delivery. Do not expose leases, raw
+state records, or lifecycle logs unless the user asks for diagnostic detail.
+
 ## Read one reference for the active scenario
 
 | Scenario | Read first |

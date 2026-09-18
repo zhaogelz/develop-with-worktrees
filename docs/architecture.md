@@ -42,10 +42,12 @@ coordinator.
 - A managed task receives one isolated worktree and one local task anchor before
   it becomes writable. Identity uncertainty, dirty unexpected content, or a
   moved reference preserves the scene instead of adopting or deleting it.
-- The optional Hook may allow an `apply_patch` target only when it is inside the
-  current host session's verified `CODEX_HOME/visualizations/YYYY/MM/DD/<session>`
-  artifact root. This narrow delivery-artifact exception never grants access to
-  other Codex data, Git-tracked content, nested repositories, or links.
+- The optional Hook may allow an `apply_patch` target in either a current host
+  session's verified `CODEX_HOME/visualizations/YYYY/MM/DD/<session>` artifact
+  root or one registered active task worktree. A task worktree beneath
+  `CODEX_HOME` still needs its exact directory identity, branch, candidate head,
+  and owner session to match. Neither narrow exception grants access to other
+  Codex data, Git-tracked content, nested repositories, links, or mixed targets.
 - A confirmed objective has one root anchor. It retains the complete plan and
   explicit amendments; its child anchors retain only their execution slices.
   Exact host identity may map to that root as a locator only; it never stores a

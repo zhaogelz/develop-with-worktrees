@@ -733,6 +733,119 @@ def test_hook_checks_actual_patch_targets_and_isolated_owner_before_writing(
     assert "mixes targets" in moved["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+def test_hook_allows_only_owned_task_targets_inside_codex_home(
+    tmp_path: Path, monkeypatch
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    project = codex_home / "project"
+    project.mkdir(parents=True)
+    git(project, "init")
+    (project / "README.md").write_text("fixture\n", encoding="utf-8")
+    git(project, "add", "README.md")
+    git(project, "commit", "-m", "test: create project inside codex home")
+    repo = _initialized(project)
+    task = start(
+        repo,
+        name="codex-home task",
+        host_origin={"kind": "codex", "thread_id": "current-owner"},
+    )
+    worktree = Path(task["worktree"])
+    owned = worktree / "owned.md"
+    moved = worktree / "moved.md"
+    owned.write_text("old\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    def decide(
+        patch: str, *, session: str = "current-owner"
+    ) -> dict[str, object] | None:
+        return HOOK.decide(
+            _payload(project, tool="apply_patch", patch=patch, session=session)
+        )
+
+    allowed_patches = (
+        f"*** Begin Patch\n*** Add File: {worktree / 'added.md'}\n+added\n*** End Patch",
+        f"*** Begin Patch\n*** Update File: {owned}\n@@\n-old\n+new\n*** End Patch",
+        f"*** Begin Patch\n*** Delete File: {owned}\n*** End Patch",
+        (
+            "*** Begin Patch\n"
+            f"*** Update File: {owned}\n"
+            f"*** Move to: {moved}\n"
+            "@@\n-old\n+new\n*** End Patch"
+        ),
+    )
+    for patch in allowed_patches:
+        assert decide(patch) is None
+
+    wrong_owner = decide(allowed_patches[0], session="other-owner")
+    assert wrong_owner is not None
+    assert wrong_owner["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    for patch in (
+        f"*** Begin Patch\n*** Update File: {worktree / '.git'}\n@@\n-old\n+new\n*** End Patch",
+        (
+            "*** Begin Patch\n"
+            f"*** Add File: {worktree / 'allowed.md'}\n+allowed\n"
+            f"*** Add File: {codex_home / 'config.toml'}\nblocked\n"
+            "*** End Patch"
+        ),
+    ):
+        denied = decide(patch)
+        assert denied is not None
+        assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    nested = worktree / "nested"
+    nested.mkdir()
+    git(nested, "init")
+    nested_denied = decide(
+        f"*** Begin Patch\n*** Add File: {nested / 'report.md'}\nblocked\n*** End Patch"
+    )
+    assert nested_denied is not None
+    assert nested_denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_hook_denies_codex_home_task_when_registered_identity_drifts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    project = codex_home / "project"
+    project.mkdir(parents=True)
+    git(project, "init")
+    (project / "README.md").write_text("fixture\n", encoding="utf-8")
+    git(project, "add", "README.md")
+    git(project, "commit", "-m", "test: create project inside codex home")
+    repo = _initialized(project)
+    task = start(
+        repo,
+        name="identity drift task",
+        host_origin={"kind": "codex", "thread_id": "current-owner"},
+    )
+    StateStore(repo).update_task(
+        task["id"], slot_worktree_resolved=str(tmp_path / "replaced-worktree")
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    denied = HOOK.decide(
+        _payload(
+            project,
+            tool="apply_patch",
+            patch=(
+                "*** Begin Patch\n"
+                f"*** Add File: {Path(task['worktree']) / 'owned.md'}\n"
+                "+owned\n"
+                "*** End Patch"
+            ),
+            session="current-owner",
+        )
+    )
+
+    assert denied is not None
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert (
+        "worktree path identity changed"
+        in denied["hookSpecificOutput"]["permissionDecisionReason"]
+    )
+
+
 def test_hook_fails_closed_for_an_isolated_task_without_host_owner(
     git_repo: Path,
 ) -> None:
