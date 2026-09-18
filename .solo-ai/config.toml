@@ -1,6 +1,6 @@
 schema_version = 2
 mode = "managed"
-slots = 3
+slots = 5
 branch_prefix = "codex/"
 worktree_directory = ".worktrees" # repository-relative only
 port_base = 20000
