@@ -62,6 +62,10 @@ recorded decision. You do not need to copy candidate IDs for the normal flow.
 
 ## Boundaries that keep work safe
 
+When the host loads and trusts the Hook, native patches started outside Git also
+check ownership of the target worktree; another session gains no write permission
+by starting elsewhere.
+
 DWW preserves unknown or protected working-tree content and does not guess a
 candidate from UI state, hooks, or elapsed time. A conflict or failed combined
 check leaves the base branch unchanged and provides a recorded recovery route.

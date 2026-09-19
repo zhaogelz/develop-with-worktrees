@@ -9,7 +9,10 @@ The Codex Hook is optional scoped hardening, not the only safety boundary.
 A trusted plugin Hook may deny supported Codex local writes to a protected base
 worktree before they happen. It recognizes a limited read-only command subset and
 fails closed for unknown or compound supported writes. The Hook derives repository
-scope from the current working directory and verified Git facts; it does not claim
+scope from the current working directory and verified Git facts. For native
+`apply_patch`, it also inspects declared targets before an outside-repository
+session can leave routing: a managed target still requires its recorded owner.
+An unrelated repository cannot supply authorization for that target. It does not claim
 to sandbox deliberate cross-repository or specialized bypass paths.
 
 `hooks/hooks.json` is the stable trust contract. Ordinary plugin, skill, and

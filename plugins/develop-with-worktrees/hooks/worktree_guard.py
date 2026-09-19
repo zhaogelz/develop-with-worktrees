@@ -569,7 +569,6 @@ def _patch_execution_directory(payload: dict[str, Any], root: Path) -> Path | No
         return None
     try:
         cwd = Path(value).resolve()
-        cwd.relative_to(root.resolve())
     except (OSError, ValueError):
         return None
     return cwd if cwd.is_dir() else None
@@ -1485,6 +1484,27 @@ def _session_context(
 def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
     event = str(payload.get("hook_event_name") or payload.get("hookEventName") or "")
     root = git_root(str(payload.get("cwd") or "."))
+    tool = str(payload.get("tool_name") or payload.get("toolName") or "")
+    if event == "PreToolUse" and tool.lower() == "apply_patch":
+        # 在路由提前退出前检查实际目标；仓库外会话不能跳过目标仓库的保护。
+        targets = _apply_patch_targets(payload, root or Path.cwd())
+        if targets is None and root is None:
+            return _deny("apply_patch target paths could not be determined safely")
+        for target in targets or []:
+            parent = _nearest_existing_directory(target)
+            target_root, reliable = _git_root_probe(parent) if parent else (None, False)
+            if not reliable:
+                return _deny("apply_patch target repository could not be verified")
+            if target_root is None:
+                continue
+            if not (target_root / ".solo-ai" / "config.toml").is_file():
+                continue
+            if root is not None and common_dir(root) != common_dir(target_root):
+                return _deny(
+                    "apply_patch target belongs to another protected repository"
+                )
+            if root is None:
+                root = target_root
     if root is None:
         return None
     workflows = detect_existing_workflows(root)

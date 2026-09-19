@@ -787,6 +787,45 @@ def test_hook_checks_actual_patch_targets_and_isolated_owner_before_writing(
     assert "mixes targets" in moved["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+def test_hook_checks_managed_patch_targets_from_outside_a_repository(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    repo = _initialized(git_repo)
+    task = start(
+        repo, name="external entry", host_origin={"kind": "codex", "thread_id": "owner"}
+    )
+    worktree = Path(task["worktree"])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    assert HOOK.git_root(str(outside)) is None
+
+    def patch(target: Path, session: str = "owner", extra: str = ""):
+        return HOOK.decide(
+            _payload(
+                outside,
+                tool="apply_patch",
+                session=session,
+                patch=f"*** Begin Patch\n*** Add File: {target}\n+probe\n{extra}*** End Patch",
+            )
+        )
+
+    target = worktree / "probe.txt"
+    assert patch(target) is None
+    for session in ("other", ""):
+        denied = patch(target, session)
+        assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert patch(target) is None
+    for target in (git_repo / "base.txt", worktree / ".git"):
+        assert patch(target)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    mixed = patch(
+        worktree / "probe.txt",
+        extra=f"*** Add File: {outside / 'mixed.txt'}\n+x\n",
+    )
+    assert mixed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert patch(outside / "ordinary.txt") is None
+    assert git(worktree, "status", "--porcelain") == ""
+
+
 def test_hook_infers_unique_owner_worktree_when_patch_payload_omits_cwd(
     git_repo: Path, monkeypatch
 ) -> None:
