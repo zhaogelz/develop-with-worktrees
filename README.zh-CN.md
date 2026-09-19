@@ -21,7 +21,7 @@ codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-安装或更新后，当前宿主需要先加载已安装的技能，正在运行的任务才会看到新内容。只有当前宿主仍显示旧版行为、且没有可用的重新加载方式时，才新开一个 Codex 会话；不要仅因版本号变化、一次拒绝或解析/路径/owner/lease 错误而重开会话或重跑验收。加载技能与 Hook 信任是两件事：版本更新本身不等于需要重新信任。只有宿主明确报告首次安装或 Hook 定义变化待审查时，才通过宿主支持的方式审查一次准确的定义；DWW 不读取或修改宿主信任存储。源码版本是 `0.5.0-beta.7`；插件缓存构建可能额外带有 `+codex.<build>` 后缀。
+安装或更新后，先让当前宿主加载已安装的技能再使用。只有宿主明确显示新的或变化的 Hook 定义待审查时才审查；出现错误先按报告的原因处理，不能因为版本变化或一次拒绝反复重开会话或信任。DWW 不读取或修改宿主信任存储。源码版本是 `0.5.0-beta.7`；插件缓存构建可能额外带有 `+codex.<build>` 后缀。
 
 ## 默认怎么工作
 
@@ -29,11 +29,17 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 
 1. 宿主先路由仓库。受管修改在独立工作树开始；已有成熟流程的仓库继续由原流程负责。
 2. AI 只在返回的工作树修改，并提交明确检查过的路径。
-3. `finish` 固化源码候选，表示本轮编码结束，并不等于已经进入主线。
-4. 每满 3 个兼容候选，DWW 会在集成工作树中组合改动，并运行组合改动影响到的仓库检查。
-5. 不足 3 个的收尾候选必须记录 `round-complete`、`user`、`deploy` 或 `dependency` 等明确原因；空闲时间和任务数量都不能当作本轮结束的依据。
+3. `finish` 固化用于本地交付的不可变源码候选，表示本轮编码结束，但不会自行推进主线。
+4. 每满 3 个兼容候选，DWW 会在集成工作树中组合改动，并运行受组合改动影响的仓库检查。
+5. 需要立即交付不足 3 个的收尾候选时，宿主记录一个受支持的交付原因及其依据；空闲时间、任务数量和界面状态都不能当作该原因。
 
-宿主会继续跟进候选的集成、恢复或需要决策的失败。普通流程不需要手工抄候选 ID。
+宿主会继续跟进候选的集成、恢复或需要决策的失败。任务怎么拆、何时等待和如何通知仍由宿主负责；普通流程不需要手工抄候选 ID。
+
+## 仅在需要时深入
+
+- 仓库已有成熟流程时，让原流程继续负责。精确、经本机批准的[适配器](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/delegated-adapters.md)是维护选项，不是默认配置步骤。
+- 任务中断、冲突或组合检查需要处理时，按已记录的[恢复路径](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)操作，不猜测也不清理工作树。
+- 只有项目自身存在外部运行资源时才配置 [Runtime Adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/runtime-adapter.md)；多数个人和小团队仓库并不需要它。
 
 ## 保护边界
 

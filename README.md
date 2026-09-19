@@ -29,16 +29,12 @@ codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-After installing or updating, the current host must load the installed skill
-before a running task can use it. If the host still shows the old skill
-behavior, use its supported reload path; start a new Codex session only when
-that host has no reload path. This is separate from Hook trust: a version
-change, a single denial, or a parse/path/owner/lease error is not evidence that
-Hook review is needed. Ask for review only when the host explicitly reports a
-first-install or changed-definition review, and use the host's supported
-control for that exact definition once. DWW cannot inspect or change host trust
-storage. The source version is `0.5.0-beta.7`; a plugin cache build may append
-a `+codex.<build>` suffix.
+After installing or updating, let the current host load the installed skill
+before using it. Review a Hook only when that host explicitly reports a new or
+changed definition awaiting review. Handle an error by its reported cause; a
+version change or one denial is not a reason to repeatedly restart or trust.
+DWW cannot inspect or change host trust storage. The source version is
+`0.5.0-beta.7`; a plugin cache build may append a `+codex.<build>` suffix.
 
 ## Default flow
 
@@ -49,16 +45,29 @@ existing files or staged changes automatically.
 1. The host routes the repository. A managed change starts in an isolated
    worktree; an existing mature workflow keeps ownership of its repository.
 2. The agent edits only there and commits the exact reviewed paths.
-3. `finish` publishes an immutable source candidate. It ends that coding round,
-   but does not by itself deliver the result to the base branch.
-4. Every three compatible candidates, DWW combines them in an integration
-   worktree and runs the repository checks affected by the combined changes.
-5. A smaller final group needs an explicit recorded reason such as
-   `round-complete`, `user`, `deploy`, or `dependency`; DWW never treats idle
-   time or a task count as proof that the round ended.
+3. `finish` preserves an immutable source candidate for local delivery. It ends
+   the coding round; it does not by itself move the base branch.
+4. Every three compatible candidates, DWW combines the changes in an
+   integration worktree and runs the affected repository checks.
+5. If a smaller final group must be delivered now, the host records one
+   supported delivery cause and its reason. DWW never uses idle time, a task
+   count, or a UI state as that cause.
 
 The host follows a published candidate through integration, recovery, or a
-recorded decision. You do not need to copy candidate IDs for the normal flow.
+recorded decision. The host still owns task splitting, waiting, and messages;
+you do not need to copy candidate IDs for the normal flow.
+
+## Only when needed
+
+- If the repository already has a mature workflow, let it keep ownership. An
+  exact locally approved [adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/delegated-adapters.md)
+  is a maintainer option, not a default setup step.
+- If an interrupted task, conflict, or combined check needs attention, follow
+  the recorded [recovery](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
+  path instead of guessing or cleaning the worktree.
+- Projects with their own external runtime resources can configure a Runtime
+  [Adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/runtime-adapter.md).
+  Most personal and small-team repositories do not need one.
 
 ## Boundaries that keep work safe
 

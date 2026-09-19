@@ -35,6 +35,25 @@ The former generic orchestration store is drain-only compatibility. New work
 must not create a second DWW scheduler, task DAG, candidate group, or persistent
 coordinator.
 
+## Default, optional, and legacy surfaces
+
+For an individual or small team, the default surface is deliberately narrow:
+route the repository, work in the returned isolated worktree, commit reviewed
+paths, publish a candidate, and follow its local delivery or recovery. The
+invariants below make that short path safe; they are not optional complexity.
+
+Some capabilities remain available only for a specific boundary. A delegated
+adapter is for a mature repository that has an exact tracked contract and local
+approval. A Runtime Adapter is for project-owned external runtime resources.
+Host handoff records support an interrupted repair when the host needs a durable
+receipt. These capabilities do not replace host scheduling and are not part of
+ordinary setup.
+
+The generic `orchestrate` surface is legacy drain-only compatibility: it may
+inspect, cancel, or finish records that already exist, but it must not create
+new work. Removing it requires evidence that retained local state no longer
+needs safe recovery; it is not a shortcut for simplifying the default flow.
+
 ## Core invariants
 
 - A detected mature workflow has routing priority. DWW writes no managed state

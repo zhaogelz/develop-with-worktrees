@@ -21,6 +21,46 @@ Use `uv` for Python commands. The tracked verification policy documents the
 available development, Ready, Full, and Stress profiles in
 [`.solo-ai/verification.toml`](../.solo-ai/verification.toml).
 
+## Distribution and local installation boundaries
+
+The public user path has one official GitHub marketplace identity, shown in the
+README. Keep that public installation path independent from a developer checkout
+and from any machine-specific migration directory.
+
+A development checkout is source, not a daily runtime source. When two local
+development paths have competed for one installed identity, a fixed committed
+snapshot may be exported to a separate local marketplace to preserve a known
+runtime while the machine is migrated. That local marketplace is a per-machine
+transition aid, not a public distribution default and not proof that an official
+release already contains a fix. Do not put its name, account path, or local
+release directory in the public README.
+
+After a plugin code, Hook, or packaged-document change, verify and commit the
+fixed source first. A later formal release must use that fixed content and the
+project's versioned release process. Different release content requires a new
+version: never overwrite an existing formal version or deliver different content
+under the same version to a daily-use cache. Keep development testing on an
+isolated source. Do not push, tag, create a Release, replace a public
+installation, or claim that the official distribution includes the change
+without separate verification and authorization.
+
+Treat installation, enablement, Hook trust, and runtime loading as separate
+facts. For a local desktop check, use the same desktop executable and Windows
+user that will run the plugin, then verify in this order:
+
+1. The intended marketplace and plugin are installed from the expected fixed
+   source.
+2. Only the intended plugin identity is enabled; do not uninstall an older
+   identity merely to switch it off.
+3. The host reports the exact current Hook definition as trusted, when review
+   is required.
+4. A real host session loads the expected skill and enforces the expected Hook
+   behavior.
+
+An isolated test `CODEX_HOME` may exercise installation tests, but it cannot
+stand in for the production user or bypass a production Hook, cache, config, or
+trust decision. Never hand-edit those stores to manufacture a passing result.
+
 ## Checks
 
 Run the smallest useful check while developing, then the checks selected by the
