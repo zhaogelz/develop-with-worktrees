@@ -99,6 +99,14 @@ tracked edits and deletes ordinary untracked files only through unchanged-object
 checks. It protects `.env*`, databases, uploads/storage, unknown ignored paths,
 replacements, symlinks, and junctions.
 
+`reclaim-retained` is the only path that returns an already terminal,
+retain-worktree slot. Its read-only checklist confirmation binds the terminal
+task, slot generation, path identity, branch/HEAD, base, and each ordinary-file
+snapshot. It rejects tracked, protected, unknown, linked, changed, or late
+content, resumes only its persisted phase, and keeps the task record, branch,
+and receipts after the slot becomes reusable. Known dependency caches remain in
+place; reuse is a safe return, not a physical worktree deletion.
+
 An active in-place task additionally binds its trusted session, branch, start
 head, and expected head. A mismatch quarantines it. A post-session handoff
 requires explicit exact confirmation and cannot recreate or clean an ambiguous

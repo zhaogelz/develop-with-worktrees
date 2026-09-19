@@ -14,6 +14,8 @@
 
 DWW 只负责 Git 生命周期。任务怎么拆、谁来做、何时等待由 Codex 等宿主负责；项目自己的测试、运行资源和产品决策仍由项目负责。
 
+用大白话说：“已合入”是改动已经进入本地主线；“保留工作树”是留给复核，还不能再用；“可复用”才是安全归还的槽位。
+
 ## 安装
 
 ```text
@@ -39,6 +41,7 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 
 - 仓库已有成熟流程时，让原流程继续负责。精确、经本机批准的[适配器](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/delegated-adapters.md)是维护选项，不是默认配置步骤。
 - 任务中断、冲突或组合检查需要处理时，按已记录的[恢复路径](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)操作，不猜测也不清理工作树。
+- 如果复核用的测试工作树被特意保留，使用 `reclaim-retained` 返回的清单再回收；任务已结束不等于可以清空未知内容。
 - 只有项目自身存在外部运行资源时才配置 [Runtime Adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/runtime-adapter.md)；多数个人和小团队仓库并不需要它。
 
 ## 保护边界

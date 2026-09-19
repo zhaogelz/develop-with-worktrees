@@ -165,6 +165,15 @@ then records the task as terminal while retaining every file and quarantining th
 slot with the supplied reason. It never cleans, resets, detaches, deletes the
 branch, or releases that worktree. Neither operation uses blanket cleanup.
 
+When a terminal retained worktree is later known to contain only disposable
+test residue, run `reclaim-retained --task <id>` first. It returns the exact
+identity, slot generation, branch/HEAD, deletion checklist, and one-use
+confirmation. Re-run it with that confirmation to remove only the unchanged
+ordinary files on the checklist, detach to the recorded base, and return the
+slot. It refuses active tasks, tracked work, protected or unknown content,
+identity changes, and changed checklists; it keeps the terminal task record,
+task branch, and abandonment receipt for audit.
+
 ## Compatibility modes
 
 An explicit in-place task binds one clean registered worktree, branch, start

@@ -22,6 +22,9 @@ DWW is the Git lifecycle layer. Your host's task system still decides how work
 is split, scheduled, and discussed. Your project still owns its tests, runtime
 resources, and product decisions.
 
+Plainly: an integrated change has reached the local base; a retained worktree is
+kept for review and is not reusable; a reusable slot has been safely returned.
+
 ## Install
 
 ```text
@@ -65,6 +68,9 @@ you do not need to copy candidate IDs for the normal flow.
 - If an interrupted task, conflict, or combined check needs attention, follow
   the recorded [recovery](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
   path instead of guessing or cleaning the worktree.
+- If a reviewed test worktree was deliberately retained, use the returned
+  checklist in `reclaim-retained`; it never treats “task ended” as permission to
+  erase unknown work.
 - Projects with their own external runtime resources can configure a Runtime
   [Adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/runtime-adapter.md).
   Most personal and small-team repositories do not need one.

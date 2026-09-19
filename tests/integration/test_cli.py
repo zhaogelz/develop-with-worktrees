@@ -113,6 +113,10 @@ def test_candidate_status_human_output_is_compact_and_reasons_are_required() -> 
         ]
     )
     assert retained_intent.retain_worktree is True
+    reclaim_intent = parser.parse_args(
+        ["reclaim-retained", "--task", "task-one", "--confirm", "checklist"]
+    )
+    assert reclaim_intent.confirm == "checklist"
 
 
 def test_abandon_dispatch_forwards_retain_worktree_flag(
@@ -146,6 +150,35 @@ def test_abandon_dispatch_forwards_retain_worktree_flag(
 
     assert result["status"] == "abandoned"
     assert captured["retain_worktree"] is True
+
+
+@pytest.mark.dww_fast
+def test_reclaim_retained_dispatch_forwards_exact_confirmation(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_reclaim(repo: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"task_id": "task-one", "status": "needs-confirmation"}
+
+    monkeypatch.setattr(cli_module, "reclaim_retained_worktree", fake_reclaim)
+    args = cli_module._parser().parse_args(
+        [
+            "--repo",
+            str(git_repo),
+            "reclaim-retained",
+            "--task",
+            "task-one",
+            "--confirm",
+            "exact-checklist",
+        ]
+    )
+
+    result = cli_module._dispatch(args)
+
+    assert result["status"] == "needs-confirmation"
+    assert captured == {"task_id": "task-one", "confirm": "exact-checklist"}
 
 
 def test_handoff_dispatch_forwards_the_exact_receiving_host(

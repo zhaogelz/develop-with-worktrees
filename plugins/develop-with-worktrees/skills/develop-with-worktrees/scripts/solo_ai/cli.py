@@ -68,6 +68,7 @@ from .lifecycle import (
     maintenance_lock,
     ready,
     recover,
+    reclaim_retained_worktree,
     repository_route,
     resume_in_place,
     retarget,
@@ -1074,6 +1075,16 @@ def _parser() -> argparse.ArgumentParser:
         help="mark an isolated task terminal while preserving every worktree file and quarantining its slot",
     )
     abandoned.add_argument("--session")
+
+    reclaim_retained = sub.add_parser(
+        "reclaim-retained",
+        help="review then safely return one retained terminal worktree to its slot",
+    )
+    reclaim_retained.add_argument("--task", required=True)
+    reclaim_retained.add_argument(
+        "--confirm",
+        help="exact confirmation returned with the current deletion checklist",
+    )
 
     resume = sub.add_parser(
         "resume-in-place",
@@ -2736,6 +2747,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             session_id=args.session,
             retain_worktree=args.retain_worktree,
         )
+    if args.command == "reclaim-retained":
+        return reclaim_retained_worktree(repo, task_id=args.task, confirm=args.confirm)
     if args.command == "warm-slot":
         return warm_slot(repo, slot_id=args.slot)
     if args.command == "dev" and args.dev_command == "start":

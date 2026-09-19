@@ -31,6 +31,8 @@ from .abandonment import (
 )
 from .abandonment import resume as resume_abandonment
 from .abandonment import resume_retained as resume_retained_abandonment
+from .abandonment import retained_reclaim_plan
+from .abandonment import resume_retained_reclaim
 from .abandonment import write_completed_receipt as write_abandonment_receipt
 from .cleanup import inspect_untracked, require_managed_directory_identity
 from .config import (
@@ -4969,6 +4971,51 @@ def abandon(
 
         result["reconciliation"] = reconcile_batches(repo, cause="abandon")
     return result
+
+
+def reclaim_retained_worktree(
+    repo: GitRepo, *, task_id: str, confirm: str | None = None
+) -> dict[str, Any]:
+    """按一次可审阅清单回收已保留的终态隔离工作树。"""
+    _config_and_mode(repo)
+    with maintenance_lock(repo), candidate_admission_lock(repo):
+        store = StateStore(repo)
+        task = store.task(task_id)
+        existing = task.get("retained_reclaim")
+        if isinstance(existing, dict):
+            if existing.get("phase") == "completed":
+                return resume_retained_reclaim(repo, store=store, task=task)
+            if not confirm:
+                return {
+                    "task_id": task_id,
+                    "slot_id": task["slot_id"],
+                    "status": "needs-confirmation",
+                    "confirmation": existing.get("confirmation"),
+                    "delete": sorted((existing.get("ordinary_untracked") or {}).keys()),
+                    "resuming": True,
+                }
+            if confirm != existing.get("confirmation"):
+                raise SoloAIError("Retained reclaim confirmation changed")
+            return resume_retained_reclaim(repo, store=store, task=task)
+        plan = retained_reclaim_plan(repo, store=store, task=task)
+        if confirm is None:
+            return plan
+        if confirm != plan["confirmation"]:
+            raise SoloAIError(
+                "Retained reclaim confirmation does not match the current file checklist"
+            )
+        reclaim = {
+            **{
+                key: value
+                for key, value in plan.items()
+                if key not in {"delete", "retained", "status"}
+            },
+            "transaction_id": uuid.uuid4().hex,
+            "phase": "prepared",
+            "prepared_at": utc_timestamp(),
+        }
+        prepared = store.prepare_retained_reclaim(task_id, reclaim=reclaim)
+        return resume_retained_reclaim(repo, store=store, task=prepared)
 
 
 def _port_free(port: int) -> bool:

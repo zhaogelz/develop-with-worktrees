@@ -49,6 +49,7 @@ from solo_ai.lifecycle import (
     initialize,
     local_enabled,
     ready,
+    reclaim_retained_worktree,
     record_root_task_acceptance,
     refresh_root_context,
     recover,
@@ -3042,6 +3043,293 @@ def test_retained_abandonment_keeps_dirty_worktree_and_closes_root_child(
     }
     root_status = status_view(repo, root_id=root["root_id"])
     assert root_status["root"]["next_action"] == {"kind": "record_root_acceptance"}
+
+
+@pytest.mark.dww_fast
+def test_reclaim_retained_worktree_requires_a_checklist_and_keeps_audit_refs(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="reclaim retained test probe")
+    worktree = Path(task["worktree"])
+    probe = worktree / "probe.txt"
+    probe.write_text("disposable test evidence\n", encoding="utf-8")
+    branch_head = repo.head(worktree)
+
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="preserve a disposable test probe before explicit reclaim",
+        retain_worktree=True,
+    )
+
+    plan = reclaim_retained_worktree(repo, task_id=task["id"])
+    assert plan["status"] == "needs-confirmation"
+    assert plan["delete"] == ["probe.txt"]
+    assert plan["branch_tip"] == branch_head
+    assert probe.exists()
+
+    result = reclaim_retained_worktree(
+        repo, task_id=task["id"], confirm=plan["confirmation"]
+    )
+
+    assert result["status"] == "reclaimed"
+    assert result["deleted"] == ["probe.txt"]
+    assert not probe.exists()
+    assert repo.branch(worktree) is None
+    assert repo.head(worktree) == task["base_head"]
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == branch_head
+    state = StateStore(repo).read()
+    assert state["tasks"][task["id"]]["status"] == "abandoned"
+    assert state["tasks"][task["id"]]["retained_reclaim"]["phase"] == "completed"
+    assert state["slots"][task["slot_id"]]["status"] == "idle"
+    assert state["slots"][task["slot_id"]]["task_id"] is None
+    repeated = reclaim_retained_worktree(
+        repo, task_id=task["id"], confirm=plan["confirmation"]
+    )
+    assert repeated["idempotent"] is True
+    store = StateStore(repo)
+    store.mutate(
+        lambda state: state["slots"][task["slot_id"]].update(
+            {"generation": int(state["slots"][task["slot_id"]]["generation"]) + 1}
+        )
+    )
+    with pytest.raises(SoloAIError, match="Completed retained reclaim slot changed"):
+        reclaim_retained_worktree(
+            repo, task_id=task["id"], confirm=plan["confirmation"]
+        )
+
+
+@pytest.mark.dww_fast
+def test_reclaim_retained_worktree_preserves_active_protected_and_changed_content(
+    git_repo: Path,
+) -> None:
+    repo = initialized(git_repo)
+    active = start(repo, name="active reclaim refusal")
+    with pytest.raises(SoloAIError, match="completed retained-worktree"):
+        reclaim_retained_worktree(repo, task_id=active["id"])
+    abandon(repo, task_id=active["id"], lease=active["lease"], confirm=active["id"])
+
+    protected = start(repo, name="protected retained reclaim refusal")
+    protected_tree = Path(protected["worktree"])
+    protected_file = protected_tree / ".env"
+    protected_file.write_text("do-not-delete\n", encoding="utf-8")
+    abandon(
+        repo,
+        task_id=protected["id"],
+        lease=protected["lease"],
+        confirm=protected["id"],
+        reason="preserve protected test content",
+        retain_worktree=True,
+    )
+    with pytest.raises(SoloAIError, match="protected or unknown"):
+        reclaim_retained_worktree(repo, task_id=protected["id"])
+    assert protected_file.exists()
+    protected_slot = StateStore(repo).read()["slots"][protected["slot_id"]]
+    assert protected_slot["status"] == "quarantined"
+
+    changed = start(repo, name="changed retained reclaim checklist")
+    changed_tree = Path(changed["worktree"])
+    first = changed_tree / "first.txt"
+    first.write_text("first\n", encoding="utf-8")
+    abandon(
+        repo,
+        task_id=changed["id"],
+        lease=changed["lease"],
+        confirm=changed["id"],
+        reason="preserve a changing checklist",
+        retain_worktree=True,
+    )
+    plan = reclaim_retained_worktree(repo, task_id=changed["id"])
+    second = changed_tree / "late.txt"
+    second.write_text("late\n", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="confirmation does not match"):
+        reclaim_retained_worktree(
+            repo, task_id=changed["id"], confirm=plan["confirmation"]
+        )
+    assert first.exists()
+    assert second.exists()
+    changed_slot = StateStore(repo).read()["slots"][changed["slot_id"]]
+    assert changed_slot["status"] == "quarantined"
+
+
+@pytest.mark.dww_fast
+def test_reclaim_retained_worktree_resumes_after_completion_interruption(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="interrupted retained reclaim")
+    worktree = Path(task["worktree"])
+    probe = worktree / "probe.txt"
+    probe.write_text("disposable\n", encoding="utf-8")
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="exercise retained reclaim recovery",
+        retain_worktree=True,
+    )
+    plan = reclaim_retained_worktree(repo, task_id=task["id"])
+    original_complete = StateStore.complete_retained_reclaim
+
+    def interrupt_completion(
+        self: StateStore, task_id: str, *, transaction_id: str
+    ) -> dict[str, object]:
+        raise RuntimeError("stop after retained reclaim detach")
+
+    monkeypatch.setattr(StateStore, "complete_retained_reclaim", interrupt_completion)
+    with pytest.raises(RuntimeError, match="stop after retained reclaim detach"):
+        reclaim_retained_worktree(
+            repo, task_id=task["id"], confirm=plan["confirmation"]
+        )
+    assert not probe.exists()
+    assert repo.branch(worktree) is None
+    reclaim = StateStore(repo).task(task["id"])["retained_reclaim"]
+    assert reclaim["phase"] == "detached"
+
+    monkeypatch.setattr(StateStore, "complete_retained_reclaim", original_complete)
+    resumed = reclaim_retained_worktree(
+        repo, task_id=task["id"], confirm=plan["confirmation"]
+    )
+    assert resumed["status"] == "reclaimed"
+    assert StateStore(repo).read()["slots"][task["slot_id"]]["status"] == "idle"
+
+
+@pytest.mark.dww_fast
+def test_reclaim_retained_worktree_refuses_new_ignored_file_before_detach(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / ".gitignore").write_text("late-ignored.txt\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore late retained probe")
+    repo = initialized(git_repo)
+    task = start(repo, name="retained reclaim detaching recheck")
+    worktree = Path(task["worktree"])
+    probe = worktree / "probe.txt"
+    probe.write_text("disposable\n", encoding="utf-8")
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="exercise detach recheck",
+        retain_worktree=True,
+    )
+    plan = reclaim_retained_worktree(repo, task_id=task["id"])
+    original_advance = StateStore.advance_retained_reclaim
+
+    def stop_after_detaching(
+        self: StateStore, task_id: str, *, transaction_id: str, phase: str
+    ) -> dict[str, object]:
+        result = original_advance(
+            self, task_id, transaction_id=transaction_id, phase=phase
+        )
+        if phase == "detaching":
+            raise RuntimeError("stop before retained reclaim detach")
+        return result
+
+    monkeypatch.setattr(StateStore, "advance_retained_reclaim", stop_after_detaching)
+    with pytest.raises(RuntimeError, match="stop before retained reclaim detach"):
+        reclaim_retained_worktree(
+            repo, task_id=task["id"], confirm=plan["confirmation"]
+        )
+    monkeypatch.setattr(StateStore, "advance_retained_reclaim", original_advance)
+    late = worktree / "late-ignored.txt"
+    late.write_text("must survive\n", encoding="utf-8")
+
+    with pytest.raises(SoloAIError, match="before detach"):
+        reclaim_retained_worktree(
+            repo, task_id=task["id"], confirm=plan["confirmation"]
+        )
+
+    assert late.read_text(encoding="utf-8") == "must survive\n"
+    assert repo.branch(worktree) == task["branch"]
+    assert repo.head(worktree) == plan["branch_tip"]
+    reclaim = StateStore(repo).task(task["id"])["retained_reclaim"]
+    assert reclaim["phase"] == "detaching"
+
+
+@pytest.mark.dww_fast
+@pytest.mark.parametrize(
+    "mutation",
+    ("ordinary-content", "branch-head", "slot-owner"),
+)
+def test_reclaim_retained_worktree_preserves_changed_preview_or_successor(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name=f"retained reclaim {mutation} refusal")
+    worktree = Path(task["worktree"])
+    probe = worktree / "probe.txt"
+    probe.write_text("original\n", encoding="utf-8")
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="preserve an exact reclaim refusal fixture",
+        retain_worktree=True,
+    )
+    plan = reclaim_retained_worktree(repo, task_id=task["id"])
+    expected_slot = {"status": "quarantined", "task_id": task["id"]}
+    expected_content = "original\n"
+
+    if mutation == "ordinary-content":
+        expected_content = "changed after preview\n"
+        probe.write_text(expected_content, encoding="utf-8")
+    elif mutation == "branch-head":
+        repo.git(
+            ["commit", "--allow-empty", "-m", "test: advance retained head"],
+            cwd=worktree,
+        )
+    else:
+        original_advance = StateStore.advance_retained_reclaim
+
+        def stop_after_deleting(
+            self: StateStore, task_id: str, *, transaction_id: str, phase: str
+        ) -> dict[str, object]:
+            result = original_advance(
+                self, task_id, transaction_id=transaction_id, phase=phase
+            )
+            if phase == "deleting":
+                raise RuntimeError("stop before retained reclaim deletion")
+            return result
+
+        monkeypatch.setattr(StateStore, "advance_retained_reclaim", stop_after_deleting)
+        with pytest.raises(RuntimeError, match="stop before retained reclaim deletion"):
+            reclaim_retained_worktree(
+                repo, task_id=task["id"], confirm=plan["confirmation"]
+            )
+        monkeypatch.setattr(StateStore, "advance_retained_reclaim", original_advance)
+        store = StateStore(repo)
+        current_generation = store.read()["slots"][task["slot_id"]]["generation"]
+        successor_generation = int(current_generation) + 1
+        store.mutate(
+            lambda state: state["slots"][task["slot_id"]].update(
+                {
+                    "generation": successor_generation,
+                    "status": "active",
+                    "task_id": "task-successor",
+                }
+            )
+        )
+        expected_slot = {
+            "generation": successor_generation,
+            "status": "active",
+            "task_id": "task-successor",
+        }
+
+    with pytest.raises(SoloAIError):
+        reclaim_retained_worktree(
+            repo, task_id=task["id"], confirm=plan["confirmation"]
+        )
+
+    assert probe.read_text(encoding="utf-8") == expected_content
+    slot = StateStore(repo).read()["slots"][task["slot_id"]]
+    assert {key: slot[key] for key in expected_slot} == expected_slot
 
 
 def test_recover_keeps_retained_worktree_after_interrupted_completion(

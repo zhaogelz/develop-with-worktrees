@@ -31,6 +31,7 @@ TOP_LEVEL_COMMANDS = frozenset(
         "status",
         "recover",
         "abandon",
+        "reclaim-retained",
         "resume-in-place",
         "warm-slot",
         "dev",

@@ -16,12 +16,15 @@ from .util import (
     atomic_write_json,
     path_identity,
     read_json,
+    sha256_text,
     snapshot_plain_path,
+    stable_json,
     utc_timestamp,
 )
 
 ABANDONMENT_SCHEMA = 1
 ABANDONMENT_RECEIPT_SCHEMA = 1
+RETAINED_RECLAIM_SCHEMA = 1
 
 
 def _receipt_path(repo: GitRepo, task_id: str) -> Path:
@@ -473,6 +476,305 @@ def resume_retained(
         "transaction_id": receipt["transaction_id"],
         "retained_worktree": True,
         "quarantine_reason": completed.get("quarantine_reason"),
+    }
+
+
+def _assert_reclaim_task(task: dict[str, Any]) -> dict[str, Any]:
+    """仅让已完整保留的终态任务进入显式回收流程。"""
+    transaction = task.get("abandonment")
+    if (
+        task.get("status") != "abandoned"
+        or not isinstance(transaction, dict)
+        or transaction.get("retained_worktree") is not True
+        or transaction.get("phase") != "completed"
+    ):
+        raise SoloAIError(
+            "Retained reclaim accepts only a completed retained-worktree abandonment"
+        )
+    if task.get("active_operation"):
+        raise SoloAIError("Retained reclaim requires no active task operation")
+    _assert_identity(task, transaction)
+    assert_retained_worktree_safe(task)
+    return transaction
+
+
+def _reclaim_worktree(
+    repo: GitRepo, *, task: dict[str, Any], transaction: dict[str, Any]
+) -> Path:
+    worktree = Path(str(transaction["worktree"]))
+    resolved = require_managed_directory_identity(
+        worktree,
+        managed_root=Path(str(transaction["managed_root"])),
+        expected_resolved=str(transaction["worktree_resolved"]),
+        expected_root_resolved=str(transaction["managed_root_resolved"]),
+        expected_identity=dict(transaction["worktree_identity"]),
+        expected_root_identity=dict(transaction["managed_root_identity"]),
+    )
+    registered = any(item.path == resolved for item in repo.worktrees())
+    if not worktree.is_dir() or not registered:
+        raise SoloAIError("Retained reclaim worktree is missing or unregistered")
+    return worktree
+
+
+def retained_reclaim_plan(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any]:
+    """生成无副作用的回收清单；确认值绑定本次可删对象快照。"""
+    transaction = _assert_reclaim_task(task)
+    worktree = _reclaim_worktree(repo, task=task, transaction=transaction)
+    state = store.read()
+    slot = state["slots"].get(str(task["slot_id"]))
+    if (
+        not slot
+        or slot.get("task_id") != task["id"]
+        or slot.get("status") != "quarantined"
+    ):
+        raise SoloAIError("Retained reclaim requires its exact quarantined slot")
+    expected_tip = str(transaction["branch_tip"])
+    if (
+        repo.branch(worktree) != transaction["branch"]
+        or repo.head(worktree) != expected_tip
+        or repo.ref_head(f"refs/heads/{transaction['branch']}") != expected_tip
+    ):
+        raise SoloAIError("Retained reclaim branch or HEAD changed")
+    tracked_status = repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=no"], cwd=worktree
+    ).stdout
+    if tracked_status:
+        raise SoloAIError(
+            "Retained reclaim refuses tracked changes; preserve the worktree for review"
+        )
+    inventory = inspect_untracked(repo, cwd=worktree)
+    blocked = [
+        *inventory["keep"],
+        *inventory["protected"],
+        *inventory["unknown_ignored"],
+    ]
+    if blocked:
+        raise SoloAIError(
+            "Retained reclaim found protected or unknown content; files were preserved:\n"
+            + "\n".join(f"- {item}" for item in blocked[:20])
+        )
+    ordinary = {
+        relative: snapshot_plain_path(worktree / relative)
+        for relative in inventory["ordinary"]
+    }
+    identity = {
+        "schema_version": RETAINED_RECLAIM_SCHEMA,
+        "task_id": task["id"],
+        "slot_id": task["slot_id"],
+        "slot_generation": int(slot["generation"]),
+        "abandonment_transaction_id": transaction["transaction_id"],
+        "worktree": str(worktree),
+        "branch": transaction["branch"],
+        "branch_tip": expected_tip,
+        "base_head": transaction["base_head"],
+        "ordinary_untracked": ordinary,
+    }
+    confirmation = sha256_text(stable_json(identity))
+    return {
+        **identity,
+        "confirmation": confirmation,
+        "delete": sorted(ordinary),
+        "retained": sorted(inventory["retained"]),
+        "status": "needs-confirmation",
+    }
+
+
+def _assert_reclaim_transaction(
+    task: dict[str, Any], transaction: dict[str, Any]
+) -> None:
+    expected = {
+        "schema_version": RETAINED_RECLAIM_SCHEMA,
+        "task_id": task["id"],
+        "slot_id": task["slot_id"],
+        "abandonment_transaction_id": task["abandonment"]["transaction_id"],
+    }
+    for key, value in expected.items():
+        if transaction.get(key) != value:
+            raise SoloAIError(f"Retained reclaim identity changed: {key}")
+    if transaction.get("phase") not in {
+        "prepared",
+        "deleting",
+        "detaching",
+        "detached",
+        "completed",
+    }:
+        raise SoloAIError("Unsupported retained reclaim transaction phase")
+
+
+def _assert_reclaim_slot(
+    store: StateStore, *, task: dict[str, Any], transaction: dict[str, Any]
+) -> None:
+    slot = store.read()["slots"].get(str(task["slot_id"]))
+    if (
+        not slot
+        or slot.get("task_id") != task["id"]
+        or slot.get("status") != "release-checking"
+        or int(slot.get("generation", -1)) != int(transaction["slot_generation"])
+    ):
+        raise SoloAIError("Retained reclaim slot identity changed")
+
+
+def _assert_reclaim_clean_before_detach(
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    transaction: dict[str, Any],
+) -> Path:
+    """detach 前重新冻结现场，不能把中断后新到的内容交给 Git 覆盖。"""
+    _assert_reclaim_slot(store, task=task, transaction=transaction)
+    abandonment = dict(task["abandonment"])
+    worktree = _reclaim_worktree(repo, task=task, transaction=abandonment)
+    tracked_status = repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=no"], cwd=worktree
+    ).stdout
+    if tracked_status:
+        raise SoloAIError("Retained reclaim received tracked changes before detach")
+    inventory = inspect_untracked(repo, cwd=worktree)
+    blocked = [
+        *inventory["keep"],
+        *inventory["protected"],
+        *inventory["ordinary"],
+        *inventory["unknown_ignored"],
+    ]
+    if blocked:
+        raise SoloAIError(
+            "Retained reclaim received protected, unknown, or ordinary content before detach:\n"
+            + "\n".join(f"- {item}" for item in blocked[:20])
+        )
+    if not repo.is_clean(worktree):
+        raise SoloAIError("Retained reclaim worktree is not clean before detach")
+    return worktree
+
+
+def resume_retained_reclaim(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any]:
+    """从持久阶段继续回收；只删除已确认且未改变的普通未跟踪内容。"""
+    _assert_reclaim_task(task)
+    transaction = task.get("retained_reclaim")
+    if not isinstance(transaction, dict):
+        raise SoloAIError("Retained reclaim transaction is missing")
+    _assert_reclaim_transaction(task, transaction)
+    if transaction.get("phase") == "completed":
+        slot = store.read()["slots"].get(str(task["slot_id"]))
+        if (
+            not slot
+            or slot.get("task_id") is not None
+            or slot.get("status") != "idle"
+            or int(slot.get("generation", -1)) != int(transaction["slot_generation"])
+        ):
+            raise SoloAIError("Completed retained reclaim slot changed")
+        return {
+            "task_id": task["id"],
+            "slot_id": task["slot_id"],
+            "status": "reclaimed",
+            "idempotent": True,
+            "deleted": sorted(transaction["ordinary_untracked"]),
+        }
+    _assert_reclaim_slot(store, task=task, transaction=transaction)
+    abandonment = dict(task["abandonment"])
+    worktree = _reclaim_worktree(repo, task=task, transaction=abandonment)
+    expected_tip = str(transaction["branch_tip"])
+    base_head = str(transaction["base_head"])
+    phase = str(transaction["phase"])
+
+    if phase in {"prepared", "deleting"}:
+        if (
+            repo.branch(worktree) != transaction["branch"]
+            or repo.head(worktree) != expected_tip
+            or repo.ref_head(f"refs/heads/{transaction['branch']}") != expected_tip
+        ):
+            raise SoloAIError("Retained reclaim branch or HEAD changed")
+        tracked_status = repo.git(
+            ["status", "--porcelain=v1", "--untracked-files=no"], cwd=worktree
+        ).stdout
+        if tracked_status:
+            raise SoloAIError("Retained reclaim received tracked changes")
+        inventory = inspect_untracked(repo, cwd=worktree)
+        blocked = [
+            *inventory["keep"],
+            *inventory["protected"],
+            *inventory["unknown_ignored"],
+        ]
+        if blocked:
+            raise SoloAIError("Retained reclaim received protected or unknown content")
+        observed = {
+            relative: snapshot_plain_path(worktree / relative)
+            for relative in inventory["ordinary"]
+        }
+        expected = dict(transaction["ordinary_untracked"])
+        for relative, snapshot in observed.items():
+            if expected.get(relative) != snapshot:
+                raise SoloAIError("Retained reclaim ordinary content changed")
+        if set(observed) - set(expected):
+            raise SoloAIError("Retained reclaim ordinary content list changed")
+        if phase == "prepared":
+            transaction = store.advance_retained_reclaim(
+                task["id"],
+                transaction_id=str(transaction["transaction_id"]),
+                phase="deleting",
+            )
+        if observed:
+            remove_abandoned_untracked(
+                repo,
+                cwd=worktree,
+                expected_ordinary=observed,
+            )
+        remaining = inspect_untracked(repo, cwd=worktree)
+        blocked_keys = ("keep", "protected", "ordinary", "unknown_ignored")
+        if any(remaining[key] for key in blocked_keys):
+            raise SoloAIError("Retained reclaim content changed during deletion")
+        transaction = store.advance_retained_reclaim(
+            task["id"],
+            transaction_id=str(transaction["transaction_id"]),
+            phase="detaching",
+        )
+        phase = "detaching"
+
+    if phase == "detaching":
+        worktree = _assert_reclaim_clean_before_detach(
+            repo, store=store, task=task, transaction=transaction
+        )
+        branch = repo.branch(worktree)
+        if branch == transaction["branch"]:
+            if (
+                repo.head(worktree) != expected_tip
+                or repo.ref_head(f"refs/heads/{transaction['branch']}") != expected_tip
+            ):
+                raise SoloAIError("Retained reclaim branch changed before detach")
+            repo.git(["switch", "--detach", base_head], cwd=worktree)
+        elif branch is None:
+            if repo.head(worktree) != base_head:
+                raise SoloAIError("Retained reclaim detached HEAD changed")
+        else:
+            raise SoloAIError("Retained reclaim worktree switched to another branch")
+        transaction = store.advance_retained_reclaim(
+            task["id"],
+            transaction_id=str(transaction["transaction_id"]),
+            phase="detached",
+        )
+
+    if repo.branch(worktree) is not None or repo.head(worktree) != base_head:
+        raise SoloAIError("Retained reclaim worktree changed before release")
+    if not repo.is_clean(worktree):
+        raise SoloAIError("Retained reclaim worktree is not clean before release")
+    inventory = inspect_untracked(repo, cwd=worktree)
+    blocked_keys = ("keep", "protected", "ordinary", "unknown_ignored")
+    if any(inventory[key] for key in blocked_keys):
+        raise SoloAIError("Retained reclaim content changed before release")
+    completed = store.complete_retained_reclaim(
+        task["id"], transaction_id=str(transaction["transaction_id"])
+    )
+    return {
+        "task_id": task["id"],
+        "slot_id": task["slot_id"],
+        "status": "reclaimed",
+        "idempotent": False,
+        "deleted": sorted(transaction["ordinary_untracked"]),
+        "branch_preserved": completed["branch"],
     }
 
 

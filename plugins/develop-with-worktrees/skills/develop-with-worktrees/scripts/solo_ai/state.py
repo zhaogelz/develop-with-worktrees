@@ -1597,6 +1597,146 @@ class StateStore:
 
         return self.mutate(update)
 
+    def prepare_retained_reclaim(
+        self, task_id: str, *, reclaim: dict[str, Any]
+    ) -> dict[str, Any]:
+        """把已确认的保留式回收清单冻结为可恢复事务。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            abandonment = task.get("abandonment") if task else None
+            if (
+                not task
+                or task.get("status") != "abandoned"
+                or not abandonment
+                or abandonment.get("retained_worktree") is not True
+                or abandonment.get("phase") != "completed"
+                or task.get("active_operation")
+            ):
+                raise SoloAIError("Retained reclaim task identity changed")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "quarantined"
+                or int(slot.get("generation", -1))
+                != int(reclaim.get("slot_generation", -1))
+            ):
+                raise SoloAIError("Retained reclaim slot identity changed")
+            if (
+                reclaim.get("task_id") != task_id
+                or reclaim.get("slot_id") != task.get("slot_id")
+                or reclaim.get("abandonment_transaction_id")
+                != abandonment.get("transaction_id")
+                or reclaim.get("phase") != "prepared"
+            ):
+                raise SoloAIError("Retained reclaim confirmation identity changed")
+            if task.get("retained_reclaim"):
+                raise SoloAIError("A retained reclaim transaction already exists")
+            task["retained_reclaim"] = copy.deepcopy(reclaim)
+            task["updated_at"] = utc_timestamp()
+            slot.update(
+                {
+                    "status": "release-checking",
+                    "quarantine_reason": "Retained reclaim in progress",
+                }
+            )
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def advance_retained_reclaim(
+        self, task_id: str, *, transaction_id: str, phase: str
+    ) -> dict[str, Any]:
+        if phase not in {"deleting", "detaching", "detached"}:
+            raise SoloAIError("Unsupported retained reclaim transition")
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            reclaim = task.get("retained_reclaim") if task else None
+            if (
+                not task
+                or task.get("status") != "abandoned"
+                or not reclaim
+                or reclaim.get("transaction_id") != transaction_id
+            ):
+                raise SoloAIError("Retained reclaim transaction identity changed")
+            allowed = {
+                "prepared": "deleting",
+                "deleting": "detaching",
+                "detaching": "detached",
+            }
+            if allowed.get(reclaim.get("phase")) != phase:
+                raise SoloAIError("Retained reclaim phase changed")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "release-checking"
+                or int(slot.get("generation", -1))
+                != int(reclaim.get("slot_generation", -1))
+            ):
+                raise SoloAIError("Retained reclaim slot identity changed")
+            reclaim["phase"] = phase
+            reclaim["updated_at"] = utc_timestamp()
+            task["updated_at"] = utc_timestamp()
+            return copy.deepcopy(task)
+
+        return self.mutate(update)["retained_reclaim"]
+
+    def complete_retained_reclaim(
+        self, task_id: str, *, transaction_id: str
+    ) -> dict[str, Any]:
+        """正式释放已清空并脱离的保留工作树，历史任务与分支均保留。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            abandonment = task.get("abandonment") if task else None
+            reclaim = task.get("retained_reclaim") if task else None
+            if (
+                not task
+                or task.get("status") != "abandoned"
+                or not abandonment
+                or abandonment.get("retained_worktree") is not True
+                or not reclaim
+                or reclaim.get("transaction_id") != transaction_id
+                or reclaim.get("phase") != "detached"
+            ):
+                raise SoloAIError("Retained reclaim completion identity changed")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "release-checking"
+                or int(slot.get("generation", -1))
+                != int(reclaim.get("slot_generation", -1))
+            ):
+                raise SoloAIError("Retained reclaim slot release state changed")
+            now = utc_timestamp()
+            reclaim.update({"phase": "completed", "completed_at": now})
+            task["updated_at"] = now
+            slot.update(
+                {
+                    "status": "idle",
+                    "task_id": None,
+                    "last_used": time.time(),
+                    "quarantine_reason": None,
+                    "released_worktree_identity": copy.deepcopy(
+                        abandonment["worktree_identity"]
+                    ),
+                    "released_managed_root_identity": copy.deepcopy(
+                        abandonment["managed_root_identity"]
+                    ),
+                    "released_worktree_resolved": abandonment["worktree_resolved"],
+                    "released_managed_root_resolved": abandonment[
+                        "managed_root_resolved"
+                    ],
+                }
+            )
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     def prepare_preactivation_release(
         self, task_id: str, *, operation_id: str, recovery: dict[str, Any]
     ) -> dict[str, Any]:

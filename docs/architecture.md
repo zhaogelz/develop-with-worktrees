@@ -111,6 +111,13 @@ tracked checkout. The important groups are:
 These are recovery evidence, not a public API for direct editing. The CLI and
 persisted Git facts decide lifecycle truth; status views are projections.
 
+A retained terminal worktree is deliberately not reusable merely because its
+old task is terminal. The explicit `reclaim-retained` maintenance path first
+binds a reviewable deletion checklist to its recorded identity, then returns
+only an unchanged, clean, detached test worktree. It preserves the terminal
+task, branch, and receipts, so “integrated”, “retained for review”, and
+“reusable” remain distinct states.
+
 ## Delivery and runtime are separate
 
 A source candidate is published after its task finishes. It becomes delivered
