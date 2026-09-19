@@ -42,6 +42,10 @@ a `+codex.<build>` suffix.
 
 ## Default flow
 
+A brand-new empty Git repository is supported: after you accept isolated mode,
+DWW creates an empty first commit on your chosen branch. It will not include
+existing files or staged changes automatically.
+
 1. The host routes the repository. A managed change starts in an isolated
    worktree; an existing mature workflow keeps ownership of its repository.
 2. The agent edits only there and commits the exact reviewed paths.

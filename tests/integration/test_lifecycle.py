@@ -109,6 +109,131 @@ def initialized(path: Path) -> GitRepo:
     return repo
 
 
+def _empty_repo(path: Path, *, branch: str = "trunk") -> Path:
+    path.mkdir()
+    git(path, "init", "-b", branch)
+    git(path, "config", "user.name", "Test User")
+    git(path, "config", "user.email", "test@example.invalid")
+    return path
+
+
+def test_initialize_empty_repo_uses_custom_unborn_branch_and_empty_baseline(
+    tmp_path: Path,
+) -> None:
+    root = _empty_repo(tmp_path / "中文 空", branch="release/base")
+    repo = GitRepo(root)
+    commands = [CommandSpec(("git", "status", "--short"))]
+
+    preview = initialize(
+        repo,
+        slots=1,
+        commands=commands,
+        accept=False,
+        accept_static_only=False,
+    )
+    assert preview["decision"] == "needs-approval"
+    assert preview["plan"]["initial_empty_baseline"] is True
+    assert repo.git(["rev-parse", "--verify", "HEAD"], check=False).returncode != 0
+
+    adopted = initialize(
+        repo,
+        slots=1,
+        commands=commands,
+        accept=True,
+        accept_static_only=False,
+    )
+    assert adopted["decision"] == "adopted"
+    assert git(root, "symbolic-ref", "--short", "HEAD") == "release/base"
+    roots = git(root, "rev-list", "--max-parents=0", "HEAD").splitlines()
+    assert len(roots) == 1
+    assert git(root, "ls-tree", "-r", roots[0]) == ""
+    assert git(root, "show", "-s", "--format=%P", roots[0]) == ""
+    assert git(root, "rev-list", "--count", "HEAD") == "2"
+
+
+@pytest.mark.parametrize("content_kind", ["untracked", "staged", "ignored"])
+def test_initialize_empty_repo_preserves_user_content_without_baseline(
+    tmp_path: Path,
+    content_kind: str,
+) -> None:
+    root = _empty_repo(tmp_path / "dirty", branch="main")
+    marker = root / "keep.txt"
+    marker.write_text("keep\n", encoding="utf-8")
+    repo = GitRepo(root)
+    if content_kind == "staged":
+        git(root, "add", "keep.txt")
+    elif content_kind == "ignored":
+        (root / ".git" / "info" / "exclude").write_text("keep.txt\n", encoding="utf-8")
+    index = root / ".git" / "index"
+    index_before = index.read_bytes() if index.exists() else None
+
+    with pytest.raises(SoloAIError, match="staged, modified, untracked, or ignored"):
+        initialize(
+            repo,
+            slots=1,
+            commands=[CommandSpec(("git", "status", "--short"))],
+            accept=True,
+            accept_static_only=False,
+        )
+
+    assert marker.read_text(encoding="utf-8") == "keep\n"
+    assert repo.git(["rev-parse", "--verify", "HEAD"], check=False).returncode != 0
+    assert (index.read_bytes() if index.exists() else None) == index_before
+
+
+def test_initialize_empty_repo_missing_author_can_retry_without_duplicate_baseline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _empty_repo(tmp_path / "missing-author")
+    repo = GitRepo(root)
+    git(root, "config", "user.name", "")
+    for variable in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        monkeypatch.delenv(variable, raising=False)
+    commands = [CommandSpec(("git", "status", "--short"))]
+    with pytest.raises(
+        SoloAIError, match="Cannot create the initial empty Git baseline"
+    ):
+        initialize(
+            repo, slots=1, commands=commands, accept=True, accept_static_only=False
+        )
+    assert repo.git(["rev-parse", "--verify", "HEAD"], check=False).returncode != 0
+    assert not (root / ".git" / "index").exists()
+    assert not (root / "AGENTS.md").exists()
+    assert list(repo.local_dir.glob("dww-empty-index-*")) == []
+    git(root, "config", "user.name", "Test User")
+    result = initialize(
+        repo, slots=1, commands=commands, accept=True, accept_static_only=False
+    )
+    assert result["decision"] == "adopted"
+    assert git(root, "rev-list", "--count", "HEAD") == "2"
+
+
+def test_initialize_preserves_unreadable_refs_and_existing_history(
+    tmp_path: Path, git_repo: Path
+) -> None:
+    empty = _empty_repo(tmp_path / "broken", branch="main")
+    broken_ref = empty / ".git" / "refs" / "tags" / "broken"
+    broken_ref.parent.mkdir(exist_ok=True)
+    broken_ref.write_text("1" * 40 + "\n", encoding="utf-8")
+    repo = GitRepo(empty)
+    commands = [CommandSpec(("git", "status", "--short"))]
+    with pytest.raises(SoloAIError, match="not a clean unborn repository"):
+        initialize(
+            repo, slots=1, commands=commands, accept=True, accept_static_only=False
+        )
+    assert broken_ref.read_text(encoding="utf-8") == "1" * 40 + "\n"
+    assert not (empty / "AGENTS.md").exists()
+    original_head = git(git_repo, "rev-parse", "HEAD")
+    initialize(
+        GitRepo(git_repo),
+        slots=1,
+        commands=commands,
+        accept=True,
+        accept_static_only=False,
+    )
+    assert git(git_repo, "rev-parse", "HEAD^") == original_head
+
+
 def test_initialize_discovery_creates_a_conservative_integration_full_profile(
     git_repo: Path,
 ) -> None:
@@ -4057,9 +4182,7 @@ def test_handoff_preserves_dirty_isolated_task_and_rotates_its_lease(
     repo = initialized(git_repo)
     original_host = {"kind": "codex", "thread_id": "handoff-source"}
     receiving_host = {"kind": "codex", "thread_id": "handoff-recipient"}
-    task = start(
-        repo, name="handoff dirty worktree", host_origin=original_host
-    )
+    task = start(repo, name="handoff dirty worktree", host_origin=original_host)
     worktree = Path(task["worktree"])
     draft = worktree / "draft.txt"
     draft.write_text("preserve this work\n", encoding="utf-8")
@@ -4202,9 +4325,7 @@ def test_handoff_rejects_identity_changed_after_confirmation(
     repo = initialized(git_repo)
     original_host = {"kind": "codex", "thread_id": "drift-source"}
     receiving_host = {"kind": "codex", "thread_id": "drift-recipient"}
-    task = start(
-        repo, name="handoff confirmation drift", host_origin=original_host
-    )
+    task = start(repo, name="handoff confirmation drift", host_origin=original_host)
     original_head = task["candidate_head"]
     original_assert = lifecycle._assert_handoff_validation_idle
 

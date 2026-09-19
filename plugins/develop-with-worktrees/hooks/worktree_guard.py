@@ -1315,6 +1315,20 @@ def _read_only_rejection_reason(command: str) -> str:
     return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."
 
 
+def _dww_runner_present(command: str) -> bool:
+    """仅用于拒绝文案：出现 runner 路径不代表命令可以执行。"""
+    expected = (
+        Path(__file__).resolve().parents[1]
+        / "skills"
+        / "develop-with-worktrees"
+        / "scripts"
+        / "dww.py"
+    ).resolve()
+    return (
+        str(expected).replace("\\", "/").lower() in command.replace("\\", "/").lower()
+    )
+
+
 def _dww_invocation(command: str, root: Path) -> tuple[str, Path] | None:
     """Parse one literal DWW runner call and return its target worktree root.
 
@@ -1625,6 +1639,12 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             "help",
         }:
             return None
+        if tool == "Bash" and dww_command is None and _dww_runner_present(command):
+            return _deny(
+                "A DWW runner path was detected, but the invocation could not be "
+                "verified. Check literal quoting, --repo and the subcommand; "
+                "the repository choice was not changed and no write was allowed."
+            )
         return _deny(
             "Potential repository write is blocked until the user chooses how this repository should be modified. Show the one compact three-choice question, then use the matching trusted dww choose command."
         )

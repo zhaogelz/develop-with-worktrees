@@ -60,11 +60,16 @@ class GitRepo:
         *,
         cwd: Path | None = None,
         check: bool = True,
+        env: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> CommandResult:
         actual = cwd or self.root
         return run(
-            ["git", "-C", str(actual), *args], cwd=actual, check=check, timeout=timeout
+            ["git", "-C", str(actual), *args],
+            cwd=actual,
+            check=check,
+            env=env,
+            timeout=timeout,
         )
 
     def worktrees(self) -> list[WorktreeInfo]:
@@ -128,6 +133,9 @@ class GitRepo:
                 return candidate
         if len(branches) == 1:
             return branches[0]
+        if symbolic.returncode == 0 and symbolic.stdout.strip() and not branches:
+            # unborn 仓库仍有符号 HEAD，首个基线沿用用户选定的分支名。
+            return symbolic.stdout.strip()
         raise SoloAIError(
             "Cannot determine the local default branch; set git config solo-ai.default-branch NAME"
         )

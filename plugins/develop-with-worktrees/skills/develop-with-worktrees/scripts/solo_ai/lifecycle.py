@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -490,12 +491,69 @@ def _require_no_lifecycle_lock(repo: GitRepo) -> None:
         raise SoloAIError("An active lifecycle lock blocks this maintenance operation")
 
 
+def _needs_empty_baseline(repo: GitRepo, primary: Path) -> bool:
+    """确认 primary 是否是真正的无提交、无内容 unborn 仓库。"""
+    head = repo.git(
+        ["rev-parse", "--verify", "HEAD^{commit}"], cwd=primary, check=False
+    )
+    if head.returncode == 0:
+        return False
+    symbolic = repo.git(
+        ["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=primary, check=False
+    )
+    refs = repo.git(["show-ref"], cwd=primary, check=False)
+    if symbolic.returncode != 0 or refs.returncode != 1 or refs.stdout.strip():
+        raise SoloAIError(
+            "Primary worktree has no readable HEAD but is not a clean unborn repository; "
+            "preserve it and repair the Git refs before adoption."
+        )
+    dirty = repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=all", "--ignored"],
+        cwd=primary,
+    ).stdout.splitlines()
+    if dirty:
+        raise SoloAIError(
+            "Cannot create the initial empty baseline while the primary worktree has "
+            "staged, modified, untracked, or ignored files: " + ", ".join(dirty[:5])
+        )
+    return True
+
+
+def _create_empty_baseline(repo: GitRepo, primary: Path) -> None:
+    """用临时 index 建立无文件、无父提交的首个基线，保留用户 index。"""
+    index_fd, index_name = tempfile.mkstemp(
+        prefix="dww-empty-index-", dir=str(repo.local_dir)
+    )
+    os.close(index_fd)
+    index_path = Path(index_name)
+    try:
+        index_path.unlink()
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = str(index_path)
+        repo.git(["read-tree", "--empty"], cwd=primary, env=env)
+        repo.git(
+            ["commit", "--allow-empty", "-m", "chore: 建立空仓库初始基线"],
+            cwd=primary,
+            env=env,
+        )
+    except Exception as exc:
+        raise SoloAIError(
+            f"Cannot create the initial empty Git baseline; no bootstrap was attempted: {exc}"
+        ) from exc
+    finally:
+        try:
+            index_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _initialization_plan(
     repo: GitRepo,
     verification: VerificationConfig,
     *,
     slots: int,
     validation_source: str,
+    initial_empty_baseline: bool,
 ) -> dict[str, Any]:
     return {
         "slots": slots,
@@ -519,6 +577,7 @@ def _initialization_plan(
         ),
         "static_only": verification.static_only,
         "validation_source": validation_source,
+        "initial_empty_baseline": initial_empty_baseline,
         "dependency_inputs": [
             name for name in LOCKFILE_NAMES if (repo.root / name).exists()
         ],
@@ -586,6 +645,7 @@ def initialize(
                 "Repository is already adopted or has a pending bootstrap; run doctor"
             )
         primary, default = repo.ensure_primary_default()
+        initial_empty_baseline = _needs_empty_baseline(repo, primary)
         if verification_file is not None:
             source, rendered_verification, verification = read_verification_config_file(
                 verification_file
@@ -627,8 +687,12 @@ def initialize(
                     verification,
                     slots=slots,
                     validation_source=validation_source,
+                    initial_empty_baseline=initial_empty_baseline,
                 ),
             }
+        # 审阅后重新检查：仅为空 unborn 仓库建一次基线，用户内容变化则保留并拒绝。
+        if _needs_empty_baseline(repo, primary):
+            _create_empty_baseline(repo, primary)
         bootstrap_id = uuid.uuid4().hex[:8]
         branch = f"solo-ai/bootstrap-{bootstrap_id}"
         worktree = repo.local_dir / "bootstrap" / bootstrap_id / "worktree"

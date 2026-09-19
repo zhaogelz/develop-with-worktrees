@@ -40,7 +40,7 @@ def _change(worktree: str, diff: str) -> dict[str, object]:
                 "type": "fileChange",
                 "status": "completed",
                 "changes": [{"path": f"{worktree}\\probe.txt", "diff": diff}],
-            }
+            },
         },
     }
 
@@ -135,9 +135,7 @@ def _owner_session_jsonl(
                     "type": "custom_tool_call",
                     "name": "exec",
                     "input": f"await tools.apply_patch({json.dumps(patch)});",
-                    "internal_chat_message_metadata_passthrough": {
-                        "turn_id": turn_id
-                    },
+                    "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
                 },
             }
         )
@@ -346,7 +344,7 @@ def _turn_ids() -> dict[str, str]:
 def test_verifier_rejects_all_owner_changes_from_foreign_identity() -> None:
     events = _valid_events(r"C:\repo\.worktrees\slot")
     for event in events:
-        item = ((event.get("params") or {}).get("item") or {})
+        item = (event.get("params") or {}).get("item") or {}
         if item.get("type") == "fileChange":
             params = event["params"]
             assert isinstance(params, dict)
@@ -520,6 +518,7 @@ def test_snapshot_rejects_unrelated_porcelain(monkeypatch, tmp_path: Path) -> No
     )
 
     for dirty_path in (repo, worktree):
+
         def fake_git_status(path: Path) -> verifier.GitStatus:
             if path == worktree:
                 lines = [" M probe.txt"]
@@ -534,8 +533,7 @@ def test_snapshot_rejects_unrelated_porcelain(monkeypatch, tmp_path: Path) -> No
         checks = verifier.verify_snapshot(repo, worktree)
 
         assert any(
-            check.id == "NO_INTRUSION" and check.status == "failed"
-            for check in checks
+            check.id == "NO_INTRUSION" and check.status == "failed" for check in checks
         )
 
 

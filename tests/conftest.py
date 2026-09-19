@@ -221,7 +221,10 @@ def directory_link():
         if (int(details.st_dev), int(details.st_ino)) != expected_identity:
             continue
         if os.name == "nt":
-            if not getattr(details, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            if (
+                not getattr(details, "st_file_attributes", 0)
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
                 continue
             # rmdir 只删除 junction 对象，不会跟随或删除其目标目录。
             link.rmdir()

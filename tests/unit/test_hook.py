@@ -87,6 +87,60 @@ def _initialized(path: Path, *, slots: int = 1) -> GitRepo:
     return repo
 
 
+def test_dww_subcommand_accepts_single_double_and_unquoted_paths(
+    git_repo: Path,
+) -> None:
+    for quote in ("", "'", '"'):
+        runner = f"{quote}{RUNNER_PATH}{quote}"
+        repo_value = f"{quote}{git_repo}{quote}"
+        command = f"uv run --script {runner} --repo {repo_value} --json status"
+        assert HOOK._dww_subcommand(command, git_repo) == "status"
+
+
+def test_dww_subcommand_accepts_repo_equals_and_read_only_help(
+    git_repo: Path,
+) -> None:
+    command = f"uv run --script '{RUNNER_PATH}' --json --repo='{git_repo}' --help"
+    assert HOOK._dww_subcommand(command, git_repo) == "help"
+
+
+def test_dww_subcommand_rejects_fake_runner_and_argument_text(
+    git_repo: Path,
+) -> None:
+    fake = git_repo / "dww.py"
+    assert (
+        HOOK._dww_subcommand(
+            f"uv run --script '{fake}' --repo '{git_repo}' status", git_repo
+        )
+        is None
+    )
+    assert (
+        HOOK._dww_subcommand(
+            f"uv run --script '{RUNNER_PATH}' --repo '{git_repo}' --name choose",
+            git_repo,
+        )
+        is None
+    )
+
+
+def test_dww_parse_error_does_not_repeat_repository_choice_prompt(
+    git_repo: Path,
+) -> None:
+    command = f"uv run --script '{RUNNER_PATH}' --repo '{git_repo}' --unknown"
+    result = HOOK.decide(_payload(git_repo, tool="Bash", command=command))
+    assert result is not None
+    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "invocation could not be verified" in reason
+    assert "three-choice" not in reason
+
+    valid_start = (
+        f"uv run --script '{RUNNER_PATH}' --repo '{git_repo}' start --name test"
+    )
+    choice = HOOK.decide(_payload(git_repo, tool="Bash", command=valid_start))
+    assert choice is not None
+    assert "three-choice" in choice["hookSpecificOutput"]["permissionDecisionReason"]
+
+
 def test_doctor_describes_stable_hook_trust_without_repeated_user_work(
     git_repo: Path,
 ) -> None:

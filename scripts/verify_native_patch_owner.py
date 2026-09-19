@@ -204,16 +204,12 @@ def verify_trace(
                 or ""
             )
             == turn_id
-            and str(
-                ((event.get("params") or {}).get("turn") or {}).get("status")
-                or ""
-            )
+            and str(((event.get("params") or {}).get("turn") or {}).get("status") or "")
             == "completed"
         ]
 
     completed_turns = [
-        completed_turn_indexes(thread_id, turn_id)
-        for thread_id, turn_id in identities
+        completed_turn_indexes(thread_id, turn_id) for thread_id, turn_id in identities
     ]
     valid_turns = independent and all(len(indexes) == 1 for indexes in completed_turns)
     checks.append(
@@ -243,8 +239,7 @@ def verify_trace(
         for index in barrier_completion_candidates
         if str((events[index].get("params") or {}).get("threadId") or "")
         == owner_thread
-        and str((events[index].get("params") or {}).get("turnId") or "")
-        == owner_turn
+        and str((events[index].get("params") or {}).get("turnId") or "") == owner_turn
         and ((events[index].get("params") or {}).get("item") or {}).get("status")
         == "completed"
         and ((events[index].get("params") or {}).get("item") or {}).get("success")
@@ -269,8 +264,7 @@ def verify_trace(
         for index in barrier_started
         if str((events[index].get("params") or {}).get("threadId") or "")
         == owner_thread
-        and str((events[index].get("params") or {}).get("turnId") or "")
-        == owner_turn
+        and str((events[index].get("params") or {}).get("turnId") or "") == owner_turn
         and ((events[index].get("params") or {}).get("item") or {}).get("id")
         == barrier_item_id
     ]
@@ -285,8 +279,7 @@ def verify_trace(
         for index in barrier_requests
         if str((events[index].get("params") or {}).get("threadId") or "")
         == owner_thread
-        and str((events[index].get("params") or {}).get("turnId") or "")
-        == owner_turn
+        and str((events[index].get("params") or {}).get("turnId") or "") == owner_turn
         and (events[index].get("params") or {}).get("callId") == barrier_item_id
     ]
     barrier_started_support_ok = not barrier_started or (
@@ -329,9 +322,7 @@ def verify_trace(
     ):
         reasons.append("同步 barrier 缺失、身份/工具不符或开始请求未关联")
 
-    def denied_hook_indexes(
-        thread_id: str, turn_id: str, feedback: str
-    ) -> list[int]:
+    def denied_hook_indexes(thread_id: str, turn_id: str, feedback: str) -> list[int]:
         return [
             index
             for index, event in enumerate(events)
@@ -340,17 +331,12 @@ def verify_trace(
             and str((event.get("params") or {}).get("turnId") or "") == turn_id
             and (event.get("params") or {}).get("run", {}).get("eventName")
             == "preToolUse"
-            and (event.get("params") or {}).get("run", {}).get("status")
-            == "blocked"
+            and (event.get("params") or {}).get("run", {}).get("status") == "blocked"
             and feedback in _hook_feedback((event.get("params") or {}).get("run", {}))
         ]
 
-    blocked_b = denied_hook_indexes(
-        b_thread, b_turn, "does not own this isolated task"
-    )
-    blocked_c = denied_hook_indexes(
-        c_thread, c_turn, "not an active managed worktree"
-    )
+    blocked_b = denied_hook_indexes(b_thread, b_turn, "does not own this isolated task")
+    blocked_c = denied_hook_indexes(c_thread, c_turn, "not an active managed worktree")
     b_ok = len(blocked_b) == 1
     c_ok = len(blocked_c) == 1
     checks.extend(
@@ -376,18 +362,15 @@ def verify_trace(
         index
         for index, event in enumerate(events)
         if _event_method(event) == "item/completed"
-        and ((event.get("params") or {}).get("item") or {}).get("type")
-        == "fileChange"
-        and ((event.get("params") or {}).get("item") or {}).get("status")
-        == "completed"
+        and ((event.get("params") or {}).get("item") or {}).get("type") == "fileChange"
+        and ((event.get("params") or {}).get("item") or {}).get("status") == "completed"
     ]
     owner_change_indexes = [
         index
         for index in target_change_indexes
         if str((events[index].get("params") or {}).get("threadId") or "")
         == owner_thread
-        and str((events[index].get("params") or {}).get("turnId") or "")
-        == owner_turn
+        and str((events[index].get("params") or {}).get("turnId") or "") == owner_turn
         and _item_paths((events[index].get("params") or {}).get("item") or {})
         == {_normalise_path(expected_worktree + "\\probe.txt")}
     ]
@@ -553,9 +536,7 @@ def verify_snapshot(repo: Path, worktree: Path) -> tuple[Check, ...]:
     worktree_status = _git_status(worktree)
     repo_status = _git_status(repo)
     worktree_paths = {
-        Path(line[3:]).as_posix()
-        for line in worktree_status.lines
-        if len(line) >= 4
+        Path(line[3:]).as_posix() for line in worktree_status.lines if len(line) >= 4
     }
     repo_paths = {
         Path(line[3:]).as_posix() for line in repo_status.lines if len(line) >= 4
@@ -573,9 +554,7 @@ def verify_snapshot(repo: Path, worktree: Path) -> tuple[Check, ...]:
     )
     if not worktree_status.succeeded or not repo_status.succeeded:
         errors = [
-            error
-            for error in (worktree_status.error, repo_status.error)
-            if error
+            error for error in (worktree_status.error, repo_status.error) if error
         ]
         if errors:
             git_observation += ": " + " | ".join(errors)

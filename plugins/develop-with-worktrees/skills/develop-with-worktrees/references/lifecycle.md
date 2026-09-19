@@ -29,6 +29,20 @@ so a detected mature workflow remains deferred.
 
 ## Managed task
 
+### A repository with no commits
+
+Accepted initialization (including `choose --mode isolated`) can adopt a clean
+unborn repository. Preview reports `initial_empty_baseline` without creating a
+commit. After acceptance, DWW preserves the symbolic HEAD branch name and uses
+a temporary index to create one empty parentless baseline before its ordinary
+bootstrap commit. Existing history does not receive an extra baseline.
+
+Staged, untracked, or ignored files, unreadable refs, and missing Git author
+configuration block automatic adoption without enrolling user content. Fix the
+reported cause and retry: a baseline already created before a later bootstrap
+failure is reused. A recorded pending bootstrap still uses the normal recovery
+path; it is not overwritten.
+
 `start` selects an idle slot, derives a task branch from the local base branch,
 and records the branch, frozen base, worktree identity, and optional stable
 request ID. Repeating the same non-empty request ID with the same purpose and

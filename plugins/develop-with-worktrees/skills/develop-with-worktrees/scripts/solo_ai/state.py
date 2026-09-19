@@ -2137,7 +2137,9 @@ class StateStore:
 
         recipient = normalize_host_reference(host_origin)
         if recipient is None:
-            raise SoloAIError("Isolated handoff requires an exact recipient host reference")
+            raise SoloAIError(
+                "Isolated handoff requires an exact recipient host reference"
+            )
 
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
