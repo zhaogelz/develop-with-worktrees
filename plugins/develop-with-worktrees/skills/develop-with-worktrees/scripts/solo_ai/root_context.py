@@ -1627,6 +1627,7 @@ def record_root_acceptance(
     status: str,
     evidence: str,
     expected_sha256: str,
+    require_structured_evidence: bool = False,
 ) -> dict[str, Any]:
     if status not in {"accepted", "cancelled"}:
         raise SoloAIError("Overall acceptance result must be accepted or cancelled")
@@ -1635,6 +1636,14 @@ def record_root_acceptance(
     path = root_anchor_path(repo, root_id)
     with root_anchor_lock(path):
         current = show_root_anchor(repo, root_id=root_id)
+        if (
+            require_structured_evidence
+            and current.get("objective_protocol_version") != 1
+        ):
+            raise SoloAIError(
+                "Inline JSON acceptance evidence is supported only for "
+                "objective-protocol roots; legacy roots must use --evidence-file"
+            )
         content = str(current["content"])
         plan_version = _plan_version(content)
         if plan_version is None:

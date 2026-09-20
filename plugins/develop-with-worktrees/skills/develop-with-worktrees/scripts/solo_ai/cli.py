@@ -625,7 +625,12 @@ def _parser() -> argparse.ArgumentParser:
     root_acceptance.add_argument(
         "--status", choices=("accepted", "cancelled"), required=True
     )
-    root_acceptance.add_argument("--evidence-file", type=Path, required=True)
+    root_acceptance_input = root_acceptance.add_mutually_exclusive_group(required=True)
+    root_acceptance_input.add_argument("--evidence-file", type=Path)
+    root_acceptance_input.add_argument(
+        "--evidence-json",
+        help="strict JSON evidence for an objective-protocol root; does not read a file",
+    )
     root_acceptance.add_argument("--expected-sha256", required=True)
     root_acceptance.add_argument(
         "--content",
@@ -2208,6 +2213,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 root_id=args.root,
                 status=args.status,
                 evidence_input_path=args.evidence_file,
+                evidence_json=args.evidence_json,
                 expected_sha256=args.expected_sha256,
                 include_content=args.content,
             )

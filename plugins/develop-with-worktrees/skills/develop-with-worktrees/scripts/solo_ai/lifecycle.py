@@ -3122,18 +3122,29 @@ def record_root_task_acceptance(
     *,
     root_id: str,
     status: str,
-    evidence_input_path: Path,
     expected_sha256: str,
+    evidence_input_path: Path | None = None,
+    evidence_json: str | None = None,
     include_content: bool = True,
 ) -> dict[str, Any]:
+    if (evidence_input_path is None) == (evidence_json is None):
+        raise SoloAIError(
+            "Provide exactly one acceptance evidence file or inline JSON value"
+        )
     _config_and_mode(repo)
     with maintenance_lock(repo):
+        evidence = (
+            evidence_json
+            if evidence_json is not None
+            else read_root_acceptance_evidence_input(repo, evidence_input_path)
+        )
         result = record_root_acceptance(
             repo,
             root_id=root_id,
             status=status,
-            evidence=read_root_acceptance_evidence_input(repo, evidence_input_path),
+            evidence=evidence,
             expected_sha256=expected_sha256,
+            require_structured_evidence=evidence_json is not None,
         )
         return _anchor_view(result, include_content=include_content)
 

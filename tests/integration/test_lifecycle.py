@@ -789,6 +789,221 @@ def test_structured_legacy_acceptance_without_version_must_be_recorded_again(
     ) == {"root_id": root["root_id"], "status": "closed"}
 
 
+def test_root_accept_cli_requires_valid_inline_protocol_evidence(
+    git_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = initialized(git_repo)
+    plan = git_repo / "inline-evidence-plan.md"
+    plan.write_text(
+        "# Inline evidence\n\n- Preserve the checked result.\n- Close only after review.\n",
+        encoding="utf-8",
+    )
+    index = git_repo / "inline-evidence-index.json"
+    index.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "AC01",
+                        "locator": "plan line 3",
+                        "quote": "Preserve the checked result.",
+                        "required": True,
+                        "plan_version": None,
+                    },
+                    {
+                        "id": "AC02",
+                        "locator": "plan line 4",
+                        "quote": "Close only after review.",
+                        "required": True,
+                        "plan_version": None,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    root = create_root_task_anchor(
+        repo,
+        purpose="accept checked protocol evidence without a temporary file",
+        target="record the complete indexed result through the CLI",
+        scope="root acceptance input only",
+        acceptance="invalid inline evidence leaves the root pending",
+        plan_input_path=plan,
+        plan_source="user confirmed the inline evidence workflow",
+        request_id="inline-evidence-cli-test",
+        acceptance_index_input_path=index,
+        host_origin={
+            "kind": "codex",
+            "thread_id": "inline-evidence-cli-test-host",
+        },
+    )
+    assert root["objective_protocol_version"] == 1
+    valid_evidence = json.dumps(
+        {
+            "items": [
+                {
+                    "id": "AC01",
+                    "status": "passed",
+                    "observation": "checked",
+                    "evidence": "test/inline/one",
+                },
+                {
+                    "id": "AC02",
+                    "status": "passed",
+                    "observation": "checked",
+                    "evidence": "test/inline/two",
+                },
+            ]
+        }
+    )
+
+    def reject(evidence: str, expected_sha256: str, message: str) -> None:
+        before = show_root_task_anchor(repo, root_id=root["root_id"])
+        assert (
+            cli_module.main(
+                [
+                    "--repo",
+                    str(git_repo),
+                    "--json",
+                    "root-anchor",
+                    "accept",
+                    "--root",
+                    root["root_id"],
+                    "--status",
+                    "accepted",
+                    "--evidence-json",
+                    evidence,
+                    "--expected-sha256",
+                    expected_sha256,
+                ]
+            )
+            == 2
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert message in payload["error"]
+        after = show_root_task_anchor(repo, root_id=root["root_id"])
+        assert after["sha256"] == before["sha256"]
+        assert after["overall_acceptance_status"] == "pending"
+
+    current = show_root_task_anchor(repo, root_id=root["root_id"])
+    with pytest.raises(SoloAIError, match="exactly one acceptance evidence"):
+        record_root_task_acceptance(
+            repo,
+            root_id=root["root_id"],
+            status="accepted",
+            expected_sha256=current["sha256"],
+        )
+    with pytest.raises(SoloAIError, match="exactly one acceptance evidence"):
+        record_root_task_acceptance(
+            repo,
+            root_id=root["root_id"],
+            status="accepted",
+            evidence_input_path=git_repo / "unused-evidence.json",
+            evidence_json=valid_evidence,
+            expected_sha256=current["sha256"],
+        )
+    reject("not-json", str(current["sha256"]), "JSON object")
+    reject('{"items":[],"unexpected":true}', str(current["sha256"]), "only an items")
+    reject(
+        json.dumps({"items": [json.loads(valid_evidence)["items"][0]]}),
+        str(current["sha256"]),
+        "missing indexed items",
+    )
+    reject(valid_evidence, "0" * 64, "changed since it was read")
+
+    current = show_root_task_anchor(repo, root_id=root["root_id"])
+    assert (
+        cli_module.main(
+            [
+                "--repo",
+                str(git_repo),
+                "--json",
+                "root-anchor",
+                "accept",
+                "--root",
+                root["root_id"],
+                "--status",
+                "accepted",
+                "--evidence-json",
+                valid_evidence,
+                "--expected-sha256",
+                current["sha256"],
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["overall_acceptance_status"] == "accepted"
+
+
+def test_root_accept_cli_keeps_legacy_text_file_evidence(
+    git_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = initialized(git_repo)
+    plan = git_repo / "legacy-inline-evidence-plan.md"
+    plan.write_text("# Legacy evidence\n", encoding="utf-8")
+    root = create_root_task_anchor(
+        repo,
+        purpose="preserve legacy text evidence",
+        target="reject inline JSON without changing the legacy file route",
+        scope="root acceptance input only",
+        acceptance="legacy evidence-file still records an accepted result",
+        plan_input_path=plan,
+        plan_source="existing legacy root workflow",
+        request_id="legacy-inline-evidence-cli-test",
+    )
+    current = show_root_task_anchor(repo, root_id=root["root_id"])
+    inline_arguments = [
+        "--repo",
+        str(git_repo),
+        "--json",
+        "root-anchor",
+        "accept",
+        "--root",
+        root["root_id"],
+        "--status",
+        "accepted",
+        "--evidence-json",
+        '{"items":[]}',
+        "--expected-sha256",
+        current["sha256"],
+    ]
+
+    assert cli_module.main(inline_arguments) == 2
+    assert (
+        "legacy roots must use --evidence-file"
+        in json.loads(capsys.readouterr().out)["error"]
+    )
+
+    evidence = git_repo / "legacy-inline-evidence.txt"
+    evidence.write_text("Legacy review completed.", encoding="utf-8")
+    current = show_root_task_anchor(repo, root_id=root["root_id"])
+    assert (
+        cli_module.main(
+            [
+                "--repo",
+                str(git_repo),
+                "--json",
+                "root-anchor",
+                "accept",
+                "--root",
+                root["root_id"],
+                "--status",
+                "accepted",
+                "--evidence-file",
+                str(evidence),
+                "--expected-sha256",
+                current["sha256"],
+            ]
+        )
+        == 0
+    )
+    assert (
+        json.loads(capsys.readouterr().out)["result"]["overall_acceptance_status"]
+        == "accepted"
+    )
+
+
 def test_explicitly_continued_legacy_root_can_upgrade_to_indexed_protocol(
     git_repo: Path,
 ) -> None:

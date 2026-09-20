@@ -61,6 +61,10 @@ within scope. The host that freezes a batch remains responsible for that follow
 through. Use `status --compact` for a read-only view; candidate publication,
 current-base delivery, and runtime effectiveness are separate facts.
 
+When the actual round has ended, the host records the supported tail cause and
+continues local delivery and root acceptance with its checked evidence. It does
+not ask the user to run ordinary Finish, batch, or acceptance commands.
+
 ## User-facing status
 
 Report in the user's language and lead with the useful fact, not internal DWW

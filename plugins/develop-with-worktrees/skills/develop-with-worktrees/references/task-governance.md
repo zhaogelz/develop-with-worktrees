@@ -63,6 +63,9 @@ one-line `locator`, an exact one-line `quote` from the effective plan, a boolean
 `required`, and `plan_version: null` on input. DWW assigns the current plan
 version. `root-anchor accept` for this protocol consumes JSON evidence for every
 indexed item; each record names `id`, `status`, `observation`, and `evidence`.
+Supply exactly one input: the existing root-local `--evidence-file`, or strict
+inline `--evidence-json`. Inline JSON is available only to protocol roots and
+does not read a path; legacy roots keep their text `--evidence-file` route.
 Required items must pass before an accepted result can be recorded. Use
 `root-anchor reindex` only to correct this derived index for the same effective
 plan; it resets overall acceptance without inventing a user plan amendment.
@@ -75,6 +78,10 @@ A child starts with `--root-anchor <root-id>`. A cross-repository child must als
 supply the exact external root file; DWW records that one non-linked locator and
 does not discover repositories or copy the root. Root anchors do not define
 candidate membership, task dependencies, scheduler ownership, or batch scope.
+Use the verified native Hook session for a child owner: a scheduler or subagent
+ID alone is not proof of that session. If CLI and Hook identities differ, stop
+writes and use formal handoff to the verified owner; do not create a replacement
+task or retry a denied write.
 For a host-associated objective, Start also stores the expected root separately
 from the active task binding. Commit, Ready, and publishing Finish reject a lost
 or substituted binding before their existing version checks. The recovery action

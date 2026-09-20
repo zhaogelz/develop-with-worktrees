@@ -181,6 +181,45 @@ def test_reclaim_retained_dispatch_forwards_exact_confirmation(
     assert captured == {"task_id": "task-one", "confirm": "exact-checklist"}
 
 
+def test_root_accept_parser_requires_one_evidence_input_and_forwards_inline_json(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_record(repo: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"root_id": "root-one", "status": "accepted"}
+
+    monkeypatch.setattr(cli_module, "record_root_task_acceptance", fake_record)
+    parser = cli_module._parser()
+    arguments = [
+        "--repo",
+        str(git_repo),
+        "root-anchor",
+        "accept",
+        "--root",
+        "root-one",
+        "--status",
+        "accepted",
+        "--evidence-json",
+        '{"items":[]}',
+        "--expected-sha256",
+        "a" * 64,
+    ]
+
+    result = cli_module._dispatch(parser.parse_args(arguments))
+
+    assert result["status"] == "accepted"
+    assert captured["evidence_input_path"] is None
+    assert captured["evidence_json"] == '{"items":[]}'
+    with pytest.raises(SystemExit):
+        parser.parse_args(arguments[:-4] + ["--expected-sha256", "a" * 64])
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            arguments + ["--evidence-file", str(git_repo / "evidence.json")]
+        )
+
+
 def test_handoff_dispatch_forwards_the_exact_receiving_host(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

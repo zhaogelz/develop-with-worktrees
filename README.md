@@ -48,13 +48,14 @@ existing files or staged changes automatically.
 1. The host routes the repository. A managed change starts in an isolated
    worktree; an existing mature workflow keeps ownership of its repository.
 2. The agent edits only there and commits the exact reviewed paths.
-3. `finish` preserves an immutable source candidate for local delivery. It ends
-   the coding round; it does not by itself move the base branch.
+3. `finish` preserves an immutable source candidate for local delivery and
+   returns the task worktree automatically. It does not by itself move the base
+   branch.
 4. Every three compatible candidates, DWW combines the changes in an
    integration worktree and runs the affected repository checks.
-5. If a smaller final group must be delivered now, the host records one
-   supported delivery cause and its reason. DWW never uses idle time, a task
-   count, or a UI state as that cause.
+5. When an actual round ends with a smaller final group, the agent records one
+   supported delivery cause and follows its tail delivery. DWW never uses idle
+   time, a task count, or a UI state as that cause.
 
 The host follows a published candidate through integration, recovery, or a
 recorded decision. The host still owns task splitting, waiting, and messages;
