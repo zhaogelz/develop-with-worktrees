@@ -1953,7 +1953,7 @@ def _integration_worktree(repo: GitRepo, batch: dict[str, Any]) -> Path:
     name = (
         "solo-ai-integration" if mode == "reusable" else f"solo-ai-batch-{batch['id']}"
     )
-    return (repo.primary_path / config.worktree_directory / name).absolute()
+    return (StateStore(repo).managed_worktree_root(config) / name).absolute()
 
 
 def _batch_worktree_identity(repo: GitRepo, batch: dict[str, Any]) -> tuple[Path, Path]:

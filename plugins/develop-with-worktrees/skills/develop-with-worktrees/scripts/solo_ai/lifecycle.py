@@ -136,7 +136,7 @@ from .util import (
     utc_timestamp,
 )
 
-BOOTSTRAP_SCHEMA = 1
+BOOTSTRAP_SCHEMA = 2
 TASK_GRANT_SCHEMA = 1
 PREACTIVATION_RELEASE_SCHEMA = 2
 MAX_READY_CONVERGENCE_RETRIES = 5
@@ -493,35 +493,47 @@ def _require_no_lifecycle_lock(repo: GitRepo) -> None:
         raise SoloAIError("An active lifecycle lock blocks this maintenance operation")
 
 
-def _needs_empty_baseline(repo: GitRepo, primary: Path) -> bool:
-    """确认 primary 是否是真正的无提交、无内容 unborn 仓库。"""
+def _needs_empty_baseline(repo: GitRepo, target: Path) -> bool:
+    """确认调用目标是否是真正的无提交、无内容 unborn 仓库。"""
     head = repo.git(
-        ["rev-parse", "--verify", "HEAD^{commit}"], cwd=primary, check=False
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        cwd=target,
+        check=False,
     )
     if head.returncode == 0:
         return False
     symbolic = repo.git(
-        ["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=primary, check=False
+        ["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=target, check=False
     )
-    refs = repo.git(["show-ref"], cwd=primary, check=False)
+    refs = repo.git(["show-ref"], cwd=target, check=False)
     if symbolic.returncode != 0 or refs.returncode != 1 or refs.stdout.strip():
         raise SoloAIError(
-            "Primary worktree has no readable HEAD but is not a clean unborn repository; "
+            "Current target worktree has no readable HEAD but is not a clean unborn repository; "
             "preserve it and repair the Git refs before adoption."
         )
     dirty = repo.git(
         ["status", "--porcelain=v1", "--untracked-files=all", "--ignored"],
-        cwd=primary,
+        cwd=target,
     ).stdout.splitlines()
     if dirty:
         raise SoloAIError(
-            "Cannot create the initial empty baseline while the primary worktree has "
+            "Cannot create the initial empty baseline while the current target worktree has "
             "staged, modified, untracked, or ignored files: " + ", ".join(dirty[:5])
         )
     return True
 
 
-def _create_empty_baseline(repo: GitRepo, primary: Path) -> None:
+def _target_is_clean(repo: GitRepo, target: Path) -> bool:
+    """策略写入前同时保留暂存、未暂存、未跟踪与忽略的用户内容。"""
+
+    ignored = set(repo.ignored_untracked(target, directories=True))
+    # `.worktrees/` 是 DWW 在该目标下创建并登记的受管槽位根；它不会代表
+    # 用户脏内容。其余忽略内容仍必须保留并阻断 bootstrap 合入。
+    ignored.discard(".worktrees/")
+    return repo.is_clean(target) and not ignored
+
+
+def _create_empty_baseline(repo: GitRepo, target: Path) -> None:
     """用临时 index 建立无文件、无父提交的首个基线，保留用户 index。"""
     index_fd, index_name = tempfile.mkstemp(
         prefix="dww-empty-index-", dir=str(repo.local_dir)
@@ -532,10 +544,10 @@ def _create_empty_baseline(repo: GitRepo, primary: Path) -> None:
         index_path.unlink()
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = str(index_path)
-        repo.git(["read-tree", "--empty"], cwd=primary, env=env)
+        repo.git(["read-tree", "--empty"], cwd=target, env=env)
         repo.git(
             ["commit", "--allow-empty", "-m", "chore: 建立空仓库初始基线"],
-            cwd=primary,
+            cwd=target,
             env=env,
         )
     except Exception as exc:
@@ -646,8 +658,8 @@ def initialize(
             raise SoloAIError(
                 "Repository is already adopted or has a pending bootstrap; run doctor"
             )
-        primary, default = repo.ensure_primary_default()
-        initial_empty_baseline = _needs_empty_baseline(repo, primary)
+        target, target_ref = repo.checked_out_local_branch()
+        initial_empty_baseline = _needs_empty_baseline(repo, target)
         if verification_file is not None:
             source, rendered_verification, verification = read_verification_config_file(
                 verification_file
@@ -693,12 +705,23 @@ def initialize(
                 ),
             }
         # 审阅后重新检查：仅为空 unborn 仓库建一次基线，用户内容变化则保留并拒绝。
-        if _needs_empty_baseline(repo, primary):
-            _create_empty_baseline(repo, primary)
+        if _needs_empty_baseline(repo, target):
+            _create_empty_baseline(repo, target)
+        target_head = repo.head(target)
+        target_identity = path_identity(target)
+        repo.require_checked_out_branch_target(
+            target,
+            target_ref,
+            expected_head=target_head,
+            expected_identity=target_identity,
+        )
         bootstrap_id = uuid.uuid4().hex[:8]
         branch = f"solo-ai/bootstrap-{bootstrap_id}"
         worktree = repo.local_dir / "bootstrap" / bootstrap_id / "worktree"
-        repo.git(["worktree", "add", "-b", branch, str(worktree), default], cwd=primary)
+        repo.git(
+            ["worktree", "add", "-b", branch, str(worktree), target_ref],
+            cwd=target,
+        )
         try:
             config_dir = worktree / ".solo-ai"
             config_dir.mkdir(parents=True, exist_ok=True)
@@ -736,19 +759,31 @@ def initialize(
                 f"Bootstrap was preserved at {worktree} for inspection. Cause: {exc}"
             ) from exc
         repo.add_local_exclude("/.worktrees/")
-        clean_primary = repo.is_clean(primary)
+        clean_target = _target_is_clean(repo, target)
         bootstrap = {
             "schema_version": BOOTSTRAP_SCHEMA,
             "branch": branch,
             "worktree": str(worktree),
-            "default_branch": default,
+            # default_branch 保留给 schema-1 恢复；新记录必须显式绑定调用目标。
+            "default_branch": target_ref,
+            "target_ref": target_ref,
+            "target_head": target_head,
+            "target_worktree": str(target.resolve()),
+            "target_worktree_resolved": str(target.resolve()),
+            "target_worktree_identity": target_identity,
             "bootstrap_head": repo.head(worktree),
             "created_at": utc_timestamp(),
         }
-        if clean_primary:
-            repo.git(["merge", "--ff-only", branch], cwd=primary)
-            repo.git(["worktree", "remove", str(worktree)], cwd=primary)
-            repo.git(["branch", "-d", branch], cwd=primary)
+        if clean_target:
+            repo.require_checked_out_branch_target(
+                target,
+                target_ref,
+                expected_head=target_head,
+                expected_identity=target_identity,
+            )
+            repo.git(["merge", "--ff-only", branch], cwd=target)
+            repo.git(["worktree", "remove", str(worktree)], cwd=target)
+            repo.git(["branch", "-d", branch], cwd=target)
         else:
             atomic_write_json(repo.local_dir / "bootstrap.json", bootstrap)
         policy = repo.policy_path()
@@ -756,12 +791,16 @@ def initialize(
         approval = approve(repo, verification, cwd=policy)
         StateStore(repo).ensure_slots(load_repo_config(repo, cwd=policy))
         return {
-            "decision": "adopted" if clean_primary else "pending-primary-clean",
+            "decision": "adopted" if clean_target else "pending-primary-clean",
             "slots": slots,
             "static_only": static_only,
             "commands": [command.redacted() for command in selected],
             "approval": approval["fingerprint"],
-            "primary_dirty_excluded": not clean_primary,
+            "target_branch": target_ref,
+            "target_worktree": str(target.resolve()),
+            "target_dirty_excluded": not clean_target,
+            # 保留旧响应字段，供既有调用方平滑升级。
+            "primary_dirty_excluded": not clean_target,
         }
 
 
@@ -2114,7 +2153,7 @@ def start(
                 **_read_root_context(repo, store=store, task=task),
             }
         worktree = ensure_within(
-            Path(task["worktree"]), repo.primary_path / config.worktree_directory
+            Path(task["worktree"]), store.managed_worktree_root(config)
         )
         managed_root = worktree.absolute().parent
         try:
@@ -2479,15 +2518,21 @@ def _recorded_base_worktree(repo: GitRepo, task: dict[str, Any]) -> Path:
         raise SoloAIError(
             "Task has no recorded base worktree; recover it by explicitly retargeting before Finish"
         )
-    path = Path(str(value)).resolve()
-    if not any(item.path == path for item in repo.worktrees()):
+    path = Path(str(value))
+    stored_resolved = task.get("base_worktree_resolved")
+    stored_identity = task.get("base_worktree_identity")
+    if (stored_resolved is None) != (stored_identity is None):
         raise SoloAIError(
-            "Recorded base worktree no longer exists; explicitly retarget"
+            "Recorded base worktree has incomplete identity; explicitly retarget"
         )
-    if repo.branch(path) != task.get("base_ref"):
-        raise SoloAIError(
-            "Recorded base worktree no longer has the recorded base branch"
-        )
+    if stored_resolved is not None and str(path.resolve()) != str(stored_resolved):
+        raise SoloAIError("Recorded base worktree path changed; explicitly retarget")
+    identity = dict(stored_identity) if isinstance(stored_identity, dict) else None
+    path = repo.require_checked_out_branch_target(
+        path,
+        str(task["base_ref"]),
+        expected_identity=identity,
+    )
     if not repo.is_clean(path):
         raise SoloAIError("Recorded base worktree must be clean before integration")
     return path
@@ -2708,10 +2753,9 @@ def _preflight_deinit_slots(
 ) -> list[Path]:
     """在写入任何策略清理提交前验证全部槽位，避免半卸载。"""
     removable: list[Path] = []
+    managed_root = StateStore(repo).managed_worktree_root(config)
     for slot in state["slots"].values():
-        path = ensure_within(
-            Path(slot["path"]), repo.primary_path / config.worktree_directory
-        )
+        path = ensure_within(Path(slot["path"]), managed_root)
         if _assert_removable_managed_slot(repo, path):
             removable.append(path)
     return removable
@@ -2794,25 +2838,105 @@ def _stop_registered_processes(store: StateStore, task: dict[str, Any]) -> None:
         store.update_task(task["id"], processes=[])
 
 
-def _integrate_pending_bootstrap(repo: GitRepo, primary: Path) -> dict[str, str] | None:
+def _pending_bootstrap_target(
+    repo: GitRepo, pending: dict[str, Any]
+) -> tuple[Path, str, str, dict[str, Any] | None]:
+    """恢复 bootstrap 的原调用目标，schema-1 只接受可唯一验证的事实。"""
+
+    branch = str(pending.get("branch") or "")
+    bootstrap_head = str(pending.get("bootstrap_head") or "")
+    if not branch or not bootstrap_head:
+        raise SoloAIError(
+            "Pending bootstrap lacks its branch identity; preserve it and run doctor"
+        )
+    if repo.ref_head(f"refs/heads/{branch}") != bootstrap_head:
+        raise SoloAIError(
+            "Pending bootstrap branch changed or disappeared; preserve it for inspection"
+        )
+
+    target_fields = (
+        "target_ref",
+        "target_head",
+        "target_worktree",
+        "target_worktree_resolved",
+        "target_worktree_identity",
+    )
+    present = [field for field in target_fields if pending.get(field) is not None]
+    if present and len(present) != len(target_fields):
+        raise SoloAIError(
+            "Pending bootstrap has incomplete recorded target identity; preserve it and run doctor"
+        )
+    if len(present) == len(target_fields):
+        target = Path(str(pending["target_worktree"]))
+        expected_resolved = str(pending["target_worktree_resolved"])
+        if str(target.resolve()) != expected_resolved:
+            raise SoloAIError(
+                "Pending bootstrap target path changed; preserve it for inspection"
+            )
+        target_ref = str(pending["target_ref"])
+        target_head = str(pending["target_head"])
+        identity = pending["target_worktree_identity"]
+        if not isinstance(identity, dict):
+            raise SoloAIError(
+                "Pending bootstrap target identity is unreadable; preserve it and run doctor"
+            )
+        return target, target_ref, target_head, identity
+
+    # schema-1 只记录了默认分支和 bootstrap 提交。它的父提交是唯一可验证的
+    # 原始基线；分支必须恰好附着在一个本地工作树上，不能回退到名称猜测。
+    target_ref = str(pending.get("default_branch") or "")
+    if not target_ref:
+        raise SoloAIError(
+            "Legacy pending bootstrap has no target branch; preserve it and run doctor"
+        )
+    matches = [
+        item.path
+        for item in repo.worktrees()
+        if not item.bare and repo.branch(item.path) == target_ref
+    ]
+    if len(matches) != 1:
+        raise SoloAIError(
+            "Legacy pending bootstrap target is not uniquely checked out; preserve it and run doctor"
+        )
+    parent = repo.git(["rev-parse", "--verify", f"{branch}^"], check=False)
+    if parent.returncode != 0:
+        raise SoloAIError(
+            "Legacy pending bootstrap has no verifiable target baseline; preserve it and run doctor"
+        )
+    return matches[0], target_ref, parent.stdout.strip(), None
+
+
+def _integrate_pending_bootstrap(repo: GitRepo) -> dict[str, Any] | None:
     pending = _bootstrap(repo)
     if not pending:
         return None
     branch = str(pending["branch"])
-    repo.git(["merge", "--ff-only", branch], cwd=primary)
-    target_ref = repo.branch(primary)
-    if target_ref is None:
-        raise SoloAIError("Primary worktree detached while integrating bootstrap")
+    target, target_ref, target_head, target_identity = _pending_bootstrap_target(
+        repo, pending
+    )
+    target = repo.require_checked_out_branch_target(
+        target,
+        target_ref,
+        expected_head=target_head,
+        expected_identity=target_identity,
+    )
+    if not _target_is_clean(repo, target):
+        raise SoloAIError(
+            "Recorded bootstrap target worktree must be clean before integration"
+        )
+    repo.git(["merge", "--ff-only", branch], cwd=target)
     result = {
         "bootstrap_branch": branch,
         "base_ref": target_ref,
-        "base_head": repo.head(primary),
-        "base_worktree": str(primary.resolve()),
+        "base_head": repo.head(target),
+        "base_worktree": str(target.resolve()),
+        "base_worktree_resolved": str(target.resolve()),
+        "base_worktree_identity": path_identity(target),
     }
     worktree = Path(str(pending["worktree"]))
     if worktree.exists():
-        repo.git(["worktree", "remove", str(worktree)], cwd=primary)
-    repo.git(["branch", "-d", branch], cwd=primary)
+        repo.git(["worktree", "remove", str(worktree)], cwd=target)
+    repo.git(["branch", "-d", branch], cwd=target)
     (repo.local_dir / "bootstrap.json").unlink(missing_ok=True)
     return result
 
@@ -3961,8 +4085,7 @@ def finish(
         with maintenance_lock(repo), turn:
             pending = _bootstrap(repo)
             if pending:
-                primary, _ = repo.ensure_default_primary_clean()
-                bootstrap_result = _integrate_pending_bootstrap(repo, primary)
+                bootstrap_result = _integrate_pending_bootstrap(repo)
                 task = store.task(task_id)
                 if (
                     bootstrap_result
@@ -3973,6 +4096,12 @@ def finish(
                         base_ref=bootstrap_result["base_ref"],
                         base_head=bootstrap_result["base_head"],
                         base_worktree=bootstrap_result["base_worktree"],
+                        base_worktree_resolved=bootstrap_result[
+                            "base_worktree_resolved"
+                        ],
+                        base_worktree_identity=bootstrap_result[
+                            "base_worktree_identity"
+                        ],
                         ready_proof=None,
                     )
             task = store.task(task_id)
@@ -4937,7 +5066,7 @@ def abandon(
                         assert_task_not_held_by_candidate_delivery(repo, task=task)
                     ensure_within(
                         Path(task["worktree"]),
-                        repo.primary_path / config.worktree_directory,
+                        store.managed_worktree_root(config),
                     )
                     if retain_worktree:
                         assert_retained_worktree_safe(task)
@@ -5293,7 +5422,13 @@ def _deinit_locked(repo: GitRepo, *, confirm: str, message: str) -> dict[str, An
     ) or any((repo.local_dir / "queue").glob("*.json")):
         raise SoloAIError("Active tasks or integration tickets block deinitialization")
     _require_no_lifecycle_lock(repo)
-    primary, _ = repo.ensure_default_primary_clean()
+    primary, default = repo.checked_out_local_branch()
+    if not repo.is_clean(primary):
+        raise SoloAIError(
+            "Current policy worktree must be clean before deinitialization"
+        )
+    primary_head = repo.head(primary)
+    primary_identity = path_identity(primary)
     agents = repo.root / "AGENTS.md"
     existing = agents.read_text(encoding="utf-8") if agents.exists() else ""
     cleaned_agents = remove_managed_agents_block(existing)
@@ -5302,7 +5437,12 @@ def _deinit_locked(repo: GitRepo, *, confirm: str, message: str) -> dict[str, An
     # 在临时分支准备策略删除，但只在槽位全部安全释放后才合入默认分支。
     cleanup = repo.local_dir / "deinit" / uuid.uuid4().hex / "worktree"
     branch = f"solo-ai/deinit-{uuid.uuid4().hex[:8]}"
-    default = repo.default_branch()
+    repo.require_checked_out_branch_target(
+        primary,
+        default,
+        expected_head=primary_head,
+        expected_identity=primary_identity,
+    )
     repo.git(["worktree", "add", "-b", branch, str(cleanup), default], cwd=primary)
     policy_integrated = False
     removed_slot_paths: list[Path] = []
@@ -5328,8 +5468,17 @@ def _deinit_locked(repo: GitRepo, *, confirm: str, message: str) -> dict[str, An
                 repo.git(["worktree", "remove", "--force", str(path)], cwd=primary)
                 removed_slots.append(str(path))
                 removed_slot_paths.append(path)
-        # 槽位释放成功后再次确认主工作区，随后才提交受管策略删除。
-        primary, _ = repo.ensure_default_primary_clean()
+        # 槽位释放成功后再次确认调用目标，随后才合入策略删除。
+        primary = repo.require_checked_out_branch_target(
+            primary,
+            default,
+            expected_head=primary_head,
+            expected_identity=primary_identity,
+        )
+        if not repo.is_clean(primary):
+            raise SoloAIError(
+                "Current policy worktree changed before deinitialization merge"
+            )
         repo.git(["merge", "--ff-only", branch], cwd=primary)
         policy_integrated = True
     except Exception as exc:

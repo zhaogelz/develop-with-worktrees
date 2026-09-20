@@ -565,8 +565,47 @@ class StateStore:
 
         return self._mutate_guard(update)
 
+    def _managed_worktree_root(self, state: dict[str, Any], config: RepoConfig) -> Path:
+        """从既有槽位恢复旧根；首次采用则绑定本次调用工作树。"""
+
+        roots = {
+            Path(str(slot.get("path", ""))).resolve().parent
+            for slot in state["slots"].values()
+            if slot.get("path")
+        }
+        if not roots:
+            return (self.repo.root / config.worktree_directory).resolve()
+        if len(roots) != 1:
+            raise SoloAIError("Managed slots do not share one immutable worktree root")
+        return roots.pop()
+
+    def managed_worktree_root(self, config: RepoConfig) -> Path:
+        """返回本仓库已登记的槽位根，不用物理主工作树猜测。"""
+
+        state = self.read()
+        return self._managed_worktree_root(state, config)
+
     def _assert_slot_layout(self, state: dict[str, Any], config: RepoConfig) -> None:
         """受管槽位目录在首次采用后不可被配置文件静默迁移。"""
+        managed_root = self._managed_worktree_root(state, config)
+        ownership_roots = {
+            Path(str(ownership.get("managed_root", ""))).resolve()
+            for slot_id in state["slots"]
+            if (ownership := read_json(self._ownership_path(slot_id), {}))
+            and ownership.get("managed_root")
+        }
+        if len(ownership_roots) > 1:
+            raise SoloAIError("Managed slot ownership records disagree on their root")
+        if ownership_roots:
+            configured_root = (
+                ownership_roots.pop() / config.worktree_directory
+            ).resolve()
+            if configured_root != managed_root:
+                raise SoloAIError(
+                    "worktree_directory is immutable after adoption; restore its "
+                    "original value before continuing, or deinitialize and adopt "
+                    "again to move managed slots"
+                )
         for slot_id, slot in state["slots"].items():
             try:
                 number = int(slot_id)
@@ -576,11 +615,7 @@ class StateStore:
                 raise SoloAIError(
                     f"Managed slot id is outside supported range: {slot_id}"
                 )
-            expected = (
-                self.repo.primary_path
-                / config.worktree_directory
-                / f"solo-ai-slot-{slot_id}"
-            ).resolve()
+            expected = (managed_root / f"solo-ai-slot-{slot_id}").resolve()
             actual = Path(str(slot.get("path", ""))).resolve()
             if actual != expected:
                 raise SoloAIError(
@@ -599,11 +634,12 @@ class StateStore:
 
     def _ensure_slot_ownership(self, slot: dict[str, Any]) -> None:
         path = self._ownership_path(str(slot["id"]))
+        managed_root = Path(str(slot["path"])).resolve().parent
         expected = {
             "schema_version": 1,
             "slot_id": str(slot["id"]),
             "path": str(Path(str(slot["path"])).resolve()),
-            "managed_root": str((self.repo.primary_path).resolve()),
+            "managed_root": str(managed_root.parent),
         }
         existing = read_json(path, {})
         if existing:
@@ -625,7 +661,7 @@ class StateStore:
             or ownership.get("slot_id") != slot_id
             or Path(str(ownership.get("path", ""))).resolve() != path.resolve()
             or Path(str(ownership.get("managed_root", ""))).resolve()
-            != self.repo.primary_path.resolve()
+            != path.resolve().parent.parent
         ):
             raise SoloAIError(
                 f"Managed slot ownership record does not match and is retained: {slot_id}"
@@ -635,6 +671,7 @@ class StateStore:
     def ensure_slots(self, config: RepoConfig) -> dict[str, Any]:
         def update(state: dict[str, Any]) -> dict[str, Any]:
             self._assert_slot_layout(state, config)
+            managed_root = self._managed_worktree_root(state, config)
             existing_numbers = [
                 int(slot_id) for slot_id in state["slots"] if slot_id.isdigit()
             ]
@@ -642,11 +679,7 @@ class StateStore:
                 1, max(config.slots, max(existing_numbers, default=0)) + 1
             ):
                 slot_id = f"{number:02d}"
-                path = (
-                    self.repo.primary_path
-                    / config.worktree_directory
-                    / f"solo-ai-slot-{slot_id}"
-                )
+                path = managed_root / f"solo-ai-slot-{slot_id}"
                 slot = state["slots"].setdefault(
                     slot_id,
                     {

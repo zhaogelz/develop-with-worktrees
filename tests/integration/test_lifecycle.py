@@ -235,6 +235,57 @@ def test_initialize_preserves_unreadable_refs_and_existing_history(
     assert git(git_repo, "rev-parse", "HEAD^") == original_head
 
 
+@pytest.mark.parametrize("legacy_default", ["config", "origin-head"])
+def test_initialize_uses_current_branch_instead_of_legacy_default(
+    git_repo: Path, legacy_default: str
+) -> None:
+    old_master = git(git_repo, "rev-parse", "HEAD")
+    git(git_repo, "branch", "master", old_master)
+    (git_repo / "apps").mkdir()
+    (git_repo / "apps" / "fixture.txt").write_text("main\n", encoding="utf-8")
+    git(git_repo, "add", "apps/fixture.txt")
+    git(git_repo, "commit", "-m", "test: add main-only fixture")
+    if legacy_default == "config":
+        git(git_repo, "config", "solo-ai.default-branch", "master")
+    else:
+        git(git_repo, "update-ref", "refs/remotes/origin/master", old_master)
+        git(
+            git_repo,
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+        )
+
+    repo = GitRepo(git_repo)
+    adopted = initialize(
+        repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False
+    )
+
+    assert adopted["decision"] == "adopted"
+    assert (git_repo / "apps" / "fixture.txt").read_text(encoding="utf-8") == "main\n"
+    assert (git_repo / ".solo-ai" / "config.toml").exists()
+    assert git(git_repo, "rev-parse", "master") == old_master
+    assert (
+        repo.git(["cat-file", "-e", "master:apps/fixture.txt"], check=False).returncode
+        != 0
+    )
+
+
+def test_initialize_accepts_a_custom_current_branch_despite_legacy_default(
+    git_repo: Path,
+) -> None:
+    git(git_repo, "switch", "-c", "feature/current")
+    git(git_repo, "config", "solo-ai.default-branch", "main")
+    repo = GitRepo(git_repo)
+
+    initialize(repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False)
+    task = start(repo, name="custom branch task")
+
+    assert task["base_ref"] == "feature/current"
+    assert Path(task["base_worktree"]) == git_repo.resolve()
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
 def test_initialize_discovery_creates_a_conservative_integration_full_profile(
     git_repo: Path,
 ) -> None:
@@ -4039,6 +4090,143 @@ def test_dirty_primary_bootstrap_is_pending_then_first_finish_integrates(
     seal_batch(repo, candidate_ids=[published["candidate_id"]])
     assert (git_repo / ".solo-ai" / "config.toml").exists()
     assert (git_repo / "task.txt").exists()
+
+
+def test_linked_worktree_owns_initialization_and_batched_delivery(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    linked = tmp_path / "release-worktree"
+    git(git_repo, "worktree", "add", "-b", "release/current", str(linked), "main")
+    git(git_repo, "config", "solo-ai.default-branch", "main")
+    repo = GitRepo(linked)
+
+    adopted = initialize(
+        repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False
+    )
+    task = start(repo, name="linked release change")
+    commit_one(repo, task, "release.txt", "release\n", "test: linked release")
+    published = finish(repo, task_id=task["id"], lease=task["lease"])
+    sealed = seal_batch(repo, candidate_ids=[published["candidate_id"]])
+
+    assert adopted["decision"] == "adopted"
+    assert task["base_ref"] == "release/current"
+    assert Path(task["base_worktree"]) == linked.resolve()
+    assert Path(task["worktree"]).parent == (linked / ".worktrees").resolve()
+    assert sealed["integrated_head"] == repo.head(linked)
+    assert (linked / ".solo-ai" / "config.toml").exists()
+    assert (linked / "release.txt").read_text(encoding="utf-8") == "release\n"
+    assert not (git_repo / ".solo-ai").exists()
+    assert not (git_repo / "release.txt").exists()
+
+
+def test_dirty_linked_worktree_bootstrap_records_and_rechecks_its_target(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    linked = tmp_path / "release-worktree"
+    git(git_repo, "worktree", "add", "-b", "release/current", str(linked), "main")
+    (linked / "README.md").write_text("dirty release\n", encoding="utf-8")
+    repo = GitRepo(linked)
+
+    pending = initialize(
+        repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False
+    )
+    bootstrap = lifecycle._bootstrap(repo)
+    task = start(repo, name="dirty linked release")
+    commit_one(repo, task, "release.txt", "release\n", "test: dirty linked release")
+
+    assert pending["decision"] == "pending-primary-clean"
+    assert bootstrap["target_ref"] == "release/current"
+    assert Path(bootstrap["target_worktree"]) == linked.resolve()
+    with pytest.raises(
+        SoloAIError, match="Recorded bootstrap target worktree must be clean"
+    ):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    git(linked, "restore", "README.md")
+
+    published = finish(repo, task_id=task["id"], lease=task["lease"])
+    seal_batch(repo, candidate_ids=[published["candidate_id"]])
+
+    assert (linked / ".solo-ai" / "config.toml").exists()
+    assert (linked / "release.txt").read_text(encoding="utf-8") == "release\n"
+    assert not (git_repo / ".solo-ai").exists()
+    assert not (git_repo / "release.txt").exists()
+
+
+def test_ignored_content_keeps_linked_bootstrap_isolated(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    linked = tmp_path / "release-worktree"
+    git(git_repo, "worktree", "add", "-b", "release/current", str(linked), "main")
+    ignored = linked / "local-only.txt"
+    ignored.write_text("keep\n", encoding="utf-8")
+    repo = GitRepo(linked)
+    (repo.common_dir / "info" / "exclude").write_text(
+        "local-only.txt\n", encoding="utf-8"
+    )
+
+    result = initialize(
+        repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False
+    )
+
+    assert result["decision"] == "pending-primary-clean"
+    assert ignored.read_text(encoding="utf-8") == "keep\n"
+    assert not (linked / ".solo-ai").exists()
+
+
+def test_pending_bootstrap_rejects_a_replaced_target_before_merging(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    linked = tmp_path / "release-worktree"
+    git(git_repo, "worktree", "add", "-b", "release/current", str(linked), "main")
+    (linked / "README.md").write_text("dirty release\n", encoding="utf-8")
+    repo = GitRepo(linked)
+    initialize(repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False)
+    task = start(repo, name="replaced bootstrap target")
+    commit_one(repo, task, "release.txt", "release\n", "test: target replacement")
+    git(linked, "restore", "README.md")
+    git(linked, "switch", "-c", "other")
+
+    with pytest.raises(SoloAIError, match="no longer has the recorded local branch"):
+        finish(
+            GitRepo(Path(task["worktree"])),
+            task_id=task["id"],
+            lease=task["lease"],
+        )
+
+    assert (repo.local_dir / "bootstrap.json").exists()
+    assert not (git_repo / ".solo-ai").exists()
+
+
+def test_legacy_dirty_bootstrap_uses_only_a_verifiable_target(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    linked = tmp_path / "release-worktree"
+    git(git_repo, "worktree", "add", "-b", "release/current", str(linked), "main")
+    (linked / "README.md").write_text("dirty release\n", encoding="utf-8")
+    repo = GitRepo(linked)
+
+    initialize(repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False)
+    bootstrap_path = repo.local_dir / "bootstrap.json"
+    bootstrap = lifecycle._bootstrap(repo)
+    for key in (
+        "target_ref",
+        "target_head",
+        "target_worktree",
+        "target_worktree_resolved",
+        "target_worktree_identity",
+    ):
+        bootstrap.pop(key)
+    bootstrap["schema_version"] = 1
+    atomic_write_json(bootstrap_path, bootstrap)
+    task = start(repo, name="legacy dirty linked release")
+    commit_one(repo, task, "release.txt", "release\n", "test: legacy linked release")
+    git(linked, "restore", "README.md")
+
+    published = finish(repo, task_id=task["id"], lease=task["lease"])
+    seal_batch(repo, candidate_ids=[published["candidate_id"]])
+
+    assert (linked / "release.txt").read_text(encoding="utf-8") == "release\n"
+    assert not (git_repo / "release.txt").exists()
 
 
 def test_existing_workflow_defers_with_zero_policy_writes(git_repo: Path) -> None:

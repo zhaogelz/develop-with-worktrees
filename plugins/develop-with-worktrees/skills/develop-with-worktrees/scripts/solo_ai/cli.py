@@ -1575,9 +1575,7 @@ def _slot_prune_payload(repo: GitRepo, *, slot: str) -> dict[str, Any]:
     details = state["slots"].get(slot)
     if not details or details.get("status") not in {"idle", "inactive"}:
         raise SoloAIError("Only an empty idle or inactive slot can be pruned")
-    root = ensure_within(
-        Path(details["path"]), repo.primary_path / config.worktree_directory
-    )
+    root = ensure_within(Path(details["path"]), store.managed_worktree_root(config))
     if not any(item.path == root for item in repo.worktrees()):
         if root.exists():
             raise SoloAIError(

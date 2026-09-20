@@ -29,6 +29,12 @@ so a detected mature workflow remains deferred.
 
 ## Managed task
 
+Initialization uses the attached local branch of the worktree passed through
+`--repo`; a linked worktree is therefore a valid policy and delivery target.
+It never substitutes `origin/HEAD` or a legacy `solo-ai.default-branch` value
+for that explicit calling context. A detached invocation is rejected until a
+checked-out local branch is selected.
+
 ### A repository with no commits
 
 Accepted initialization (including `choose --mode isolated`) can adopt a clean
@@ -42,6 +48,13 @@ configuration block automatic adoption without enrolling user content. Fix the
 reported cause and retry: a baseline already created before a later bootstrap
 failure is reused. A recorded pending bootstrap still uses the normal recovery
 path; it is not overwritten.
+
+For a dirty target, bootstrap records the target branch, worktree identity, and
+starting commit before keeping user content out of its policy commit. Finish
+rechecks those recorded facts and cleanliness before merging, so it cannot send
+the policy or later task delivery to another worktree. Schema-1 bootstrap records
+remain readable only when their branch and bootstrap parent identify one local
+target; incomplete or ambiguous records stop with a preservation error.
 
 `start` selects an idle slot, derives a task branch from the local base branch,
 and records the branch, frozen base, worktree identity, and optional stable

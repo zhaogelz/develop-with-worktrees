@@ -9,6 +9,7 @@ from .cleanup import (
     remove_abandoned_untracked,
     require_managed_directory_identity,
 )
+from .config import load_repo_config
 from .repo import GitRepo
 from .state import FINAL_TASK_STATES, StateStore, candidate_admission_lock
 from .util import (
@@ -157,7 +158,9 @@ def new_transaction(
         raise SoloAIError("Abandon operation identity is missing")
     worktree = Path(str(task["worktree"]))
     managed_root = worktree.absolute().parent
-    ensure_root = repo.primary_path.resolve()
+    ensure_root = store.managed_worktree_root(
+        load_repo_config(repo, cwd=repo.policy_path())
+    ).resolve()
     try:
         managed_root.relative_to(ensure_root)
     except ValueError as exc:

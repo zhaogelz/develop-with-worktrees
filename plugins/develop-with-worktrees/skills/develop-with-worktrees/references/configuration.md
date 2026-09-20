@@ -35,6 +35,13 @@ conservative integration Full profile. The fallback does not claim cross-task
 reuse; if no command is found, the resulting static-only limitation remains
 explicit. `--verification-file` and `--verify` are mutually exclusive.
 
+Adoption has no default-branch option: `--repo` already identifies the attached
+local branch and worktree that receive the policy and its managed slot directory.
+`origin/HEAD` and the legacy local `solo-ai.default-branch` setting remain
+available only to compatibility queries without a calling or recorded target;
+they never redirect initialization, bootstrap recovery, task delivery, or
+deinitialization.
+
 Machine-local approval covers only the repository-declared commands that the
 requested lifecycle step will execute. An approval for the complete policy also
 covers an unchanged smaller step. Use an explicit target when approving one

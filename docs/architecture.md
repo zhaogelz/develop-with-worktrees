@@ -61,6 +61,11 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
 - A managed task receives one isolated worktree and one local task anchor before
   it becomes writable. Identity uncertainty, dirty unexpected content, or a
   moved reference preserves the scene instead of adopting or deleting it.
+- Initialization adopts the attached local branch of the invoked worktree,
+  including a linked worktree. Its policy commit, managed slot root, pending
+  bootstrap, task base, and local promotion remain bound to that recorded branch
+  and worktree identity; remote defaults and legacy default-branch preferences
+  are only compatibility queries, never an override for a recorded target.
 - The optional Hook may allow an `apply_patch` target in either a current host
   session's verified `CODEX_HOME/visualizations/YYYY/MM/DD/<session>` artifact
   root or one registered active task worktree. A task worktree beneath

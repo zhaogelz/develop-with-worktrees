@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .util import CommandResult, SoloAIError, run
+from .util import CommandResult, SoloAIError, path_identity, run
 
 
 @dataclass(frozen=True)
@@ -151,6 +151,61 @@ class GitRepo:
             ["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=cwd, check=False
         )
         return result.stdout.strip() if result.returncode == 0 else None
+
+    def checked_out_local_branch(self, cwd: Path | None = None) -> tuple[Path, str]:
+        """返回调用工作树附着的本地分支，不从远端或配置猜测目标。"""
+
+        target = (cwd or self.root).resolve()
+        if not any(item.path == target for item in self.worktrees()):
+            raise SoloAIError("Selected worktree is no longer registered locally")
+        branch = self.branch(target)
+        if branch is None:
+            raise SoloAIError(
+                "Current worktree is detached; use a checked-out local branch instead"
+            )
+        ref_head = self.ref_head(f"refs/heads/{branch}", cwd=target)
+        head = self.git(["rev-parse", "--verify", "HEAD"], cwd=target, check=False)
+        if ref_head is None:
+            if head.returncode == 0:
+                raise SoloAIError(
+                    f"Current worktree branch {branch!r} no longer has a local ref"
+                )
+            # unborn 分支仍可由初始化创建首个空基线。
+            return target, branch
+        if head.returncode != 0 or head.stdout.strip() != ref_head:
+            raise SoloAIError(
+                "Current worktree HEAD no longer matches its attached local branch"
+            )
+        return target, branch
+
+    def require_checked_out_branch_target(
+        self,
+        path: Path,
+        branch: str,
+        *,
+        expected_head: str | None = None,
+        expected_identity: dict[str, Any] | None = None,
+    ) -> Path:
+        """在写入前核验记录的工作树、分支和可选提交快照。"""
+
+        target = path.resolve()
+        if expected_identity is not None and path_identity(target) != expected_identity:
+            raise SoloAIError(
+                "Recorded target worktree identity changed; preserve it for inspection"
+            )
+        current, actual_branch = self.checked_out_local_branch(target)
+        if current != target or actual_branch != branch:
+            raise SoloAIError(
+                "Recorded target worktree no longer has the recorded local branch"
+            )
+        actual_head = self.ref_head(f"refs/heads/{branch}", cwd=target)
+        if actual_head is None:
+            raise SoloAIError("Recorded target branch no longer exists locally")
+        if expected_head is not None and actual_head != expected_head:
+            raise SoloAIError(
+                "Recorded target branch changed; preserve it and explicitly retarget"
+            )
+        return target
 
     def is_clean(
         self, cwd: Path | None = None, *, include_untracked: bool = True
