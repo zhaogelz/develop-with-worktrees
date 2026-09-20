@@ -73,7 +73,9 @@ def status_view(
         if not task:
             raise _not_found("task", task_id)
         candidate = candidate_by_task.get(task_id)
-        delivery = _project_deliveries(batch_store, [candidate], batches).get(task_id)
+        delivery = _project_deliveries(
+            batch_store, [candidate], batches, all_candidates=candidates.values()
+        ).get(task_id)
         return {
             **common,
             "scope": "task",
@@ -88,7 +90,9 @@ def status_view(
             for candidate_id in batch.get("candidate_ids", [])
             if candidate_id in candidates
         ]
-        deliveries = _project_deliveries(batch_store, members, batches)
+        deliveries = _project_deliveries(
+            batch_store, members, batches, all_candidates=candidates.values()
+        )
         return {
             **common,
             "scope": "batch",
@@ -111,6 +115,7 @@ def status_view(
             batch_store,
             [candidate_by_task.get(str(task["id"])) for task in local_tasks],
             batches,
+            all_candidates=candidates.values(),
         )
         local_children = [
             _task_projection(repo, task, deliveries.get(str(task["id"])))
@@ -154,7 +159,12 @@ def status_view(
         for batch in batches.values()
         if include_history or batch.get("status") in ACTIVE_BATCH_STATES
     ]
-    deliveries = _project_deliveries(batch_store, visible_candidates, batches)
+    deliveries = _project_deliveries(
+        batch_store,
+        visible_candidates,
+        batches,
+        all_candidates=candidates.values(),
+    )
     return {
         **common,
         "scope": "history" if include_history else "current",
@@ -199,13 +209,18 @@ def _project_deliveries(
     store: CandidateBatchStore,
     candidates: list[dict[str, Any] | None],
     batches: dict[str, Any],
+    *,
+    all_candidates: Any,
 ) -> dict[str, dict[str, Any]]:
     """单次投影为同一请求内的任务与候选列表共享 Git 事实。"""
 
+    selected = [item for item in candidates if item is not None]
     return {
         str(candidate["task_id"]): candidate
         for candidate in store.project_candidates(
-            [item for item in candidates if item is not None], batches
+            selected,
+            batches,
+            all_candidates=all_candidates,
         )
     }
 
@@ -263,6 +278,7 @@ def _candidate_projection(candidate: dict[str, Any]) -> dict[str, Any]:
         "delivered": candidate.get("delivered"),
         "finalization_pending": candidate.get("finalization_pending"),
         "batch_ownership": copy.deepcopy(candidate.get("batch_ownership")),
+        "waiting": copy.deepcopy(candidate.get("waiting")),
     }
 
 

@@ -267,6 +267,8 @@ class CandidateBatchStore:
         self,
         candidates: Iterable[dict[str, Any]],
         batches: dict[str, Any],
+        *,
+        all_candidates: Iterable[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """在一次查询中投影所选候选，并复用同一批次的 Git 事实。
 
@@ -274,6 +276,8 @@ class CandidateBatchStore:
         推进的 main 错误显示为未交付。
         """
 
+        selected = list(candidates)
+        lane_members = list(all_candidates) if all_candidates is not None else selected
         ref_heads: dict[str, str | None] = {}
         ancestry: dict[tuple[str, str], bool] = {}
         return [
@@ -282,8 +286,9 @@ class CandidateBatchStore:
                 batches,
                 ref_heads=ref_heads,
                 ancestry=ancestry,
+                all_candidates=lane_members,
             )
-            for item in candidates
+            for item in selected
         ]
 
     def status_view(
@@ -360,7 +365,11 @@ class CandidateBatchStore:
         else:
             selected = active
             view = "active"
-        projected = self.project_candidates(selected, value["batches"])
+        projected = self.project_candidates(
+            selected,
+            value["batches"],
+            all_candidates=raw_candidates,
+        )
         return {
             "view": view,
             "candidates": projected,
@@ -535,6 +544,7 @@ class CandidateBatchStore:
         *,
         ref_heads: dict[str, str | None] | None = None,
         ancestry: dict[tuple[str, str], bool] | None = None,
+        all_candidates: Iterable[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         projected = copy.deepcopy(candidate)
         status = str(projected.get("status"))
@@ -576,8 +586,67 @@ class CandidateBatchStore:
             if status in {"withdrawn", "superseded"}
             else "awaiting-integration"
         )
-        projected["batch_ownership"] = self._batch_ownership(candidate, batches)
+        ownership = self._batch_ownership(candidate, batches)
+        projected["batch_ownership"] = ownership
+        projected["waiting"] = self._waiting_facts(
+            candidate,
+            ownership=ownership,
+            all_candidates=all_candidates,
+        )
         return projected
+
+    @staticmethod
+    def _waiting_facts(
+        candidate: dict[str, Any],
+        *,
+        ownership: dict[str, Any] | None,
+        all_candidates: Iterable[dict[str, Any]] | None,
+    ) -> dict[str, Any] | None:
+        """只从当前候选池的同一 lane 事实解释尚未本地交付的候选。"""
+
+        status = str(candidate.get("status") or "")
+        if status != "pending":
+            return None
+        policy = candidate.get("integration_policy") or LEGACY_EXPLICIT_POLICY
+        base_ref, base_head, activation_epoch = _candidate_lane(candidate)
+        common = {
+            "base_ref": base_ref,
+            "base_head": base_head,
+            "activation_epoch": activation_epoch,
+            "batch_size": int(policy.get("batch_size", 5)),
+        }
+        state = (ownership or {}).get("state")
+        if state == "candidate_queued":
+            if policy.get("seal_policy") != "auto_full":
+                return {
+                    "state": "waiting_for_recorded_delivery_cause",
+                    **common,
+                }
+            compatible_pending = sum(
+                item.get("status") == "pending"
+                and _candidate_lane(item) == (base_ref, base_head, activation_epoch)
+                for item in (all_candidates or ())
+            )
+            return {
+                "state": "waiting_for_compatible_candidates",
+                **common,
+                "compatible_pending_count": compatible_pending,
+                "additional_candidates_needed": max(
+                    int(common["batch_size"]) - compatible_pending, 0
+                ),
+            }
+        if state in {"active_full_batch", "active_tail_batch"}:
+            batch = (ownership or {}).get("batch") or {}
+            process = batch.get("process") or {}
+            return {
+                "state": "integration_process_confirmed"
+                if process.get("live") is True
+                else "integration_process_unconfirmed",
+                **common,
+                "batch_id": batch.get("id"),
+                "batch_phase": batch.get("phase"),
+            }
+        return {"state": "unknown", **common}
 
     @staticmethod
     def _batch_ownership(

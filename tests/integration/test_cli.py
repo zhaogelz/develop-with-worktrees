@@ -36,7 +36,8 @@ def test_human_batch_output_accepts_direct_and_reconcile_results() -> None:
 
     assert direct == reconciled
     assert direct == (
-        f"Integrated batch batch-one at {'a' * 40} from 1 candidate(s) (quiet_tail)."
+        "Changes integrated into the current local base by batch batch-one "
+        f"at {'a' * 40} from 1 saved change(s) (quiet_tail)."
     )
 
 
@@ -51,6 +52,13 @@ def test_candidate_status_human_output_is_compact_and_reasons_are_required() -> 
                         "candidate_id": "candidate-active",
                         "status": "withdrawing",
                         "delivery_status": "awaiting-integration",
+                        "waiting": {
+                            "state": "waiting_for_recorded_delivery_cause",
+                            "base_ref": "main",
+                            "base_head": "a" * 40,
+                            "activation_epoch": "epoch-one",
+                            "batch_size": 3,
+                        },
                     }
                 ],
                 "status_summary": {
@@ -64,9 +72,10 @@ def test_candidate_status_human_output_is_compact_and_reasons_are_required() -> 
         Namespace(candidate_command="status"),
     )
 
-    assert "1 active, 4 historical" in rendered
-    assert "Historical candidates are hidden" in rendered
-    assert "candidate-active: withdrawing" in rendered
+    assert "1 saved change(s) not yet delivered, 4 historical" in rendered
+    assert "Historical records are hidden" in rendered
+    assert "candidate-active: Saved change is being withdrawn" in rendered
+    assert "awaiting-integration" not in rendered
     assert "not checked" in rendered
     parser = cli_module._parser()
     finish_intent = parser.parse_args(
@@ -278,6 +287,60 @@ def test_task_status_human_output_shows_retained_worktree_reason() -> None:
     assert "Reason: Retained worktree: keep the reviewed patch" in rendered
 
 
+@pytest.mark.parametrize(
+    ("waiting", "expected", "unexpected"),
+    [
+        (
+            {
+                "state": "waiting_for_compatible_candidates",
+                "base_ref": "main",
+                "base_head": "a" * 40,
+                "activation_epoch": "epoch-one",
+                "batch_size": 3,
+                "compatible_pending_count": 2,
+                "additional_candidates_needed": 1,
+            },
+            "2/3 saved changes share its frozen base",
+            "recorded local-integration cause",
+        ),
+        (
+            {
+                "state": "waiting_for_recorded_delivery_cause",
+                "base_ref": "main",
+                "base_head": "a" * 40,
+                "activation_epoch": "epoch-one",
+                "batch_size": 3,
+            },
+            "waiting for a recorded local-integration cause",
+            "more compatible change(s) are needed",
+        ),
+    ],
+)
+def test_task_status_human_output_uses_only_projected_waiting_facts(
+    waiting: dict[str, object], expected: str, unexpected: str
+) -> None:
+    rendered = _human(
+        "status",
+        {
+            "scope": "task",
+            "task": {
+                "id": "task-published",
+                "status": "candidate-published",
+                "candidate_delivery": {
+                    "status": "pending",
+                    "delivery_status": "awaiting-integration",
+                    "waiting": waiting,
+                },
+            },
+        },
+    )
+
+    assert rendered.startswith("Task task-published: Change saved; waiting")
+    assert expected in rendered
+    assert unexpected not in rendered
+    assert "awaiting-integration" not in rendered
+
+
 def test_human_recover_output_accepts_candidate_publication_without_a_lease() -> None:
     result = {
         "task_id": "task-published",
@@ -290,8 +353,8 @@ def test_human_recover_output_accepts_candidate_publication_without_a_lease() ->
 
     assert rendered == (
         "Task: task-published\n"
-        "Status: candidate published; awaiting integration\n"
-        f"Candidate: candidate-published at {'a' * 40}"
+        "Status: change saved; waiting for local integration\n"
+        f"Source ID: candidate-published at {'a' * 40}"
     )
     assert "Lease:" not in rendered
 
@@ -308,8 +371,8 @@ def test_human_recover_output_uses_id_for_idempotent_candidate_publication() -> 
 
     assert rendered == (
         "Task: task-published\n"
-        "Status: candidate published; awaiting integration\n"
-        f"Candidate: candidate-published at {'a' * 40}"
+        "Status: change saved; waiting for local integration\n"
+        f"Source ID: candidate-published at {'a' * 40}"
     )
     assert "Lease:" not in rendered
 
@@ -327,10 +390,10 @@ def test_human_recover_output_accepts_integrated_candidate_without_a_lease() -> 
 
     assert rendered == (
         "Task: task-integrated\n"
-        "Status: integrated\n"
-        "Candidate: candidate-integrated\n"
+        "Status: change integrated into the current local base\n"
+        "Source ID: candidate-integrated\n"
         "Batch: batch-integrated\n"
-        "Delivery: integrated"
+        "Local delivery record: integrated"
     )
     assert "Lease:" not in rendered
 

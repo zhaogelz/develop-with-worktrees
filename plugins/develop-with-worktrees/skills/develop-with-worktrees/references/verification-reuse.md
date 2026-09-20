@@ -88,6 +88,9 @@ admission.
 回执误报成仍在排队或执行。`reused`、`failed`、`timed_out` 与 `interrupted` 继续来自
 该回执，不能从缺失日志推断为仍在运行。
 
+面向人的进度说明同样只陈述这些已观察到的回执、退出码、队列票据或进程快照；没有
+可核验输出时，不能声称正在构建、正在执行或运行健康。
+
 ## Minimal policy examples
 
 Use these only when their stated purity is true.

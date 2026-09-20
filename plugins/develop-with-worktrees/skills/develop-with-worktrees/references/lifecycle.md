@@ -97,6 +97,14 @@ The source candidate is immutable. Publishing it ends the developer's coding
 round, but it is delivered only after a completed batch is contained in the
 current base. Runtime effectiveness is a separate explicit project check.
 
+Human-readable Finish and status output says “Change saved; waiting for local
+integration” until Git facts prove it reached the current local base. An
+`auto_full` wait may report only the compatible saved-change count for that
+candidate's exact frozen base and activation policy. An explicit tail instead
+waits for a recorded delivery cause; it must not infer a reason from task counts,
+other bases, other repositories, UI state, or elapsed time. If the relevant
+recorded fact cannot be confirmed, report the wait reason as unknown.
+
 The pool counts held, pending, and sealed nonterminal candidates. Its default
 capacity is 10. A full pool preserves the publishing task rather than dropping
 work. A release failure leaves a candidate held and recoverable; it cannot enter

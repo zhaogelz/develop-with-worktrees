@@ -713,9 +713,9 @@ def test_compact_exact_task_query_ignores_unrelated_terminal_history(
     original_ref_head = repo.ref_head
     original_is_ancestor = repo.is_ancestor
 
-    def counted_project(self, candidates, batches):
+    def counted_project(self, candidates, batches, **kwargs):
         projection_sizes.append(len(candidates))
-        return original_project(self, candidates, batches)
+        return original_project(self, candidates, batches, **kwargs)
 
     def counted_ref_head(ref: str):
         nonlocal ref_calls
@@ -2552,9 +2552,55 @@ def test_candidate_publication_is_not_reported_as_delivery(git_repo: Path) -> No
 
     assert candidate["delivered"] is False
     assert candidate["delivery_status"] == "awaiting-integration"
-    projected = CandidateBatchStore(repo).summary()["candidates"][0]
+    store = CandidateBatchStore(repo)
+    source = store.candidate(candidate["candidate_id"])
+    store.publish(
+        {
+            **source,
+            "candidate_id": "candidate-other-frozen-base",
+            "task_id": "task-other-frozen-base",
+            "name": "different frozen base",
+            "ref": "refs/dww/candidates/candidate-other-frozen-base",
+            "base_head": "b" * 40,
+        },
+        capacity=10,
+        batch_size=2,
+        seal_policy="auto_full",
+    )
+    projected = next(
+        item
+        for item in store.summary()["candidates"]
+        if item["candidate_id"] == candidate["candidate_id"]
+    )
     assert projected["delivered"] is False
     assert projected["delivery_status"] == "awaiting-integration"
+    assert projected["waiting"] == {
+        "state": "waiting_for_compatible_candidates",
+        "base_ref": "main",
+        "base_head": source["base_head"],
+        "activation_epoch": source["integration_policy"]["activation_epoch"],
+        "batch_size": 2,
+        "compatible_pending_count": 1,
+        "additional_candidates_needed": 1,
+    }
+
+
+def test_explicit_tail_waiting_does_not_infer_a_count_based_reason(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="explicit delivery", relative="delivery.txt")
+
+    source = CandidateBatchStore(repo).candidate(candidate["candidate_id"])
+    projected = CandidateBatchStore(repo).summary()["candidates"][0]
+
+    assert projected["waiting"] == {
+        "state": "waiting_for_recorded_delivery_cause",
+        "base_ref": "main",
+        "base_head": source["base_head"],
+        "activation_epoch": source["integration_policy"]["activation_epoch"],
+        "batch_size": 2,
+    }
 
 
 def test_status_projects_active_full_batch_and_abandon_refuses_its_candidate(

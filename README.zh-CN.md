@@ -37,6 +37,8 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 
 宿主会继续跟进候选的集成、恢复或需要决策的失败。任务怎么拆、何时等待和如何通知仍由宿主负责；普通流程不需要手工抄候选 ID。
 
+`finish` 之后的普通状态是“改动已保存，等待本地合并”。这不代表改动已经进入本地主线，也不代表已安装的插件已在宿主会话中验证。自动整合等待兼容改动时，状态只统计同一冻结基线和激活策略的改动；显式尾批则只等待已记录的交付原因。
+
 ## 仅在需要时深入
 
 - 仓库已有成熟流程时，让原流程继续负责。精确、经本机批准的[适配器](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/delegated-adapters.md)是维护选项，不是默认配置步骤。

@@ -84,6 +84,12 @@ trust state cannot be read, say that the need for review is currently
 unconfirmed. Do not expose leases, raw state records, or lifecycle logs unless
 the user asks for diagnostic detail.
 
+The normal CLI wording follows the same distinction: “Change saved; waiting for
+local integration” is not “integrated” or “installed and verified.” Explain that
+wait only with recorded facts from the candidate's own frozen base and activation
+policy. For an explicit tail, say that a recorded delivery cause is still needed;
+do not infer a reason from task counts, unrelated tasks, UI state, or quiet time.
+
 ## Read one reference for the active scenario
 
 | Scenario | Read first |

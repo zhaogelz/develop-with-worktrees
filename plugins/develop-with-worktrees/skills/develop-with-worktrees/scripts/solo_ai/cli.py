@@ -2794,6 +2794,117 @@ def _repair_task_human(task: dict[str, Any]) -> str:
     )
 
 
+def _human_candidate_delivery(candidate: dict[str, Any]) -> str:
+    """将候选的可核验交付事实转换为面向人的结论。"""
+
+    if (
+        candidate.get("delivered") is True
+        or candidate.get("delivery_status") == "integrated"
+    ):
+        return "Change integrated into the current local base."
+    status = str(candidate.get("status") or "")
+    if status in {"withdrawn", "superseded"}:
+        return "Saved change will not be delivered locally."
+    if status == "withdrawing":
+        return "Saved change is being withdrawn; local delivery is not established."
+    if status == "held":
+        return (
+            "Saving the change is still being finalized; local delivery is not "
+            "established."
+        )
+    waiting = candidate.get("waiting")
+    if not isinstance(waiting, dict):
+        return (
+            "Change saved; waiting for local integration. "
+            "The specific wait reason is not currently verified."
+        )
+    state = waiting.get("state")
+    if state == "waiting_for_compatible_candidates":
+        compatible = int(waiting.get("compatible_pending_count") or 0)
+        batch_size = int(waiting.get("batch_size") or 0)
+        needed = int(waiting.get("additional_candidates_needed") or 0)
+        return (
+            "Change saved; waiting for local integration. "
+            f"{compatible}/{batch_size} saved changes share its frozen base and "
+            f"activation policy; {needed} more compatible change(s) are needed "
+            "for automatic integration."
+        )
+    if state == "waiting_for_recorded_delivery_cause":
+        return (
+            "Change saved; waiting for a recorded local-integration cause. "
+            "Task counts and unrelated work are not used as the reason."
+        )
+    if state == "integration_process_confirmed":
+        return (
+            "Change saved; a recorded local integration batch is running "
+            f"for it ({waiting.get('batch_id')})."
+        )
+    if state == "integration_process_unconfirmed":
+        return (
+            "Change saved; a recorded local integration batch owns it "
+            f"({waiting.get('batch_id')}), but its process is not confirmed."
+        )
+    return (
+        "Change saved; waiting for local integration. "
+        "The specific wait reason is not currently verified."
+    )
+
+
+def _human_validation_progress(validation: object) -> str | None:
+    """只陈述状态视图已经确认的验证事实。"""
+
+    if not isinstance(validation, dict):
+        return None
+    state = validation.get("state")
+    if state == "running":
+        profile = next(
+            (
+                item
+                for item in validation.get("profiles") or []
+                if isinstance(item, dict) and item.get("state") == "running"
+            ),
+            None,
+        )
+        command = profile.get("current_command") if isinstance(profile, dict) else None
+        if isinstance(command, dict):
+            return (
+                "Related validation has a confirmed running command "
+                f"({command.get('index')}/{command.get('count')})."
+            )
+        return "Related validation command progress is unknown."
+    if state == "waiting":
+        return "Related validation has a confirmed queue record and is waiting."
+    if state == "unknown":
+        return (
+            "Related validation state is unknown; its queue or process is not "
+            "confirmed."
+        )
+    if state == "passed":
+        return "Related validation completed successfully."
+    if state in {"failed", "timed_out", "interrupted"}:
+        return f"Related validation ended as {state}."
+    return None
+
+
+def _human_task_status(task: dict[str, Any]) -> str:
+    delivery = task.get("candidate_delivery")
+    if isinstance(delivery, dict):
+        summary = _human_candidate_delivery(delivery)
+    else:
+        summary = {
+            "active": "Work can continue in its isolated worktree.",
+            "starting": "The task is recorded as preparing its isolated worktree.",
+            "ready": "Work is ready for its recorded next lifecycle step.",
+            "candidate-published": (
+                "Change has been saved; local delivery state is unknown."
+            ),
+            "completed": "Work completed in the recorded local transaction.",
+            "abandoned": "Work was ended without local delivery.",
+        }.get(str(task.get("status") or ""), "Task state is not currently verified.")
+    validation = _human_validation_progress(task.get("validation"))
+    return " ".join(item for item in (summary, validation) if item)
+
+
 def _human(
     command: str, result: dict[str, Any], args: argparse.Namespace | None = None
 ) -> str:
@@ -2817,20 +2928,17 @@ def _human(
         view = result.get("status_view") or {}
         summary = view.get("status_summary") or {}
         lines = [
-            "Candidates: "
-            f"{summary.get('active', 0)} active, "
-            f"{summary.get('history', 0)} historical, "
-            f"{summary.get('active_batches', 0)} active batch(es)."
+            "Local delivery: "
+            f"{summary.get('active', 0)} saved change(s) not yet delivered, "
+            f"{summary.get('history', 0)} historical record(s), "
+            f"{summary.get('active_batches', 0)} recorded integration batch(es)."
         ]
         if view.get("view") == "active" and summary.get("history"):
-            lines.append(
-                "Historical candidates are hidden; use --history to show them."
-            )
+            lines.append("Historical records are hidden; use --history to show them.")
         for candidate in view.get("candidates") or []:
             lines.append(
-                "- "
-                f"{candidate.get('candidate_id')}: {candidate.get('status')} "
-                f"({candidate.get('delivery_status')})"
+                f"- {candidate.get('candidate_id')}: "
+                f"{_human_candidate_delivery(candidate)}"
             )
         integrity = view.get("integrity") or {}
         if integrity.get("status") == "not-checked":
@@ -2891,10 +2999,10 @@ def _human(
     if command == "finish":
         if result.get("outcome") == "batch_integrated":
             summary = (
-                f"Published {result['candidate_id']} and integrated "
-                f"{result.get('batch_trigger', 'full')} batch "
-                f"{result['batch_id']} at {result['integrated_head']} "
-                f"from {result['candidate_count']} candidates."
+                "Changes integrated into the current local base: "
+                f"{result.get('batch_trigger', 'full')} batch {result['batch_id']} "
+                f"at {result['integrated_head']} from {result['candidate_count']} "
+                "saved change(s)."
             )
             handoff = result.get("repair_handoff")
             if isinstance(handoff, dict) and handoff.get("id"):
@@ -2922,7 +3030,8 @@ def _human(
                     "then record the actual result-delivery; the coordinator owns integration."
                 )
             return (
-                f"Published {result['candidate_id']} at {result['candidate_head']}.\n"
+                "Change saved; waiting for local integration.\n"
+                f"Source ID: {result['candidate_id']} at {result['candidate_head']}.\n"
                 f"The base branch did not move. {next_step}"
             )
         label = (
@@ -2939,8 +3048,9 @@ def _human(
         batch = result
     if command == "batch" and batch.get("status") == "completed":
         return (
-            f"Integrated batch {batch['id']} at {batch['integrated_head']} "
-            f"from {len(batch['candidate_ids'])} candidate(s) "
+            f"Changes integrated into the current local base by batch {batch['id']} "
+            f"at {batch['integrated_head']} from {len(batch['candidate_ids'])} "
+            "saved change(s) "
             f"({batch.get('trigger', 'explicit_tail')})."
         )
     if command in {"recover", "handoff", "resume-in-place"}:
@@ -2953,8 +3063,8 @@ def _human(
         if result.get("status") == "candidate-published":
             return (
                 f"Task: {result.get('task_id') or result['id']}\n"
-                "Status: candidate published; awaiting integration\n"
-                f"Candidate: {result['candidate_id']} at {result['candidate_head']}"
+                "Status: change saved; waiting for local integration\n"
+                f"Source ID: {result['candidate_id']} at {result['candidate_head']}"
             )
         if result.get("status") == "abandoned":
             return (
@@ -2962,17 +3072,22 @@ def _human(
                 f"Status: abandoned\nTransaction: {result['transaction_id']}"
             )
         if result.get("status") in {"integrated", "withdrawn", "superseded"}:
+            state_summary = {
+                "integrated": "change integrated into the current local base",
+                "withdrawn": "saved change withdrawn; local delivery did not occur",
+                "superseded": "saved change replaced; local delivery did not occur",
+            }[result["status"]]
             lines = (
                 f"Task: {result.get('id') or result.get('task_id')}",
-                f"Status: {result['status']}",
+                f"Status: {state_summary}",
                 *(
-                    (f"Candidate: {result['candidate_id']}",)
+                    (f"Source ID: {result['candidate_id']}",)
                     if result.get("candidate_id")
                     else ()
                 ),
                 *((f"Batch: {result['batch_id']}",) if result.get("batch_id") else ()),
                 *(
-                    (f"Delivery: {result['delivery_status']}",)
+                    (f"Local delivery record: {result['delivery_status']}",)
                     if result.get("delivery_status")
                     else ()
                 ),
@@ -2995,37 +3110,41 @@ def _status_view_human(result: dict[str, Any]) -> str:
     scope = result.get("scope")
     if scope in {"current", "history"}:
         lines = [
-            f"Status view: {scope} ({len(result.get('tasks') or [])} task(s), "
-            f"{len(result.get('candidates') or [])} candidate(s), "
-            f"{len(result.get('batches') or [])} batch(es))."
+            "Current local work: "
+            f"{len(result.get('tasks') or [])} task(s), "
+            f"{len(result.get('candidates') or [])} saved change(s), "
+            f"{len(result.get('batches') or [])} recorded integration batch(es)."
         ]
         for task in result.get("tasks") or []:
-            lines.append(
-                f"- task {task.get('id')}: {task.get('status')} "
-                f"({task.get('next_action', {}).get('kind')})"
-            )
+            lines.append(f"- Task {task.get('id')}: {_human_task_status(task)}")
         for candidate in result.get("candidates") or []:
             lines.append(
-                f"- candidate {candidate.get('id')}: {candidate.get('status')} "
-                f"({candidate.get('delivery_status')})"
+                f"- Saved change {candidate.get('id')}: "
+                f"{_human_candidate_delivery(candidate)}"
             )
         for batch in result.get("batches") or []:
-            lines.append(f"- batch {batch.get('id')}: {batch.get('status')}")
+            validation = _human_validation_progress(batch.get("validation"))
+            batch_summary = (
+                "Local integration completed."
+                if batch.get("status") == "completed"
+                else "Local integration has a recorded active batch."
+            )
+            lines.append(
+                f"- Local integration {batch.get('id')}: "
+                + " ".join(item for item in (batch_summary, validation) if item)
+            )
         counts = result.get("history_counts") or {}
         if scope == "current" and any(counts.values()):
             lines.append(
-                "History hidden: "
+                "Historical records hidden: "
                 f"{counts.get('tasks', 0)} task(s), "
-                f"{counts.get('candidates', 0)} candidate(s), "
+                f"{counts.get('candidates', 0)} saved change(s), "
                 f"{counts.get('batches', 0)} batch(es). Use status --history."
             )
         return "\n".join(lines)
     if scope == "task":
         task = result["task"]
-        lines = [
-            f"Task {task.get('id')}: {task.get('status')}\n"
-            f"Next: {task.get('next_action', {}).get('kind')}",
-        ]
+        lines = [f"Task {task.get('id')}: {_human_task_status(task)}"]
         retained = task.get("retained_worktree")
         if isinstance(retained, dict):
             lines.extend(
@@ -3038,15 +3157,22 @@ def _status_view_human(result: dict[str, Any]) -> str:
         return "\n".join(lines)
     if scope == "batch":
         batch = result["batch"]
-        return (
-            f"Batch {batch.get('id')}: {batch.get('status')}\n"
-            f"Next: {batch.get('next_action', {}).get('kind')}"
+        validation = _human_validation_progress(batch.get("validation"))
+        return f"Local integration {batch.get('id')}: " + " ".join(
+            item
+            for item in (
+                "Local integration completed."
+                if batch.get("status") == "completed"
+                else "Local integration has a recorded active batch.",
+                validation,
+            )
+            if item
         )
     if scope == "root":
         root = result["root"]
         return (
-            f"Root {root.get('id')}: acceptance={root.get('overall_acceptance_status')}\n"
-            f"Next: {root.get('next_action', {}).get('kind')}"
+            f"Root objective {root.get('id')}: "
+            f"acceptance is {root.get('overall_acceptance_status')}."
         )
     return json.dumps(
         _redact_leases(result), ensure_ascii=False, indent=2, sort_keys=True

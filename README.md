@@ -61,6 +61,13 @@ The host follows a published candidate through integration, recovery, or a
 recorded decision. The host still owns task splitting, waiting, and messages;
 you do not need to copy candidate IDs for the normal flow.
 
+After `finish`, the ordinary status is “Change saved; waiting for local
+integration.” It does not mean the change has reached the local base or that an
+installed plugin has been verified in a host session. When automatic integration
+is waiting for compatible work, the status counts only changes with the same
+frozen base and activation policy; an explicit tail instead waits for a recorded
+delivery cause.
+
 ## Only when needed
 
 - If the repository already has a mature workflow, let it keep ownership. An
