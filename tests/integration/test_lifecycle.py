@@ -3282,6 +3282,8 @@ def test_reclaim_retained_worktree_requires_a_checklist_and_keeps_audit_refs(
 
     plan = reclaim_retained_worktree(repo, task_id=task["id"])
     assert plan["status"] == "needs-confirmation"
+    assert plan["scan_complete"] is True
+    assert plan["blockers"] == []
     assert plan["delete"] == ["probe.txt"]
     assert plan["branch_tip"] == branch_head
     assert probe.exists()
@@ -3318,6 +3320,142 @@ def test_reclaim_retained_worktree_requires_a_checklist_and_keeps_audit_refs(
 
 
 @pytest.mark.dww_fast
+def test_reclaim_preview_blocks(git_repo: Path, tmp_path: Path, monkeypatch) -> None:
+    (git_repo / ".gitignore").write_text(".tmp/\n.venv/\n", encoding="utf-8")
+    git(git_repo, "add", ".gitignore")
+    git(git_repo, "commit", "-m", "test: ignore retained preview cache")
+    repo = initialized(git_repo)
+    task = start(repo, name="retained reclaim diagnostic blockers")
+    worktree = Path(task["worktree"])
+    ignored_cache = worktree / ".tmp"
+    ignored_cache.mkdir()
+    link_probe = ignored_cache / "link-probe"
+    permission_probe = ignored_cache / "permission-probe"
+    permission_probe.mkdir()
+    dependency_root = worktree / ".venv"
+    dependency_root.mkdir()
+    dependency_link = dependency_root / "link-probe"
+    snapshot_probe = worktree / "snapshot-probe.txt"
+    snapshot_probe.write_text("must remain\n", encoding="utf-8")
+    link_target = tmp_path / "link-target"
+    link_target.mkdir()
+    (link_target / "sentinel.txt").write_text("must not traverse\n", encoding="utf-8")
+    dependency_target = tmp_path / "dependency-target"
+    dependency_target.mkdir()
+
+    def make_link(link: Path, target: Path) -> bool:
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except OSError:
+            link.mkdir()
+            return True
+        return False
+
+    simulated_link = make_link(link_probe, link_target)
+    simulated_dependency_link = make_link(dependency_link, dependency_target)
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="exercise retained reclaim diagnostic reporting",
+        retain_worktree=True,
+    )
+
+    original_filesystem_path = cleanup_module.filesystem_path
+    original_link_check = cleanup_module.is_link_or_junction
+    original_link_snapshot = cleanup_module.snapshot_link_path
+    inspected_paths: list[Path] = []
+
+    class SimulatedLink:
+        def lstat(self):
+            return type(
+                "LinkStatus", (), {"st_mode": 0o120000, "st_file_attributes": 0}
+            )()
+
+        def is_dir(self) -> bool:
+            raise AssertionError("link target must not be enumerated")
+
+    class PermissionDeniedDirectory:
+        def lstat(self):
+            return original_filesystem_path(permission_probe).lstat()
+
+        def is_dir(self) -> bool:
+            return True
+
+        def iterdir(self):
+            raise PermissionError("Permission denied while reading ignored .tmp")
+
+    def guarded_filesystem_path(path: Path):
+        inspected_paths.append(path)
+        if path == permission_probe:
+            return PermissionDeniedDirectory()
+        if simulated_link and path == link_probe:
+            return SimulatedLink()
+        if simulated_dependency_link and path == dependency_link:
+            return SimulatedLink()
+        return original_filesystem_path(path)
+
+    def guarded_link_check(path: Path) -> bool:
+        if path in {link_probe, dependency_link} and (
+            simulated_link or simulated_dependency_link
+        ):
+            return True
+        return original_link_check(path)
+
+    def guarded_link_snapshot(path: Path) -> dict[str, object]:
+        if simulated_dependency_link and path == dependency_link:
+            return {"kind": "link"}
+        return original_link_snapshot(path)
+
+    def blocked_snapshot(path: Path) -> dict[str, object]:
+        if path.name == snapshot_probe.name:
+            raise OSError(f"Cannot snapshot: {path}")
+        return cleanup_module.snapshot_plain_path(path)
+
+    monkeypatch.setattr(cleanup_module, "filesystem_path", guarded_filesystem_path)
+    monkeypatch.setattr(cleanup_module, "is_link_or_junction", guarded_link_check)
+    monkeypatch.setattr(cleanup_module, "snapshot_link_path", guarded_link_snapshot)
+    monkeypatch.setattr(abandonment_module, "snapshot_plain_path", blocked_snapshot)
+
+    report = reclaim_retained_worktree(repo, task_id=task["id"])
+
+    assert report["status"] == "blocked"
+    assert report["scan_complete"] is False
+    assert {(item["path"], item["kind"]) for item in report["blockers"]} == {
+        (".tmp/link-probe", "link"),
+        (".tmp/permission-probe", "permission"),
+        (snapshot_probe.name, "inspection"),
+    }
+    assert link_target not in inspected_paths
+    assert dependency_target not in inspected_paths
+    dependency_diagnostics: list[dict[str, str]] = []
+    expanded_inventory = cleanup_module.inspect_untracked(
+        repo,
+        cwd=worktree,
+        expand_dependencies=True,
+        diagnostics=dependency_diagnostics,
+    )
+    assert ".venv/link-probe" in expanded_inventory["retained"]
+    assert all(item["path"] != ".venv/link-probe" for item in dependency_diagnostics)
+    assert "confirmation" not in report
+    assert "delete" not in report
+    monkeypatch.setattr(
+        abandonment_module,
+        "snapshot_plain_path",
+        cleanup_module.snapshot_plain_path,
+    )
+    with pytest.raises(SoloAIError):
+        reclaim_retained_worktree(repo, task_id=task["id"], confirm="not-issued")
+    assert link_probe.exists()
+    assert permission_probe.exists()
+    assert snapshot_probe.exists()
+    slot = StateStore(repo).read()["slots"][task["slot_id"]]
+    assert slot["status"] == "quarantined"
+    assert slot["task_id"] == task["id"]
+
+
+@pytest.mark.dww_fast
 def test_reclaim_retained_worktree_preserves_active_protected_and_changed_content(
     git_repo: Path,
 ) -> None:
@@ -3339,8 +3477,14 @@ def test_reclaim_retained_worktree_preserves_active_protected_and_changed_conten
         reason="preserve protected test content",
         retain_worktree=True,
     )
+    protected_report = reclaim_retained_worktree(repo, task_id=protected["id"])
+    assert protected_report["status"] == "blocked"
+    assert protected_report["scan_complete"] is True
+    assert protected_report["blockers"] == [{"path": ".env", "kind": "keep"}]
+    assert "confirmation" not in protected_report
+    assert "delete" not in protected_report
     with pytest.raises(SoloAIError, match="protected or unknown"):
-        reclaim_retained_worktree(repo, task_id=protected["id"])
+        reclaim_retained_worktree(repo, task_id=protected["id"], confirm="not-issued")
     assert protected_file.exists()
     protected_slot = StateStore(repo).read()["slots"][protected["slot_id"]]
     assert protected_slot["status"] == "quarantined"

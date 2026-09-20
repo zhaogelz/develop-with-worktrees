@@ -166,11 +166,14 @@ slot with the supplied reason. It never cleans, resets, detaches, deletes the
 branch, or releases that worktree. Neither operation uses blanket cleanup.
 
 When a terminal retained worktree is later known to contain only disposable
-test residue, run `reclaim-retained --task <id>` first. It returns the exact
-identity, slot generation, branch/HEAD, deletion checklist, and one-use
-confirmation. Re-run it with that confirmation to remove only the unchanged
-ordinary files on the checklist, detach to the recorded base, and return the
-slot. It refuses active tasks, tracked work, protected or unknown content,
+test residue, run `reclaim-retained --task <id>` first. A complete safe scan
+returns the exact identity, slot generation, branch/HEAD, deletion checklist,
+and one-use confirmation. If a read-only scan observes protected, unknown,
+linked, unreadable, or unsnappable content, it returns a blocker report instead:
+no confirmation or deletion list is issued. Re-run only a complete checklist
+with its confirmation: that call runs the strict scan again rather than consuming
+the diagnostic report, then removes unchanged ordinary files, detaches to the
+recorded base, and returns the slot. It refuses active tasks, tracked work,
 identity changes, and changed checklists; it keeps the terminal task record,
 task branch, and abandonment receipt for audit.
 

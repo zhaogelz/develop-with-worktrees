@@ -5008,7 +5008,9 @@ def reclaim_retained_worktree(
             if confirm != existing.get("confirmation"):
                 raise SoloAIError("Retained reclaim confirmation changed")
             return resume_retained_reclaim(repo, store=store, task=task)
-        plan = retained_reclaim_plan(repo, store=store, task=task)
+        plan = retained_reclaim_plan(
+            repo, store=store, task=task, diagnostic=confirm is None
+        )
         if confirm is None:
             return plan
         if confirm != plan["confirmation"]:
@@ -5019,7 +5021,8 @@ def reclaim_retained_worktree(
             **{
                 key: value
                 for key, value in plan.items()
-                if key not in {"delete", "retained", "status"}
+                if key
+                not in {"delete", "retained", "status", "scan_complete", "blockers"}
             },
             "transaction_id": uuid.uuid4().hex,
             "phase": "prepared",

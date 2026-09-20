@@ -117,6 +117,7 @@ binds a reviewable deletion checklist to its recorded identity, then returns
 only an unchanged, clean, detached test worktree. It preserves the terminal
 task, branch, and receipts, so “integrated”, “retained for review”, and
 “reusable” remain distinct states.
+A diagnostic blocker report authorizes no deletion.
 
 ## Delivery and runtime are separate
 

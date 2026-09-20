@@ -72,6 +72,9 @@ you do not need to copy candidate IDs for the normal flow.
 - If a reviewed test worktree was deliberately retained, use the returned
   checklist in `reclaim-retained`; it never treats “task ended” as permission to
   erase unknown work.
+  If it returns blockers, read the report first: work already integrated or
+  confirmed to have a copy needs no duplicate backup, while unknown content
+  remains preserved.
 - Projects with their own external runtime resources can configure a Runtime
   [Adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/runtime-adapter.md).
   Most personal and small-team repositories do not need one.

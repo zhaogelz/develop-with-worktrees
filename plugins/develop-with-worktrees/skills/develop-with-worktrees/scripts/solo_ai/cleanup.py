@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -155,7 +156,11 @@ def _require_inventory_path(path: Path, cwd: Path, *, ignored: bool) -> Path:
 
 
 def _ignored_inventory(
-    repo: GitRepo, *, cwd: Path, expand_dependencies: bool
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    expand_dependencies: bool,
+    diagnostics: list[dict[str, str]] | None = None,
 ) -> set[str]:
     # Git for Windows 会递归 junction；先折叠全忽略目录，再自行不跟随链接遍历。
     pending = [
@@ -164,7 +169,15 @@ def _ignored_inventory(
     ]
     result: set[str] = set()
     while pending:
-        path = _require_inventory_path(pending.pop(), cwd, ignored=True)
+        candidate = pending.pop()
+        if diagnostics is not None:
+            path = _diagnostic_inventory_path(
+                candidate, cwd, ignored=True, diagnostics=diagnostics
+            )
+            if path is None:
+                continue
+        else:
+            path = _require_inventory_path(candidate, cwd, ignored=True)
         relative = path.relative_to(cwd).as_posix()
         if is_link_or_junction(path):
             result.add(relative)
@@ -177,7 +190,12 @@ def _ignored_inventory(
                 children = [
                     path / child.name for child in filesystem_path(path).iterdir()
                 ]
-            except PermissionError as exc:
+            except OSError as exc:
+                if diagnostics is not None:
+                    _record_inspection_failure(diagnostics, path, cwd, exc)
+                    continue
+                if not isinstance(exc, PermissionError):
+                    raise
                 # `.tmp`、`.cache` 等已知保留根本来就不会被 DWW 删除；
                 # Windows 上测试或其他工具留下的拒绝访问子目录，不应让
                 # 交付门禁在清点阶段以原始 traceback 终止。根外的未知
@@ -200,12 +218,70 @@ def _ignored_inventory(
     return result
 
 
+def _record_inspection_failure(
+    diagnostics: list[dict[str, str]], path: Path, cwd: Path, exc: Exception
+) -> None:
+    """只记录无法安全读取的对象；诊断模式绝不把它归入可删除清单。"""
+
+    try:
+        relative = path.absolute().relative_to(cwd.resolve()).as_posix()
+    except (OSError, ValueError):
+        relative = str(path)
+    kind = (
+        "permission"
+        if isinstance(exc, PermissionError)
+        else ("link" if "link or junction" in str(exc).casefold() else "inspection")
+    )
+    diagnostics.append({"path": relative, "kind": kind, "reason": str(exc)})
+
+
+def _diagnostic_inventory_path(
+    path: Path, cwd: Path, *, ignored: bool, diagnostics: list[dict[str, str]]
+) -> Path | None:
+    """诊断预览用 lstat 逐层核验；读取失败不能伪装为普通或 retained 内容。"""
+
+    try:
+        relative = path.absolute().relative_to(cwd.resolve())
+    except (OSError, ValueError) as exc:
+        _record_inspection_failure(diagnostics, path, cwd, exc)
+        return None
+    relative_text = relative.as_posix()
+    opaque = _opaque_root(relative_text)
+    allow_leaf_link = ignored and opaque is not None and relative_text != opaque
+    current = cwd.absolute()
+    for part in relative.parts:
+        current /= part
+        try:
+            status = filesystem_path(current).lstat()
+        except OSError as exc:
+            _record_inspection_failure(diagnostics, current, cwd, exc)
+            return None
+        if stat.S_ISLNK(status.st_mode) or bool(
+            getattr(status, "st_file_attributes", 0) & 0x0400
+        ):
+            if allow_leaf_link and current == path.absolute():
+                continue
+            _record_inspection_failure(
+                diagnostics,
+                current,
+                cwd,
+                SoloAIError(f"Cleanup content is a link or junction: {current}"),
+            )
+            return None
+    try:
+        return _require_inventory_path(path, cwd, ignored=ignored)
+    except (OSError, SoloAIError) as exc:
+        _record_inspection_failure(diagnostics, path, cwd, exc)
+        return None
+
+
 def inspect_untracked(
     repo: GitRepo,
     *,
     cwd: Path,
     policy: CleanupPolicy = CleanupPolicy(),
     expand_dependencies: bool = False,
+    diagnostics: list[dict[str, str]] | None = None,
 ) -> dict[str, list[str]]:
     result = {
         "keep": [],
@@ -214,13 +290,25 @@ def inspect_untracked(
         "retained": [],
         "unknown_ignored": [],
     }
-    ignored = _ignored_inventory(repo, cwd=cwd, expand_dependencies=expand_dependencies)
+    ignored = _ignored_inventory(
+        repo,
+        cwd=cwd,
+        expand_dependencies=expand_dependencies,
+        diagnostics=diagnostics,
+    )
     paths = sorted(set(repo.untracked(cwd)) | ignored)
     for relative in paths:
         # ignored 已由不跟随链接的库存遍历逐项核验；分类不访问文件系统。
         # 删除前仍会重新清点、冻结对象，并在删除时复核祖先及对象身份。
         if relative not in ignored:
-            _require_inventory_path(cwd / relative, cwd, ignored=False)
+            if diagnostics is not None:
+                checked = _diagnostic_inventory_path(
+                    cwd / relative, cwd, ignored=False, diagnostics=diagnostics
+                )
+                if checked is None:
+                    continue
+            else:
+                _require_inventory_path(cwd / relative, cwd, ignored=False)
         parts = tuple(part.casefold() for part in Path(relative).parts)
         opaque = _opaque_root(relative) if relative in ignored else None
         # 依赖根内的生成名称可不透明；根外的 uploads/storage 不能被遮蔽。

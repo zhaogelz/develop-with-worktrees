@@ -41,7 +41,7 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 
 - 仓库已有成熟流程时，让原流程继续负责。精确、经本机批准的[适配器](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/delegated-adapters.md)是维护选项，不是默认配置步骤。
 - 任务中断、冲突或组合检查需要处理时，按已记录的[恢复路径](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)操作，不猜测也不清理工作树。
-- 如果复核用的测试工作树被特意保留，使用 `reclaim-retained` 返回的清单再回收；任务已结束不等于可以清空未知内容。
+- 如果复核用的测试工作树被特意保留，使用 `reclaim-retained` 返回的清单再回收；任务已结束不等于可以清空未知内容。若返回阻塞，先查看汇总报告；已合入或已确认有副本的成果无需重复备份，未知内容继续保留。
 - 只有项目自身存在外部运行资源时才配置 [Runtime Adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/runtime-adapter.md)；多数个人和小团队仓库并不需要它。
 
 ## 保护边界

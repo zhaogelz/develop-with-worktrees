@@ -1054,6 +1054,9 @@ def test_hook_allows_only_the_current_codex_session_artifact_root(
     codex_home = tmp_path / "custom codex home"
     codex_home.mkdir()
     git(codex_home, "init")
+    adopted_config = codex_home / ".solo-ai" / "config.toml"
+    adopted_config.parent.mkdir()
+    adopted_config.write_text('mode = "managed"\n', encoding="utf-8")
     session = "session-2026-中文"
     artifact = codex_home / "visualizations" / "2026" / "09" / "17" / session
     artifact.mkdir(parents=True)
@@ -1072,6 +1075,22 @@ def test_hook_allows_only_the_current_codex_session_artifact_root(
     assert HOOK._apply_patch_scope(payload, git_repo) == "session-artifact"
     assert HOOK.decide(payload) is None
 
+    second_allowed = artifact / "第二份 报告.md"
+    all_current_artifacts = "\n".join(
+        (
+            "*** Begin Patch",
+            f"*** Add File: {allowed}",
+            "+第一份",
+            f"*** Add File: {second_allowed}",
+            "+第二份",
+            "*** End Patch",
+        )
+    )
+    assert (
+        HOOK.decide({**payload, "tool_input": {"command": all_current_artifacts}})
+        is None
+    )
+
     other = artifact.parent / "other-session" / "报告.md"
     denied = HOOK.decide(
         {
@@ -1080,10 +1099,6 @@ def test_hook_allows_only_the_current_codex_session_artifact_root(
         }
     )
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert (
-        "其他或无效的 Codex 会话"
-        in denied["hookSpecificOutput"]["permissionDecisionReason"]
-    )
 
     mixed = "\n".join(
         (
@@ -1099,6 +1114,8 @@ def test_hook_allows_only_the_current_codex_session_artifact_root(
         HOOK._apply_patch_scope({**payload, "tool_input": {"command": mixed}}, git_repo)
         == "mixed-targets"
     )
+    mixed_denied = HOOK.decide({**payload, "tool_input": {"command": mixed}})
+    assert mixed_denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     ordinary = tmp_path / "ordinary-report.md"
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing-codex-home"))

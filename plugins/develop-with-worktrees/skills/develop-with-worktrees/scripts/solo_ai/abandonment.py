@@ -517,7 +517,11 @@ def _reclaim_worktree(
 
 
 def retained_reclaim_plan(
-    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    diagnostic: bool = False,
 ) -> dict[str, Any]:
     """生成无副作用的回收清单；确认值绑定本次可删对象快照。"""
     transaction = _assert_reclaim_task(task)
@@ -544,21 +548,58 @@ def retained_reclaim_plan(
         raise SoloAIError(
             "Retained reclaim refuses tracked changes; preserve the worktree for review"
         )
-    inventory = inspect_untracked(repo, cwd=worktree)
+    diagnostics: list[dict[str, str]] | None = [] if diagnostic else None
+    inventory = inspect_untracked(repo, cwd=worktree, diagnostics=diagnostics)
     blocked = [
         *inventory["keep"],
         *inventory["protected"],
         *inventory["unknown_ignored"],
     ]
-    if blocked:
+    if not diagnostic and blocked:
         raise SoloAIError(
             "Retained reclaim found protected or unknown content; files were preserved:\n"
             + "\n".join(f"- {item}" for item in blocked[:20])
         )
-    ordinary = {
-        relative: snapshot_plain_path(worktree / relative)
-        for relative in inventory["ordinary"]
-    }
+    blockers: list[dict[str, str]] = [
+        *({"path": relative, "kind": "keep"} for relative in inventory["keep"]),
+        *(
+            {"path": relative, "kind": "protected"}
+            for relative in inventory["protected"]
+        ),
+        *(
+            {"path": relative, "kind": "unknown-ignored"}
+            for relative in inventory["unknown_ignored"]
+        ),
+    ]
+    if not diagnostic:
+        ordinary = {
+            relative: snapshot_plain_path(worktree / relative)
+            for relative in inventory["ordinary"]
+        }
+    else:
+        ordinary: dict[str, dict[str, object]] = {}
+        for relative in inventory["ordinary"]:
+            try:
+                ordinary[relative] = snapshot_plain_path(worktree / relative)
+            except (OSError, SoloAIError) as exc:
+                _record_reclaim_diagnostic(diagnostics, relative, exc)
+        blockers.extend(
+            {
+                "path": item["path"],
+                "kind": item["kind"],
+                "reason": item["reason"],
+            }
+            for item in diagnostics
+        )
+    if diagnostic and blockers:
+        return {
+            "task_id": task["id"],
+            "slot_id": task["slot_id"],
+            "status": "blocked",
+            "scan_complete": not diagnostics,
+            "blockers": blockers,
+            "retained": sorted(inventory["retained"]),
+        }
     identity = {
         "schema_version": RETAINED_RECLAIM_SCHEMA,
         "task_id": task["id"],
@@ -578,7 +619,16 @@ def retained_reclaim_plan(
         "delete": sorted(ordinary),
         "retained": sorted(inventory["retained"]),
         "status": "needs-confirmation",
+        "scan_complete": True,
+        "blockers": [],
     }
+
+
+def _record_reclaim_diagnostic(
+    diagnostics: list[dict[str, str]], relative: str, exc: Exception
+) -> None:
+    kind = "permission" if isinstance(exc, PermissionError) else "inspection"
+    diagnostics.append({"path": relative, "kind": kind, "reason": str(exc)})
 
 
 def _assert_reclaim_transaction(

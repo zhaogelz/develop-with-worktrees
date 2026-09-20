@@ -1182,6 +1182,7 @@ def _approval_request(repo: GitRepo, args: argparse.Namespace) -> dict[str, Any]
         config = load_repo_config(repo, cwd=cwd)
         profile_ids: tuple[str, ...] = ()
         level_for_scope = {
+            "development": ("development", None),
             "ready": ("ready", None),
             "finish": ("ready", None),
             "full": ("full", "integration"),
@@ -1200,8 +1201,8 @@ def _approval_request(repo: GitRepo, args: argparse.Namespace) -> dict[str, Any]
                     level_for_scope = None
             if level_for_scope is not None:
                 levels = (
-                    ("ready",)
-                    if level == "ready"
+                    (level,)
+                    if level in {"development", "ready"}
                     else (("stress",) if level == "stress" else ("ready", "full"))
                 )
                 profile_ids = selected_profile_ids(

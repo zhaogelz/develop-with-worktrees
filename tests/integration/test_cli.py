@@ -1230,7 +1230,6 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
     )
     git(git_repo, "add", ".solo-ai")
     git(git_repo, "commit", "-m", "test: configure validation levels")
-    call_json("approve", "--accept")
     started = call("start", "--name", "verify levels")
     assert started.returncode == 0, started.stderr
     values = dict(line.split(": ", 1) for line in started.stdout.splitlines())
@@ -1241,6 +1240,15 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
     # Stress 仅覆盖其关联的运行时变更；同一候选中的文档不应被错误当成
     # Ready 全路径门禁，否则无法显式运行压力层。
     (worktree / "notes.md").write_text("documentation\n", encoding="utf-8")
+    call_json(
+        "approve",
+        "--accept",
+        "--scope",
+        "commit",
+        "--task",
+        task_id,
+        repo_path=worktree,
+    )
     call_json(
         "commit",
         "--task",
@@ -1255,6 +1263,21 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         "notes.md",
         repo_path=worktree,
     )
+    development_approval = call_json(
+        "approve",
+        "--accept",
+        "--scope",
+        "development",
+        "--task",
+        task_id,
+        repo_path=worktree,
+    )
+    development_policy = development_approval["plan"]["policy"]
+    assert [profile["id"] for profile in development_policy["profiles"]] == [
+        "development"
+    ]
+    assert development_policy["secret_scanner"] is None
+    assert development_policy["warm_commands"] == []
     plan = call_json("plan", "--task", task_id, repo_path=worktree)
     assert {profile["level"] for profile in plan["profiles"]} == {
         "development",
@@ -1309,6 +1332,65 @@ commands = [["git", "diff", "--check", "main...HEAD"]]
         planned["development"]["fingerprint"]
         == development_proof["profile_proofs"][0]["fingerprint"]
     )
+    call_json(
+        "verify",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--level",
+        "development",
+        repo_path=worktree,
+    )
+    task_policy = worktree / ".solo-ai" / "verification.toml"
+    original_policy = task_policy.read_text(encoding="utf-8")
+    task_policy.write_text(
+        original_policy.replace(
+            '["git", "diff", "--check", "main...HEAD"]',
+            '["git", "status", "--short"]',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    call_json(
+        "commit",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--message",
+        "test: change development validation command",
+        "--path",
+        ".solo-ai/verification.toml",
+        repo_path=worktree,
+    )
+    changed_development = call(
+        "--json",
+        "verify",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--level",
+        "development",
+        repo_path=worktree,
+    )
+    assert changed_development.returncode != 0
+    assert "approval" in (changed_development.stdout + changed_development.stderr)
+    task_policy.write_text(original_policy, encoding="utf-8")
+    call_json(
+        "commit",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
+        "--message",
+        "test: restore development validation command",
+        "--path",
+        ".solo-ai/verification.toml",
+        repo_path=worktree,
+    )
+    call_json("approve", "--accept")
     ready_gate = call_json(
         "ready",
         "--task",

@@ -1490,6 +1490,16 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         targets = _apply_patch_targets(payload, root or Path.cwd())
         if targets is None and root is None:
             return _deny("apply_patch target paths could not be determined safely")
+        session = _session(payload)
+        artifact_scopes = [
+            _session_artifact_scope(target, session) for target in targets or []
+        ]
+        # 当前会话的交付产物不属于会话 checkout 的 common-dir。只有完整补丁
+        # 的每个目标都通过既有严格核验时，才可在跨仓库预检前直接放行。
+        if artifact_scopes and all(
+            scope == PATCH_SCOPE_SESSION_ARTIFACT for scope in artifact_scopes
+        ):
+            return None
         for target in targets or []:
             parent = _nearest_existing_directory(target)
             target_root, reliable = _git_root_probe(parent) if parent else (None, False)
