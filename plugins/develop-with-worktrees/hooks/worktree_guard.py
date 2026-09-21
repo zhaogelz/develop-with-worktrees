@@ -1328,9 +1328,9 @@ def _trusted_codex_cli(value: str) -> bool:
     try:
         raw = candidate.absolute()
         resolved = raw.resolve(strict=True)
-        install_root = (
-            Path(local_app_data) / "OpenAI" / "Codex" / "bin"
-        ).resolve(strict=True)
+        install_root = (Path(local_app_data) / "OpenAI" / "Codex" / "bin").resolve(
+            strict=True
+        )
         relative = resolved.relative_to(install_root)
     except (OSError, ValueError):
         return False
@@ -1379,9 +1379,7 @@ def _trusted_powershell_cli(value: str) -> bool:
 
 def _maintenance_script_path() -> Path:
     """返回与当前受信 Hook 同一已安装插件根中的维护脚本。"""
-    return (
-        Path(__file__).resolve().parents[1] / "maintain-dww-plugin.ps1"
-    ).resolve()
+    return (Path(__file__).resolve().parents[1] / "maintain-dww-plugin.ps1").resolve()
 
 
 def _main_primary_worktree(root: Path) -> Path | None:

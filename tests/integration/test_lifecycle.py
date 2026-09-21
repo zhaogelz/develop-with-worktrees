@@ -72,6 +72,7 @@ from solo_ai.util import (
     ActionableSoloAIError,
     SoloAIError,
     atomic_write_json,
+    path_identity,
     process_snapshot,
     read_json,
 )
@@ -3369,6 +3370,105 @@ def test_reclaim_retained_worktree_requires_a_checklist_and_keeps_audit_refs(
         reclaim_retained_worktree(
             repo, task_id=task["id"], confirm=plan["confirmation"]
         )
+
+
+@pytest.mark.dww_fast
+def test_reclaim_retained_disposal_recreates_slot_without_following_link(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="dispose retained root and recreate its slot")
+    worktree = Path(task["worktree"])
+    residue = worktree / "residue.txt"
+    residue.write_text("explicitly disposable\n", encoding="utf-8")
+    external = tmp_path / "external-target"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("must survive\n", encoding="utf-8")
+    link = worktree / "external-link"
+    try:
+        os.symlink(external, link, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Current Windows policy cannot create a directory symlink: {exc}")
+    branch_head = repo.head(worktree)
+
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="dispose explicitly verified retained test residue",
+        retain_worktree=True,
+    )
+
+    plan = reclaim_retained_worktree(repo, task_id=task["id"], dispose=True)
+    assert plan["status"] == "needs-confirmation"
+    assert plan["discard_scope"] == "entire-retained-worktree-root"
+    assert plan["branch_tip"] == branch_head
+    assert residue.exists()
+
+    result = reclaim_retained_worktree(
+        repo,
+        task_id=task["id"],
+        confirm=plan["confirmation"],
+        dispose=True,
+    )
+
+    assert result["status"] == "disposed-and-recreated"
+    assert result["branch_preserved"] == task["branch"]
+    assert sentinel.read_text(encoding="utf-8") == "must survive\n"
+    assert not residue.exists()
+    assert repo.branch(worktree) is None
+    assert repo.head(worktree) == repo.default_head()
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == branch_head
+    state = StateStore(repo).read()
+    disposal = state["tasks"][task["id"]]["retained_disposal"]
+    assert disposal["phase"] == "completed"
+    assert disposal["receipt_sha256"] == result["receipt_sha256"]
+    assert (
+        repo.local_dir / "retained-disposal-receipts" / f"{task['id']}.json"
+    ).is_file()
+    slot = state["slots"][task["slot_id"]]
+    assert slot["status"] == "idle"
+    assert slot["task_id"] is None
+    assert slot["released_worktree_identity"] == path_identity(worktree)
+    repeated = reclaim_retained_worktree(
+        repo,
+        task_id=task["id"],
+        confirm=plan["confirmation"],
+        dispose=True,
+    )
+    assert repeated["idempotent"] is True
+
+
+@pytest.mark.dww_fast
+def test_reclaim_retained_disposal_refuses_branch_drift(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="refuse retained disposal branch drift")
+    worktree = Path(task["worktree"])
+    residue = worktree / "residue.txt"
+    residue.write_text("preserve on drift\n", encoding="utf-8")
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="exercise disposal identity refusal",
+        retain_worktree=True,
+    )
+    plan = reclaim_retained_worktree(repo, task_id=task["id"], dispose=True)
+    repo.git(["switch", "--detach"], cwd=worktree)
+
+    with pytest.raises(SoloAIError, match="branch or HEAD changed"):
+        reclaim_retained_worktree(
+            repo,
+            task_id=task["id"],
+            confirm=plan["confirmation"],
+            dispose=True,
+        )
+
+    assert residue.read_text(encoding="utf-8") == "preserve on drift\n"
+    assert StateStore(repo).read()["slots"][task["slot_id"]]["status"] == "quarantined"
 
 
 @pytest.mark.dww_fast

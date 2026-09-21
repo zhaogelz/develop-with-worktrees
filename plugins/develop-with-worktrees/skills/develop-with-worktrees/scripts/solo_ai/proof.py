@@ -598,9 +598,7 @@ def _profile_inputs(
     # 对完整、无外部状态的检查，选择规则、跨任务提示和资源队列不会改变已执行
     # 命令或其输入。省略它们允许同一真实执行事实跨任务复用；其余检查仍保留
     # 所有调度边界，且历史证明因指纹自然不同而不会被误用。
-    if not (
-        profile.external_state == "none" and profile.input_closure == "complete"
-    ):
+    if not (profile.external_state == "none" and profile.input_closure == "complete"):
         inputs.update(
             {
                 "paths": list(profile.paths),
@@ -1228,7 +1226,11 @@ def _require_profile_inputs(
         detail = ", ".join(reasons)
         if changed_paths:
             visible_paths = changed_paths[:20]
-            suffix = "" if len(changed_paths) <= len(visible_paths) else f" (+{len(changed_paths) - len(visible_paths)} more)"
+            suffix = (
+                ""
+                if len(changed_paths) <= len(visible_paths)
+                else f" (+{len(changed_paths) - len(visible_paths)} more)"
+            )
             detail += "; declared paths: " + ", ".join(visible_paths) + suffix
         raise SoloAIError(
             f"Validation inputs changed for profile {profile.profile_id}; "

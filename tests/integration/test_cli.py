@@ -163,7 +163,7 @@ def test_abandon_dispatch_forwards_retain_worktree_flag(
 
 
 @pytest.mark.dww_fast
-def test_reclaim_retained_dispatch_forwards_exact_confirmation(
+def test_reclaim_retained_dispatch_forwards_exact_confirmation_and_disposal(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, object] = {}
@@ -182,13 +182,18 @@ def test_reclaim_retained_dispatch_forwards_exact_confirmation(
             "task-one",
             "--confirm",
             "exact-checklist",
+            "--dispose",
         ]
     )
 
     result = cli_module._dispatch(args)
 
     assert result["status"] == "needs-confirmation"
-    assert captured == {"task_id": "task-one", "confirm": "exact-checklist"}
+    assert captured == {
+        "task_id": "task-one",
+        "confirm": "exact-checklist",
+        "dispose": True,
+    }
 
 
 def test_root_accept_parser_requires_one_evidence_input_and_forwards_inline_json(

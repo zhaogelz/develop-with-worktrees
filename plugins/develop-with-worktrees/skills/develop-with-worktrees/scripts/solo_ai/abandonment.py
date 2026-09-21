@@ -15,8 +15,12 @@ from .state import FINAL_TASK_STATES, StateStore, candidate_admission_lock
 from .util import (
     SoloAIError,
     atomic_write_json,
+    is_link_or_junction,
     path_identity,
+    pinned_plain_directory,
     read_json,
+    remove_tree_without_following_links,
+    sha256_file,
     sha256_text,
     snapshot_plain_path,
     stable_json,
@@ -26,10 +30,15 @@ from .util import (
 ABANDONMENT_SCHEMA = 1
 ABANDONMENT_RECEIPT_SCHEMA = 1
 RETAINED_RECLAIM_SCHEMA = 1
+RETAINED_DISPOSAL_SCHEMA = 1
 
 
 def _receipt_path(repo: GitRepo, task_id: str) -> Path:
     return repo.local_dir / "abandonment-receipts" / f"{task_id}.json"
+
+
+def _disposal_receipt_path(repo: GitRepo, task_id: str) -> Path:
+    return repo.local_dir / "retained-disposal-receipts" / f"{task_id}.json"
 
 
 def _assert_no_active_reference(
@@ -828,6 +837,376 @@ def resume_retained_reclaim(
         "idempotent": False,
         "deleted": sorted(transaction["ordinary_untracked"]),
         "branch_preserved": completed["branch"],
+    }
+
+
+def retained_disposal_plan(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any]:
+    """冻结一次显式处置保留树的身份，不枚举获准根中的未知内容。"""
+    abandonment = _assert_reclaim_task(task)
+    if task.get("retained_reclaim") or task.get("retained_disposal"):
+        raise SoloAIError("Retained worktree already has a reclaim or disposal record")
+    worktree = _reclaim_worktree(repo, task=task, transaction=abandonment)
+    slot = store.read()["slots"].get(str(task["slot_id"]))
+    if (
+        not slot
+        or slot.get("task_id") != task["id"]
+        or slot.get("status") != "quarantined"
+    ):
+        raise SoloAIError("Retained disposal requires its exact quarantined slot")
+    expected_tip = str(abandonment["branch_tip"])
+    if (
+        repo.branch(worktree) != abandonment["branch"]
+        or repo.head(worktree) != expected_tip
+        or repo.ref_head(f"refs/heads/{abandonment['branch']}") != expected_tip
+    ):
+        raise SoloAIError("Retained disposal branch or HEAD changed")
+    tracked_status = repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=no"], cwd=worktree
+    ).stdout
+    if tracked_status:
+        raise SoloAIError(
+            "Retained disposal refuses tracked changes; preserve the worktree for review"
+        )
+    primary, default_branch = repo.ensure_default_primary_clean()
+    rebuild_head = repo.default_head()
+    if primary == worktree.resolve():
+        raise SoloAIError("Retained disposal cannot replace the primary worktree")
+    identity = {
+        "schema_version": RETAINED_DISPOSAL_SCHEMA,
+        "mode": "dispose-retained-worktree",
+        "task_id": task["id"],
+        "slot_id": task["slot_id"],
+        "slot_generation": int(slot["generation"]),
+        "abandonment_transaction_id": abandonment["transaction_id"],
+        "worktree": str(worktree),
+        "worktree_resolved": abandonment["worktree_resolved"],
+        "worktree_identity": abandonment["worktree_identity"],
+        "managed_root": abandonment["managed_root"],
+        "managed_root_resolved": abandonment["managed_root_resolved"],
+        "managed_root_identity": abandonment["managed_root_identity"],
+        "branch": abandonment["branch"],
+        "branch_tip": expected_tip,
+        "base_head": abandonment["base_head"],
+        "rebuild_branch": default_branch,
+        "rebuild_head": rebuild_head,
+    }
+    return {
+        **identity,
+        "confirmation": sha256_text(stable_json(identity)),
+        "status": "needs-confirmation",
+        "discard_scope": "entire-retained-worktree-root",
+        "scan_complete": False,
+    }
+
+
+def _assert_disposal_transaction(
+    task: dict[str, Any], transaction: dict[str, Any]
+) -> None:
+    abandonment = _assert_reclaim_task(task)
+    expected = {
+        "schema_version": RETAINED_DISPOSAL_SCHEMA,
+        "mode": "dispose-retained-worktree",
+        "task_id": task["id"],
+        "slot_id": task["slot_id"],
+        "abandonment_transaction_id": abandonment["transaction_id"],
+    }
+    for key, value in expected.items():
+        if transaction.get(key) != value:
+            raise SoloAIError(f"Retained disposal identity changed: {key}")
+    if transaction.get("phase") not in {
+        "prepared",
+        "renaming",
+        "staged",
+        "removed",
+        "recreated",
+        "completed",
+    }:
+        raise SoloAIError("Unsupported retained disposal transaction phase")
+
+
+def _assert_disposal_slot(
+    store: StateStore, *, task: dict[str, Any], transaction: dict[str, Any]
+) -> None:
+    slot = store.read()["slots"].get(str(task["slot_id"]))
+    if (
+        not slot
+        or slot.get("task_id") != task["id"]
+        or slot.get("status") != "release-checking"
+        or int(slot.get("generation", -1)) != int(transaction["slot_generation"])
+    ):
+        raise SoloAIError("Retained disposal slot identity changed")
+
+
+def _assert_disposal_primary(repo: GitRepo, transaction: dict[str, Any]) -> Path:
+    primary, branch = repo.ensure_default_primary_clean()
+    if (
+        branch != transaction["rebuild_branch"]
+        or repo.default_head() != transaction["rebuild_head"]
+    ):
+        raise SoloAIError("Retained disposal rebuild base changed")
+    return primary
+
+
+def _disposal_stage_path(transaction: dict[str, Any]) -> Path:
+    worktree = Path(str(transaction["worktree"]))
+    return worktree.parent / (
+        f".{worktree.name}.retained-disposal-{transaction['transaction_id']}"
+    )
+
+
+def _assert_disposal_parent(transaction: dict[str, Any]) -> Path:
+    parent = Path(str(transaction["managed_root"]))
+    require_managed_directory_identity(
+        parent,
+        managed_root=parent,
+        expected_resolved=str(transaction["managed_root_resolved"]),
+        expected_root_resolved=str(transaction["managed_root_resolved"]),
+        expected_identity=dict(transaction["managed_root_identity"]),
+        expected_root_identity=dict(transaction["managed_root_identity"]),
+    )
+    return parent
+
+
+def _assert_disposal_original(
+    repo: GitRepo, *, task: dict[str, Any], transaction: dict[str, Any]
+) -> Path:
+    worktree = _reclaim_worktree(repo, task=task, transaction=transaction)
+    if (
+        repo.branch(worktree) != transaction["branch"]
+        or repo.head(worktree) != transaction["branch_tip"]
+        or repo.ref_head(f"refs/heads/{transaction['branch']}")
+        != transaction["branch_tip"]
+    ):
+        raise SoloAIError("Retained disposal branch or HEAD changed")
+    if repo.git(
+        ["status", "--porcelain=v1", "--untracked-files=no"], cwd=worktree
+    ).stdout:
+        raise SoloAIError("Retained disposal received tracked changes")
+    return worktree
+
+
+def _assert_disposal_staging(
+    transaction: dict[str, Any], *, require_exists: bool = True
+) -> Path:
+    stage = _disposal_stage_path(transaction)
+    if is_link_or_junction(stage):
+        raise SoloAIError("Retained disposal staging path became a link or junction")
+    if require_exists and not stage.is_dir():
+        raise SoloAIError("Retained disposal staging directory is missing")
+    if stage.exists() and path_identity(stage) != transaction["worktree_identity"]:
+        raise SoloAIError("Retained disposal staging directory was replaced")
+    return stage
+
+
+def _assert_disposal_registration(
+    repo: GitRepo, transaction: dict[str, Any], *, registered: bool
+) -> None:
+    worktree = Path(str(transaction["worktree"]))
+    records = [item for item in repo.worktrees() if item.path == worktree.resolve()]
+    if registered:
+        if (
+            len(records) != 1
+            or records[0].head != transaction["branch_tip"]
+            or records[0].branch != f"refs/heads/{transaction['branch']}"
+            or records[0].detached
+        ):
+            raise SoloAIError("Retained disposal Git registration changed")
+    elif records:
+        raise SoloAIError("Retained disposal Git registration unexpectedly remains")
+
+
+def _write_disposal_receipt(repo: GitRepo, transaction: dict[str, Any]) -> str:
+    path = _disposal_receipt_path(repo, str(transaction["task_id"]))
+    payload = {
+        "schema_version": RETAINED_DISPOSAL_SCHEMA,
+        "mode": transaction["mode"],
+        "task_id": transaction["task_id"],
+        "slot_id": transaction["slot_id"],
+        "slot_generation": transaction["slot_generation"],
+        "abandonment_transaction_id": transaction["abandonment_transaction_id"],
+        "disposal_transaction_id": transaction["transaction_id"],
+        "worktree": transaction["worktree"],
+        "branch": transaction["branch"],
+        "branch_tip": transaction["branch_tip"],
+        "rebuild_branch": transaction["rebuild_branch"],
+        "rebuild_head": transaction["rebuild_head"],
+        "recreated_worktree_identity": transaction["recreated_worktree_identity"],
+        "recreated_managed_root_identity": transaction[
+            "recreated_managed_root_identity"
+        ],
+        "recreated_at": transaction["recreated_at"],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and read_json(path, None) != payload:
+        raise SoloAIError("Existing retained disposal receipt has different facts")
+    if not path.exists():
+        atomic_write_json(path, payload)
+    return sha256_file(path)
+
+
+def resume_retained_disposal(
+    repo: GitRepo, *, store: StateStore, task: dict[str, Any]
+) -> dict[str, Any]:
+    """继续一个已经明确授权的整树处置，再以当前默认分支重建原槽位。"""
+    transaction = task.get("retained_disposal")
+    if not isinstance(transaction, dict):
+        raise SoloAIError("Retained disposal transaction is missing")
+    _assert_disposal_transaction(task, transaction)
+    if transaction["phase"] == "completed":
+        slot = store.read()["slots"].get(str(task["slot_id"]))
+        if (
+            not slot
+            or slot.get("task_id") is not None
+            or slot.get("status") != "idle"
+            or int(slot.get("generation", -1)) != int(transaction["slot_generation"])
+        ):
+            raise SoloAIError("Completed retained disposal slot changed")
+        return {
+            "task_id": task["id"],
+            "slot_id": task["slot_id"],
+            "status": "disposed-and-recreated",
+            "idempotent": True,
+            "branch_preserved": transaction["branch"],
+            "rebuild_head": transaction["rebuild_head"],
+        }
+
+    _assert_disposal_slot(store, task=task, transaction=transaction)
+    primary = _assert_disposal_primary(repo, transaction)
+    parent = _assert_disposal_parent(transaction)
+    worktree = Path(str(transaction["worktree"]))
+    stage = _disposal_stage_path(transaction)
+    phase = str(transaction["phase"])
+
+    if phase == "prepared":
+        transaction = store.advance_retained_disposal(
+            task["id"],
+            transaction_id=str(transaction["transaction_id"]),
+            phase="renaming",
+        )
+        phase = "renaming"
+
+    if phase == "renaming":
+        if stage.exists() or is_link_or_junction(stage):
+            if worktree.exists() or is_link_or_junction(worktree):
+                raise SoloAIError(
+                    "Retained disposal has both original and staging paths"
+                )
+            stage = _assert_disposal_staging(transaction)
+            _assert_disposal_registration(repo, transaction, registered=True)
+        else:
+            original = _assert_disposal_original(
+                repo, task=task, transaction=transaction
+            )
+            with pinned_plain_directory(parent, transaction["managed_root_identity"]):
+                if stage.exists() or is_link_or_junction(stage):
+                    raise SoloAIError(
+                        "Retained disposal staging path appeared before rename"
+                    )
+                original.rename(stage)
+            stage = _assert_disposal_staging(transaction)
+        transaction = store.advance_retained_disposal(
+            task["id"],
+            transaction_id=str(transaction["transaction_id"]),
+            phase="staged",
+            staging_identity=path_identity(stage),
+        )
+        phase = "staged"
+
+    if phase == "staged":
+        stage = _assert_disposal_staging(transaction)
+        expected_stage = transaction.get("staging_identity")
+        if expected_stage != path_identity(stage):
+            raise SoloAIError("Retained disposal staging directory identity changed")
+        remove_tree_without_following_links(stage)
+        if stage.exists() or is_link_or_junction(stage):
+            raise SoloAIError("Retained disposal staging directory remains")
+        _assert_disposal_registration(repo, transaction, registered=True)
+        repo.git(["worktree", "remove", str(worktree)], cwd=primary)
+        if worktree.exists() or is_link_or_junction(worktree):
+            raise SoloAIError("Retained disposal original path reappeared")
+        _assert_disposal_registration(repo, transaction, registered=False)
+        transaction = store.advance_retained_disposal(
+            task["id"],
+            transaction_id=str(transaction["transaction_id"]),
+            phase="removed",
+        )
+        phase = "removed"
+
+    if phase == "removed":
+        if (
+            worktree.exists()
+            or is_link_or_junction(worktree)
+            or stage.exists()
+            or is_link_or_junction(stage)
+        ):
+            raise SoloAIError("Retained disposal path changed before recreation")
+        _assert_disposal_registration(repo, transaction, registered=False)
+        repo.git(
+            ["worktree", "add", "--detach", str(worktree), transaction["rebuild_head"]],
+            cwd=primary,
+        )
+        rebuilt = require_managed_directory_identity(
+            worktree,
+            managed_root=parent,
+            expected_root_resolved=str(transaction["managed_root_resolved"]),
+            expected_root_identity=dict(transaction["managed_root_identity"]),
+        )
+        records = [item for item in repo.worktrees() if item.path == rebuilt]
+        if (
+            len(records) != 1
+            or not records[0].detached
+            or records[0].head != transaction["rebuild_head"]
+            or repo.branch(worktree) is not None
+            or repo.head(worktree) != transaction["rebuild_head"]
+            or not repo.is_clean(worktree)
+        ):
+            raise SoloAIError(
+                "Retained disposal recreation did not produce a clean detached slot"
+            )
+        transaction = store.advance_retained_disposal(
+            task["id"],
+            transaction_id=str(transaction["transaction_id"]),
+            phase="recreated",
+            recreated_worktree_identity=path_identity(worktree),
+            recreated_worktree_resolved=str(rebuilt),
+            recreated_managed_root_identity=path_identity(parent),
+            recreated_managed_root_resolved=str(parent.resolve()),
+        )
+
+    rebuilt = require_managed_directory_identity(
+        worktree,
+        managed_root=parent,
+        expected_resolved=str(transaction["recreated_worktree_resolved"]),
+        expected_root_resolved=str(transaction["recreated_managed_root_resolved"]),
+        expected_identity=dict(transaction["recreated_worktree_identity"]),
+        expected_root_identity=dict(transaction["recreated_managed_root_identity"]),
+    )
+    records = [item for item in repo.worktrees() if item.path == rebuilt]
+    if (
+        len(records) != 1
+        or not records[0].detached
+        or records[0].head != transaction["rebuild_head"]
+        or repo.branch(worktree) is not None
+        or repo.head(worktree) != transaction["rebuild_head"]
+        or not repo.is_clean(worktree)
+    ):
+        raise SoloAIError("Retained disposal recreated slot changed before release")
+    receipt_sha = _write_disposal_receipt(repo, transaction)
+    completed = store.complete_retained_disposal(
+        task["id"],
+        transaction_id=str(transaction["transaction_id"]),
+        receipt_sha256=receipt_sha,
+    )
+    return {
+        "task_id": task["id"],
+        "slot_id": task["slot_id"],
+        "status": "disposed-and-recreated",
+        "idempotent": False,
+        "branch_preserved": completed["branch"],
+        "rebuild_head": transaction["rebuild_head"],
+        "receipt_sha256": receipt_sha,
     }
 
 

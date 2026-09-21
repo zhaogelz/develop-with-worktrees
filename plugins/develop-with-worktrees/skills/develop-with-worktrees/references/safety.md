@@ -155,6 +155,15 @@ and keeps the task record, branch, and receipts after the slot becomes reusable.
 Known dependency caches remain in place; reuse is a safe return, not a physical
 worktree deletion.
 
+`reclaim-retained --dispose` is a separate exceptional route for a retained root
+whose whole contents were explicitly approved as disposable. Its confirmation
+also freezes the replacement default-branch head. It never follows a symlink or
+junction while removing that one approved root, never deletes the historical
+task branch or abandonment receipt, and records a disposal receipt before the
+new clean detached slot is made reusable. It rejects any change to the task,
+slot generation, branch/HEAD, tracked files, managed-directory identity, or
+replacement base.
+
 An active in-place task additionally binds its trusted session, branch, start
 head, and expected head. A mismatch quarantines it. A post-session handoff
 requires explicit exact confirmation and cannot recreate or clean an ambiguous

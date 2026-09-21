@@ -31,7 +31,9 @@ from .abandonment import (
 )
 from .abandonment import resume as resume_abandonment
 from .abandonment import resume_retained as resume_retained_abandonment
+from .abandonment import resume_retained_disposal
 from .abandonment import retained_reclaim_plan
+from .abandonment import retained_disposal_plan
 from .abandonment import resume_retained_reclaim
 from .abandonment import write_completed_receipt as write_abandonment_receipt
 from .cleanup import inspect_untracked, require_managed_directory_identity
@@ -5114,13 +5116,53 @@ def abandon(
 
 
 def reclaim_retained_worktree(
-    repo: GitRepo, *, task_id: str, confirm: str | None = None
+    repo: GitRepo, *, task_id: str, confirm: str | None = None, dispose: bool = False
 ) -> dict[str, Any]:
     """按一次可审阅清单回收已保留的终态隔离工作树。"""
     _config_and_mode(repo)
     with maintenance_lock(repo), candidate_admission_lock(repo):
         store = StateStore(repo)
         task = store.task(task_id)
+        if dispose:
+            existing_disposal = task.get("retained_disposal")
+            if isinstance(existing_disposal, dict):
+                if existing_disposal.get("phase") == "completed":
+                    return resume_retained_disposal(repo, store=store, task=task)
+                if not confirm:
+                    return {
+                        "task_id": task_id,
+                        "slot_id": task["slot_id"],
+                        "status": "needs-confirmation",
+                        "confirmation": existing_disposal.get("confirmation"),
+                        "discard_scope": "entire-retained-worktree-root",
+                        "resuming": True,
+                    }
+                if confirm != existing_disposal.get("confirmation"):
+                    raise SoloAIError("Retained disposal confirmation changed")
+                return resume_retained_disposal(repo, store=store, task=task)
+            if task.get("retained_reclaim"):
+                raise SoloAIError("Retained reclaim is already in progress")
+            plan = retained_disposal_plan(repo, store=store, task=task)
+            if confirm is None:
+                return plan
+            if confirm != plan["confirmation"]:
+                raise SoloAIError(
+                    "Retained disposal confirmation does not match the current identity"
+                )
+            disposal = {
+                **{
+                    key: value
+                    for key, value in plan.items()
+                    if key not in {"status", "discard_scope", "scan_complete"}
+                },
+                "transaction_id": uuid.uuid4().hex,
+                "phase": "prepared",
+                "prepared_at": utc_timestamp(),
+            }
+            prepared = store.prepare_retained_disposal(task_id, disposal=disposal)
+            return resume_retained_disposal(repo, store=store, task=prepared)
+        if task.get("retained_disposal"):
+            raise SoloAIError("Retained disposal is already in progress")
         existing = task.get("retained_reclaim")
         if isinstance(existing, dict):
             if existing.get("phase") == "completed":

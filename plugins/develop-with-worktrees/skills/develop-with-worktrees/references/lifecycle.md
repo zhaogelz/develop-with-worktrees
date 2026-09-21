@@ -223,6 +223,16 @@ recorded base, and returns the slot. It refuses active tasks, tracked work,
 identity changes, and changed checklists; it keeps the terminal task record,
 task branch, and abandonment receipt for audit.
 
+If the retained worktree is a verified, explicitly disposable residue but its
+contents cannot pass that ordinary-file checklist, use the separate two-step
+`reclaim-retained --task <id> --dispose` preview and its exact `--confirm` value.
+This is not a broad force option: it accepts only the original completed
+retain-worktree task in its exact quarantined slot, refuses tracked changes or
+branch/HEAD/base drift, records a durable disposal receipt, removes only that
+root without following symlinks or junctions, preserves its task branch and
+abandonment audit, then recreates the same slot as a clean detached worktree at
+the frozen current default-branch head.
+
 ## Compatibility modes
 
 An explicit in-place task binds one clean registered worktree, branch, start

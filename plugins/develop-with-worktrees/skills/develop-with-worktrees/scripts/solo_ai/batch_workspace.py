@@ -101,7 +101,9 @@ def _check_git(repo: GitRepo, worktree: Path, expected_head: str) -> None:
             f"expected {expected_head}, found {actual_head}"
         )
     if not repo.is_clean(worktree):
-        raise BatchWorkspacePending("Integration workspace contains uncommitted changes")
+        raise BatchWorkspacePending(
+            "Integration workspace contains uncommitted changes"
+        )
     common = repo.git(
         ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=worktree
     ).stdout.strip()

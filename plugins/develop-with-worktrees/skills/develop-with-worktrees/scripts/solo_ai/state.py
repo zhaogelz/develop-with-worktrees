@@ -1770,6 +1770,192 @@ class StateStore:
 
         return self.mutate(update)
 
+    def prepare_retained_disposal(
+        self, task_id: str, *, disposal: dict[str, Any]
+    ) -> dict[str, Any]:
+        """冻结一个获明确授权的保留树整根处置事务。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            abandonment = task.get("abandonment") if task else None
+            if (
+                not task
+                or task.get("status") != "abandoned"
+                or not abandonment
+                or abandonment.get("retained_worktree") is not True
+                or abandonment.get("phase") != "completed"
+                or task.get("active_operation")
+                or task.get("retained_reclaim")
+            ):
+                raise SoloAIError("Retained disposal task identity changed")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "quarantined"
+                or int(slot.get("generation", -1))
+                != int(disposal.get("slot_generation", -1))
+            ):
+                raise SoloAIError("Retained disposal slot identity changed")
+            if (
+                disposal.get("mode") != "dispose-retained-worktree"
+                or disposal.get("task_id") != task_id
+                or disposal.get("slot_id") != task.get("slot_id")
+                or disposal.get("abandonment_transaction_id")
+                != abandonment.get("transaction_id")
+                or disposal.get("phase") != "prepared"
+            ):
+                raise SoloAIError("Retained disposal confirmation identity changed")
+            if task.get("retained_disposal"):
+                raise SoloAIError("A retained disposal transaction already exists")
+            task["retained_disposal"] = copy.deepcopy(disposal)
+            task["updated_at"] = utc_timestamp()
+            slot.update(
+                {
+                    "status": "release-checking",
+                    "quarantine_reason": "Retained disposal in progress",
+                }
+            )
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def advance_retained_disposal(
+        self,
+        task_id: str,
+        *,
+        transaction_id: str,
+        phase: str,
+        staging_identity: dict[str, Any] | None = None,
+        recreated_worktree_identity: dict[str, Any] | None = None,
+        recreated_worktree_resolved: str | None = None,
+        recreated_managed_root_identity: dict[str, Any] | None = None,
+        recreated_managed_root_resolved: str | None = None,
+    ) -> dict[str, Any]:
+        """记录保留树处置的可恢复物理阶段，阶段转换不能跳跃。"""
+        allowed = {
+            "prepared": "renaming",
+            "renaming": "staged",
+            "staged": "removed",
+            "removed": "recreated",
+        }
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            disposal = task.get("retained_disposal") if task else None
+            if (
+                not task
+                or task.get("status") != "abandoned"
+                or not disposal
+                or disposal.get("transaction_id") != transaction_id
+                or allowed.get(disposal.get("phase")) != phase
+            ):
+                raise SoloAIError("Retained disposal phase changed")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "release-checking"
+                or int(slot.get("generation", -1))
+                != int(disposal.get("slot_generation", -1))
+            ):
+                raise SoloAIError("Retained disposal slot identity changed")
+            if phase == "staged":
+                if not staging_identity:
+                    raise SoloAIError("Retained disposal staging identity is missing")
+                disposal["staging_identity"] = copy.deepcopy(staging_identity)
+            if phase == "recreated":
+                values = (
+                    recreated_worktree_identity,
+                    recreated_worktree_resolved,
+                    recreated_managed_root_identity,
+                    recreated_managed_root_resolved,
+                )
+                if not all(values):
+                    raise SoloAIError(
+                        "Retained disposal recreation identity is missing"
+                    )
+                disposal.update(
+                    {
+                        "recreated_worktree_identity": copy.deepcopy(
+                            recreated_worktree_identity
+                        ),
+                        "recreated_worktree_resolved": recreated_worktree_resolved,
+                        "recreated_managed_root_identity": copy.deepcopy(
+                            recreated_managed_root_identity
+                        ),
+                        "recreated_managed_root_resolved": recreated_managed_root_resolved,
+                    }
+                )
+            now = utc_timestamp()
+            disposal.update({"phase": phase, f"{phase}_at": now})
+            task["updated_at"] = now
+            return copy.deepcopy(task)
+
+        return self.mutate(update)["retained_disposal"]
+
+    def complete_retained_disposal(
+        self, task_id: str, *, transaction_id: str, receipt_sha256: str
+    ) -> dict[str, Any]:
+        """仅在新的干净 detached 槽已落盘后，将原槽位再次开放。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state["tasks"].get(task_id)
+            abandonment = task.get("abandonment") if task else None
+            disposal = task.get("retained_disposal") if task else None
+            if (
+                not task
+                or task.get("status") != "abandoned"
+                or not abandonment
+                or abandonment.get("retained_worktree") is not True
+                or not disposal
+                or disposal.get("transaction_id") != transaction_id
+                or disposal.get("phase") != "recreated"
+                or not receipt_sha256
+            ):
+                raise SoloAIError("Retained disposal completion identity changed")
+            slot = state["slots"].get(str(task.get("slot_id")))
+            if (
+                not slot
+                or slot.get("task_id") != task_id
+                or slot.get("status") != "release-checking"
+                or int(slot.get("generation", -1))
+                != int(disposal.get("slot_generation", -1))
+            ):
+                raise SoloAIError("Retained disposal slot release state changed")
+            now = utc_timestamp()
+            disposal.update(
+                {
+                    "phase": "completed",
+                    "completed_at": now,
+                    "receipt_sha256": receipt_sha256,
+                }
+            )
+            task["updated_at"] = now
+            slot.update(
+                {
+                    "status": "idle",
+                    "task_id": None,
+                    "last_used": time.time(),
+                    "quarantine_reason": None,
+                    "released_worktree_identity": copy.deepcopy(
+                        disposal["recreated_worktree_identity"]
+                    ),
+                    "released_managed_root_identity": copy.deepcopy(
+                        disposal["recreated_managed_root_identity"]
+                    ),
+                    "released_worktree_resolved": disposal[
+                        "recreated_worktree_resolved"
+                    ],
+                    "released_managed_root_resolved": disposal[
+                        "recreated_managed_root_resolved"
+                    ],
+                }
+            )
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
     def prepare_preactivation_release(
         self, task_id: str, *, operation_id: str, recovery: dict[str, Any]
     ) -> dict[str, Any]:

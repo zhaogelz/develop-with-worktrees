@@ -3090,8 +3090,9 @@ def test_failed_combined_validation_preserves_base_and_generation_is_not_rerun(
     preserved = CandidateBatchStore(repo).summary()["batches"][0]
     assert preserved["failure_kind"] == "validation_failed"
     assert (
-        CandidateBatchStore(repo)
-        .candidate(candidate["candidate_id"])["last_failure_kind"]
+        CandidateBatchStore(repo).candidate(candidate["candidate_id"])[
+            "last_failure_kind"
+        ]
         == "validation_failed"
     )
 

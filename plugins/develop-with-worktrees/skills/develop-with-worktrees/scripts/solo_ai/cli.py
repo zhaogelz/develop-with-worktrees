@@ -1091,6 +1091,11 @@ def _parser() -> argparse.ArgumentParser:
         "--confirm",
         help="exact confirmation returned with the current deletion checklist",
     )
+    reclaim_retained.add_argument(
+        "--dispose",
+        action="store_true",
+        help="explicitly dispose the exact retained root, then recreate its slot",
+    )
 
     resume = sub.add_parser(
         "resume-in-place",
@@ -2758,7 +2763,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             retain_worktree=args.retain_worktree,
         )
     if args.command == "reclaim-retained":
-        return reclaim_retained_worktree(repo, task_id=args.task, confirm=args.confirm)
+        return reclaim_retained_worktree(
+            repo, task_id=args.task, confirm=args.confirm, dispose=args.dispose
+        )
     if args.command == "warm-slot":
         return warm_slot(repo, slot_id=args.slot)
     if args.command == "dev" and args.dev_command == "start":

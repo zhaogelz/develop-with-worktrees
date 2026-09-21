@@ -1602,9 +1602,10 @@ def test_plugin_maintenance_allows_only_owned_dww_commands(
         denied = decide(command)
         assert denied is not None, command
         assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "plugin maintenance command is blocked" in denied["hookSpecificOutput"][
-            "permissionDecisionReason"
-        ]
+        assert (
+            "plugin maintenance command is blocked"
+            in denied["hookSpecificOutput"]["permissionDecisionReason"]
+        )
 
     not_owner = decide(
         f"{quoted} plugin marketplace list --json", session="other-session"

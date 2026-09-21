@@ -547,6 +547,29 @@ def is_link_or_junction(path: Path) -> bool:
     return bool(getattr(status, "st_file_attributes", 0) & 0x0400)
 
 
+def remove_tree_without_following_links(path: Path) -> None:
+    """删除一个已获准的根；目录链接只删除对象本身，绝不进入其目标。"""
+    access_path = filesystem_path(path)
+    if is_link_or_junction(path):
+        if os.name == "nt" and access_path.is_dir():
+            access_path.rmdir()
+        else:
+            access_path.unlink()
+        return
+    try:
+        status = access_path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(status.st_mode):
+        access_path.unlink()
+        return
+    with os.scandir(access_path) as entries:
+        children = [path / entry.name for entry in entries]
+    for child in children:
+        remove_tree_without_following_links(child)
+    access_path.rmdir()
+
+
 def process_snapshot(pid: int | None = None) -> dict[str, Any]:
     actual_pid = pid or os.getpid()
     try:

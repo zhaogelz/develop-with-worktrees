@@ -58,9 +58,7 @@ def test_plugin_maintenance_script_rechecks_unknown_switch_and_resumes(
     source_plugin = source / "plugins" / "develop-with-worktrees"
     (source_plugin / ".codex-plugin").mkdir(parents=True)
     (source_plugin / ".codex-plugin" / "plugin.json").write_text(
-        json.dumps(
-            {"name": "develop-with-worktrees", "version": "0.5.0-beta.7"}
-        ),
+        json.dumps({"name": "develop-with-worktrees", "version": "0.5.0-beta.7"}),
         encoding="utf-8",
     )
 
@@ -356,9 +354,7 @@ def test_maintenance_script_preserves_legacy_releases_and_check_is_read_only(
     source_plugin = source / "plugins" / "develop-with-worktrees"
     (source_plugin / ".codex-plugin").mkdir(parents=True)
     (source_plugin / ".codex-plugin" / "plugin.json").write_text(
-        json.dumps(
-            {"name": "develop-with-worktrees", "version": "0.5.0-beta.7"}
-        ),
+        json.dumps({"name": "develop-with-worktrees", "version": "0.5.0-beta.7"}),
         encoding="utf-8",
     )
 
@@ -418,7 +414,9 @@ manifest.write_text(json.dumps(payload), encoding='utf-8')
 """,
         encoding="utf-8",
     )
-    (helpers / "validate_plugin.py").write_text("# valid test helper\n", encoding="utf-8")
+    (helpers / "validate_plugin.py").write_text(
+        "# valid test helper\n", encoding="utf-8"
+    )
 
     state = tmp_path / "fake-state.json"
     state.write_text(json.dumps({"marketplaces": [], "plugins": []}), encoding="utf-8")

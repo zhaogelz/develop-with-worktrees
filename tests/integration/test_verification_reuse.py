@@ -380,13 +380,19 @@ def test_complete_pure_proof_ignores_selection_and_queue_metadata(
     policy.write_text(
         policy.read_text(encoding="utf-8")
         .replace('paths = ["**"]', 'paths = ["README.md"]')
-        .replace('frozen_base = false', 'frozen_base = false\ncross_task_reuse = true\nresource_class = "heavy"'),
+        .replace(
+            "frozen_base = false",
+            'frozen_base = false\ncross_task_reuse = true\nresource_class = "heavy"',
+        ),
         encoding="utf-8",
     )
     (git_repo / "README.md").write_text("selection-only change\n", encoding="utf-8")
     second = validate(repo)
 
-    assert first["profile_proofs"][0]["fingerprint"] == second["profile_proofs"][0]["fingerprint"]
+    assert (
+        first["profile_proofs"][0]["fingerprint"]
+        == second["profile_proofs"][0]["fingerprint"]
+    )
     assert second["profile_proofs"][0]["reused"] is True
     assert (git_repo / ".tmp/count").read_text(encoding="utf-8") == "1"
 
