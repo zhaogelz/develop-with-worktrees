@@ -87,13 +87,21 @@ def require_retained_contents(repo: GitRepo, worktree: Path) -> None:
 
 
 def _check_git(repo: GitRepo, worktree: Path, expected_head: str) -> None:
-    if (
-        not any(item.path == worktree for item in repo.worktrees())
-        or repo.branch(worktree) is not None
-        or repo.head(worktree) != expected_head
-        or not repo.is_clean(worktree)
-    ):
-        raise BatchWorkspacePending("Integration workspace Git identity changed")
+    if not any(item.path == worktree for item in repo.worktrees()):
+        raise BatchWorkspacePending("Integration workspace registration is missing")
+    branch = repo.branch(worktree)
+    if branch is not None:
+        raise BatchWorkspacePending(
+            f"Integration workspace is attached to branch {branch}"
+        )
+    actual_head = repo.head(worktree)
+    if actual_head != expected_head:
+        raise BatchWorkspacePending(
+            "Integration workspace HEAD changed: "
+            f"expected {expected_head}, found {actual_head}"
+        )
+    if not repo.is_clean(worktree):
+        raise BatchWorkspacePending("Integration workspace contains uncommitted changes")
     common = repo.git(
         ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=worktree
     ).stdout.strip()

@@ -577,18 +577,15 @@ def _profile_inputs(
     shared: dict[str, Any],
     validation_environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    inputs = {
         **shared,
         # 旧证明未执行单元输入前后复核，不能作为新复用契约的成功证明。
         "reuse_contract": 2,
         "profile_id": profile.profile_id,
-        "paths": list(profile.paths),
         "command_digests": [command.fingerprint for command in profile.commands],
-        "cross_task_reuse": profile.cross_task_reuse,
         "external_state": profile.external_state,
         "input_closure": profile.input_closure,
         "timeout_seconds": profile.timeout_seconds,
-        "resource_class": profile.resource_class,
         "level": profile.level,
         "tracked_inputs": _matching_hashes(cwd, tracked, profile.input_paths),
         "environment": {
@@ -598,6 +595,20 @@ def _profile_inputs(
         # DWW 注入的冻结基线会影响项目选择器；它与声明环境一样属于证明身份。
         "dww_validation_environment": dict(validation_environment or {}),
     }
+    # 对完整、无外部状态的检查，选择规则、跨任务提示和资源队列不会改变已执行
+    # 命令或其输入。省略它们允许同一真实执行事实跨任务复用；其余检查仍保留
+    # 所有调度边界，且历史证明因指纹自然不同而不会被误用。
+    if not (
+        profile.external_state == "none" and profile.input_closure == "complete"
+    ):
+        inputs.update(
+            {
+                "paths": list(profile.paths),
+                "cross_task_reuse": profile.cross_task_reuse,
+                "resource_class": profile.resource_class,
+            }
+        )
+    return inputs
 
 
 def _execution_environment(profile: VerificationProfile) -> dict[str, str]:
@@ -1206,9 +1217,22 @@ def _require_profile_inputs(
         ),
     )
     if any(inputs.get(key) != value for key, value in current.items()):
+        reasons = _profile_input_change_reasons(inputs, current)
+        previous_paths = inputs.get("tracked_inputs", {})
+        current_paths = current.get("tracked_inputs", {})
+        changed_paths = sorted(
+            path
+            for path in set(previous_paths).union(current_paths)
+            if previous_paths.get(path) != current_paths.get(path)
+        )
+        detail = ", ".join(reasons)
+        if changed_paths:
+            visible_paths = changed_paths[:20]
+            suffix = "" if len(changed_paths) <= len(visible_paths) else f" (+{len(changed_paths) - len(visible_paths)} more)"
+            detail += "; declared paths: " + ", ".join(visible_paths) + suffix
         raise SoloAIError(
             f"Validation inputs changed for profile {profile.profile_id}; "
-            "no successful proof may certify this execution"
+            f"{detail}; no successful proof may certify this execution"
         )
 
 

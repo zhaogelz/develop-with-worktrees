@@ -76,6 +76,51 @@ command remain available. This check is scoped to observed Hook events and tools
 not an operating-system sandbox. The CLI binding and version gates remain the
 fallback when the Hook is not trusted or an event/tool is not covered.
 
+### Restricted local plugin maintenance
+
+The Hook keeps plugin maintenance separate from its ordinary read-only shell
+parser. With exactly one active isolated task owned by the current Codex
+session, it permits only an absolute, verified Windows Codex CLI to query
+plugins or marketplaces, or to refresh `develop-with-worktrees` from the fixed
+local `dww-stable-local` marketplace. A root refresh is still required before
+the refresh write. It also permits exactly one installed-plugin maintenance
+entry: the formal PowerShell 7 executable, `-NoProfile -File`, and the
+`maintain-dww-plugin.ps1` stored beside the currently trusted Hook, followed by
+the fixed `Install`, same-common-dir primary `main` source root, full-commit
+and formal-Codex parameters. The script independently verifies that the source
+commit is exactly `main`. It
+rejects a different executable or script, plugin, marketplace, marketplace
+add/remove, `-MigrateMarketplace`, added or reordered parameters, shell
+composition, and configuration injection. The one-time move from an older
+marketplace source remains a human-only system PowerShell maintenance action;
+ordinary updates do not switch marketplace roots.
+
+Any command that appears to invoke the maintenance script or a Codex plugin
+subcommand but fails that exact contract is denied before the generic isolated
+task write allowance. This keeps a fake executable, fake script, or composed
+command from inheriting ordinary task permission.
+
+The stable-market release directory is not an archive. During a package switch
+the script keeps at most one `.previous-release` together with its one
+`.stage-*` recovery scene. Once the new active receipt is written, it removes
+the stage immediately. A later run rejects any remaining stage, and also
+rejects a previous release unless the active receipt and active plugin exactly
+match the requested source commit and tree. That one exact state may only
+continue marketplace/plugin installation and read-back; a successful read-back
+removes the previous release, while another install failure preserves it. The
+resume path will not switch marketplace sources. The script never creates
+`releases/` or accumulates old plugin copies.
+
+`Check` is a read-only layout report: it does not call Codex or write files. A
+missing market root, or an uninitialized root containing only one ordinary,
+non-link legacy `releases/` directory, is an acceptable starting layout. The
+legacy directory is preserved when `Install` initializes the new market;
+unknown, linked, or mixed existing content remains rejected.
+
+Ordinary source tasks Finish and return their worktrees. A coordinator starts a
+separate short-lived maintenance task only when a plugin release is needed; an
+ordinary development worktree is never retained merely to publish a package.
+
 ## Identity and content protection
 
 Every managed Start, Commit, Ready, Finish, Recover, Abandon, and cleanup action

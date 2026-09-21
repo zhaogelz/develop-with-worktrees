@@ -1208,7 +1208,11 @@ def _approval_request(repo: GitRepo, args: argparse.Namespace) -> dict[str, Any]
                 profile_ids = selected_profile_ids(
                     repo,
                     cwd=cwd,
-                    base=str(task.get("start_head") or task["base_ref"]),
+                    base=str(
+                        task.get("start_head")
+                        or task.get("base_head")
+                        or task["base_ref"]
+                    ),
                     verification=verification,
                     levels=levels,
                     full_scopes=(

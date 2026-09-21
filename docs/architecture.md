@@ -80,6 +80,16 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   same Git common directory; the target task still passes the existing owner,
   root-refresh, branch, HEAD, and directory-identity checks. It never treats an
   arbitrary command argument or a foreign repository as an execution context.
+- Plugin maintenance is not folded into the read-only shell parser. A current
+  owner with exactly one verified isolated task may query the formal Windows
+  Codex CLI and refresh only `develop-with-worktrees` from the fixed
+  `dww-stable-local` marketplace. Marketplace replacement, another plugin or
+  marketplace, a non-official executable, and shell composition remain denied.
+  The stable marketplace is prepared by its dedicated release script; normal
+  refreshes therefore do not remove and re-add a marketplace.
+  Ordinary source tasks Finish and return their worktrees. A coordinator starts
+  plugin publication as a separate, short-lived maintenance task rather than
+  retaining a normal development worktree for release work.
 - A confirmed objective has one root anchor. It retains the complete plan and
   explicit amendments; its child anchors retain only their execution slices.
   Exact host identity may map to that root as a locator only; it never stores a

@@ -39,6 +39,13 @@ version change or one denial is not a reason to repeatedly restart or trust.
 DWW cannot inspect or change host trust storage. The source version is
 `0.5.0-beta.7`; a plugin cache build may append a `+codex.<build>` suffix.
 
+For a confirmed local DWW marketplace, normal maintenance refreshes only this
+plugin from its existing local source. A first move from an older local source
+is a separate, verified maintenance action; it is not a routine task step.
+Normal source tasks still Finish and return their worktrees. When a plugin
+release is needed, the coordinator starts a separate short-lived maintenance
+task instead of retaining an ordinary development worktree for publishing.
+
 ## Default flow
 
 A brand-new empty Git repository is supported: after you accept isolated mode,

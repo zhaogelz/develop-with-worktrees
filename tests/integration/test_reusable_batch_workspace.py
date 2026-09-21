@@ -52,6 +52,16 @@ def test_workspace_retention_error_preserves_specific_reason(
     assert isinstance(raised.value.__cause__, SoloAIError)
 
 
+def test_workspace_git_identity_reports_the_actual_drift(git_repo: Path) -> None:
+    """分支、HEAD 和脏目录不能再被同一条泛化错误掩盖。"""
+    repo = reusable_repo(git_repo)
+    with pytest.raises(
+        batch_workspace.BatchWorkspacePending,
+        match="Integration workspace is attached to branch main",
+    ):
+        batch_workspace._check_git(repo, git_repo, repo.head(git_repo))
+
+
 def test_reusable_batches_resolve_one_workspace(git_repo: Path) -> None:
     """连续批次的实际目录入口不能继续按批次ID膨胀。"""
     repo = initialized_batched(git_repo)

@@ -60,6 +60,8 @@ PATCH_SCOPE_CODEX_HOME = "codex-home-protected"
 PATCH_SCOPE_ARTIFACT_ESCAPE = "artifact-link-escape"
 PATCH_SCOPE_MIXED = "mixed-targets"
 PATCH_SCOPE_FOREIGN_REPOSITORY = "foreign-repository"
+MAINTENANCE_PLUGIN = "develop-with-worktrees"
+MAINTENANCE_MARKETPLACE = "dww-stable-local"
 
 
 def _run_git(cwd: str, *args: str) -> str | None:
@@ -1294,6 +1296,293 @@ def _strict_read_only_bash(command: str) -> bool:
     )
 
 
+def _tokenize_plugin_maintenance(command: str) -> list[_ReadToken] | None:
+    """只接受 Windows 常见的一次 ``& \"…\\codex.exe\"`` 调用。
+
+    这不是只读命令解析器的扩展：调用符仅在这里、且只能出现在第一个
+    字符位置。其余语法继续由已有的保守词元器拒绝。
+    """
+    value = command.strip()
+    if value.startswith("&"):
+        if len(value) == 1 or not value[1].isspace():
+            return None
+        value = value[1:].lstrip()
+    tokens = _tokenize_read_only(value)
+    if not tokens or any(token.value == "|" and not token.quoted for token in tokens):
+        return None
+    return tokens
+
+
+def _trusted_codex_cli(value: str) -> bool:
+    """确认 Windows 正式 Codex CLI 的绝对、非链接安装位置。
+
+    命令名或 PATH 不足以证明来源，因此只接受用户本机 Codex 安装目录中
+    某个版本目录下的 ``codex.exe``。这不是对任意可执行文件的白名单。
+    """
+    candidate = Path(value)
+    if not candidate.is_absolute() or candidate.name.casefold() != "codex.exe":
+        return False
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        local_app_data = str(Path.home() / "AppData" / "Local")
+    try:
+        raw = candidate.absolute()
+        resolved = raw.resolve(strict=True)
+        install_root = (
+            Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+        ).resolve(strict=True)
+        relative = resolved.relative_to(install_root)
+    except (OSError, ValueError):
+        return False
+    # 正式布局是 bin/<build>/codex.exe；拒绝目录链接和根目录中的同名文件。
+    return (
+        raw == resolved
+        and len(relative.parts) == 2
+        and relative.name.casefold() == "codex.exe"
+    )
+
+
+def _trusted_powershell_cli(value: str) -> bool:
+    """确认 Windows PowerShell 7 的正式、非链接安装位置。
+
+    维护发布会写入用户级本地市场，不能把裸 ``pwsh`` 或 PATH 中同名程序
+    当作身份。当前契约仅支持 PowerShell 7 的标准安装位置。
+    """
+    program_file_roots = [
+        value
+        for value in (
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramFiles(x86)"),
+        )
+        if value
+    ]
+    if not program_file_roots:
+        return False
+    raw = Path(value)
+    try:
+        resolved = raw.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    if not raw.is_absolute() or raw != resolved:
+        return False
+    for program_files in program_file_roots:
+        try:
+            trusted = (Path(program_files) / "PowerShell" / "7" / "pwsh.exe").resolve(
+                strict=True
+            )
+        except (OSError, RuntimeError):
+            continue
+        if resolved == trusted:
+            return True
+    return False
+
+
+def _maintenance_script_path() -> Path:
+    """返回与当前受信 Hook 同一已安装插件根中的维护脚本。"""
+    return (
+        Path(__file__).resolve().parents[1] / "maintain-dww-plugin.ps1"
+    ).resolve()
+
+
+def _main_primary_worktree(root: Path) -> Path | None:
+    """从同一 common-dir 的首个工作树确认干净的 ``main`` 主根。"""
+    output = _run_git(str(root), "worktree", "list", "--porcelain")
+    if not output:
+        return None
+    first_record = output.split("\n\n", 1)[0].splitlines()
+    worktree_line = next(
+        (line for line in first_record if line.startswith("worktree ")), None
+    )
+    if worktree_line is None:
+        return None
+    try:
+        primary = Path(worktree_line.removeprefix("worktree ")).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if common_dir(primary) != common_dir(root):
+        return None
+    if _run_git(str(primary), "branch", "--show-current") != "main":
+        return None
+    return primary
+
+
+def _plugin_release_invocation(command: str, root: Path) -> bool:
+    """识别唯一允许的已安装 DWW 维护脚本调用。
+
+    这是独立的写入入口，不继承只读解析器。每个位置、参数名和参数顺序都
+    固定，因而 ``-MigrateMarketplace``、包装器、追加参数或 shell 拼接都
+    无法借此通过。
+    """
+    tokens = _tokenize_plugin_maintenance(command)
+    if not tokens or not _trusted_powershell_cli(tokens[0].value):
+        return False
+    values = [token.value for token in tokens]
+    if len(values) != 12:
+        return False
+    if [values[index].casefold() for index in (1, 2, 4, 6, 8, 10)] != [
+        "-noprofile",
+        "-file",
+        "-mode",
+        "-sourcerepo",
+        "-sourcecommit",
+        "-codexpath",
+    ]:
+        return False
+    if values[5].casefold() != "install":
+        return False
+    try:
+        script = Path(values[3])
+        expected_script = _maintenance_script_path()
+        source_repo = Path(values[7])
+        source_git_root = _run_git(str(source_repo), "rev-parse", "--show-toplevel")
+        if source_git_root is None:
+            return False
+        source_root = Path(source_git_root)
+        primary_root = _main_primary_worktree(root)
+        if primary_root is None:
+            return False
+        resolved_source = source_repo.resolve(strict=True)
+        resolved_script = script.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    if (
+        not script.is_absolute()
+        or script != resolved_script
+        or resolved_script != expected_script
+        or resolved_source != primary_root
+        or source_root.resolve() != primary_root
+    ):
+        return False
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", values[9]):
+        return False
+    return _trusted_codex_cli(values[11])
+
+
+def _plugin_maintenance_invocation(command: str) -> str | None:
+    """识别一条精确的 DWW 本地插件查询或重装命令。
+
+    首次市场迁移不能在这里完成：它必须由已核实的系统 PowerShell 发布
+    脚本执行。稳定市场建立后，正常更新只需要重装这一指定插件。
+    """
+    tokens = _tokenize_plugin_maintenance(command)
+    if not tokens or not _trusted_codex_cli(tokens[0].value):
+        return None
+    values = [token.value for token in tokens[1:]]
+    lowered = [value.casefold() for value in values]
+    if len(lowered) == 2 and lowered == ["plugin", "--help"]:
+        return "query"
+    if len(lowered) == 2 and lowered == ["plugin", "help"]:
+        return "query"
+    if len(lowered) >= 3 and lowered[:3] == ["plugin", "marketplace", "list"]:
+        return "query" if lowered[3:] in ([], ["--json"]) else None
+    if len(lowered) >= 3 and lowered[:3] == ["plugin", "marketplace", "--help"]:
+        return "query" if lowered[3:] == [] else None
+    if len(lowered) >= 3 and lowered[:3] == ["plugin", "marketplace", "help"]:
+        return "query" if lowered[3:] == [] else None
+    if len(lowered) >= 2 and lowered[:2] == ["plugin", "list"]:
+        remaining = values[2:]
+        seen_marketplace = False
+        seen_json = False
+        index = 0
+        while index < len(remaining):
+            option = remaining[index].casefold()
+            if (
+                option == "--marketplace"
+                and not seen_marketplace
+                and index + 1 < len(remaining)
+            ):
+                if remaining[index + 1] != MAINTENANCE_MARKETPLACE:
+                    return None
+                seen_marketplace = True
+                index += 2
+                continue
+            if option == "--json" and not seen_json:
+                seen_json = True
+                index += 1
+                continue
+            return None
+        return "query" if seen_marketplace else None
+    if len(lowered) >= 3 and lowered[:2] == ["plugin", "add"]:
+        if values[2] != f"{MAINTENANCE_PLUGIN}@{MAINTENANCE_MARKETPLACE}":
+            return None
+        return "install" if lowered[3:] in ([], ["--json"]) else None
+    return None
+
+
+def _looks_like_plugin_maintenance(command: str) -> bool:
+    """保守识别伪装或拼接后的 DWW 插件维护尝试。
+
+    此函数不扩展任何允许范围。它只在精确解析失败时阻止命令落入普通
+    isolated-task 的通用放行，且避开带引号的普通文本搜索。
+    """
+    tokens = _tokenize_plugin_maintenance(command)
+    if tokens:
+        values = [token.value for token in tokens]
+        for index, value in enumerate(values):
+            name = PureWindowsPath(value).name.casefold()
+            if name.endswith("maintain-dww-plugin.ps1") and (
+                index == 0
+                or values[index - 1].casefold() == "-file"
+                or PureWindowsPath(values[index - 1]).name.casefold()
+                in {"pwsh", "pwsh.exe"}
+            ):
+                return True
+            if name.endswith("codex.exe") and index + 1 < len(values):
+                if values[index + 1].casefold() == "plugin":
+                    return True
+    return bool(
+        re.search(
+            r"""(?ix)
+            (?:
+                -file\s+(?:"[^"]*maintain-dww-plugin\.ps1"|\S*maintain-dww-plugin\.ps1)
+                |
+                (?:^|[;&|]\s*|&\s*)
+                (?:"[^"]*codex\.exe"|[^\s;&|]*codex\.exe)\s+plugin\b
+            )
+            """,
+            command,
+        )
+    )
+
+
+def _owned_maintenance_task(
+    state: dict[str, Any],
+    guard: dict[str, Any],
+    root: Path,
+    payload: dict[str, Any],
+    *,
+    require_write: bool,
+) -> tuple[dict[str, Any] | None, str]:
+    """维护只可绑定到唯一、仍归当前会话所有的同仓隔离任务。"""
+    source_common = common_dir(root)
+    if source_common is None:
+        return None, "repository common directory could not be verified"
+    candidates: list[dict[str, Any]] = []
+    for task in state.get("tasks", {}).values():
+        if not isinstance(task, dict) or task.get("mode", "isolated") != "isolated":
+            continue
+        worktree = task.get("worktree")
+        if not isinstance(worktree, str):
+            continue
+        try:
+            if common_dir(Path(worktree)) != source_common:
+                continue
+        except OSError:
+            continue
+        if _is_valid_isolated_owner(task, payload)[0]:
+            candidates.append(task)
+    if len(candidates) != 1:
+        return (
+            None,
+            "plugin maintenance requires exactly one active isolated task owned by this Codex session",
+        )
+    task = candidates[0]
+    if require_write:
+        if denial := _isolated_write_denial(guard, task, payload):
+            return None, denial
+    return task, ""
+
+
 def _read_only_rejection_reason(command: str) -> str:
     tokens = _tokenize_read_only(command)
     if not tokens:
@@ -1678,6 +1967,27 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         return _deny(
             "Potential repository write is blocked until the user chooses how this repository should be modified. Show the one compact three-choice question, then use the matching trusted dww choose command."
         )
+    if tool == "Bash":
+        if _plugin_release_invocation(command, root):
+            _task, denial = _owned_maintenance_task(
+                state, guard, root, payload, require_write=True
+            )
+            if _task is None:
+                return _deny("Plugin maintenance is blocked: " + denial)
+            return None
+        maintenance = _plugin_maintenance_invocation(command)
+        if maintenance is not None:
+            _task, denial = _owned_maintenance_task(
+                state, guard, root, payload, require_write=maintenance == "install"
+            )
+            if _task is None:
+                return _deny("Plugin maintenance is blocked: " + denial)
+            return None
+        if _looks_like_plugin_maintenance(command):
+            return _deny(
+                "DWW plugin maintenance command is blocked unless it exactly matches "
+                "the trusted query, add, or Install contract."
+            )
     task = (
         _task_for_worktree(state, guard, dww_target_root)
         if dww_target_root is not None

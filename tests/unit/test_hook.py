@@ -1516,6 +1516,107 @@ def test_read_only_parser_limits_content_and_select_arguments() -> None:
     )
 
 
+def test_maintenance_powershell_identity_rejects_a_sibling_executable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    program_files = tmp_path / "Program Files"
+    trusted = program_files / "PowerShell" / "7" / "pwsh.exe"
+    trusted.parent.mkdir(parents=True)
+    trusted.write_text("official test marker\n", encoding="utf-8")
+    fake = trusted.parent / "pwsh-copy.exe"
+    fake.write_text("official test marker\n", encoding="utf-8")
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+
+    assert HOOK._trusted_powershell_cli(str(trusted))
+    assert not HOOK._trusted_powershell_cli(str(fake))
+
+
+def test_plugin_maintenance_allows_only_owned_dww_commands(
+    git_repo: Path, monkeypatch
+) -> None:
+    """插件维护不能借只读解析器或任意任务扩大为通用 shell 权限。"""
+    repo = _initialized(git_repo)
+    task = start(
+        repo,
+        name="plugin maintenance",
+        host_origin={"kind": "codex", "thread_id": "maintenance-owner"},
+    )
+    codex = git_repo / "official-codex.exe"
+    codex.write_text("official test marker\n", encoding="utf-8")
+    pwsh = git_repo / "official-pwsh.exe"
+    pwsh.write_text("official test marker\n", encoding="utf-8")
+    monkeypatch.setattr(
+        HOOK,
+        "_trusted_codex_cli",
+        lambda value: Path(value).resolve() == codex.resolve(),
+    )
+    monkeypatch.setattr(
+        HOOK,
+        "_trusted_powershell_cli",
+        lambda value: Path(value).resolve() == pwsh.resolve(),
+    )
+    task_worktree = Path(task["worktree"])
+
+    def decide(command: str, *, session: str = "maintenance-owner") -> dict | None:
+        return HOOK.decide(
+            _payload(task_worktree, tool="Bash", command=command, session=session)
+        )
+
+    quoted = f'& "{codex}"'
+    assert decide(f"{quoted} plugin marketplace list --json") is None
+    assert decide(f"{quoted} plugin list --marketplace dww-stable-local --json") is None
+    assert (
+        decide(f"{quoted} plugin add develop-with-worktrees@dww-stable-local --json")
+        is None
+    )
+
+    source_commit = git(git_repo, "rev-parse", "HEAD")
+    script = HOOK._maintenance_script_path()
+    release = (
+        f'& "{pwsh}" -NoProfile -File "{script}" -Mode Install '
+        f'-SourceRepo "{git_repo}" -SourceCommit {source_commit} '
+        f'-CodexPath "{codex}"'
+    )
+    assert decide(release) is None
+
+    for command in (
+        f'& "{git_repo / "fake-codex.exe"}" plugin marketplace list --json',
+        f"{quoted} plugin add another-plugin@dww-stable-local --json",
+        f"{quoted} plugin add develop-with-worktrees@other-market --json",
+        f"{quoted} plugin marketplace add C:\\untrusted --json",
+        f"{quoted} plugin marketplace remove dww-stable-local --json",
+        f"{quoted} plugin list --config injected --json",
+        f"{quoted} plugin marketplace list --json; Remove-Item README.md",
+        release.replace(str(pwsh), str(git_repo / "fake-pwsh.exe")),
+        release.replace(str(script), str(git_repo / "fake-maintain-dww-plugin.ps1")),
+        release.replace(str(codex), str(git_repo / "fake-codex.exe")),
+        release.replace(
+            f'-SourceRepo "{git_repo}"',
+            f'-SourceRepo "{git_repo / ".worktrees"}"',
+        ),
+        release.replace("-CodexPath", "-MigrateMarketplace -CodexPath"),
+        release + " -MarketplaceRoot C:\\untrusted",
+        release + "; Remove-Item README.md",
+    ):
+        denied = decide(command)
+        assert denied is not None, command
+        assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "plugin maintenance command is blocked" in denied["hookSpecificOutput"][
+            "permissionDecisionReason"
+        ]
+
+    not_owner = decide(
+        f"{quoted} plugin marketplace list --json", session="other-session"
+    )
+    assert not_owner is not None
+    assert not_owner["hookSpecificOutput"]["permissionDecision"] == "deny"
+    not_owner_release = decide(release, session="other-session")
+    assert not_owner_release is not None
+    assert not_owner_release["hookSpecificOutput"]["permissionDecision"] == "deny"
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
 def test_hook_allows_every_contract_command_and_rejects_a_spoofed_runner(
     git_repo: Path,
 ) -> None:

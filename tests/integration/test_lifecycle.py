@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 import json
 import os
 import shutil
@@ -6211,6 +6212,39 @@ timeout_seconds = 1
     assert not (worktree / "dev-command-ran.txt").exists()
     assert not (worktree / "warm-command-ran.txt").exists()
     assert StateStore(repo).task(task["id"])["processes"] == []
+
+
+@pytest.mark.dww_fast
+def test_task_development_approval_uses_frozen_base_head(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """任务状态没有 start_head 时，许可选择仍须使用冻结基线。"""
+    repo = initialized(git_repo)
+    task = start(repo, name="approve development from frozen base")
+    assert task["base_head"]
+    assert "start_head" not in task
+    selected: dict[str, object] = {}
+
+    def select_profile_ids(*_args: object, **kwargs: object) -> tuple[str, ...]:
+        selected.update(kwargs)
+        return ("development-profile",)
+
+    monkeypatch.setattr(cli_module, "selected_profile_ids", select_profile_ids)
+
+    request = cli_module._approval_request(
+        repo,
+        Namespace(
+            task=task["id"],
+            slot=None,
+            batch=None,
+            candidate=None,
+            scope="development",
+        ),
+    )
+
+    assert selected["base"] == task["base_head"]
+    assert request["profile_ids"] == ("development-profile",)
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
 @pytest.mark.parametrize("status", ["finishing", "abandoning"])

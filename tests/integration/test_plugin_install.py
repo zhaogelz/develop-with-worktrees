@@ -127,6 +127,7 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     )
     shipped_paths = (
         ".codex-plugin/plugin.json",
+        "maintain-dww-plugin.ps1",
         "skills/develop-with-worktrees/SKILL.md",
         *reference_paths,
         "skills/develop-with-worktrees/scripts/dww.py",
