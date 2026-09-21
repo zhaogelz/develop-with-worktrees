@@ -35,6 +35,31 @@ It never substitutes `origin/HEAD` or a legacy `solo-ai.default-branch` value
 for that explicit calling context. A detached invocation is rejected until a
 checked-out local branch is selected.
 
+### Windows Codex sandbox and the shared `.git` directory
+
+When Codex opens a worktree under `CODEX_HOME/worktrees`, that worktree is the
+place to edit project files. Its `.git` file points to the repository's Git
+common directory, usually the `.git` directory beside the original checkout.
+This is normal Git worktree layout: the worktree keeps its own `HEAD` and index,
+while the common directory owns shared objects, refs, and DWW's local state.
+Do not move ordinary file edits to the common directory.
+
+The common directory is still where `start`, `commit`, `ready`, `finish`, and
+other DWW lifecycle commands update Git and DWW metadata. Under Codex's
+`workspace-write` sandbox, that metadata may be protected even when the
+worktree itself is writable. A Windows sandbox identity can also make Git reject
+the shared repository as "dubious ownership". If DWW returns
+`GIT_METADATA_ACCESS_REQUIRES_HOST_APPROVAL`, rerun the exact same DWW command
+through the host's reviewed escalation (`auto_review`). That is a narrow,
+per-command approval for the lifecycle action; it does not grant a general
+write exception.
+
+Do not fix this condition by adding a global `safe.directory` exception,
+changing `.git` ownership, or loosening filesystem ACLs. Those changes weaken
+the ownership or sandbox boundary for more than the one reviewed operation.
+Using Codex's Local environment can remove the extra outer worktree, but it does
+not make protected Git metadata writable from an unapproved sandbox command.
+
 ### A repository with no commits
 
 Accepted initialization (including `choose --mode isolated`) can adopt a clean

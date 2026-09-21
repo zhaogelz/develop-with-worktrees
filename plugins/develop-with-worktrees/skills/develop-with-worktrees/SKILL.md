@@ -41,6 +41,12 @@ returns it once. After continuation, context recovery, root change, or candidate
 repair, refresh it before a gate when stale. Read [Task governance](references/task-governance.md)
 before using root, host association, reindex, or close commands.
 
+When a Codex workspace sandbox reports Git metadata access or Git's "dubious
+ownership" error, keep the ownership check and sandbox protection. Re-run the
+same DWW lifecycle command through the host's reviewed escalation; do not add a
+global `safe.directory` exception or loosen filesystem ACLs. See the Windows
+and Codex sandbox note in [Lifecycle](references/lifecycle.md).
+
 ## Finish and follow delivery
 
 Finish publishes an immutable source candidate and ends the coding round; it

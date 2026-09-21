@@ -107,6 +107,7 @@ from .util import (
     directory_size,
     ensure_within,
     format_bytes,
+    git_metadata_access_error,
     is_link_or_junction,
     new_id,
     path_identity,
@@ -3219,7 +3220,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = _dispatch(args)
-    except (SoloAIError, DelegatedContractError) as exc:
+    except (SoloAIError, DelegatedContractError, OSError) as caught:
+        translated = git_metadata_access_error(
+            caught,
+            repository=Path(args.repo),
+            operation=str(args.command),
+        )
+        if isinstance(caught, OSError) and translated is None:
+            raise
+        exc = translated or caught
         if args.json:
             payload: dict[str, Any] = {"ok": False, "error": str(exc)}
             if isinstance(exc, ActionableSoloAIError):

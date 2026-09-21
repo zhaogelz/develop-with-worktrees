@@ -45,6 +45,47 @@ class ActionableSoloAIError(SoloAIError):
         self.next_action = next_action or {}
 
 
+def git_metadata_access_error(
+    exc: BaseException,
+    *,
+    repository: Path,
+    operation: str,
+) -> ActionableSoloAIError | None:
+    """将受限身份访问 Git 元数据的失败转为不降低保护的下一步。"""
+
+    if isinstance(exc, ActionableSoloAIError):
+        return None
+
+    detail = str(exc)
+    normalized = detail.casefold()
+    ownership_rejected = "detected dubious ownership in repository" in normalized
+    metadata_path = ".git\\" in normalized or ".git/" in normalized
+    permission_rejected = isinstance(exc, PermissionError) or (
+        isinstance(exc, OSError) and exc.errno in {errno.EACCES, errno.EPERM}
+    )
+    if not ownership_rejected and not (permission_rejected and metadata_path):
+        return None
+
+    reason = "git_ownership_check" if ownership_rejected else "metadata_permission"
+    return ActionableSoloAIError(
+        "Git metadata access was blocked. In a Codex workspace sandbox, rerun the "
+        "same DWW lifecycle command through host-reviewed escalation (auto_review). "
+        "Keep Git ownership checks and the sandbox boundary intact: do not add a "
+        "global safe.directory exception or change filesystem ACLs to bypass this "
+        "failure.",
+        code="GIT_METADATA_ACCESS_REQUIRES_HOST_APPROVAL",
+        context={
+            "operation": operation,
+            "repository": str(repository),
+            "reason": reason,
+        },
+        next_action={
+            "kind": "rerun_same_dww_command_with_host_approval",
+            "operation": operation,
+        },
+    )
+
+
 @dataclass(frozen=True)
 class CommandResult:
     args: Sequence[str] | str

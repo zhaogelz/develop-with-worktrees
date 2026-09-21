@@ -17,6 +17,7 @@ from solo_ai import __version__
 import solo_ai.cli as cli_module
 from solo_ai.cli import _human
 from solo_ai.state import STATE_SCHEMA
+from solo_ai.util import SoloAIError
 
 
 def test_human_batch_output_accepts_direct_and_reconcile_results() -> None:
@@ -461,6 +462,47 @@ def test_cli_main_emits_utf8_when_noninteractive(
 
     stdout.flush()
     assert "中文完整方案正文" in raw_stdout.getvalue().decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SoloAIError(
+            "Command failed (128): git status\\n"
+            "fatal: detected dubious ownership in repository at 'C:/demo'"
+        ),
+        PermissionError(13, "Access is denied", "C:/demo/.git/solo-ai/state.json"),
+    ],
+)
+def test_cli_translates_git_metadata_access_to_reviewed_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: BaseException,
+) -> None:
+    def fail_dispatch(_args: object) -> dict[str, object]:
+        raise failure
+
+    monkeypatch.setattr(cli_module, "_dispatch", fail_dispatch)
+
+    assert cli_module.main(["--repo", "C:/demo", "--json", "doctor"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_code"] == "GIT_METADATA_ACCESS_REQUIRES_HOST_APPROVAL"
+    assert payload["context"] == {
+        "operation": "doctor",
+        "repository": str(Path("C:/demo")),
+        "reason": (
+            "git_ownership_check"
+            if isinstance(failure, SoloAIError)
+            else "metadata_permission"
+        ),
+    }
+    assert payload["next_action"] == {
+        "kind": "rerun_same_dww_command_with_host_approval",
+        "operation": "doctor",
+    }
+    assert "safe.directory" in payload["error"]
+    assert "ACLs" in payload["error"]
 
 
 def test_human_start_output_keeps_headers_separate_from_one_complete_root_plan() -> (
