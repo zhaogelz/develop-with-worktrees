@@ -43,7 +43,8 @@ commands = [
 ]
 
 # 核心代码、策略、测试及 CI 再运行可快速、纯本地的回归；测试层级由
-# tests/conftest.py 集中审计，新增测试默认进入 dww_full。
+# tests/conftest.py 集中审计，新增测试默认进入 dww_full。pytest 的 -m
+# 过滤发生在收集之后，因此整个 tests/ 树都是这条命令的实际输入。
 [[profiles]]
 id = "dww-fast-ready"
 paths = [
@@ -57,13 +58,7 @@ cross_task_reuse = true
 external_state = "none"
 input_paths = [
   "AGENTS.md", ".solo-ai/verification.toml", ".solo-ai/stress-verification.toml",
-  "pyproject.toml", "tests/conftest.py", "tests/unit/test_config.py",
-  "tests/unit/test_proof.py", "tests/unit/test_routing.py",
-  "tests/unit/test_safety.py", "tests/unit/test_task_context.py",
-  "tests/unit/test_host_context.py", "tests/unit/test_host_handoff_state.py",
-  "tests/unit/test_root_context.py", "tests/unit/test_hook.py",
-  "tests/unit/test_test_temporary_directory.py", "tests/unit/test_test_layers.py",
-  "tests/integration/test_lifecycle.py", "tests/integration/test_plugin_maintenance_script.py",
+  "pyproject.toml", "tests/**",
   "plugins/develop-with-worktrees/maintain-dww-plugin.ps1", "uv.lock",
   "plugins/develop-with-worktrees/hooks/**",
   "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
@@ -115,6 +110,7 @@ commands = [
   ["uv", "run", "pytest", "-q", "tests/integration/test_lifecycle.py::test_ignored_content_keeps_linked_bootstrap_isolated", "tests/integration/test_lifecycle.py::test_pending_bootstrap_rejects_a_replaced_target_before_merging"],
   ["uv", "run", "pytest", "-q", "tests/integration/test_plugin_maintenance_script.py"],
   ["uv", "run", "pytest", "-q", "tests/integration/test_lifecycle.py::test_task_development_approval_uses_frozen_base_head"],
+  ["uv", "run", "pytest", "-q", "tests/integration/test_candidate_batches.py::test_failed_combined_validation_preserves_base_and_generation_is_not_rerun"],
 ]
 
 # 宽回归是明确里程碑入口（dww verify --level full --complete 或 CI），不会

@@ -2823,6 +2823,10 @@ def _run_owned_batch(
         raise
     except Exception as exc:
         current = store.batch(batch_id)
+        # 已终结的失败批次只允许报告原始失败；把 recover 的拒绝再写成
+        # composition_failed 会丢失验证归因，也会阻断后续基于证据的修复。
+        if current.get("status") == "failed":
+            raise
         if isinstance(exc, CandidateCompositionConflict):
             failure_kind = "composition_conflict"
             failed_candidate_id = exc.candidate_id

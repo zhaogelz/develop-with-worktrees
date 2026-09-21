@@ -31,6 +31,7 @@ def test_fast_proof_covers_its_real_configuration_inputs_and_development_lint_is
         "AGENTS.md",
         ".solo-ai/verification.toml",
         ".solo-ai/stress-verification.toml",
+        "tests/**",
     } <= set(fast["input_paths"])
     ids = [profile["id"] for profile in profiles]
     lint = next(
@@ -116,3 +117,10 @@ def test_integration_full_keeps_the_fast_refactor_safety_boundaries() -> None:
         "tests/integration/test_lifecycle.py::test_ready_does_not_blindly_rerun_an_unchanged_deterministic_failure"
         in command
     )
+    assert [
+        "uv",
+        "run",
+        "pytest",
+        "-q",
+        "tests/integration/test_candidate_batches.py::test_failed_combined_validation_preserves_base_and_generation_is_not_rerun",
+    ] in integration["commands"]

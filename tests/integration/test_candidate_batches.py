@@ -3087,6 +3087,13 @@ def test_failed_combined_validation_preserves_base_and_generation_is_not_rerun(
         prepare_candidate_repair(repo, candidate_id=candidate["candidate_id"])
     with pytest.raises(SoloAIError, match="will not be rerun automatically"):
         batch_module.recover_batch(repo, batch_id=failed["id"])
+    preserved = CandidateBatchStore(repo).summary()["batches"][0]
+    assert preserved["failure_kind"] == "validation_failed"
+    assert (
+        CandidateBatchStore(repo)
+        .candidate(candidate["candidate_id"])["last_failure_kind"]
+        == "validation_failed"
+    )
 
 
 def test_reviewed_reseal_of_exact_failed_generation_is_new_and_idempotent(
