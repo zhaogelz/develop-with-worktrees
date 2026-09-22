@@ -643,9 +643,9 @@ def _parse_verification_config(
             field=f"profiles[{index}].resource_class",
             non_empty=True,
         )
-        if resource_class not in {"normal", "heavy"}:
+        if resource_class not in {"light", "normal", "heavy"}:
             raise SoloAIError(
-                f"Profile {profile_id!r} resource_class must be normal or heavy"
+                f"Profile {profile_id!r} resource_class must be light, normal, or heavy"
             )
         level = _string(
             raw.get("level", "ready"),

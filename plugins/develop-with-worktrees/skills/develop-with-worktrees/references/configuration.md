@@ -148,6 +148,12 @@ resource_class = "normal"
 commands = [["uv", "run", "pytest"]]
 ```
 
+`resource_class = "light"` is reserved for short, local static checks such as
+lint or formatting. It has one machine-local slot and may run while a heavy
+integration check occupies the normal validation capacity. It does not make
+tests, builds, or external-state checks light; those remain `normal` or
+`heavy`.
+
 `level` is `development`, `ready`, `full`, or `stress`. A heavy profile is Full
 or Stress only. Ready and integration Full profiles must cover changed batch
 paths. `frozen_base = true` adds the validated base to that profile's proof

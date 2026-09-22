@@ -56,6 +56,27 @@ def test_fixed_machine_capacity_is_local_and_heavy_claim_is_exclusive(
     assert queue.queue_status()["active_units"] == 0
 
 
+def test_light_claim_runs_during_exclusive_heavy_validation(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    queue.set_capacity("2")
+    started = threading.Event()
+
+    def claim_light() -> None:
+        with queue.claim_validation_slot("light"):
+            started.set()
+
+    with queue.claim_validation_slot("heavy"):
+        worker = threading.Thread(target=claim_light)
+        worker.start()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert started.is_set()
+
+    assert queue.queue_status()["active_units"] == 0
+
+
 def test_verified_descendant_reuses_parent_claim_without_self_deadlock(
     monkeypatch, tmp_path
 ) -> None:

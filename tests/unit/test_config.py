@@ -360,6 +360,27 @@ commands = [["git", "status"]]
         load_verification_config(GitRepo(git_repo))
 
 
+def test_accepts_light_development_profiles(git_repo: Path) -> None:
+    config = git_repo / ".solo-ai"
+    config.mkdir()
+    (config / "verification.toml").write_text(
+        """schema_version = 3
+static_only = false
+
+[[profiles]]
+id = "light-lint"
+level = "development"
+resource_class = "light"
+paths = ["**"]
+commands = [["ruff", "check", "."]]
+""",
+        encoding="utf-8",
+    )
+
+    profile = load_verification_config(GitRepo(git_repo)).profiles[0]
+    assert profile.resource_class == "light"
+
+
 def test_full_profiles_default_to_integration_and_accept_explicit_complete_scope(
     git_repo: Path,
 ) -> None:

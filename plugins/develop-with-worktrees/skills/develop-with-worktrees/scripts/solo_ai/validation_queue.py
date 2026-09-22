@@ -25,6 +25,7 @@ from .util import (
 SETTINGS_SCHEMA = 1
 QUEUE_SCHEMA = 1
 MAX_CAPACITY = 4
+LIGHT_CAPACITY = 1
 SLOW_VALIDATION_SECONDS = 10 * 60
 INHERITED_CLAIM_ENV = "DWW_VALIDATION_PARENT_CLAIM"
 
@@ -183,6 +184,16 @@ def _active_units(active: dict[str, Any]) -> int:
     return sum(int(item.get("units", 0)) for item in active.values())
 
 
+def _active_units_for(
+    active: dict[str, Any], *, resource_class: str
+) -> int:
+    return sum(
+        int(item.get("units", 0))
+        for item in active.values()
+        if item.get("resource_class") == resource_class
+    )
+
+
 def inherited_claim_environment(claim: dict[str, Any]) -> dict[str, str]:
     """把当前活动票据显式传给其受控子进程。"""
 
@@ -212,7 +223,7 @@ def _inherited_claim(
     claim = state.setdefault("active", {}).get(claim_id)
     if not claim or not _is_current_process_descendant(claim.get("owner", {})):
         return None
-    if claim.get("resource_class") == "normal" and resource_class == "heavy":
+    if claim.get("resource_class") != "heavy" and resource_class == "heavy":
         raise SoloAIError(
             "Nested heavy validation cannot inherit a normal parent claim; declare the outer validation heavy"
         )
@@ -239,6 +250,9 @@ def queue_status() -> dict[str, Any]:
         "scope": "machine-global",
         "capacity": details,
         "active_units": _active_units(state["active"]),
+        "active_light_units": _active_units_for(
+            state["active"], resource_class="light"
+        ),
         "active": [
             {
                 "id": item["id"],
@@ -288,8 +302,8 @@ def queue_ticket_snapshot(ticket_id: str) -> dict[str, Any] | None:
 @contextmanager
 def claim_validation_slot(resource_class: str) -> Iterator[dict[str, Any]]:
     """按全机 FIFO 领取验证资源；等待期间不持有仓库状态锁。"""
-    if resource_class not in {"normal", "heavy"}:
-        raise SoloAIError("Validation resource_class must be normal or heavy")
+    if resource_class not in {"light", "normal", "heavy"}:
+        raise SoloAIError("Validation resource_class must be light, normal, or heavy")
     with DirectoryLock(_queue_lock(), wait=True):
         state = read_json(_queue_state_path(), _default_queue_state())
         if state.get("schema_version") != QUEUE_SCHEMA:
@@ -321,15 +335,34 @@ def claim_validation_slot(resource_class: str) -> Iterator[dict[str, Any]]:
                 waiting = _cleanup_stale_locked(state)
                 details = capacity_details()
                 capacity = int(details["capacity"])
-                first = waiting[0] if waiting else None
+                first_non_light = next(
+                    (item for item in waiting if item["resource_class"] != "light"),
+                    None,
+                )
+                first_light = next(
+                    (item for item in waiting if item["resource_class"] == "light"),
+                    None,
+                )
                 active = state.setdefault("active", {})
                 units = capacity if resource_class == "heavy" else 1
-                # 严格 FIFO：排在重任务后面的普通任务不能持续插队。
-                if (
-                    first
-                    and first["id"] == ticket_id
-                    and _active_units(active) + units <= capacity
-                ):
+                if resource_class == "light":
+                    can_acquire = (
+                        first_light is not None
+                        and first_light["id"] == ticket_id
+                        and _active_units_for(active, resource_class="light")
+                        < LIGHT_CAPACITY
+                    )
+                else:
+                    # 普通与重型检查继续共享容量并保持 FIFO；轻量检查走独立名额。
+                    main_units = _active_units(active) - _active_units_for(
+                        active, resource_class="light"
+                    )
+                    can_acquire = (
+                        first_non_light is not None
+                        and first_non_light["id"] == ticket_id
+                        and main_units + units <= capacity
+                    )
+                if can_acquire:
                     claim = {
                         **ticket,
                         "units": units,
