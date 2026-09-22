@@ -49,11 +49,30 @@ and Codex sandbox note in [Lifecycle](references/lifecycle.md).
 
 ## Finish and follow delivery
 
-Finish publishes an immutable source candidate and ends the coding round; it
-does not deliver the change. Compatible candidates freeze automatically in groups
-of three. A smaller tail needs a recorded `round-complete`, `user`, `deploy`, or
-`dependency` cause and one-line reason. Idle time, Hooks, and task counts never
-prove a round ended.
+When one task is ready, Finish publishes its immutable source candidate and
+returns that task's worktree; it does not mean the whole development round is
+over. Compatible candidates freeze automatically in groups of three. A smaller
+tail needs a recorded `round-complete`, `user`, `deploy`, or `dependency` cause
+and one-line reason. Idle time, Hooks, and task counts never prove a round
+ended.
+
+The normal personal-development flow is:
+
+1. Develop each change in its returned worktree and run only focused checks that
+   help the current change.
+2. Finish the task without a tail cause when other compatible work may still be
+   produced.
+3. Let the third compatible candidate trigger the combined validation.
+4. Use a tail cause only when the round really ended, the user explicitly asks
+   for immediate integration, or another concrete dependency requires it.
+
+Ready remains available for evidence or legacy policies, but it is not a default
+second full-project gate before every candidate. The combined batch is where
+the composed changes receive their required integration checks.
+
+When a focused formatting check fails, ask the project's formatter for a diff
+against the changed paths before editing again. Apply that diff, then rerun the
+focused check; do not turn a formatting failure into an unrelated full batch.
 
 Ordinary completion or review wording is not an immediate-integration request:
 without a cause, Finish publishes the candidate and releases its task worktree.

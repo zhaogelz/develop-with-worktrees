@@ -20,6 +20,8 @@ commands = [
 
 # Ruff 已锁定在 uv.lock；开发期先做格式与语法检查，完整输入闭包未变时可
 # 复用同仓库证明。Ready/Full 不隐式重复它，开发者需要时显式运行 development。
+# 若格式检查失败，先对审查过的改动路径运行 `uv run ruff format --diff
+# <path ...>` 获取补丁，再修复并重跑本检查；不要因此提前启动组合批次。
 [[profiles]]
 id = "dww-lint-development"
 paths = [

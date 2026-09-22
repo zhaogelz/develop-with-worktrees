@@ -14,6 +14,7 @@ task contract locally, and carries reviewed changes through local integration.
   objective instead of asking you to copy it into every task.
 - Exact-path commits and immutable source candidates.
 - Combined validation and protected local promotion for compatible work.
+- A task starts with focused checks; Ready is not a second full-project gate for every candidate.
 - One local approval can cover the commands of the next unchanged step, without repeating approval for unrelated checks.
 - A recoverable record when composition or validation fails; the base branch
   stays unchanged until a batch succeeds.
@@ -61,7 +62,8 @@ that choice.
 
 1. The host routes the repository. A managed change starts in an isolated
    worktree; an existing mature workflow keeps ownership of its repository.
-2. The agent edits only there and commits the exact reviewed paths.
+2. The agent edits only there, runs focused checks for the change, and commits
+   the exact reviewed paths.
 3. `finish` preserves an immutable source candidate for local delivery and
    returns the task worktree automatically. It does not by itself move the base
    branch.
@@ -81,6 +83,10 @@ installed plugin has been verified in a host session. When automatic integration
 is waiting for compatible work, the status counts only changes with the same
 frozen base and activation policy; an explicit tail instead waits for a recorded
 delivery cause.
+
+If formatting fails, ask the formatter for a diff on the reviewed changed paths,
+apply it, and rerun the focused check before continuing. A formatting error alone
+should not start a combined batch.
 
 ## Only when needed
 

@@ -114,6 +114,18 @@ policy does not make Ready a mandatory project-test gate: run useful development
 checks, then Finish preserves the exact source candidate and the combined batch
 runs the required integration checks.
 
+For a normal personal development task, keep the pre-Finish checks focused on
+the files and behavior being changed. Finish without a tail cause when the
+development round may continue; this publishes the candidate and releases its
+worktree without starting a one-candidate integration. The third compatible
+candidate starts the combined batch. Only a real round end, an explicit user
+request for immediate integration, deployment, or a concrete dependency should
+create a smaller tail.
+
+If a formatter reports a failure, use its diff-only mode on the reviewed changed
+paths, apply the resulting patch, and rerun the focused check. A formatter
+diagnostic should not by itself trigger a full project validation.
+
 Direct integration remains compatibility for a repository explicitly configured
 for it. Its Finish records a persisted transaction and fast-forwards only the
 exact clean base; it never resets, cleans, or adopts ambiguous content.
