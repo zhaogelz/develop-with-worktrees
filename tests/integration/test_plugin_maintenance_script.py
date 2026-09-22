@@ -317,9 +317,9 @@ else:
         env=env,
     )
     assert blocked_previous.returncode != 0
-    assert "active-release 与本次精确源码不匹配" in (
-        blocked_previous.stdout + blocked_previous.stderr
-    )
+    blocked_output = blocked_previous.stdout + blocked_previous.stderr
+    assert "DWW_LOCAL_PUBLISH_ERROR" in blocked_output
+    assert "active-release" in blocked_output
     assert marker.read_text(encoding="utf-8") == "do not overwrite\n"
     shutil.rmtree(previous)
 

@@ -37,7 +37,8 @@ input_paths = ["**"]
 environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
 input_closure = "complete"
 timeout_seconds = 120
-resource_class = "normal"
+# Ruff 开发检查走独立轻量名额；Ready 回归继续使用普通名额。
+resource_class = "light"
 level = "development"
 commands = [
   ["uv", "run", "ruff", "check", "."],
@@ -65,7 +66,10 @@ input_paths = [
   "plugins/develop-with-worktrees/hooks/**",
   "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
 ]
-environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
+environment = [
+  "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432", "LANG", "LC_ALL",
+  "LC_CTYPE", "TERM", "NO_COLOR",
+]
 input_closure = "complete"
 timeout_seconds = 600
 resource_class = "normal"

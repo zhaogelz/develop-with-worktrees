@@ -27,7 +27,7 @@ if ([string]::IsNullOrWhiteSpace($CodexHome)) {
 $PluginCreatorRoot = Join-Path $CodexHome 'skills\.system\plugin-creator'
 
 function Fail([string]$Message) {
-    throw "DWW 本地发布未继续：$Message"
+    throw "DWW_LOCAL_PUBLISH_ERROR: DWW 本地发布未继续：$Message"
 }
 
 function Normalize-Path([string]$Value) {

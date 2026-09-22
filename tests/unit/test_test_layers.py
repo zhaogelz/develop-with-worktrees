@@ -43,6 +43,7 @@ def test_fast_proof_covers_its_real_configuration_inputs_and_development_lint_is
         ["uv", "run", "ruff", "check", "."],
         ["uv", "run", "ruff", "format", "--check", "."],
     ]
+    assert lint["resource_class"] == "light"
     assert lint["input_paths"] == ["**"]
     assert lint["input_closure"] == "complete"
     assert lint["cross_task_reuse"] is True
