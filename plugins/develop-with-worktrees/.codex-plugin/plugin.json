@@ -1,7 +1,7 @@
 {
   "id": "develop-with-worktrees",
   "name": "develop-with-worktrees",
-  "version": "0.5.0-beta.7+codex.20260918081842",
+  "version": "0.5.0-beta.7+codex.20260922124640",
   "description": "A host-neutral Git safety lifecycle for isolated worktrees, task anchors, verified candidates, and safe candidate-first integration.",
   "skills": "./skills/",
   "author": {
