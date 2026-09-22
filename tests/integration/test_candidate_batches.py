@@ -1941,6 +1941,56 @@ def test_protected_ignored_content_blocks_promotion_until_exact_recovery(
     assert repo.head(git_repo) == completed["integrated_head"]
 
 
+@pytest.mark.dww_fast
+def test_promotion_ignores_missing_unrelated_registered_worktree(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="unrelated missing slot", relative="candidate.txt")
+    other = git_repo.parent / "unrelated-worktree"
+    repo.git(["worktree", "add", "-b", "unrelated-disposal", str(other)])
+    staged = other.with_name("unrelated-staged")
+    other.rename(staged)
+    result = seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    assert result["status"] == "completed"
+    assert staged.is_dir()
+    assert not other.exists()
+
+
+@pytest.mark.dww_fast
+def test_promotion_os_error_keeps_passed_proof_and_verifies_recovery_source(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="recover filesystem error", relative="candidate.txt")
+    original = batch_module._promote
+
+    def denied(*args: object, **kwargs: object) -> None:
+        raise PermissionError("filesystem access denied")
+
+    monkeypatch.setattr(batch_module, "_promote", denied)
+    with pytest.raises(batch_module.BatchPromotionPending):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    pending = CandidateBatchStore(repo).summary()["batches"][0]
+    assert pending["status"] == "promotion_blocked"
+    source = batch_module.verified_recovery_source(
+        repo, commit=pending["integration_head"]
+    )
+    assert source["proof"] == pending["proof"]
+    assert source["purpose"] == "recovery-install-only"
+    with pytest.raises(SoloAIError, match="one exact passed"):
+        batch_module.verified_recovery_source(repo, commit=repo.head(git_repo))
+    proof_path = repo.local_dir / "proofs" / f"{pending['proof']}.json"
+    original_proof = proof_path.read_bytes()
+    proof_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="proof schema"):
+        batch_module.verified_recovery_source(repo, commit=pending["integration_head"])
+    proof_path.write_bytes(original_proof)
+    monkeypatch.setattr(batch_module, "_promote", original)
+    completed = batch_module.recover_batch(repo, batch_id=pending["id"])
+    assert completed["status"] == "completed"
+
+
 def test_promotion_block_records_redacted_git_failure(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -13,6 +13,7 @@ from .config import load_repo_config
 from .repo import GitRepo
 from .state import FINAL_TASK_STATES, StateStore, candidate_admission_lock
 from .util import (
+    ActionableSoloAIError,
     SoloAIError,
     atomic_write_json,
     is_link_or_junction,
@@ -1119,7 +1120,24 @@ def resume_retained_disposal(
         expected_stage = transaction.get("staging_identity")
         if expected_stage != path_identity(stage):
             raise SoloAIError("Retained disposal staging directory identity changed")
-        remove_tree_without_following_links(stage)
+        try:
+            remove_tree_without_following_links(stage)
+        except PermissionError as exc:
+            raise ActionableSoloAIError(
+                "Retained disposal could not access a filesystem object. "
+                "The staged transaction is preserved; check the reported "
+                "object and the Windows execution identity before resuming. "
+                "Host sandbox approval does not imply administrator rights. "
+                "Do not change ACLs or ownership to bypass this failure.",
+                code="RETAINED_DISPOSAL_ACCESS_DENIED",
+                context={
+                    "task_id": task["id"],
+                    "phase": "staged",
+                    "path": str(exc.filename or stage),
+                    "winerror": getattr(exc, "winerror", None),
+                },
+                next_action={"kind": "inspect_access_then_resume_disposal"},
+            ) from exc
         if stage.exists() or is_link_or_junction(stage):
             raise SoloAIError("Retained disposal staging directory remains")
         _assert_disposal_registration(repo, transaction, registered=True)

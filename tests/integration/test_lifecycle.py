@@ -3442,6 +3442,46 @@ def test_reclaim_retained_disposal_recreates_slot_without_following_link(
 
 
 @pytest.mark.dww_fast
+def test_reclaim_retained_disposal_access_denial_is_specific_and_resumable(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized(git_repo)
+    task = start(repo, name="disposal permission diagnosis")
+    worktree = Path(task["worktree"])
+    (worktree / "residue.txt").write_text("disposable", encoding="utf-8")
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="disposable test residue",
+        retain_worktree=True,
+    )
+    plan = reclaim_retained_worktree(repo, task_id=task["id"], dispose=True)
+    original = abandonment_module.remove_tree_without_following_links
+
+    def denied(path: Path) -> None:
+        raise PermissionError(13, "denied", str(path / ".git" / "objects"))
+
+    monkeypatch.setattr(
+        abandonment_module, "remove_tree_without_following_links", denied
+    )
+    with pytest.raises(ActionableSoloAIError) as caught:
+        reclaim_retained_worktree(
+            repo, task_id=task["id"], dispose=True, confirm=plan["confirmation"]
+        )
+    assert caught.value.code == "RETAINED_DISPOSAL_ACCESS_DENIED"
+    assert caught.value.context["phase"] == "staged"
+    monkeypatch.setattr(
+        abandonment_module, "remove_tree_without_following_links", original
+    )
+    result = reclaim_retained_worktree(
+        repo, task_id=task["id"], dispose=True, confirm=plan["confirmation"]
+    )
+    assert result["status"] == "disposed-and-recreated"
+
+
+@pytest.mark.dww_fast
 def test_reclaim_retained_disposal_refuses_branch_drift(git_repo: Path) -> None:
     repo = initialized(git_repo)
     task = start(repo, name="refuse retained disposal branch drift")

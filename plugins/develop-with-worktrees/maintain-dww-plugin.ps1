@@ -3,7 +3,7 @@
 # PowerShell 中执行；普通更新不反复切换市场来源。
 [CmdletBinding()]
 param(
-    [ValidateSet('Check', 'Install')]
+    [ValidateSet('Check', 'Install', 'RecoveryInstall')]
     [string]$Mode = 'Check',
     [string]$SourceRepo,
     [string]$SourceCommit,
@@ -197,7 +197,20 @@ foreach ($helper in @($create, $cachebuster, $validate)) { Require-Path $helper 
 $resolved = (& $git -C $SourceRepo rev-parse "$SourceCommit^{commit}").Trim()
 if ($LASTEXITCODE -ne 0 -or $resolved -ne $SourceCommit.ToLowerInvariant()) { Fail '指定源码提交不可解析。' }
 $main = (& $git -C $SourceRepo rev-parse main).Trim()
-if ($LASTEXITCODE -ne 0 -or $main -ne $resolved) { Fail '只允许从已合入的 main 精确提交发布。' }
+if ($LASTEXITCODE -ne 0) { Fail '无法核验 main。' }
+$recoveryEvidence = $null
+if ($Mode -eq 'RecoveryInstall') {
+    if ($MigrateMarketplace) { Fail '恢复安装不得迁移市场。' }
+    # 使用随本入口安装的验证器，不执行尚未获核验的源码，也不要求先合入 main。
+    $runner = Join-Path $PSScriptRoot 'skills\develop-with-worktrees\scripts\dww.py'
+    $checked = @(& $uv run --script $runner --repo $SourceRepo --json batch recovery-source --commit $resolved)
+    if ($LASTEXITCODE -ne 0) { Fail '恢复来源未通过精确 Full、日志、基线与候选核验。' }
+    $checkedPayload = Read-Json ($checked -join "`n") 'recovery-source'
+    if (-not $checkedPayload.ok -or $checkedPayload.result.source_commit -ne $resolved -or $checkedPayload.result.purpose -ne 'recovery-install-only') {
+        Fail '恢复来源核验结果不匹配。'
+    }
+    $recoveryEvidence = $checkedPayload.result
+} elseif ($main -ne $resolved) { Fail '只允许从已合入的 main 精确提交发布。' }
 $tree = (& $git -C $SourceRepo rev-parse "$resolved`:plugins/$PluginName").Trim()
 if ($LASTEXITCODE -ne 0) { Fail '提交中缺少目标插件树。' }
 
@@ -270,7 +283,7 @@ if (-not $activeMatches) {
     }
     try {
         Move-Item -LiteralPath $stagePlugin -Destination $activePlugin
-        $newReceipt = [ordered]@{ release_id = $releaseId; source_commit = $resolved; source_tree = $tree; package_version = [string]$manifest.version; packaged_at_utc = (Get-Date).ToUniversalTime().ToString('o') }
+        $newReceipt = [ordered]@{ release_id = $releaseId; source_commit = $resolved; source_tree = $tree; package_version = [string]$manifest.version; packaged_at_utc = (Get-Date).ToUniversalTime().ToString('o'); recovery_source = $recoveryEvidence }
         Write-Receipt $activeReceipt $newReceipt
         Remove-Item -LiteralPath $stage -Recurse -Force
     } catch {
@@ -312,5 +325,9 @@ if (-not (Get-InstalledPlugin ([string]$receipt.package_version))) {
     if (-not (Get-InstalledPlugin ([string]$receipt.package_version))) { Fail 'CLI 未能回读已安装的精确插件身份。' }
 }
 Write-Receipt (Join-Path $MarketplaceRoot 'install-verification.json') ([ordered]@{ release_id = $receipt.release_id; status = 'installed-by-cli'; codex_version = $cliVersion.Output.Trim(); marketplace_root = $MarketplaceRoot; package_version = $receipt.package_version; host_runtime_verified = $false })
-if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
-Write-Output "DWW 本地插件已由正式 CLI 核验：$($receipt.package_version)。请在新 Codex 会话验证实际加载。"
+if ($Mode -eq 'RecoveryInstall') {
+    Write-Output "DWW 恢复版已安装：$($receipt.package_version)。来源已通过 Full，但尚未交付 main；保留上一发行。完成恢复和正式合入后，以 Install 收尾并验证宿主。"
+} else {
+    if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
+    Write-Output "DWW 本地插件已由正式 CLI 核验：$($receipt.package_version)。请在新 Codex 会话验证实际加载。"
+}

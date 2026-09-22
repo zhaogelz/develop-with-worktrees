@@ -2467,6 +2467,77 @@ def _require_exact_passed_promotion_recovery(
         raise SoloAIError("Promotion recovery integration head changed")
 
 
+def verified_recovery_source(repo: GitRepo, *, commit: str) -> dict[str, Any]:
+    """只读核验恢复发行来源；复用既有 Full、日志与冻结候选，不另建授权库。"""
+    if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        raise SoloAIError("Recovery source requires one exact lowercase commit")
+    state = CandidateBatchStore(repo).read()
+    matches = [
+        batch
+        for batch in state["batches"].values()
+        if batch.get("integration_head") == commit
+        and (
+            batch.get("status") == "promotion_blocked"
+            or (
+                batch.get("status") == "failed"
+                and batch.get("failure_kind") == "promotion_blocked"
+            )
+        )
+        and batch.get("validation_outcome") == "passed"
+    ]
+    if len(matches) != 1:
+        raise SoloAIError(
+            "Recovery source needs one exact passed promotion-blocked batch"
+        )
+    batch = matches[0]
+    base = str(batch.get("base_before") or "")
+    if batch.get("base_ref") != "main" or repo.ref_head("refs/heads/main") != base:
+        raise SoloAIError("Recovery source base changed")
+    if not repo.is_ancestor(base, commit):
+        raise SoloAIError("Recovery source is not a descendant of its frozen base")
+    fingerprint = str(batch.get("proof") or "")
+    proof = read_json(repo.local_dir / "proofs" / f"{fingerprint}.json", {})
+    require_exact_passed_proof(
+        proof, fingerprint=fingerprint, candidate_head=commit, base_head=base
+    )
+    if "full" not in (proof.get("inputs") or {}).get("levels", []):
+        raise SoloAIError("Recovery source requires Full validation")
+    require_exact_passed_batch_release(
+        repo, receipt=copy.deepcopy(batch.get("runtime_release") or {})
+    )
+    frozen = list(batch.get("candidates") or [])
+    if not frozen or batch.get("candidate_ids") != [
+        item.get("candidate_id") for item in frozen
+    ]:
+        raise SoloAIError("Recovery source candidate snapshot changed")
+    for sealed in frozen:
+        current = state["candidates"].get(sealed["candidate_id"], {})
+        if current.get("status") not in {"sealed", "retained"} or any(
+            current.get(key) != sealed.get(key)
+            for key in (
+                "task_id",
+                "ref",
+                "head",
+                "base_ref",
+                "base_head",
+                "integration_policy",
+            )
+        ):
+            raise SoloAIError("Recovery source candidate changed or was superseded")
+        if repo.ref_head(str(sealed["ref"])) != sealed.get("head"):
+            raise SoloAIError("Recovery source candidate ref changed")
+    integration_ref = batch.get("integration_ref")
+    if integration_ref and repo.ref_head(str(integration_ref)) != commit:
+        raise SoloAIError("Recovery source integration ref changed")
+    return {
+        "batch_id": batch["id"],
+        "source_commit": commit,
+        "base_head": base,
+        "proof": fingerprint,
+        "purpose": "recovery-install-only",
+    }
+
+
 def _block_promotion(
     store: CandidateBatchStore, batch: dict[str, Any], error: Exception
 ) -> None:
@@ -2503,13 +2574,16 @@ def _promote(
     matching = [
         item.path
         for item in repo.worktrees()
-        if not item.bare and repo.branch(item.path) == base_ref
+        if not item.bare and item.branch == f"refs/heads/{base_ref}"
     ]
     if len(matching) != 1:
         raise BatchPromotionPending(
             "Batch base branch is not checked out in one stable worktree"
         )
     base_worktree = matching[0]
+    # 注册信息用于定位；只进入本批次目标，不探测正在处置的无关槽位。
+    if repo.branch(base_worktree) != base_ref:
+        raise BatchPromotionPending("Batch base worktree branch changed")
     observed = repo.head(base_worktree)
     # Git已推进而记录中断，或此后主线再次前进：不重复Full或要求回退主线。
     if (
@@ -2622,7 +2696,7 @@ def _resume(
     if batch["status"] in {"validated", "promotion_blocked"}:
         try:
             batch = _promote(repo, store, batch)
-        except (BatchCleanupPending, BatchPromotionPending) as exc:
+        except (BatchCleanupPending, BatchPromotionPending, OSError) as exc:
             _block_promotion(store, batch, exc)
     if batch["status"] == "promoted":
         batch = _cleanup(repo, store, batch)

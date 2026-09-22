@@ -59,6 +59,32 @@ failure.
 
 ## Repair decisions
 
+### Recovering DWW itself
+
+An installed DWW bug can block promotion of its own fix. The installed
+`maintain-dww-plugin.ps1` supports `-Mode RecoveryInstall` with the same exact
+`-SourceRepo`, `-SourceCommit`, and `-CodexPath` arguments as ordinary Install.
+The source must be the exact composed commit of one promotion-blocked batch
+whose Full validation passed. `batch recovery-source --commit <full-sha>` is a
+read-only preflight: it verifies the unchanged main base, proof and log hashes,
+candidate identities and refs, and runtime release evidence. A legacy failed
+batch is eligible only when its failure was promotion and its Full passed.
+Missing, changed, superseded, or unverified sources are rejected.
+
+RecoveryInstall archives the immutable commit and uses the normal marketplace
+and CLI installer. It does not execute an arbitrary source runner, overwrite an
+installed cache, disable protection, or change Git/DWW state by hand. It keeps
+the previous release and includes the validation identity in the release
+receipt. After recovery, complete normal integration and Install from main;
+verify the actual host before declaring runtime success. A recovery package
+does not mean that its source has been delivered. Host review is still required
+when the host reports a changed Hook definition.
+
+For `RETAINED_DISPOSAL_ACCESS_DENIED`, inspect the reported filesystem object
+and execution identity. Sandbox approval and a Windows administrator token are
+different. Preserve the staged transaction and resume the same confirmation
+after access is legitimately available; do not loosen ACLs or take ownership.
+
 A composition conflict may identify one retained candidate for managed repair.
 The repair uses the latest base and is bounded to two published generations in a
 supersession chain. Resolve automatically only when code, durable contracts,

@@ -20,6 +20,7 @@ from .candidate_batches import (
     retire_failed_batch,
     seal_batch,
     withdraw_candidate,
+    verified_recovery_source,
 )
 from .cleanup import classify_cleanup_path, require_managed_directory_identity
 from .host_context import resolve_host_reference
@@ -747,6 +748,11 @@ def _parser() -> argparse.ArgumentParser:
         help="resume an interrupted sealed generation from recorded Git facts",
     )
     batch_recover.add_argument("--batch", required=True)
+    recovery_source = batch_sub.add_parser(
+        "recovery-source",
+        help="verify one passed exact source for recovery installation",
+    )
+    recovery_source.add_argument("--commit", required=True)
     batch_reopen = batch_sub.add_parser(
         "reopen",
         help="reopen only an unactivated, prevalidation Adapter-failed reusable batch",
@@ -2366,6 +2372,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             )
         if args.batch_command == "recover":
             return recover_batch(repo, batch_id=args.batch)
+        if args.batch_command == "recovery-source":
+            return verified_recovery_source(repo, commit=args.commit)
         if args.batch_command == "reopen":
             if (
                 args.confirm != args.batch

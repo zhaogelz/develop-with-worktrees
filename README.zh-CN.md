@@ -26,6 +26,7 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 安装或更新后，先让当前宿主加载已安装的技能再使用。只有宿主明确显示新的或变化的 Hook 定义待审查时才审查；出现错误先按报告的原因处理，不能因为版本变化或一次拒绝反复重开会话或信任。DWW 不读取或修改宿主信任存储。源码版本是 `0.5.0-beta.7`；插件缓存构建可能额外带有 `+codex.<build>` 后缀。
 
 已确认的本地 DWW 市场在日常维护时只刷新这个插件，不反复切换市场来源。从旧本地来源首次迁移是单独、可核验的维护动作，不属于普通任务步骤。
+若 DWW 自身故障阻断升级，可按[恢复路径](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)安装已通过完整验证的恢复版，不必先完成正常合入。
 正常源码任务完成后仍应 `finish` 并归还工作树；需要发布插件时，由协调者启动一个独立、短生命周期的维护任务，不把普通开发工作树留作发布用途。
 
 ## 默认怎么工作

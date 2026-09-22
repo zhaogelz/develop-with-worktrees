@@ -547,6 +547,34 @@ def is_link_or_junction(path: Path) -> bool:
     return bool(getattr(status, "st_file_attributes", 0) & 0x0400)
 
 
+def _unlink_windows_readonly_file(path: Path) -> None:
+    """以对象句柄删除只读普通文件，不改属性或 ACL，也不跟随 reparse。"""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.restype = wintypes.HANDLE
+    handle = create(str(path), 0x00010080, 0x1, None, 3, 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        basic = _windows_basic_information(wintypes.HANDLE(handle))
+        attributes = basic["attributes"]
+        if attributes & (0x0010 | 0x0400) or not attributes & 0x0001:
+            raise PermissionError(
+                f"Refusing non-readonly or linked cleanup file: {path}"
+            )
+        # FileDispositionInfoEx：只删除已打开的对象，忽略只读位但保留属性。
+        flags = wintypes.DWORD(0x00000001 | 0x00000010)
+        if not kernel32.SetFileInformationByHandle(
+            wintypes.HANDLE(handle), 21, ctypes.byref(flags), ctypes.sizeof(flags)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel32.CloseHandle(wintypes.HANDLE(handle))
+
+
 def remove_tree_without_following_links(path: Path) -> None:
     """删除一个已获准的根；目录链接只删除对象本身，绝不进入其目标。"""
     access_path = filesystem_path(path)
@@ -561,7 +589,16 @@ def remove_tree_without_following_links(path: Path) -> None:
     except FileNotFoundError:
         return
     if not stat.S_ISDIR(status.st_mode):
-        access_path.unlink()
+        try:
+            access_path.unlink()
+        except PermissionError:
+            if (
+                os.name != "nt"
+                or not stat.S_ISREG(status.st_mode)
+                or not getattr(status, "st_file_attributes", 0) & 0x0001
+            ):
+                raise
+            _unlink_windows_readonly_file(access_path)
         return
     with os.scandir(access_path) as entries:
         children = [path / entry.name for entry in entries]

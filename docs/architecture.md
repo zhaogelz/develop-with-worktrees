@@ -90,6 +90,13 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   Ordinary source tasks Finish and return their worktrees. A coordinator starts
   plugin publication as a separate, short-lived maintenance task rather than
   retaining a normal development worktree for release work.
+  If DWW itself blocks promotion, the installed maintenance entry accepts
+  `RecoveryInstall` for one exact composed commit with a passed Full proof and
+  intact logs, frozen base, candidate identities, and runtime-release receipt.
+  It packages that immutable commit without first requiring main promotion;
+  ordinary `Install` still requires main. Recovery installation preserves the
+  previous release and records its proof in the existing release receipt. It
+  does not disable Hooks, rewrite lifecycle state, or claim source delivery.
 - A confirmed objective has one root anchor. It retains the complete plan and
   explicit amendments; its child anchors retain only their execution slices.
   Exact host identity may map to that root as a locator only; it never stores a
@@ -108,6 +115,10 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
 - A composition conflict, validation failure, and promotion block remain
   distinct. Deterministic recovery uses recorded identities; it never changes
   the base by guessing a merge or retrying an unchanged failure blindly.
+  Promotion locates its target from Git worktree registration, then checks that
+  target's live branch and cleanliness. It does not enter unrelated worktrees.
+  Filesystem failures after successful validation remain promotion blocks, so
+  exact recovery can retain the passed validation evidence.
 
 ## State and evidence
 

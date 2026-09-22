@@ -1426,7 +1426,7 @@ def _plugin_release_invocation(command: str, root: Path) -> bool:
         "-codexpath",
     ]:
         return False
-    if values[5].casefold() != "install":
+    if values[5].casefold() not in {"install", "recoveryinstall"}:
         return False
     try:
         script = Path(values[3])

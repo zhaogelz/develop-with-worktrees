@@ -1,7 +1,9 @@
 import errno
 import json
+import os
 import signal
 import socket
+import stat
 import sys
 import threading
 import time
@@ -10,6 +12,48 @@ from pathlib import Path
 import pytest
 from solo_ai import lifecycle, util
 from solo_ai.util import DirectoryLock, SoloAIError, redact_text, run_logged
+
+
+@pytest.mark.dww_fast
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 只读文件删除语义")
+def test_disposal_removes_readonly_object_without_changing_external_hardlink(
+    tmp_path: Path,
+) -> None:
+    tree = tmp_path / "disposable"
+    obj = tree / ".git" / "objects" / "aa" / "object"
+    obj.parent.mkdir(parents=True)
+    obj.write_bytes(b"test git object")
+    external = tmp_path / "preserved-object"
+    os.link(obj, external)
+    obj.chmod(stat.S_IREAD)
+    try:
+        util.remove_tree_without_following_links(tree)
+        assert not tree.exists()
+        assert external.read_bytes() == b"test git object"
+        assert external.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+    finally:
+        external.chmod(stat.S_IWRITE)
+
+
+@pytest.mark.dww_fast
+def test_disposal_does_not_retry_permission_denial_on_writable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "protected.txt"
+    target.write_text("preserve", encoding="utf-8")
+
+    def denied_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        raise PermissionError("real access denial")
+
+    def unexpected_retry(path: Path) -> None:
+        pytest.fail("普通权限错误不应进入只读文件处理")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", denied_unlink)
+        patch.setattr(util, "_unlink_windows_readonly_file", unexpected_retry)
+        with pytest.raises(PermissionError, match="real access denial"):
+            util.remove_tree_without_following_links(target)
+    assert target.read_text(encoding="utf-8") == "preserve"
 
 
 class AdvancingClock:

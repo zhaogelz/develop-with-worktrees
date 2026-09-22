@@ -1579,6 +1579,12 @@ def test_plugin_maintenance_allows_only_owned_dww_commands(
         f'-CodexPath "{codex}"'
     )
     assert decide(release) is None
+    assert decide(release.replace("-Mode Install", "-Mode RecoveryInstall")) is None
+    denied_recovery = decide(
+        release.replace("-Mode Install", "-Mode RecoveryInstall"),
+        session="other-session",
+    )
+    assert denied_recovery["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     for command in (
         f'& "{git_repo / "fake-codex.exe"}" plugin marketplace list --json',
