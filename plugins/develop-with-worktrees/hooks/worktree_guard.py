@@ -579,11 +579,7 @@ def _patch_execution_directory(payload: dict[str, Any], root: Path) -> Path | No
 def _apply_patch_targets(payload: dict[str, Any], root: Path) -> list[Path] | None:
     patch = patch_from(payload)
     execution_directory = _patch_execution_directory(payload, root)
-    if (
-        not patch
-        or "*** Begin Patch" not in patch
-        or "*** End Patch" not in patch
-    ):
+    if not patch or "*** Begin Patch" not in patch or "*** End Patch" not in patch:
         return None
     raw_targets = [
         match.group("path").strip()

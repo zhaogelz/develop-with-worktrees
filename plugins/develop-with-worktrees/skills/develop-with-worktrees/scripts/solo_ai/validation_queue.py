@@ -184,9 +184,7 @@ def _active_units(active: dict[str, Any]) -> int:
     return sum(int(item.get("units", 0)) for item in active.values())
 
 
-def _active_units_for(
-    active: dict[str, Any], *, resource_class: str
-) -> int:
+def _active_units_for(active: dict[str, Any], *, resource_class: str) -> int:
     return sum(
         int(item.get("units", 0))
         for item in active.values()
