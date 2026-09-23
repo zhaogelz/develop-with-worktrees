@@ -2148,6 +2148,10 @@ def start(
             ):
                 create_anchor(repo, task)
                 return _complete_runtime_activation(repo, store=store, task=task)
+            if task.get("status") == "starting":
+                raise SoloAIError(
+                    "Start has not finished preparing this slot; recover the exact task before using it"
+                )
             anchor = require_anchor(repo, task)
             return {
                 **task,
@@ -2161,6 +2165,7 @@ def start(
         try:
             activation_worktree_identity: dict[str, object]
             activation_root_identity: dict[str, object]
+            attached: str | None = None
             registered = next(
                 (item for item in repo.worktrees() if item.path == worktree), None
             )
@@ -2186,13 +2191,51 @@ def start(
                         "Idle slot contains protected or unknown ignored content:\n"
                         + "\n".join(f"- {item}" for item in unknown[:20])
                     )
-                if repo.branch(worktree) is not None:
-                    raise SoloAIError(
-                        f"Idle slot is unexpectedly attached to a branch: {worktree}"
+                attached = repo.branch(worktree)
+                predecessor_id = task.get("slot_predecessor_task_id")
+                if attached is not None:
+                    predecessor = (
+                        store.task(str(predecessor_id)) if predecessor_id else None
                     )
+                    publication = (
+                        predecessor.get("candidate_publication") or {}
+                        if predecessor
+                        else {}
+                    )
+                    from .candidate_batches import CandidateBatchStore
+
+                    candidate = (
+                        CandidateBatchStore(repo).candidate_for_task(
+                            str(predecessor_id)
+                        )
+                        if predecessor
+                        else None
+                    )
+                    if (
+                        predecessor is None
+                        or predecessor.get("status") != "candidate-published"
+                        or predecessor.get("slot_id") != task["slot_id"]
+                        or predecessor.get("worktree") != str(worktree)
+                        or publication.get("phase") != "completed"
+                        or publication.get("candidate_id")
+                        != (candidate or {}).get("candidate_id")
+                        or publication.get("head") != (candidate or {}).get("head")
+                        or repo.ref_head(str(publication.get("ref")))
+                        != publication.get("head")
+                        or attached != predecessor.get("branch")
+                        or repo.head(worktree) != predecessor.get("candidate_head")
+                        or repo.ref_head(f"refs/heads/{attached}")
+                        != predecessor.get("candidate_head")
+                    ):
+                        raise SoloAIError(
+                            "Idle attached slot does not match its published predecessor"
+                        )
                 activation_worktree_identity = path_identity(worktree)
                 activation_root_identity = path_identity(managed_root)
-                repo.git(["reset", "--hard", base_ref], cwd=worktree)
+                if attached is not None:
+                    repo.git(["switch", "--detach", base_head], cwd=worktree)
+                else:
+                    repo.git(["reset", "--hard", base_head], cwd=worktree)
             task = store.update_task(
                 task["id"],
                 slot_worktree_identity=activation_worktree_identity,
@@ -2200,7 +2243,11 @@ def start(
                 slot_worktree_resolved=str(worktree.resolve()),
                 slot_managed_root_resolved=str(managed_root.resolve()),
             )
-            repo.git(["switch", "-c", branch, base_ref], cwd=worktree)
+            repo.git(["switch", "-c", branch, base_head], cwd=worktree)
+            if attached is not None:
+                from .candidate_batches import retire_terminal_candidate_branches
+
+                retire_terminal_candidate_branches(repo)
             resolved = require_managed_directory_identity(
                 worktree,
                 managed_root=managed_root,
@@ -3816,16 +3863,14 @@ def _resume_candidate_publication(
             "Runtime Adapter changed or contaminated the candidate worktree; files were preserved"
         )
     branch_head = repo.ref_head(branch_ref)
-    if current_branch is not None:
-        if branch_head != head:
-            raise SoloAIError("Task branch changed during candidate publication")
-        repo.git(["switch", "--detach", head], cwd=worktree)
-    if branch_head is not None:
-        repo.delete_ref(branch_ref, expected=head)
+    if current_branch is not None and branch_head != head:
+        raise SoloAIError("Task branch changed during candidate publication")
+    if current_branch is None and branch_head not in {None, head}:
+        raise SoloAIError("Legacy task branch changed during candidate publication")
     if (
         not repo.is_clean(worktree)
         or repo.head(worktree) != head
-        or repo.branch(worktree) is not None
+        or repo.branch(worktree) != current_branch
     ):
         raise SoloAIError("Candidate worktree changed before slot release")
     completed = store.complete_candidate_publication(
@@ -3843,7 +3888,7 @@ def _resume_candidate_publication(
         if (
             not repo.is_clean(worktree)
             or repo.head(worktree) != head
-            or repo.branch(worktree) is not None
+            or repo.branch(worktree) != current_branch
             or _unknown_ignored(repo, worktree)
         ):
             raise SoloAIError("Candidate worktree changed after slot release")
@@ -3859,6 +3904,12 @@ def _resume_candidate_publication(
         coordinator=coordinator,
     )
     published = publication_result["candidate"]
+    if task.get("supersedes"):
+        from .candidate_batches import retire_terminal_candidate_branches
+
+        retire_terminal_candidate_branches(
+            repo, candidate_ids=[str(task["supersedes"])]
+        )
     handoff = None
     try:
         from .host_handoffs import HostHandoffStore

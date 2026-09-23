@@ -14,6 +14,7 @@ from .candidate_batches import (
     EXPLICIT_TAIL_CAUSES,
     CandidateBatchStore,
     prepare_candidate_repair,
+    restore_candidate_branch,
     reconcile_batches,
     recover_batch,
     reopen_prevalidation_batch,
@@ -696,6 +697,14 @@ def _parser() -> argparse.ArgumentParser:
     candidate_withdraw.add_argument("--candidate", required=True)
     candidate_withdraw.add_argument(
         "--reason", required=True, help="one-line reason retained with the withdrawal"
+    )
+    candidate_restore = candidate_sub.add_parser(
+        "restore-branch",
+        help="preview or restore an older candidate's original local branch",
+    )
+    candidate_restore.add_argument("--candidate", required=True)
+    candidate_restore.add_argument(
+        "--apply", action="store_true", help="create only the missing exact branch"
     )
 
     batch = sub.add_parser(
@@ -2341,6 +2350,10 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         if args.candidate_command == "withdraw":
             return withdraw_candidate(
                 repo, candidate_id=args.candidate, reason=args.reason, source="cli"
+            )
+        if args.candidate_command == "restore-branch":
+            return restore_candidate_branch(
+                repo, candidate_id=args.candidate, apply=args.apply
             )
         raise SoloAIError(f"Unknown candidate command: {args.candidate_command}")
     if args.command == "batch":

@@ -50,7 +50,8 @@ and Codex sandbox note in [Lifecycle](references/lifecycle.md).
 ## Finish and follow delivery
 
 When one task is ready, Finish publishes its immutable source candidate and
-returns that task's worktree; it does not mean the whole development round is
+ends its write lease. The reusable worktree keeps the ordinary task branch
+visible until the next Start; this does not mean the whole development round is
 over. Compatible candidates freeze automatically in groups of three. A smaller
 tail needs a recorded `round-complete`, `user`, `deploy`, or `dependency` cause
 and one-line reason. Idle time, Hooks, and task counts never prove a round
@@ -75,7 +76,7 @@ against the changed paths before editing again. Apply that diff, then rerun the
 focused check; do not turn a formatting failure into an unrelated full batch.
 
 Ordinary completion or review wording is not an immediate-integration request:
-without a cause, Finish publishes the candidate and releases its task worktree.
+without a cause, Finish publishes the candidate and makes its slot reusable.
 Use `round-complete` only after the actual round is over and its candidate lane
 has no active producer. Use `user` only when the user explicitly asks to
 integrate now without waiting for compatible work. A full batch does not wait for

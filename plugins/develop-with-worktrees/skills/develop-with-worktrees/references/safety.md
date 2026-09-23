@@ -140,6 +140,14 @@ the base unchanged. See [Runtime Adapter](runtime-adapter.md).
 
 Finish never cleans dependency caches. Retained known dependency roots are
 opaque, including normal package links; their ancestors must not be links.
+Candidate publication releases the old task lease while leaving its clean
+worktree attached to the exact task branch. That branch provides ordinary Git
+visibility; the immutable candidate ref remains the integration source. Start
+checks predecessor ownership, branch, HEAD, candidate ref, directory identity,
+cleanliness, and unknown content before reusing an attached idle slot. Terminal
+branch retirement checks exact provenance, delivery evidence, HEAD, and
+worktree occupation; moved and occupied branches are preserved.
+
 Ordinary task release and Abandon require exact worktree identity. Abandon refuses
 tracked edits and deletes ordinary untracked files only through unchanged-object
 checks. It protects `.env*`, databases, uploads/storage, unknown ignored paths,

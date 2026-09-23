@@ -85,6 +85,13 @@ target; incomplete or ambiguous records stop with a preservation error.
 and records the branch, frozen base, worktree identity, and optional stable
 request ID. Repeating the same non-empty request ID with the same purpose and
 base returns the original task instead of allocating another slot.
+An idle slot may still be attached to its last published candidate branch.
+Start accepts that only when the recorded predecessor, immutable candidate ref,
+directory identity, exact branch and HEAD, clean status, and unknown-content
+check all agree. It then switches to the new frozen base and creates a new task
+branch without moving the old candidate branch. Older detached slots remain
+reusable. An interrupted or ambiguous transition is quarantined for exact
+recovery; a repeated request never returns an unprepared Start as writable.
 
 Before Start returns a writable worktree it creates one local task anchor. If a
 project configures `runtime_adapter.activate`, the task stays `starting` until
@@ -138,14 +145,23 @@ New repositories default to batched candidate-first integration:
    `held` state.
 2. If configured, the Runtime Adapter releases project resources without
    changing the task tree.
-3. DWW rechecks cleanliness, releases the task worktree and slot, then marks the
-   candidate `pending`.
+3. DWW rechecks cleanliness, ends the task lease, and makes the slot reusable
+   while leaving its branch and files in place; then it marks the candidate
+   `pending`.
 4. The task anchor stays until the candidate is delivered, withdrawn, or the
    task is otherwise terminal.
 
 The source candidate is immutable. Publishing it ends the developer's coding
 round, but it is delivered only after a completed batch is contained in the
 current base. Runtime effectiveness is a separate explicit project check.
+The ordinary branch is a viewing entry, not the integration source. Status
+shows its name and exact candidate head separately from delivery and slot
+reuse. A delivered, withdrawn, or superseded candidate's branch is retired
+only when its original name and head still match and no worktree occupies it.
+Moved or occupied branches are preserved. For a candidate published by an
+older version that detached and removed the ordinary branch, use `candidate
+restore-branch --candidate <id>` to preview, then add `--apply` to create
+only the missing exact branch. This command never switches a worktree.
 
 Human-readable Finish and status output says “Change saved; waiting for local
 integration” until Git facts prove it reached the current local base. An

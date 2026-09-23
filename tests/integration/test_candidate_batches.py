@@ -22,6 +22,7 @@ from solo_ai.candidate_batches import (
     prepare_candidate_repair,
     reconcile_batches,
     reopen_prevalidation_batch,
+    restore_candidate_branch,
     retire_failed_batch,
     seal_batch,
     withdraw_candidate,
@@ -193,6 +194,237 @@ def publish(
         cause=delivery_cause,
         reason=delivery_reason,
     )
+
+
+def single_slot_batched(path: Path) -> GitRepo:
+    repo = initialized_batched(path, reusable=True, batch_size=None, tail_policy=None)
+    config = path / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("slots = 3", "slots = 1"),
+        encoding="utf-8",
+    )
+    git(path, "add", ".solo-ai/config.toml")
+    git(path, "commit", "-m", "test: use one reusable slot")
+    approve(repo, load_verification_config(repo))
+    return repo
+
+
+def test_candidate_branch_stays_attached_and_slot_reuses_new_base(
+    git_repo: Path,
+) -> None:
+    repo = single_slot_batched(git_repo)
+    task = start(repo, name="visible source")
+    worktree = Path(task["worktree"])
+    (worktree / "visible.txt").write_text("visible\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: visible source",
+        paths=["visible.txt"],
+    )
+    head = repo.head(worktree)
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    candidate = CandidateBatchStore(repo).candidate(result["candidate_id"])
+    assert candidate["head"] == head
+    assert repo.ref_head(candidate["ref"]) == head
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == head
+    assert repo.branch(worktree) == task["branch"]
+    assert head in git(git_repo, "log", "--branches", "--format=%H")
+    assert status_view(repo, task_id=task["id"])["task"]["slot"]["reusable"]
+    assert StateStore(repo).task(task["id"])["lease"] is None
+    with pytest.raises(SoloAIError):
+        commit_task(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            message="test: stale owner",
+            paths=["visible.txt"],
+        )
+
+    (git_repo / "later.txt").write_text("later\n", encoding="utf-8")
+    git(git_repo, "add", "later.txt")
+    git(git_repo, "commit", "-m", "test: advance main before reuse")
+    new_base = repo.head(git_repo)
+    next_task = start(repo, name="new base task")
+    assert Path(next_task["worktree"]) == worktree
+    assert next_task["base_head"] == new_base
+    assert repo.head(worktree) == new_base
+    assert repo.branch(worktree) == next_task["branch"]
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == head
+    assert repo.ref_head(candidate["ref"]) == head
+    assert status_view(repo, task_id=task["id"])["task"]["slot"]["reused"]
+    repo.git(["update-ref", f"refs/heads/{task['branch']}", new_base, head])
+    withdraw_candidate(
+        repo, candidate_id=result["candidate_id"], reason="exercise moved branch"
+    )
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == new_base
+    assert repo.ref_head(candidate["ref"]) == head
+
+
+def test_delivered_branch_retires_only_after_its_slot_switches_away(
+    git_repo: Path,
+) -> None:
+    repo = single_slot_batched(git_repo)
+    task = start(repo, name="delivered source")
+    worktree = Path(task["worktree"])
+    (worktree / "delivered.txt").write_text("delivered\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: delivered source",
+        paths=["delivered.txt"],
+    )
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    branch_ref = f"refs/heads/{task['branch']}"
+    batch = seal_batch(repo, candidate_ids=[result["candidate_id"]])
+    assert batch["status"] == "completed"
+    assert repo.branch(worktree) == task["branch"]
+    assert repo.ref_head(branch_ref) == result["candidate_head"]
+    next_task = start(repo, name="reuse delivered slot")
+    assert Path(next_task["worktree"]) == worktree
+    assert repo.ref_head(branch_ref) is None
+    assert repo.ref_head(result["candidate_ref"]) == result["candidate_head"]
+
+
+def test_legacy_detached_candidate_branch_restore_is_previewed_and_exact(
+    git_repo: Path,
+) -> None:
+    repo = single_slot_batched(git_repo)
+    task = start(repo, name="legacy source")
+    worktree = Path(task["worktree"])
+    (worktree / "legacy.txt").write_text("legacy\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: legacy source",
+        paths=["legacy.txt"],
+    )
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    branch_ref = f"refs/heads/{task['branch']}"
+    repo.git(["switch", "--detach", result["candidate_head"]], cwd=worktree)
+    repo.delete_ref(branch_ref, expected=result["candidate_head"])
+
+    preview = restore_candidate_branch(repo, candidate_id=result["candidate_id"])
+    assert preview["status"] == "preview"
+    assert repo.ref_head(branch_ref) is None
+    restored = restore_candidate_branch(
+        repo, candidate_id=result["candidate_id"], apply=True
+    )
+    assert restored["status"] == "restored"
+    assert repo.ref_head(branch_ref) == result["candidate_head"]
+    assert repo.branch(worktree) is None
+    assert (
+        restore_candidate_branch(repo, candidate_id=result["candidate_id"], apply=True)[
+            "status"
+        ]
+        == "already-visible"
+    )
+    reused = start(repo, name="reuse legacy detached")
+    assert Path(reused["worktree"]) == worktree
+    assert repo.ref_head(branch_ref) == result["candidate_head"]
+    repo.git(["update-ref", branch_ref, reused["base_head"], result["candidate_head"]])
+    conflict = restore_candidate_branch(
+        repo, candidate_id=result["candidate_id"], apply=True
+    )
+    assert conflict["status"] == "conflict"
+    assert repo.ref_head(branch_ref) == reused["base_head"]
+
+
+def test_moved_visible_branch_blocks_slot_reuse_without_rewriting_it(
+    git_repo: Path,
+) -> None:
+    repo = single_slot_batched(git_repo)
+    task = start(repo, name="move source")
+    worktree = Path(task["worktree"])
+    (worktree / "moved.txt").write_text("source\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: move source",
+        paths=["moved.txt"],
+    )
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    (worktree / "later.txt").write_text("later\n", encoding="utf-8")
+    git(worktree, "add", "later.txt")
+    git(worktree, "commit", "-m", "test: user advances visible branch")
+    moved = repo.head(worktree)
+    with pytest.raises(SoloAIError, match="Idle attached slot"):
+        start(repo, name="do not overwrite moved branch")
+    assert repo.head(worktree) == moved
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == moved
+    assert (
+        repo.ref_head(
+            CandidateBatchStore(repo).candidate(result["candidate_id"])["ref"]
+        )
+        == result["candidate_head"]
+    )
+
+
+def test_unknown_file_blocks_attached_slot_reuse(
+    git_repo: Path,
+) -> None:
+    repo = single_slot_batched(git_repo)
+    task = start(repo, name="unknown file predecessor")
+    worktree = Path(task["worktree"])
+    (worktree / "known.txt").write_text("known\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: unknown file predecessor",
+        paths=["known.txt"],
+    )
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    (worktree / "user-note.txt").write_text("keep\n", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="Idle slot is not clean"):
+        start(repo, name="blocked by unknown file")
+    assert (worktree / "user-note.txt").read_text(encoding="utf-8") == "keep\n"
+    assert repo.branch(worktree) == task["branch"]
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == result["candidate_head"]
+
+
+def test_interrupted_reuse_after_detach_recovers_without_moving_old_branch(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = single_slot_batched(git_repo)
+    task = start(repo, name="interrupted predecessor")
+    worktree = Path(task["worktree"])
+    (worktree / "old.txt").write_text("old\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: interrupted predecessor",
+        paths=["old.txt"],
+    )
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    original_git = repo.git
+
+    def interrupt_new_branch(args, **kwargs):
+        if args[:2] == ["switch", "-c"]:
+            raise RuntimeError("interrupt after old branch detach")
+        return original_git(args, **kwargs)
+
+    monkeypatch.setattr(repo, "git", interrupt_new_branch)
+    with pytest.raises(RuntimeError, match="interrupt after old branch detach"):
+        start(repo, name="interrupted successor", request_id="interrupted-successor")
+    monkeypatch.setattr(repo, "git", original_git)
+    assert repo.branch(worktree) is None
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == result["candidate_head"]
+    successor = next(
+        item
+        for item in StateStore(repo).read()["tasks"].values()
+        if item.get("request_id") == "interrupted-successor"
+    )
+    assert successor["status"] == "quarantined"
+    recovered = recover(repo, task_id=successor["id"])
+    assert recovered["status"] == "active"
+    assert repo.branch(worktree) == successor["branch"]
+    assert repo.ref_head(f"refs/heads/{task['branch']}") == result["candidate_head"]
 
 
 def test_new_default_publishes_source_candidates_without_ready_then_tests_combined_batch(

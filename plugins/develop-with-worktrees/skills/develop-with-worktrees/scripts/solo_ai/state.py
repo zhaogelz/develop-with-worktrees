@@ -694,6 +694,7 @@ class StateStore:
                         "released_managed_root_identity": None,
                         "released_worktree_resolved": None,
                         "released_managed_root_resolved": None,
+                        "released_candidate_task_id": None,
                     },
                 )
                 if number <= config.slots and slot["status"] == "inactive":
@@ -777,12 +778,15 @@ class StateStore:
                     "All managed worktree slots are busy, draining, or quarantined; no task was queued"
                 )
             slot = min(candidates, key=lambda item: float(item.get("last_used", 0.0)))
+            predecessor = slot.get("released_candidate_task_id")
             slot["generation"] = int(slot.get("generation", 0)) + 1
             task = {
                 "id": task_id,
                 "name": name,
                 "mode": ISOLATED_MODE,
                 "slot_id": slot["id"],
+                "slot_generation": slot["generation"],
+                "slot_predecessor_task_id": predecessor,
                 "worktree": slot["path"],
                 "branch": branch,
                 "base_head": base_head,
@@ -1253,6 +1257,7 @@ class StateStore:
                     "released_managed_root_resolved": publication[
                         "managed_root_resolved"
                     ],
+                    "released_candidate_task_id": task_id,
                 }
             )
             return copy.deepcopy(task)

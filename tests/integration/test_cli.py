@@ -96,6 +96,14 @@ def test_candidate_status_human_output_is_compact_and_reasons_are_required() -> 
     assert finish_intent.reason == "the user completed this development round"
     with pytest.raises(SystemExit):
         parser.parse_args(["candidate", "withdraw", "--candidate", "candidate-one"])
+    preview = parser.parse_args(
+        ["candidate", "restore-branch", "--candidate", "candidate-one"]
+    )
+    assert preview.apply is False
+    applied = parser.parse_args(
+        ["candidate", "restore-branch", "--candidate", "candidate-one", "--apply"]
+    )
+    assert applied.apply is True
     with pytest.raises(SystemExit):
         parser.parse_args(
             [

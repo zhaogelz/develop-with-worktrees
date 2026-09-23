@@ -79,7 +79,9 @@ def status_view(
         return {
             **common,
             "scope": "task",
-            "task": _task_projection(repo, task, delivery),
+            "task": _task_projection(
+                repo, task, delivery, state["slots"].get(str(task.get("slot_id")))
+            ),
         }
     if batch_id:
         batch = batches.get(batch_id)
@@ -118,7 +120,12 @@ def status_view(
             all_candidates=candidates.values(),
         )
         local_children = [
-            _task_projection(repo, task, deliveries.get(str(task["id"])))
+            _task_projection(
+                repo,
+                task,
+                deliveries.get(str(task["id"])),
+                state["slots"].get(str(task.get("slot_id"))),
+            )
             for task in local_tasks
         ]
         external_children = copy.deepcopy(root.get("linked_child_tasks") or [])
@@ -169,7 +176,12 @@ def status_view(
         **common,
         "scope": "history" if include_history else "current",
         "tasks": [
-            _task_projection(repo, task, deliveries.get(str(task["id"])))
+            _task_projection(
+                repo,
+                task,
+                deliveries.get(str(task["id"])),
+                state["slots"].get(str(task.get("slot_id"))),
+            )
             for task in visible_tasks
         ],
         "candidates": [
@@ -226,19 +238,37 @@ def _project_deliveries(
 
 
 def _task_projection(
-    repo: GitRepo, task: dict[str, Any], candidate_delivery: dict[str, Any] | None
+    repo: GitRepo,
+    task: dict[str, Any],
+    candidate_delivery: dict[str, Any] | None,
+    slot: dict[str, Any] | None,
 ) -> dict[str, Any]:
     projected = {
         "id": task.get("id"),
         "name": task.get("name"),
         "status": task.get("status"),
         "base_ref": task.get("base_ref"),
+        "ordinary_branch": task.get("branch"),
+        "candidate_head": task.get("candidate_head"),
         "root_anchor_id": task.get("root_anchor_id"),
         "next_action": {"kind": "continue_task"},
     }
     if candidate_delivery:
         projected["candidate_delivery"] = _candidate_projection(candidate_delivery)
         projected["next_action"] = _candidate_next_action(candidate_delivery)
+        projected["slot"] = {
+            "path": task.get("worktree"),
+            "reusable": bool(
+                slot
+                and slot.get("status") == "idle"
+                and slot.get("released_candidate_task_id") == task.get("id")
+            ),
+            "reused": bool(
+                slot
+                and task.get("slot_generation") is not None
+                and int(slot.get("generation", 0)) > int(task["slot_generation"])
+            ),
+        }
     active_operation = task.get("active_operation")
     if isinstance(active_operation, dict) and active_operation.get("kind"):
         operation = str(active_operation["kind"])
@@ -274,6 +304,9 @@ def _candidate_projection(candidate: dict[str, Any]) -> dict[str, Any]:
         "id": candidate.get("candidate_id"),
         "task_id": candidate.get("task_id"),
         "status": candidate.get("status"),
+        "ordinary_branch": candidate.get("ordinary_branch"),
+        "ordinary_branch_status": candidate.get("ordinary_branch_status"),
+        "candidate_head": candidate.get("head"),
         "delivery_status": candidate.get("delivery_status"),
         "delivered": candidate.get("delivered"),
         "finalization_pending": candidate.get("finalization_pending"),

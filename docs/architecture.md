@@ -103,6 +103,14 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   second plan or becomes a scheduler.
 - An exact-path commit creates the only eligible task change. Candidate
   publication is immutable source preservation, not delivery.
+- Candidate publication keeps its ordinary task branch and attached slot at the
+  frozen head while ending the old task's write lease. The immutable candidate
+  ref and batch record, rather than a later branch move, determine integration.
+  A new Start may reuse that slot only after checking its recorded predecessor,
+  candidate ref, directory, branch, HEAD, cleanliness, and unknown content.
+  It switches to the new frozen base without moving the old branch. Terminal
+  branches are retired only at their exact recorded head after delivery evidence
+  and no worktree occupation; changed branches are preserved.
 - New repositories publish source candidates, automatically freeze an exact
   compatible group of three, and run affected combined checks before protected
   local promotion. A smaller tail requires a recorded cause and reason.

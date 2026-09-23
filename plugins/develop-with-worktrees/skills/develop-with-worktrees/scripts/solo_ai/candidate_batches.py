@@ -576,6 +576,17 @@ class CandidateBatchStore:
                 if ancestry is not None:
                     ancestry[identity] = delivered
         projected["delivered"] = delivered
+        branch = candidate.get("branch")
+        branch_head = self.repo.ref_head(f"refs/heads/{branch}") if branch else None
+        projected["ordinary_branch"] = branch
+        projected["ordinary_branch_head"] = branch_head
+        projected["ordinary_branch_status"] = (
+            "exact"
+            if branch_head == candidate.get("head")
+            else "missing"
+            if branch_head is None
+            else "moved"
+        )
         projected["finalization_pending"] = (
             delivered and batch.get("status") != "completed"
         )
@@ -2705,6 +2716,9 @@ def _complete_batch(
     completed = store.complete(
         batch["id"], integrated_head=str(batch["integration_head"])
     )
+    retire_terminal_candidate_branches(
+        repo, candidate_ids=[str(item["candidate_id"]) for item in batch["candidates"]]
+    )
     for candidate in batch["candidates"]:
         delete_anchor(repo, str(candidate["task_id"]))
     return completed
@@ -3369,5 +3383,118 @@ def withdraw_candidate(
             raise SoloAIError("Candidate ref is missing and was preserved for recovery")
         raise SoloAIError("Candidate ref changed and was preserved")
     result = store.complete_withdraw(candidate_id)
+    retire_terminal_candidate_branches(repo, candidate_ids=[candidate_id])
     delete_anchor(repo, str(candidate["task_id"]))
     return result
+
+
+def restore_candidate_branch(
+    repo: GitRepo, *, candidate_id: str, apply: bool = False
+) -> dict[str, Any]:
+    """显式恢复旧候选的原普通分支；预览不写入，绝不切换工位。"""
+    from .lifecycle import _config_and_mode, maintenance_lock
+
+    _config_and_mode(repo)
+    with maintenance_lock(repo):
+        candidate = CandidateBatchStore(repo).candidate(candidate_id)
+        task = StateStore(repo).task(str(candidate["task_id"]))
+        publication = task.get("candidate_publication") or {}
+        branch = str(candidate.get("branch") or "")
+        head = str(candidate["head"])
+        if (
+            task.get("status") != "candidate-published"
+            or publication.get("phase") != "completed"
+            or publication.get("candidate_id") != candidate_id
+            or publication.get("head") != head
+            or publication.get("branch") != branch
+            or not branch
+            or repo.ref_head(str(candidate["ref"])) != head
+        ):
+            raise SoloAIError("Candidate branch provenance is incomplete or changed")
+        ref = f"refs/heads/{branch}"
+        actual = repo.ref_head(ref)
+        if actual not in {None, head}:
+            return {
+                "candidate_id": candidate_id,
+                "branch": branch,
+                "head": head,
+                "status": "conflict",
+                "actual_head": actual,
+                "changed": False,
+            }
+        if apply and actual is None:
+            created = repo.git(["update-ref", ref, head, "0" * len(head)], check=False)
+            if created.returncode:
+                raise SoloAIError(
+                    "Candidate branch name was claimed before restoration"
+                )
+        return {
+            "candidate_id": candidate_id,
+            "branch": branch,
+            "head": head,
+            "status": "already-visible"
+            if actual == head
+            else "restored"
+            if apply
+            else "preview",
+            "changed": apply and actual is None,
+            "worktree_changed": False,
+        }
+
+
+def retire_terminal_candidate_branches(
+    repo: GitRepo, *, candidate_ids: list[str] | None = None
+) -> list[dict[str, str]]:
+    """仅回收准确归属、未被工位占用且有终态交付证据的普通分支。"""
+    store = CandidateBatchStore(repo)
+    pool = store.read()
+    state = StateStore(repo).read()
+    occupied = {item.branch for item in repo.worktrees() if item.branch}
+    reports: list[dict[str, str]] = []
+    for candidate in pool["candidates"].values():
+        if candidate_ids is not None and candidate["candidate_id"] not in candidate_ids:
+            continue
+        if candidate.get("status") not in TERMINAL_CANDIDATE_STATES:
+            continue
+        task = state["tasks"].get(str(candidate["task_id"])) or {}
+        publication = task.get("candidate_publication") or {}
+        branch = candidate.get("branch")
+        head = candidate.get("head")
+        if (
+            task.get("status") != "candidate-published"
+            or publication.get("phase") != "completed"
+            or publication.get("candidate_id") != candidate.get("candidate_id")
+            or publication.get("branch") != branch
+            or publication.get("head") != head
+            or not branch
+            or not head
+        ):
+            continue
+        if candidate["status"] == "integrated":
+            projected = store.project_candidates(
+                [candidate],
+                pool["batches"],
+                all_candidates=pool["candidates"].values(),
+            )[0]
+            if not projected.get("delivered") or projected.get("finalization_pending"):
+                continue
+        if repo.ref_head(str(candidate["ref"])) != head:
+            reports.append({"branch": str(branch), "status": "preserved-candidate-ref"})
+            continue
+        ref = f"refs/heads/{branch}"
+        actual = repo.ref_head(ref)
+        if actual is None:
+            continue
+        if actual != head:
+            reports.append({"branch": str(branch), "status": "preserved-moved"})
+            continue
+        if ref in occupied:
+            reports.append({"branch": str(branch), "status": "preserved-attached"})
+            continue
+        try:
+            repo.delete_ref(ref, expected=str(head))
+        except SoloAIError:
+            reports.append({"branch": str(branch), "status": "preserved-race"})
+        else:
+            reports.append({"branch": str(branch), "status": "retired"})
+    return reports

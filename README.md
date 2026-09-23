@@ -13,6 +13,8 @@ task contract locally, and carries reviewed changes through local integration.
 - One confirmed plan kept at its root, so related work can resume from the same
   objective instead of asking you to copy it into every task.
 - Exact-path commits and immutable source candidates.
+- A normal Git branch still shows a saved candidate until it is delivered or
+  withdrawn; the task's worktree keeps showing that branch until its next use.
 - Combined validation and protected local promotion for compatible work.
 - A task starts with focused checks; Ready is not a second full-project gate for every candidate.
 - One local approval can cover the commands of the next unchanged step, without repeating approval for unrelated checks.
@@ -65,8 +67,8 @@ that choice.
 2. The agent edits only there, runs focused checks for the change, and commits
    the exact reviewed paths.
 3. `finish` preserves an immutable source candidate for local delivery and
-   returns the task worktree automatically. It does not by itself move the base
-   branch.
+   makes the task worktree available for its next task. Its current branch and
+   files stay visible until then. It does not by itself move the base branch.
 4. Every three compatible candidates, DWW combines the changes in an
    integration worktree and runs the affected repository checks.
 5. When an actual round ends with a smaller final group, the agent records one
