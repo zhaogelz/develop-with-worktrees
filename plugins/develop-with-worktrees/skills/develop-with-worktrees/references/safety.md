@@ -79,12 +79,13 @@ fallback when the Hook is not trusted or an event/tool is not covered.
 ### Restricted local plugin maintenance
 
 The Hook keeps plugin maintenance separate from its ordinary read-only shell
-parser. With exactly one active isolated task owned by the current Codex
-session, it permits only an absolute, verified Windows Codex CLI to query
-plugins or marketplaces, or to refresh `develop-with-worktrees` from the fixed
-local `dww-stable-local` marketplace. A root refresh is still required before
-the refresh write. It also permits exactly one installed-plugin maintenance
-entry: the formal PowerShell 7 executable, `-NoProfile -File`, and the
+parser. It permits exact plugin and marketplace queries through an absolute,
+verified Windows Codex CLI even after Finish releases the task. Refreshing
+`develop-with-worktrees` from the fixed local `dww-stable-local` marketplace
+requires exactly one active isolated task owned by the current Codex session.
+A root refresh is still required before that write. It also permits exactly one
+installed-plugin maintenance entry: the formal PowerShell 7 executable,
+`-NoProfile -File`, and the
 `maintain-dww-plugin.ps1` stored beside the currently trusted Hook, followed by
 the fixed `Install`, same-common-dir primary `main` source root, full-commit
 and formal-Codex parameters. The script independently verifies that the source

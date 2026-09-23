@@ -581,7 +581,6 @@ def _apply_patch_targets(payload: dict[str, Any], root: Path) -> list[Path] | No
     execution_directory = _patch_execution_directory(payload, root)
     if (
         not patch
-        or execution_directory is None
         or "*** Begin Patch" not in patch
         or "*** End Patch" not in patch
     ):
@@ -598,6 +597,8 @@ def _apply_patch_targets(payload: dict[str, Any], root: Path) -> list[Path] | No
         if _unsafe_patch_path(raw_target):
             return None
         target = Path(raw_target)
+        if not target.is_absolute() and execution_directory is None:
+            return None
         try:
             unresolved = (
                 target if target.is_absolute() else execution_directory / target
@@ -1975,8 +1976,10 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             return None
         maintenance = _plugin_maintenance_invocation(command)
         if maintenance is not None:
+            if maintenance == "query":
+                return None
             _task, denial = _owned_maintenance_task(
-                state, guard, root, payload, require_write=maintenance == "install"
+                state, guard, root, payload, require_write=True
             )
             if _task is None:
                 return _deny("Plugin maintenance is blocked: " + denial)

@@ -678,6 +678,7 @@ def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(
 
 def test_hook_checks_actual_patch_targets_and_isolated_owner_before_writing(
     git_repo: Path,
+    monkeypatch,
 ) -> None:
     repo = _initialized(git_repo, slots=2)
     first = start(
@@ -710,6 +711,30 @@ def test_hook_checks_actual_patch_targets_and_isolated_owner_before_writing(
         )
         is None
     )
+
+    no_cwd_absolute = _payload(
+        git_repo,
+        tool="apply_patch",
+        patch=own_absolute,
+        session="first-session",
+    )
+    no_cwd_absolute.pop("cwd")
+    assert HOOK._apply_patch_targets(no_cwd_absolute, git_repo) == [
+        (first_worktree / "owner-only.md").resolve()
+    ]
+    with monkeypatch.context() as isolated_cwd:
+        isolated_cwd.chdir(git_repo.parent)
+        assert HOOK.git_root(str(git_repo.parent)) is None
+        assert HOOK.decide(no_cwd_absolute) is None
+
+    no_cwd_relative = _payload(
+        git_repo,
+        tool="apply_patch",
+        patch="*** Begin Patch\n*** Add File: owner-relative.md\n+owned\n*** End Patch",
+        session="first-session",
+    )
+    no_cwd_relative.pop("cwd")
+    assert HOOK._apply_patch_targets(no_cwd_relative, git_repo) is None
 
     nested = first_worktree / "nested"
     nested.mkdir()
@@ -1613,15 +1638,20 @@ def test_plugin_maintenance_allows_only_owned_dww_commands(
             in denied["hookSpecificOutput"]["permissionDecisionReason"]
         )
 
-    not_owner = decide(
-        f"{quoted} plugin marketplace list --json", session="other-session"
+    assert (
+        decide(f"{quoted} plugin marketplace list --json", session="other-session")
+        is None
     )
-    assert not_owner is not None
-    assert not_owner["hookSpecificOutput"]["permissionDecision"] == "deny"
     not_owner_release = decide(release, session="other-session")
     assert not_owner_release is not None
     assert not_owner_release["hookSpecificOutput"]["permissionDecision"] == "deny"
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+    assert decide(f"{quoted} plugin list --marketplace dww-stable-local --json") is None
+    denied_install = decide(
+        f"{quoted} plugin add develop-with-worktrees@dww-stable-local --json"
+    )
+    assert denied_install is not None
+    assert denied_install["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_hook_allows_every_contract_command_and_rejects_a_spoofed_runner(

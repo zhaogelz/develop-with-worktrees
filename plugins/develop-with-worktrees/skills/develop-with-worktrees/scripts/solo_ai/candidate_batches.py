@@ -1991,6 +1991,50 @@ def _assert_batch_worktree_unchanged(repo: GitRepo, batch: dict[str, Any]) -> Pa
     return worktree
 
 
+def _bind_legacy_retirement_identity(
+    repo: GitRepo, store: CandidateBatchStore, batch: dict[str, Any]
+) -> dict[str, Any]:
+    """仅在原目录仍可核实时，为旧专用批次补录删除所需身份。"""
+    keys = (
+        "worktree_resolved",
+        "worktree_identity",
+        "managed_root_resolved",
+        "managed_root_identity",
+    )
+    if all(batch.get(key) for key in keys):
+        return batch
+    if batch.get("worktree_removal_manifest_sha256") or batch.get(
+        "fast_retirement_started_at"
+    ):
+        raise BatchCleanupPending(
+            "Legacy retirement identity is incomplete after removal began"
+        )
+    worktree = _assert_batch_worktree_unchanged(repo, batch)
+    registrations = [
+        item
+        for item in repo.worktrees()
+        if item.path == worktree.resolve()
+        and item.head == batch["integration_head"]
+        and item.detached
+        and not item.bare
+    ]
+    common = repo.git(
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=worktree
+    ).stdout.strip()
+    if len(registrations) != 1 or Path(common).resolve() != repo.common_dir:
+        raise BatchCleanupPending("Legacy batch worktree registration is not exact")
+    location = {
+        "worktree_resolved": str(worktree.resolve()),
+        "worktree_identity": path_identity(worktree),
+        "managed_root_resolved": str(worktree.parent.resolve()),
+        "managed_root_identity": path_identity(worktree.parent),
+    }
+    if any(batch.get(key) not in (None, location[key]) for key in keys):
+        raise BatchCleanupPending("Legacy batch directory identity changed")
+    _assert_batch_worktree_unchanged(repo, {**batch, **location})
+    return store.update_batch(batch["id"], **location)
+
+
 def _assert_batch_cleanup_safe(repo: GitRepo, batch: dict[str, Any]) -> Path:
     """只允许批次树携带可再生的已知忽略产物进入终态清理。"""
     worktree = _assert_batch_worktree_unchanged(repo, batch)
@@ -3258,6 +3302,7 @@ def retire_failed_batch(
                         "Fast retirement requires every batch candidate to be superseded "
                         "or explicitly withdrawn"
                     )
+                batch = _bind_legacy_retirement_identity(repo, store, batch)
                 return worktree_retirement.retire_fast(repo, store, batch)
             if batch.get("worktree_mode") == "reusable":
                 # 退役旧批次只终结其持有权；不得因路径相同删掉下个持有者的目录。
@@ -3293,6 +3338,7 @@ def retire_failed_batch(
 
             # 删除器本身会完整清点和拒绝受保护内容；这里不重复预扫依赖。
             _assert_batch_worktree_unchanged(repo, batch)
+            batch = _bind_legacy_retirement_identity(repo, store, batch)
             if not started_at:
                 store.update_batch(
                     batch_id, worktree_retirement_started_at=utc_timestamp()

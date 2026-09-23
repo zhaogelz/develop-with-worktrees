@@ -962,10 +962,10 @@ def test_compact_root_status_projects_child_candidates_once_per_request(
     calls = 0
     original_project = CandidateBatchStore.project_candidates
 
-    def counted_project(self, candidates, batches):
+    def counted_project(self, candidates, batches, **kwargs):
         nonlocal calls
         calls += 1
-        return original_project(self, candidates, batches)
+        return original_project(self, candidates, batches, **kwargs)
 
     monkeypatch.setattr(CandidateBatchStore, "project_candidates", counted_project)
     view = status_view(repo, root_id=root["root_id"])
@@ -3504,6 +3504,44 @@ def test_failed_batch_retirement_is_exact_idempotent_and_preserves_candidate(
         CandidateBatchStore(repo).candidate(candidate["candidate_id"])["status"]
         == "retained"
     )
+
+
+def test_failed_batch_retirement_recovers_legacy_missing_directory_identity(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    candidate = publish(repo, name="legacy retirement", relative="legacy-retire.txt")
+
+    def fail_validation(*args: object, **kwargs: object) -> dict[str, object]:
+        raise SoloAIError("synthetic legacy retirement failure")
+
+    monkeypatch.setattr(batch_module, "validate", fail_validation)
+    with pytest.raises(SoloAIError, match="synthetic legacy retirement failure"):
+        seal_batch(repo, candidate_ids=[candidate["candidate_id"]])
+    store = CandidateBatchStore(repo)
+    failed = store.summary()["batches"][0]
+    worktree = Path(failed["worktree"])
+
+    def legacy_record(value: dict[str, object]) -> None:
+        record = value["batches"][failed["id"]]
+        for key in (
+            "worktree_resolved",
+            "worktree_identity",
+            "managed_root_resolved",
+            "managed_root_identity",
+        ):
+            record.pop(key, None)
+        record["worktree_retirement_started_at"] = "2026-09-02T00:00:00Z"
+
+    store.mutate(legacy_record)
+    retired = retire_failed_batch(repo, batch_id=failed["id"])
+
+    assert retired["worktree_retired_at"]
+    assert retired["worktree_identity"]
+    assert not worktree.exists()
+    assert all(item.path != worktree for item in repo.worktrees())
+    candidate_record = store.candidate(candidate["candidate_id"])
+    assert repo.ref_head(candidate_record["ref"]) == candidate["candidate_head"]
 
 
 def _failed_superseded_batch(
