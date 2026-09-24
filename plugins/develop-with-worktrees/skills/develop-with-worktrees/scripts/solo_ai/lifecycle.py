@@ -105,6 +105,7 @@ from .state import (
     IN_PLACE_MODE,
     ISOLATED_MODE,
     ROOT_BINDING_PROTOCOL_VERSION,
+    STATE_SCHEMA,
     StateStore,
     candidate_admission_lock,
 )
@@ -1874,7 +1875,7 @@ def _resume_preactivation_release(
     return _preactivation_release_result(task)
 
 
-def start(
+def _start_once(
     repo: GitRepo,
     *,
     name: str,
@@ -2292,6 +2293,71 @@ def start(
             store.quarantine(task["id"], str(exc))
             raise
         return _complete_runtime_activation(repo, store=store, task=prepared)
+
+
+def start(
+    repo: GitRepo,
+    *,
+    name: str,
+    base: str | None = None,
+    in_place: bool = False,
+    bind_branch: str | None = None,
+    session_id: str | None = None,
+    request_id: str | None = None,
+    supersedes: str | None = None,
+    root_anchor_id: str | None = None,
+    root_anchor_file: Path | None = None,
+    independent_reason: str | None = None,
+    target: str | None = None,
+    scope: str | None = None,
+    acceptance: str | None = None,
+    host_origin: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """真实工位耗尽时，先交付同目标已等待的来源，再重试本次 Start。"""
+    arguments = {
+        "name": name,
+        "base": base,
+        "in_place": in_place,
+        "bind_branch": bind_branch,
+        "session_id": session_id,
+        "request_id": request_id,
+        "supersedes": supersedes,
+        "root_anchor_id": root_anchor_id,
+        "root_anchor_file": root_anchor_file,
+        "independent_reason": independent_reason,
+        "target": target,
+        "scope": scope,
+        "acceptance": acceptance,
+        "host_origin": host_origin,
+    }
+    try:
+        return _start_once(repo, **arguments)
+    except ActionableSoloAIError as exc:
+        if (
+            exc.code != "NO_FREE_SLOT"
+            or StateStore(repo).read()["schema_version"] != STATE_SCHEMA
+        ):
+            raise
+        from .native_batches import reconcile_native_batches
+
+        base_ref = str(exc.context["base_ref"])
+        batch = reconcile_native_batches(
+            repo,
+            base_ref=base_ref,
+            cause="capacity",
+            reason=f"Start has no free slot for {base_ref}",
+            capacity_request_id=request_id or uuid.uuid4().hex,
+        )
+        if batch is None:
+            raise
+        if batch.get("status") != "completed":
+            raise ActionableSoloAIError(
+                "Capacity delivery did not release a task slot; preserve this Start request",
+                code="CAPACITY_DELIVERY_PENDING",
+                context={"base_ref": base_ref, "batch_id": batch["id"]},
+                next_action={"kind": "recover_batch", "batch_id": batch["id"]},
+            ) from exc
+        return _start_once(repo, **arguments)
 
 
 def _activate_native_slot(
@@ -2900,6 +2966,26 @@ def ready(
                     else {}
                 ),
             }
+
+
+def withdraw_ready(
+    repo: GitRepo, *, task_id: str, lease: str, reason: str
+) -> dict[str, Any]:
+    """经原 lease 核验后解除原生 Ready 冻结，保留上一轮 SHA 证据。"""
+    store = StateStore(repo)
+    with maintenance_lock(repo), candidate_admission_lock(repo):
+        with store.operation(task_id, lease, "ready-withdraw") as task:
+            if not task.get("native_delivery"):
+                raise SoloAIError("Ready withdrawal is available only for native tasks")
+            require_anchor(repo, task, require_verified_origin=True)
+            _require_current_structured_root_review(repo, task, store=store)
+            if task.get("status") not in {"ready", "waiting-integration"}:
+                raise SoloAIError("Only an unsealed Ready task can be withdrawn")
+            frozen_head = str(
+                (task.get("native_delivery") or {}).get("ready_head") or ""
+            )
+            _assert_exact_candidate(repo, task, candidate_head=frozen_head)
+            return store.withdraw_native_ready(task_id, reason=reason)
 
 
 def _unknown_ignored(repo: GitRepo, worktree: Path) -> list[str]:

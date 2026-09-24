@@ -7,7 +7,15 @@ from conftest import git
 from solo_ai import native_batches
 from solo_ai.candidate_batches import CandidateBatchStore
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
-from solo_ai.lifecycle import approve, commit_task, finish, initialize, ready, start
+from solo_ai.lifecycle import (
+    approve,
+    commit_task,
+    finish,
+    initialize,
+    ready,
+    start,
+    withdraw_ready,
+)
 from solo_ai.native_batches import run_native_batch, seal_native_batch
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
@@ -55,9 +63,6 @@ def test_native_fixed_slot_waits_for_real_delivery_then_reuses_branch(
     assert waiting["delivered"] is False
     assert store.read()["slots"]["01"]["task_id"] == first["id"]
     assert CandidateBatchStore(repo).read()["candidates"] == {}
-    with pytest.raises(SoloAIError, match="All managed worktree slots are busy"):
-        start(repo, name="blocked successor")
-
     base_before = repo.head(git_repo)
     git(git_repo, "merge", "--no-ff", source_head, "-m", "test: deliver source")
     delivered_head = repo.head(git_repo)
@@ -297,3 +302,128 @@ def test_native_promoted_release_failure_retries_only_cleanup(
     assert completed["validation_attempt"] == attempt
     assert completed["proof"] == proof
     assert repo.head(git_repo) == promoted_head
+
+
+def test_native_start_uses_real_capacity_pressure_to_deliver_two_ready_tasks(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo, slots=10)
+    approve(repo, load_verification_config(repo))
+    ready_tasks = [start(repo, name=f"ready source {index}") for index in (1, 2)]
+    sources = []
+    for index, task in enumerate(ready_tasks, start=1):
+        filename = f"capacity-{index}.txt"
+        (Path(task["worktree"]) / filename).write_text(
+            f"source {index}\n", encoding="utf-8"
+        )
+        sources.append(
+            commit_task(
+                repo,
+                task_id=task["id"],
+                lease=task["lease"],
+                message=f"test: capacity source {index}",
+                paths=[filename],
+            )["candidate_head"]
+        )
+        assert (
+            finish(repo, task_id=task["id"], lease=task["lease"])["status"]
+            == "waiting-integration"
+        )
+    producers = [start(repo, name=f"producer {index}") for index in range(8)]
+    assert len(store.read()["batches"]) == 0
+
+    next_task = start(repo, name="capacity successor", request_id="capacity-next")
+
+    assert next_task["status"] == "active"
+    assert len(store.read()["batches"]) == 1
+    batch = next(iter(store.read()["batches"].values()))
+    assert batch["status"] == "completed"
+    assert batch["tail_request"]["cause"] == "capacity"
+    assert batch["capacity_request_id"] == "capacity-next"
+    assert [member["task_id"] for member in batch["tasks"]] == [
+        task["id"] for task in ready_tasks
+    ]
+    assert all(repo.is_ancestor(source, repo.head(git_repo)) for source in sources)
+    assert all(store.task(task["id"])["status"] == "active" for task in producers)
+    assert CandidateBatchStore(repo).read()["candidates"] == {}
+
+
+def test_native_capacity_does_not_seal_when_all_slots_are_developing(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo, slots=10)
+    tasks = [start(repo, name=f"producer {index}") for index in range(10)]
+    with pytest.raises(ActionableSoloAIError) as blocked:
+        start(repo, name="no available task slot")
+    assert blocked.value.code == "NO_FREE_SLOT"
+    assert len(store.read()["batches"]) == 0
+    assert all(store.task(task["id"])["status"] == "active" for task in tasks)
+
+
+def test_native_capacity_waits_for_existing_target_batch(git_repo: Path) -> None:
+    repo, store = _native_repo(git_repo)
+    task = start(repo, name="waiting source")
+    (Path(task["worktree"]) / "queued.txt").write_text("ready", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: queued source",
+        paths=["queued.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="explicit first batch"
+    )
+    with pytest.raises(ActionableSoloAIError) as blocked:
+        start(repo, name="wait for target owner")
+    assert blocked.value.code == "NO_FREE_SLOT"
+    assert store.native_batch(batch["id"])["status"] == "sealed"
+    assert len(store.read()["batches"]) == 1
+
+
+def test_native_ready_withdrawal_requires_exact_owner_and_new_head(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo)
+    task = start(repo, name="withdraw a frozen head")
+    worktree = Path(task["worktree"])
+    (worktree / "source.txt").write_text("first", encoding="utf-8")
+    first_head = commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: first ready source",
+        paths=["source.txt"],
+    )["candidate_head"]
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    with pytest.raises(SoloAIError):
+        withdraw_ready(
+            repo, task_id=task["id"], lease="stale-lease", reason="repair source"
+        )
+    (worktree / "untracked.txt").write_text("unknown", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="changed|clean"):
+        withdraw_ready(
+            repo, task_id=task["id"], lease=task["lease"], reason="repair source"
+        )
+    (worktree / "untracked.txt").unlink()
+    withdrawn = withdraw_ready(
+        repo, task_id=task["id"], lease=task["lease"], reason="repair source"
+    )
+    assert withdrawn["status"] == "active"
+    with pytest.raises(SoloAIError, match="new task head"):
+        ready(repo, task_id=task["id"], lease=task["lease"])
+    (worktree / "source.txt").write_text("second", encoding="utf-8")
+    second_head = commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: repaired ready source",
+        paths=["source.txt"],
+    )["candidate_head"]
+    assert second_head != first_head
+    assert ready(repo, task_id=task["id"], lease=task["lease"])["status"] == "ready"
+    assert (
+        store.task(task["id"])["native_delivery"]["attempts"][-1]["ready_head"]
+        == first_head
+    )

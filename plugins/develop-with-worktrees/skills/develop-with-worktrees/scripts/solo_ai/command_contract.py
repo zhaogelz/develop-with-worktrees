@@ -24,6 +24,7 @@ TOP_LEVEL_COMMANDS = frozenset(
         "start",
         "commit",
         "ready",
+        "ready-withdraw",
         "finish",
         "retarget",
         "plan",

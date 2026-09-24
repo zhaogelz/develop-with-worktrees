@@ -27,6 +27,7 @@ def seal_native_batch(
     task_ids: list[str],
     cause: str | None = None,
     reason: str | None = None,
+    capacity_request_id: str | None = None,
 ) -> dict[str, Any]:
     """只冻结已 Finish 的同目标任务；小批必须有明确原因。"""
 
@@ -42,11 +43,24 @@ def seal_native_batch(
         config = load_repo_config(repo)
         if len(task_ids) > config.integration.batch_size:
             raise SoloAIError("Native batch exceeds configured size")
+        capacity_cause = cause == "capacity" and bool(capacity_request_id)
         if len(task_ids) < config.integration.batch_size:
-            if cause not in _TAIL_CAUSES or not reason or "\n" in reason:
+            if (
+                not (cause in _TAIL_CAUSES or capacity_cause)
+                or not reason
+                or "\n" in reason
+            ):
                 raise SoloAIError("Native tail requires an explicit cause and reason")
-        elif cause is not None and cause not in _TAIL_CAUSES:
+        elif cause is not None and cause not in _TAIL_CAUSES and not capacity_cause:
             raise SoloAIError("Unsupported native batch cause")
+        if cause == "capacity":
+            if not capacity_cause or any(
+                slot.get("status") == "idle" and int(slot["id"]) <= config.slots
+                for slot in state["slots"].values()
+            ):
+                raise SoloAIError(
+                    "Capacity tail requires a blocked Start and no free slot"
+                )
         tasks = []
         for task_id in task_ids:
             task = state["tasks"].get(task_id)
@@ -109,6 +123,7 @@ def seal_native_batch(
             "merge_records": [],
             "merge_intent": None,
             "tail_request": {"cause": cause, "reason": reason} if cause else None,
+            "capacity_request_id": capacity_request_id if capacity_cause else None,
             "created_at": utc_timestamp(),
         }
         return store.seal_native_batch(batch)
@@ -443,6 +458,7 @@ def reconcile_native_batches(
     base_ref: str,
     cause: str | None = None,
     reason: str | None = None,
+    capacity_request_id: str | None = None,
 ) -> dict[str, Any] | None:
     """从现有等待任务推导一批；满批或已记录的有因尾批才封。"""
 
@@ -496,5 +512,6 @@ def reconcile_native_batches(
         task_ids=[str(task["id"]) for task in selected],
         cause=cause,
         reason=reason,
+        capacity_request_id=capacity_request_id,
     )
     return run_native_batch(repo, batch_id=str(batch["id"]))

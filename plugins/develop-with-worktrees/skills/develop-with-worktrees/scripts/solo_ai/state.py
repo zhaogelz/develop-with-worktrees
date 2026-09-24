@@ -790,8 +790,11 @@ class StateStore:
                 if slot.get("status") == "idle" and int(slot["id"]) <= config.slots
             ]
             if not candidates:
-                raise SoloAIError(
-                    "All managed worktree slots are busy, draining, or quarantined; no task was queued"
+                raise ActionableSoloAIError(
+                    "All managed worktree slots are busy, draining, or quarantined; no task was queued",
+                    code="NO_FREE_SLOT",
+                    context={"base_ref": base_ref, "slots": config.slots},
+                    next_action={"kind": "inspect_capacity", "base_ref": base_ref},
                 )
             slot = min(candidates, key=lambda item: float(item.get("last_used", 0.0)))
             native = state["schema_version"] == STATE_SCHEMA
@@ -1073,6 +1076,9 @@ class StateStore:
                 return copy.deepcopy(task)
             if delivery.get("batch_id") or task.get("candidate_head") != head:
                 raise SoloAIError("Task head changed before native Ready")
+            attempts = delivery.get("attempts") or []
+            if attempts and attempts[-1].get("ready_head") == head:
+                raise SoloAIError("Withdrawn Ready requires a new task head")
             delivery["ready_head"] = head
             delivery["ready_at"] = utc_timestamp()
             task["status"] = "ready"
@@ -1132,6 +1138,7 @@ class StateStore:
             )
             delivery["ready_head"] = None
             delivery["ready_at"] = None
+            delivery["tail_request"] = None
             task["status"] = "active"
             task["ready_proof"] = None
             task["updated_at"] = utc_timestamp()

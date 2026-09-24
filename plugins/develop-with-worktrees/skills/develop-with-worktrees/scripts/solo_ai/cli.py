@@ -69,6 +69,7 @@ from .lifecycle import (
     list_root_task_anchors,
     maintenance_lock,
     ready,
+    withdraw_ready,
     recover,
     reclaim_retained_worktree,
     repository_route,
@@ -998,6 +999,12 @@ def _parser() -> argparse.ArgumentParser:
         if name == "finish":
             _add_tail_request_arguments(item)
             _add_host_reference_arguments(item, role="candidate publication")
+    ready_withdraw = sub.add_parser(
+        "ready-withdraw", help="unfreeze one native Ready task using its exact lease"
+    )
+    ready_withdraw.add_argument("--task", required=True)
+    ready_withdraw.add_argument("--lease", required=True)
+    ready_withdraw.add_argument("--reason", required=True)
 
     retarget_parser = sub.add_parser(
         "retarget", help="explicitly rebind a task after its base branch changed"
@@ -2531,6 +2538,10 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "ready":
         return ready(repo, task_id=args.task, lease=args.lease, session_id=args.session)
+    if args.command == "ready-withdraw":
+        return withdraw_ready(
+            repo, task_id=args.task, lease=args.lease, reason=args.reason
+        )
     if args.command == "finish":
         return finish(
             repo,
