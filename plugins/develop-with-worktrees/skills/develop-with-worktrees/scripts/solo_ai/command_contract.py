@@ -16,6 +16,7 @@ TOP_LEVEL_COMMANDS = frozenset(
         "settings",
         "doctor",
         "route",
+        "migration",
         "delegated",
         "orchestrate",
         "candidate",

@@ -83,6 +83,7 @@ from .lifecycle import (
     upgrade_root_task_to_objective_protocol,
     warm_slot,
 )
+from .native_migration import enable_native_migration, preview_native_migration
 from .orchestration import BatchStore
 from .orchestration.adapters import adapter_for
 from .orchestration.models import MAX_DEVELOPMENT_PARALLELISM
@@ -298,6 +299,21 @@ def _parser() -> argparse.ArgumentParser:
     route.add_argument(
         "--session",
         help="optional Codex session identifier supplied by the trusted hook",
+    )
+    migration = sub.add_parser(
+        "migration", help="preview or safely enable native task-head delivery"
+    )
+    migration_sub = migration.add_subparsers(dest="migration_command", required=True)
+    migration_preview = migration_sub.add_parser(
+        "preview", help="inspect exact legacy blockers without changing state"
+    )
+    migration_preview.add_argument("--base", required=True)
+    migration_enable = migration_sub.add_parser(
+        "enable", help="enable native delivery only after legacy state drains"
+    )
+    migration_enable.add_argument("--base", required=True)
+    migration_enable.add_argument(
+        "--confirm", required=True, help="repeat BASE:HEAD from migration preview"
     )
 
     delegated = sub.add_parser(
@@ -2173,6 +2189,10 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return _doctor(repo)
     if args.command == "route":
         return repository_route(repo, session_id=args.session)
+    if args.command == "migration":
+        if args.migration_command == "preview":
+            return preview_native_migration(repo, base_ref=args.base)
+        return enable_native_migration(repo, base_ref=args.base, confirm=args.confirm)
     if args.command == "start":
         return start(
             repo,
