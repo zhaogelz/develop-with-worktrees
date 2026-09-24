@@ -486,6 +486,184 @@ def test_new_default_publishes_source_candidates_without_ready_then_tests_combin
     assert batches[0]["proof"]
 
 
+def test_candidate_first_ready_keeps_its_source_when_main_changes(
+    git_repo: Path,
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    verification_path = git_repo / ".solo-ai" / "verification.toml"
+    verification_path.write_text(
+        """schema_version = 3
+static_only = false
+[[profiles]]
+id = "source-snapshot"
+level = "ready"
+paths = ["**"]
+input_paths = ["**"]
+input_closure = "complete"
+external_state = "none"
+frozen_base = true
+commands = [["git", "status", "--short"]]
+""",
+        encoding="utf-8",
+    )
+    (git_repo / "shared.txt").write_text("original\n", encoding="utf-8")
+    git(git_repo, "add", ".solo-ai/verification.toml", "shared.txt")
+    git(git_repo, "commit", "-m", "test: declare source snapshot verification")
+    approve(repo, load_verification_config(repo))
+    source_base = repo.head(git_repo)
+
+    task = start(repo, name="source candidate while main moves")
+    worktree = Path(task["worktree"])
+    (worktree / "shared.txt").write_text("candidate\n", encoding="utf-8")
+    committed = commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: edit source candidate",
+        paths=["shared.txt"],
+    )
+    source_head = committed["candidate_head"]
+    (git_repo / "shared.txt").write_text("main moved\n", encoding="utf-8")
+    git(git_repo, "add", "shared.txt")
+    git(git_repo, "commit", "-m", "test: advance main with a conflict")
+    advanced_main = repo.head(git_repo)
+
+    first = ready(repo, task_id=task["id"], lease=task["lease"])
+    second = ready(repo, task_id=task["id"], lease=task["lease"])
+    assert first["integration_check"] == "deferred_to_batch"
+    assert second["candidate_head"] == source_head
+    assert second["base_head"] == source_base
+    assert second["ready_proof"] == first["ready_proof"]
+    assert second["convergence_retries"] == 0
+    latest_attempt = read_json(
+        repo.local_dir / "validation-attempts" / f"{second['validation_attempt']}.json",
+        {},
+    )
+    assert latest_attempt["profiles"][0]["state"] == "reused"
+    assert repo.head(worktree) == source_head
+    assert (
+        repo.git(
+            ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            cwd=worktree,
+            check=False,
+        ).returncode
+        != 0
+    )
+
+    published = finish(repo, task_id=task["id"], lease=task["lease"])
+    source = CandidateBatchStore(repo).candidate(published["candidate_id"])
+    assert source["base_head"] == source_base
+    assert source["head"] == source_head
+    assert repo.head(git_repo) == advanced_main
+    with pytest.raises(SoloAIError, match="conflict"):
+        seal_batch(repo, candidate_ids=[published["candidate_id"]])
+    failed = CandidateBatchStore(repo).summary()["batches"][0]
+    assert failed["failure_kind"] == "composition_conflict"
+    assert repo.head(git_repo) == advanced_main
+
+
+def test_second_batch_waits_for_first_full_and_uses_promoted_base(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False, batch_size=3)
+    first = publish(repo, name="first batch", relative="first.txt", run_ready=False)
+    store = CandidateBatchStore(repo)
+    frozen = store.seal([first["candidate_id"]], batch_size=3)
+    entered = threading.Event()
+    release = threading.Event()
+    events: list[tuple[str, str]] = []
+    original_compose = batch_module._compose
+    original_activate = batch_module._activate_batch_runtime
+    original_validate = batch_module._validate_batch
+
+    def traced_compose(target_repo, target_store, batch):
+        events.append(("compose", batch["id"]))
+        return original_compose(target_repo, target_store, batch)
+
+    def traced_activate(target_repo, target_store, batch):
+        events.append(("runtime", batch["id"]))
+        return original_activate(target_repo, target_store, batch)
+
+    def gated_validate(target_repo, target_store, batch):
+        events.append(("full", batch["id"]))
+        if batch["id"] == frozen["id"]:
+            entered.set()
+            assert release.wait(timeout=300)
+        return original_validate(target_repo, target_store, batch)
+
+    monkeypatch.setattr(batch_module, "_compose", traced_compose)
+    monkeypatch.setattr(batch_module, "_activate_batch_runtime", traced_activate)
+    monkeypatch.setattr(batch_module, "_validate_batch", gated_validate)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        running = executor.submit(batch_module.run_batch, repo, batch_id=frozen["id"])
+        try:
+            assert entered.wait(timeout=120)
+            second = publish(
+                repo, name="second candidate", relative="second.txt", run_ready=False
+            )
+            third = publish(
+                repo, name="third candidate", relative="third.txt", run_ready=False
+            )
+            waiting = reconcile_batches(
+                repo,
+                force=True,
+                cause="user",
+                reason="integration requested after the first batch",
+                candidate_id=second["candidate_id"],
+            )
+            assert waiting["status"] == "waiting-for-prior-batch"
+            assert len(store.summary()["batches"]) == 1
+            assert all(batch_id == frozen["id"] for _, batch_id in events)
+            projected = {
+                item["candidate_id"]: item for item in store.summary()["candidates"]
+            }
+            assert projected[second["candidate_id"]]["waiting"] == {
+                "state": "waiting_for_prior_batch",
+                "base_ref": "main",
+                "base_head": store.candidate(second["candidate_id"])["base_head"],
+                "activation_epoch": store.candidate(second["candidate_id"])[
+                    "integration_policy"
+                ]["activation_epoch"],
+                "batch_size": 3,
+                "prior_batch_id": frozen["id"],
+                "prior_batch_phase": store.batch(frozen["id"])["status"],
+            }
+            assert {
+                store.candidate(item["candidate_id"])["status"]
+                for item in (second, third)
+            } == {"pending"}
+        finally:
+            release.set()
+        completed_first = running.result(timeout=300)
+
+    assert completed_first["status"] == "completed"
+    completed_second = reconcile_batches(
+        repo,
+        force=True,
+        cause="user",
+        reason="first batch has entered main",
+        candidate_id=second["candidate_id"],
+    )
+    assert completed_second["status"] == "completed"
+    next_batch = completed_second["batch"]
+    assert next_batch["base_before"] == completed_first["integrated_head"]
+    assert set(next_batch["candidate_ids"]) == {
+        second["candidate_id"],
+        third["candidate_id"],
+    }
+    assert [kind for kind, batch_id in events if batch_id == next_batch["id"]] == [
+        "compose",
+        "runtime",
+        "full",
+    ]
+    assert all(
+        (git_repo / path).exists() for path in ("first.txt", "second.txt", "third.txt")
+    )
+    repeated = seal_batch(repo, candidate_ids=next_batch["candidate_ids"])
+    assert repeated["id"] == next_batch["id"]
+    assert len([event for event in events if event == ("full", next_batch["id"])]) == 1
+
+
 def test_composed_commits_keep_source_summary_and_traceability(git_repo: Path) -> None:
     repo = initialized_batched(git_repo, auto_full=False, batch_size=2)
     single = publish(
@@ -2221,6 +2399,52 @@ def test_promotion_os_error_keeps_passed_proof_and_verifies_recovery_source(
     monkeypatch.setattr(batch_module, "_promote", original)
     completed = batch_module.recover_batch(repo, batch_id=pending["id"])
     assert completed["status"] == "completed"
+
+
+def test_later_batch_promotion_recovery_keeps_source_and_execution_bases_distinct(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = initialized_batched(git_repo, auto_full=False)
+    first = publish(
+        repo, name="earlier source", relative="earlier.txt", run_ready=False
+    )
+    later = publish(
+        repo, name="later old source", relative="later.txt", run_ready=False
+    )
+    old_source_base = CandidateBatchStore(repo).candidate(later["candidate_id"])[
+        "base_head"
+    ]
+    completed_first = seal_batch(repo, candidate_ids=[first["candidate_id"]])
+    assert completed_first["status"] == "completed"
+    original_promote = batch_module._promote
+    original_validate = batch_module.validate
+    full_calls = 0
+
+    def count_validation(*args: object, **kwargs: object):
+        nonlocal full_calls
+        full_calls += 1
+        return original_validate(*args, **kwargs)
+
+    def denied(*args: object, **kwargs: object):
+        raise PermissionError("synthetic promotion interruption")
+
+    monkeypatch.setattr(batch_module, "validate", count_validation)
+    monkeypatch.setattr(batch_module, "_promote", denied)
+    with pytest.raises(batch_module.BatchPromotionPending):
+        seal_batch(repo, candidate_ids=[later["candidate_id"]])
+    blocked = CandidateBatchStore(repo).summary()["batches"][-1]
+    assert blocked["status"] == "promotion_blocked"
+    assert blocked["base_before"] == completed_first["integrated_head"]
+    assert blocked["candidates"][0]["base_head"] == old_source_base
+    assert old_source_base != blocked["base_before"]
+    assert full_calls == 1
+
+    monkeypatch.setattr(batch_module, "_promote", original_promote)
+    recovered = batch_module.recover_batch(repo, batch_id=blocked["id"])
+    assert recovered["status"] == "completed"
+    assert full_calls == 1
+    assert (git_repo / "earlier.txt").exists()
+    assert (git_repo / "later.txt").exists()
 
 
 def test_promotion_block_records_redacted_git_failure(

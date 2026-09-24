@@ -2496,7 +2496,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         task = StateStore(repo).task(args.task)
         worktree = Path(str(task["worktree"]))
         verification = load_verification_config(repo, cwd=worktree)
-        verification_base = str(task.get("start_head") or task["base_ref"])
+        from .lifecycle import _verification_base
+
+        verification_base = _verification_base(task)
         validation_base_ref = str(task["base_ref"])
         force_task_scope = task.get("mode") == "in-place"
         inputs, _ = proof_inputs(
@@ -2653,7 +2655,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         store = StateStore(repo)
         with store.operation(args.task, args.lease, "verify") as task:
             worktree = Path(str(task["worktree"]))
-            from .lifecycle import _assert_in_place_binding, _is_in_place
+            from .lifecycle import (
+                _assert_in_place_binding,
+                _candidate_first,
+                _is_in_place,
+                _verification_base,
+            )
 
             if _is_in_place(task):
                 _assert_in_place_binding(repo, store, task, session_id=args.session)
@@ -2662,6 +2669,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     "Commit task changes before producing reusable verification evidence"
                 )
             verification = load_verification_config(repo, cwd=worktree)
+            verification_base = _verification_base(task)
             levels = ("ready", "full") if args.level == "full" else (args.level,)
             full_scope = "complete" if args.complete else "integration"
             full_scopes = (
@@ -2681,7 +2689,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 profile_ids=selected_profile_ids(
                     repo,
                     cwd=worktree,
-                    base=str(task.get("start_head") or task["base_ref"]),
+                    base=verification_base,
                     verification=verification,
                     levels=levels,
                     full_scopes=full_scopes,
@@ -2703,12 +2711,15 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             proof = validate(
                 repo,
                 cwd=worktree,
-                base=str(task.get("start_head") or task["base_ref"]),
+                base=verification_base,
                 verification=verification,
                 task_id=task["id"],
                 level=args.level,
                 full_scope="complete" if args.complete else "integration",
                 force_task_scope=_is_in_place(task),
+                expected_base_head=(
+                    str(task["base_head"]) if _candidate_first(task) else None
+                ),
                 validation_base_ref=str(task["base_ref"]),
                 attempt_id=attempt_id,
                 attempt_owner={"kind": "task", "id": str(task["id"])},
@@ -2852,6 +2863,12 @@ def _human_candidate_delivery(candidate: dict[str, Any]) -> str:
             "The specific wait reason is not currently verified."
         )
     state = waiting.get("state")
+    if state == "waiting_for_prior_batch":
+        return (
+            "Change saved; waiting for the prior local integration batch "
+            f"({waiting.get('prior_batch_id')}) to finish before this candidate's "
+            "batch can be composed and validated."
+        )
     if state == "waiting_for_compatible_candidates":
         compatible = int(waiting.get("compatible_pending_count") or 0)
         batch_size = int(waiting.get("batch_size") or 0)

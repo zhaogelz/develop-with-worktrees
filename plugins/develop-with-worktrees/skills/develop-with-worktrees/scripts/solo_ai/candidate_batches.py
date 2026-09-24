@@ -603,6 +603,7 @@ class CandidateBatchStore:
             candidate,
             ownership=ownership,
             all_candidates=all_candidates,
+            batches=batches,
         )
         return projected
 
@@ -612,6 +613,7 @@ class CandidateBatchStore:
         *,
         ownership: dict[str, Any] | None,
         all_candidates: Iterable[dict[str, Any]] | None,
+        batches: dict[str, Any],
     ) -> dict[str, Any] | None:
         """只从当前候选池的同一 lane 事实解释尚未本地交付的候选。"""
 
@@ -628,6 +630,22 @@ class CandidateBatchStore:
         }
         state = (ownership or {}).get("state")
         if state == "candidate_queued":
+            prior = next(
+                (
+                    batch
+                    for batch in batches.values()
+                    if batch.get("status") in ACTIVE_BATCH_STATES
+                    and batch.get("base_ref") == base_ref
+                ),
+                None,
+            )
+            if prior is not None:
+                return {
+                    "state": "waiting_for_prior_batch",
+                    **common,
+                    "prior_batch_id": prior.get("id"),
+                    "prior_batch_phase": prior.get("status"),
+                }
             if policy.get("seal_policy") != "auto_full":
                 return {
                     "state": "waiting_for_recorded_delivery_cause",
@@ -869,6 +887,12 @@ class CandidateBatchStore:
         base_before = self.repo.ref_head(f"refs/heads/{base_ref}")
         if base_before is None:
             raise SoloAIError("Batch base branch no longer exists")
+        for candidate in candidates:
+            if not self.repo.is_ancestor(str(candidate["base_head"]), base_before):
+                raise SoloAIError(
+                    "Batch base no longer descends from the candidate's frozen "
+                    "source base; preserve the candidate and inspect the changed base"
+                )
         batch_id = f"batch-{seal_intent_id[:24]}"
         batch = {
             "id": batch_id,
@@ -2508,9 +2532,12 @@ def _require_exact_passed_promotion_recovery(
                 )
         if (
             sealed.get("base_ref") != batch.get("base_ref")
-            or sealed.get("base_head") != base_before
+            or not sealed.get("base_head")
             or repo.ref_head(str(sealed.get("ref") or "")) != sealed.get("head")
-            or not repo.is_ancestor(base_before, str(sealed.get("head") or ""))
+            or not repo.is_ancestor(str(sealed["base_head"]), base_before)
+            or not repo.is_ancestor(
+                str(sealed["base_head"]), str(sealed.get("head") or "")
+            )
         ):
             raise SoloAIError(
                 f"Promotion recovery candidate Git facts changed: {candidate_id}"

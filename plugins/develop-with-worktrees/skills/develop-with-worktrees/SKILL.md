@@ -70,6 +70,9 @@ The normal personal-development flow is:
 Ready remains available for evidence or legacy policies, but it is not a default
 second full-project gate before every candidate. The combined batch is where
 the composed changes receive their required integration checks.
+For a normal batched candidate, an explicit Ready checks the frozen source and
+does not merge the current base. Another active batch can finish while the
+candidate is saved; the next batch reads the base only when its turn begins.
 
 When a focused formatting check fails, ask the project's formatter for a diff
 against the changed paths before editing again. Apply that diff, then rerun the

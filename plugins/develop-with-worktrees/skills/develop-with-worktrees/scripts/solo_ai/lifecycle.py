@@ -2303,9 +2303,17 @@ def _candidate_requires_ready(task: dict[str, Any]) -> bool:
     )
 
 
+def _candidate_first(task: dict[str, Any]) -> bool:
+    return not _is_in_place(task) and not _candidate_requires_ready(task)
+
+
 def _verification_base(task: dict[str, Any]) -> str:
-    """直改分支会前进，验证必须始终相对不可变的起点。"""
-    return str(task.get("start_head") if _is_in_place(task) else task["base_ref"])
+    """候选优先验证只看来源快照；旧模式仍核对实时基线。"""
+    if _is_in_place(task):
+        return str(task["start_head"])
+    if _candidate_first(task):
+        return str(task["base_head"])
+    return str(task["base_ref"])
 
 
 def _assert_in_place_binding(
@@ -2486,8 +2494,24 @@ def commit_task(
                 )
             )
             if not repair_merge and not base_merge:
-                raise SoloAIError(
-                    "Only the current recorded base or a recorded candidate repair may complete a prepared merge"
+                raise ActionableSoloAIError(
+                    "Only the current recorded base or a recorded candidate repair may complete a prepared merge. "
+                    f"Task {task_id} prepared a merge of {merge_head_value}, but "
+                    f"{task['base_ref']} is now {current_base_head}. Preserve this worktree "
+                    "and its resolved files for review; do not complete the stale merge. "
+                    "Publish the unchanged source candidate or use the recorded candidate "
+                    "repair path after the active batch finishes.",
+                    code="STALE_PREPARED_MERGE",
+                    context={
+                        "task_id": task_id,
+                        "prepared_merge_head": merge_head_value,
+                        "current_base_head": current_base_head,
+                        "base_ref": task["base_ref"],
+                    },
+                    next_action={
+                        "kind": "preserve_and_review_stale_merge",
+                        "task_id": task_id,
+                    },
                 )
             unresolved = repo.git(
                 ["diff", "--name-only", "--diff-filter=U"],
@@ -2657,15 +2681,16 @@ def ready(
         _require_current_structured_root_review(repo, task, store=store)
         if not repo.is_clean(worktree):
             raise SoloAIError("Commit all task changes before Ready")
+        candidate_first = _candidate_first(task)
         convergence_retries = 0
         while True:
-            if not _is_in_place(task):
+            if not _is_in_place(task) and not candidate_first:
                 task = _sync_base(repo, task)
             if not repo.is_clean(worktree):
-                raise SoloAIError("Base-branch synchronization left the task dirty")
+                raise SoloAIError("Task worktree changed before Ready validation")
             expected_candidate_head = repo.head(worktree)
             _assert_exact_candidate(repo, task, candidate_head=expected_candidate_head)
-            # 每次同步都可能带入新的受管策略；必须按本轮候选重新确认和验证。
+            # 旧路径每次同步可能带入新策略；候选优先路径读取来源提交的策略。
             config = load_repo_config(repo, cwd=worktree)
             store.require_slot_layout(config)
             verification = load_verification_config(repo, cwd=worktree)
@@ -2701,9 +2726,8 @@ def ready(
                 task_id,
                 validation_attempt=attempt_id,
                 validation_attempts=attempts,
-                # _sync_base 只更新本轮内存任务；记录验证尝试时必须一并
-                # 持久化已经同步的基线，否则验证后的收敛检查会重新读取旧值，
-                # 将已稳定的基线误判为再次推进。
+                # 旧路径的 _sync_base 只更新本轮内存任务；候选优先路径
+                # 保持 Start 时冻结的来源基线，不能在此追赶目标分支。
                 base_head=task["base_head"],
                 candidate_head=expected_candidate_head,
             )
@@ -2730,7 +2754,7 @@ def ready(
                     ) from exc
                 continue
 
-            if not _is_in_place(task):
+            if not _is_in_place(task) and not candidate_first:
                 current_base_head = repo.git(
                     ["rev-parse", "--verify", f"refs/heads/{task['base_ref']}"],
                     cwd=worktree,
@@ -2752,7 +2776,15 @@ def ready(
             if not _is_in_place(task):
                 updates["base_head"] = task["base_head"]
             updated = store.update_task(task_id, **updates)
-            return {**updated, "convergence_retries": convergence_retries}
+            return {
+                **updated,
+                "convergence_retries": convergence_retries,
+                **(
+                    {"integration_check": "deferred_to_batch"}
+                    if candidate_first
+                    else {}
+                ),
+            }
 
 
 def _unknown_ignored(repo: GitRepo, worktree: Path) -> list[str]:
@@ -4239,7 +4271,7 @@ def finish(
                 require_safe(
                     repo,
                     cwd=worktree,
-                    base=str(task["base_ref"]),
+                    base=_verification_base(task),
                     allowlist=candidate_config.sensitive_allowlist,
                 )
                 _assert_exact_candidate(repo, task, candidate_head=candidate_head)

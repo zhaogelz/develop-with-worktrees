@@ -114,6 +114,12 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
 - New repositories publish source candidates, automatically freeze an exact
   compatible group of three, and run affected combined checks before protected
   local promotion. A smaller tail requires a recorded cause and reason.
+- A normal candidate's optional Ready validates its immutable source head against
+  the task's frozen source base. It does not synchronize a moving target branch.
+  The existing admission and integration ownership lets one batch per target
+  branch freeze the execution base, compose, validate, and promote. A later batch
+  waits for that owner to finish, then reads the promoted base. Source base and
+  batch execution base are separate facts, including during exact recovery.
 - Local approval covers only the commands a lifecycle step will execute; an
   unchanged complete approval can cover a smaller step. Approval does not include
   proof-only facts such as lockfiles or tool versions.

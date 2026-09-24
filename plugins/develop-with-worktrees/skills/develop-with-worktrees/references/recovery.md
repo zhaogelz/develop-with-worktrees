@@ -16,6 +16,7 @@ from a title, a worktree count, or a quiet log.
 | Older published candidate has no ordinary branch | completed publication, original branch name, exact candidate ref and head | preview `candidate restore-branch --candidate <id>`, then use `--apply` for the exact missing branch | candidate ref and any current worktree; a conflicting branch is never overwritten |
 | Batch is interrupted but not failed | batch phase and live operation | `batch recover` for that recorded generation | batch, base, and validation receipt |
 | Composition conflict | failed batch and attributed candidate | prepare the exact candidate repair | retained candidates and conflict worktree |
+| Stale prepared task merge | task ID, `MERGE_HEAD`, recorded base, and current branch head | preserve the resolved files and inspect the recorded candidate repair path after the active batch | task worktree and conflict resolution; never complete the stale merge |
 | Validation failed | selected profile, log, and inputs | change inputs or make an evidence-based attribution | failed generation and base |
 | Promotion blocked | sealed base/head and worktree identity | remove the external blocker, then recover | integration worktree and base |
 | Unknown/protected/replaced content | path identity and inventory | stop and preserve the scene | all affected content |
@@ -90,6 +91,13 @@ A composition conflict may identify one retained candidate for managed repair.
 The repair uses the latest base and is bounded to two published generations in a
 supersession chain. Resolve automatically only when code, durable contracts,
 tests, and the user's request determine one compatible result.
+For a normal source candidate, do not merge `main` while waiting for another
+batch. If an earlier manual merge is already prepared against an obsolete head,
+Commit reports the task, prepared head, and current head and preserves the
+worktree. Review and preserve any resolved files before changing that scene;
+the old merge is not made valid by a broader parent allowance. A replacement
+candidate follows the recorded repair path and receives combined validation on
+the batch's actual execution base.
 
 Final-validation failures and promotion blocks are not merge conflicts. Before
 creating a validation repair request, the coordinator reviews the exact

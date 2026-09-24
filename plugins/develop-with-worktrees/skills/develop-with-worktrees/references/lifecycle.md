@@ -121,6 +121,16 @@ policy does not make Ready a mandatory project-test gate: run useful development
 checks, then Finish preserves the exact source candidate and the combined batch
 runs the required integration checks.
 
+For an explicit Ready on a normal batched candidate, changed paths, safety checks,
+selected profiles, and proof use the task's frozen source base and committed HEAD.
+It does not merge the current base or retry because that branch advances. Its
+`integration_check = deferred_to_batch` result means that Ready evidence covers
+the source only; compatibility with other candidates is checked in the batch.
+Commands that compare with a base should use `DWW_VALIDATION_BASE_HEAD` rather
+than a moving branch name, and declare `frozen_base = true` when that value affects
+their result. Direct, legacy requires-Ready, and in-place tasks keep their
+existing Ready behavior.
+
 For a normal personal development task, keep the pre-Finish checks focused on
 the files and behavior being changed. Finish without a tail cause when the
 development round may continue; this publishes the candidate and releases its
@@ -213,6 +223,12 @@ proofs may be reused only under their matching contract; mutable profiles run
 again. [Verification reuse](verification-reuse.md) explains the selection and
 proof rules, while [Runtime Adapter](runtime-adapter.md) covers optional batch
 resources.
+
+An active batch owns its target branch through the existing admission and run
+paths. Later candidates can still publish, but reconciliation waits before
+sealing another batch. The next batch freezes `base_before` from the target
+branch only after the prior batch is terminal; a candidate's older `base_head`
+continues to describe its immutable source diff.
 
 Failure before promotion records the generation and preserves the base. An
 interrupted nonfailed generation resumes with `batch recover`; a deterministic

@@ -17,6 +17,8 @@ task contract locally, and carries reviewed changes through local integration.
   withdrawn; the task's worktree keeps showing that branch until its next use.
 - Combined validation and protected local promotion for compatible work.
 - A task starts with focused checks; Ready is not a second full-project gate for every candidate.
+- If Ready is requested for a normal candidate, it checks that candidate against
+  its saved starting point; it does not merge a moving base branch.
 - One local approval can cover the commands of the next unchanged step, without repeating approval for unrelated checks.
 - A recoverable record when composition or validation fails; the base branch
   stays unchanged until a batch succeeds.
@@ -69,8 +71,9 @@ that choice.
 3. `finish` preserves an immutable source candidate for local delivery and
    makes the task worktree available for its next task. Its current branch and
    files stay visible until then. It does not by itself move the base branch.
-4. Every three compatible candidates, DWW combines the changes in an
-   integration worktree and runs the affected repository checks.
+4. Every three compatible candidates, DWW waits for the prior batch on the
+   target branch, then combines changes against the current base and runs the
+   affected repository checks, one batch at a time.
 5. When an actual round ends with a smaller final group, the agent records one
    supported delivery cause and follows its tail delivery. DWW never uses idle
    time, a task count, or a UI state as that cause.

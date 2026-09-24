@@ -31,6 +31,13 @@ The attempt receipt lists passed, reused, failed, blocked, interrupted, and
 timed-out profiles with the failed profile IDs. Any failed or blocked required
 profile keeps the combined validation from passing.
 
+For a normal batched task, explicit Ready and its plan use the task's frozen
+source base, even if the target branch advances. Profiles that compare against a
+base must use `DWW_VALIDATION_BASE_HEAD` and set `frozen_base = true`; using a
+moving branch name inside the command is not a frozen input. Batch Full uses the
+actual composed head and the execution base frozen when that batch gets its turn.
+Source Ready proof cannot stand in for a changed combination or runtime effect.
+
 ## Reuse conditions
 
 A profile can be reused across tasks and batches only when all of these hold:
