@@ -94,6 +94,10 @@ class ValidationCandidateChanged(SoloAIError):
         super().__init__(f"Validation candidate changed from {expected} to {current}")
 
 
+class ProfileAssertionFailed(SoloAIError):
+    """显式可收集的普通命令失败；身份、环境和超时错误不使用此类型。"""
+
+
 def new_validation_attempt_id(level: str) -> str:
     """生成一次验证尝试的可追溯标识，不把它当作证明身份。"""
 
@@ -190,6 +194,22 @@ def finish_validation_attempt(
         changes["error"] = redact_text(error)[:1000]
     if proof:
         changes["proof"] = proof
+    attempt = read_validation_attempt(repo, attempt_id)
+    profiles = attempt.get("profiles") or []
+    states = ("passed", "reused", "failed", "blocked", "interrupted", "timed_out")
+    changes["summary"] = {
+        state: sum(item.get("state") == state for item in profiles) for state in states
+    }
+    changes["failures"] = [
+        {
+            "profile_id": item.get("id"),
+            "state": item.get("state"),
+            "reason": item.get("error_reason"),
+            "proof": item.get("proof"),
+        }
+        for item in profiles
+        if item.get("state") in {"failed", "blocked", "interrupted", "timed_out"}
+    ]
     _update_validation_attempt(repo, attempt_id, **changes)
 
 
@@ -229,7 +249,8 @@ def select_profiles(
     levels: tuple[str, ...] = ("ready",),
     full_scopes: tuple[str, ...] | None = None,
 ) -> list[VerificationProfile]:
-    selected: list[VerificationProfile] = []
+    available: dict[str, VerificationProfile] = {}
+    selected_ids: set[str] = set()
     for profile in config.profiles:
         if profile.level not in levels:
             continue
@@ -239,12 +260,26 @@ def select_profiles(
             and profile.full_scope not in full_scopes
         ):
             continue
+        available[profile.profile_id] = profile
         if not files or any(
             any(fnmatch.fnmatchcase(path, pattern) for pattern in profile.paths)
             for path in files
         ):
-            selected.append(profile)
-    return selected
+            selected_ids.add(profile.profile_id)
+    pending = list(selected_ids)
+    while pending:
+        profile = available[pending.pop()]
+        for dependency in profile.depends_on:
+            if dependency not in available:
+                raise SoloAIError(
+                    f"Selected profile {profile.profile_id} requires unavailable profile {dependency}"
+                )
+            if dependency not in selected_ids:
+                selected_ids.add(dependency)
+                pending.append(dependency)
+    return [
+        profile for profile in config.profiles if profile.profile_id in selected_ids
+    ]
 
 
 def selected_profile_ids(
@@ -507,6 +542,8 @@ def _verification_policy(verification: VerificationConfig) -> dict[str, Any]:
                 "level": profile.level,
                 "frozen_base": profile.frozen_base,
                 "full_scope": profile.full_scope,
+                "continue_on_failure": profile.continue_on_failure,
+                "depends_on": list(profile.depends_on),
             }
             for profile in verification.profiles
         ],
@@ -665,6 +702,8 @@ def _profile_policy(profile: VerificationProfile) -> dict[str, Any]:
         "level": profile.level,
         "frozen_base": profile.frozen_base,
         "full_scope": profile.full_scope,
+        "continue_on_failure": profile.continue_on_failure,
+        "depends_on": list(profile.depends_on),
     }
 
 
@@ -1700,8 +1739,12 @@ def _run_profile(
                     proof=fingerprint,
                     completed_at=utc_timestamp(),
                 )
-                raise SoloAIError(
-                    f"Validation {'timed out' if result.timed_out else 'failed'} in profile {profile.profile_id}. Local redacted log: {log_path}"
+                if result.timed_out:
+                    raise SoloAIError(
+                        f"Validation timed out in profile {profile.profile_id}. Local redacted log: {log_path}"
+                    )
+                raise ProfileAssertionFailed(
+                    f"Validation failed in profile {profile.profile_id}. Local redacted log: {log_path}"
                 )
     record_profile_duration(
         profile_id=profile.profile_id,
@@ -1807,6 +1850,8 @@ def validate(
                 "fingerprint": profile_fingerprint,
                 "state": "pending",
                 "selection": profile_selection_reason(profile, inputs["files"]),
+                "depends_on": list(profile.depends_on),
+                "continue_on_failure": profile.continue_on_failure,
                 "decision": profile_execution_decision(
                     repo,
                     profile=profile,
@@ -1882,7 +1927,25 @@ def validate(
 
         runs: list[dict[str, Any]] = []
         profile_proofs: list[dict[str, Any]] = []
+        profile_states: dict[str, str] = {}
+        collected_failures: list[str] = []
         for profile, profile_inputs, profile_fingerprint in records:
+            unmet = [
+                dependency
+                for dependency in profile.depends_on
+                if profile_states.get(dependency) not in {"passed", "reused"}
+            ]
+            if unmet:
+                profile_states[profile.profile_id] = "blocked"
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    profile.profile_id,
+                    state="blocked",
+                    error_reason="dependency_not_passed:" + ",".join(unmet),
+                    completed_at=utc_timestamp(),
+                )
+                continue
 
             def check_inputs(profile=profile, profile_inputs=profile_inputs):
                 _require_profile_inputs(
@@ -1895,21 +1958,31 @@ def validate(
                     validation_environment=validation_environment,
                 )
 
-            result = _run_profile(
-                repo,
-                cwd=cwd,
-                profile=profile,
-                inputs=profile_inputs,
-                fingerprint=profile_fingerprint,
-                task_id=task_id,
-                base=base,
-                expected_base_head=expected_base_head,
-                expected_candidate_head=expected_candidate_head,
-                validation_environment=_profile_validation_environment(
-                    profile, validation_environment
-                ),
-                check_inputs=check_inputs,
-                attempt_id=attempt_id,
+            try:
+                result = _run_profile(
+                    repo,
+                    cwd=cwd,
+                    profile=profile,
+                    inputs=profile_inputs,
+                    fingerprint=profile_fingerprint,
+                    task_id=task_id,
+                    base=base,
+                    expected_base_head=expected_base_head,
+                    expected_candidate_head=expected_candidate_head,
+                    validation_environment=_profile_validation_environment(
+                        profile, validation_environment
+                    ),
+                    check_inputs=check_inputs,
+                    attempt_id=attempt_id,
+                )
+            except ProfileAssertionFailed:
+                if not profile.continue_on_failure:
+                    raise
+                profile_states[profile.profile_id] = "failed"
+                collected_failures.append(profile.profile_id)
+                continue
+            profile_states[profile.profile_id] = (
+                "reused" if result["reused"] else "passed"
             )
             profile_proofs.append(
                 {
@@ -1925,6 +1998,36 @@ def validate(
                     "reused": result["reused"],
                 }
                 for item in result["runs"]
+            )
+        _require_expected_candidate_head(
+            repo, cwd=cwd, expected_candidate_head=expected_candidate_head
+        )
+        for profile, profile_inputs, _ in records:
+            _require_profile_inputs(
+                repo,
+                cwd=cwd,
+                profile=profile,
+                inputs=profile_inputs,
+                verification=verification,
+                tool_cache=tool_cache,
+                validation_environment=_profile_validation_environment(
+                    profile, validation_environment
+                ),
+            )
+        if collected_failures:
+            raise SoloAIError(
+                "Validation failed in independent profiles: "
+                + ", ".join(collected_failures)
+            )
+        blocked_profiles = [
+            profile_id
+            for profile_id, state in profile_states.items()
+            if state == "blocked"
+        ]
+        if blocked_profiles:
+            raise SoloAIError(
+                "Validation prerequisites blocked profiles: "
+                + ", ".join(blocked_profiles)
             )
         if not records:
             log_path = (

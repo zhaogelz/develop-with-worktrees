@@ -400,6 +400,8 @@ def _validation_projection(
         "started_at": attempt.get("started_at"),
         "finished_at": attempt.get("finished_at"),
         "error": attempt.get("error"),
+        "summary": copy.deepcopy(attempt.get("summary")),
+        "failures": copy.deepcopy(attempt.get("failures")),
         "profiles": profiles,
     }
 
@@ -438,6 +440,8 @@ def _validation_profile_projection(profile: dict[str, Any]) -> dict[str, Any]:
             error_reason = "running_process_not_confirmed"
     return {
         "id": profile.get("id"),
+        "depends_on": copy.deepcopy(profile.get("depends_on", [])),
+        "continue_on_failure": profile.get("continue_on_failure", False),
         "state": state,
         "reused": profile.get("reused"),
         "execution_reason": profile.get("execution_reason"),

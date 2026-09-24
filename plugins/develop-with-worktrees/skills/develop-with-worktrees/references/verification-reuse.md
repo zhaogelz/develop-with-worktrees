@@ -13,10 +13,23 @@ when that improves recovery, but do not split every test case or break a
 project's coupled command pipeline merely to increase caching. Keep useful
 project-internal parallelism inside the command.
 
+For independent profiles, set `continue_on_failure = true` only when a
+nonzero command exit is an ordinary check failure and the next profile can run
+in a trustworthy environment. The default remains fail-fast. A profile may set
+`depends_on = ["preflight"]` for an earlier profile in the same verification
+file. DWW includes that prerequisite when selecting the dependent profile and
+marks the dependent `blocked` if the prerequisite fails. The dependent command
+does not start. Commands inside one profile still stop on the first failure.
+Input or identity drift, interruption, and timeout stop the attempt; a timeout
+is not treated as an ordinary independent assertion failure.
+
 Each evidence record binds the profile, declared inputs, tool/platform facts,
 declared environment hashes, applicable frozen base, complete command receipts,
 and logs. An unchanged Git head alone does not prove the working files or tools
 are unchanged. Evidence never crosses repositories.
+The attempt receipt lists passed, reused, failed, blocked, interrupted, and
+timed-out profiles with the failed profile IDs. Any failed or blocked required
+profile keeps the combined validation from passing.
 
 ## Reuse conditions
 

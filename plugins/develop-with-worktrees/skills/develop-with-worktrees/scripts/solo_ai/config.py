@@ -95,6 +95,8 @@ class VerificationProfile:
     level: str
     frozen_base: bool
     full_scope: str | None
+    continue_on_failure: bool = False
+    depends_on: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,8 @@ class VerificationConfig:
                     "level": profile.level,
                     "frozen_base": profile.frozen_base,
                     "full_scope": profile.full_scope,
+                    "continue_on_failure": profile.continue_on_failure,
+                    "depends_on": list(profile.depends_on),
                 }
                 for profile in self.profiles
             ],
@@ -709,6 +713,15 @@ def _parse_verification_config(
                 level=level,
                 frozen_base=frozen_base,
                 full_scope=full_scope,
+                continue_on_failure=_boolean(
+                    raw.get("continue_on_failure", False),
+                    field=f"profiles[{index}].continue_on_failure",
+                ),
+                depends_on=_strings(
+                    raw.get("depends_on", []),
+                    field=f"profiles[{index}].depends_on",
+                    allow_empty=True,
+                ),
             )
         )
     static_only = _boolean(data.get("static_only", False), field="static_only")
@@ -720,6 +733,14 @@ def _parse_verification_config(
         raise SoloAIError(
             "static_only cannot be combined with verification profiles; map every changed path explicitly"
         )
+    known: set[str] = set()
+    for profile in profiles:
+        for dependency in profile.depends_on:
+            if dependency not in known:
+                raise SoloAIError(
+                    f"Profile {profile.profile_id!r} depends_on must name an earlier profile in the same file: {dependency!r}"
+                )
+        known.add(profile.profile_id)
     return VerificationConfig(schema_version, static_only, tuple(profiles))
 
 

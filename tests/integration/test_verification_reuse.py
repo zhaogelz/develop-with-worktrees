@@ -61,6 +61,33 @@ def validate(repo: GitRepo):
     )
 
 
+def configure_collecting_profiles(root: Path, profiles: list[dict]) -> GitRepo:
+    repo = configure(root, "pass")
+    lines = ["schema_version = 3", "static_only = false"]
+    for item in profiles:
+        lines.extend(
+            [
+                "[[profiles]]",
+                f"id = {json.dumps(item['id'])}",
+                'level = "full"',
+                'paths = ["**"]',
+                f"input_paths = {json.dumps(item.get('inputs', ['README.md']))}",
+                'input_closure = "complete"',
+                f"external_state = {json.dumps(item.get('external', 'none'))}",
+                f"continue_on_failure = {str(item.get('collect', False)).lower()}",
+                f"depends_on = {json.dumps(item.get('depends', []))}",
+                f"resource_class = {json.dumps(item.get('resource', 'normal'))}",
+                f"commands = [{json.dumps([sys.executable, '-c', item['script']])}]",
+            ]
+        )
+    (root / ".solo-ai/verification.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+    git(root, "add", ".solo-ai/verification.toml")
+    git(root, "commit", "-m", "test: declare independent profiles")
+    return repo
+
+
 @pytest.fixture(autouse=True)
 def isolated_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(validation_queue, "_machine_root", lambda: tmp_path / "machine")
@@ -146,6 +173,134 @@ def test_failed_validation_keeps_an_attempt_receipt_with_executed_cost(
     assert attempt["result"] == "failed"
     assert attempt["profiles"][0]["state"] == "failed"
     assert attempt["profiles"][0]["runs"][0]["duration_seconds"] >= 0
+
+
+def test_collects_two_independent_failures_and_keeps_success(git_repo: Path) -> None:
+    repo = configure_collecting_profiles(
+        git_repo,
+        [
+            {"id": "first", "script": "raise SystemExit(2)", "collect": True},
+            {"id": "second", "script": "raise SystemExit(3)", "collect": True},
+            {"id": "success", "script": "pass"},
+        ],
+    )
+    attempt_id = "collect-two-failures"
+    with pytest.raises(SoloAIError, match="first, second"):
+        proof.validate(
+            repo,
+            cwd=repo.root,
+            base="main",
+            verification=load_verification_config(repo),
+            level="full",
+            expected_candidate_head=repo.head(repo.root),
+            attempt_id=attempt_id,
+        )
+    attempt = proof.read_validation_attempt(repo, attempt_id)
+    assert attempt["summary"]["failed"] == 2
+    assert attempt["summary"]["passed"] == 1
+    assert [item["profile_id"] for item in attempt["failures"]] == ["first", "second"]
+    success = next(item for item in attempt["profiles"] if item["id"] == "success")
+    assert success["proof"]
+    assert success["runs"][0]["exit_code"] == 0
+
+
+def test_failed_prerequisite_blocks_heavy_check_but_keeps_independent_check(
+    git_repo: Path,
+) -> None:
+    repo = configure_collecting_profiles(
+        git_repo,
+        [
+            {"id": "preflight", "script": "raise SystemExit(2)", "collect": True},
+            {
+                "id": "browser",
+                "script": "from pathlib import Path; p=Path('.tmp/heavy'); p.parent.mkdir(exist_ok=True); p.write_text('ran')",
+                "resource": "heavy",
+                "depends": ["preflight"],
+            },
+            {"id": "independent", "script": "pass"},
+        ],
+    )
+    attempt_id = "blocked-heavy"
+    with pytest.raises(SoloAIError, match="preflight"):
+        proof.validate(
+            repo,
+            cwd=repo.root,
+            base="main",
+            verification=load_verification_config(repo),
+            level="full",
+            expected_candidate_head=repo.head(repo.root),
+            attempt_id=attempt_id,
+        )
+    attempt = proof.read_validation_attempt(repo, attempt_id)
+    assert attempt["summary"]["blocked"] == 1
+    assert attempt["summary"]["passed"] == 1
+    assert attempt["profiles"][1]["error_reason"] == "dependency_not_passed:preflight"
+    assert not (git_repo / ".tmp/heavy").exists()
+
+
+def test_input_drift_stops_collection_before_next_profile(git_repo: Path) -> None:
+    repo = configure_collecting_profiles(
+        git_repo,
+        [
+            {
+                "id": "drift",
+                "script": "from pathlib import Path; Path('README.md').write_text('changed'); raise SystemExit(2)",
+                "collect": True,
+            },
+            {
+                "id": "later",
+                "script": "from pathlib import Path; Path('.tmp/later').write_text('ran')",
+            },
+        ],
+    )
+    with pytest.raises(SoloAIError, match="declared paths: README.md"):
+        validate(repo)
+    assert not (git_repo / ".tmp/later").exists()
+
+
+def test_repair_reuses_unaffected_pure_check_and_rebuilds_output(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / "feature.txt").write_text("bad", encoding="utf-8")
+    git(git_repo, "add", "feature.txt")
+    git(git_repo, "commit", "-m", "test: add failing feature")
+    repo = configure_collecting_profiles(
+        git_repo,
+        [
+            {"id": "pure", "script": "pass", "inputs": ["README.md"]},
+            {
+                "id": "feature",
+                "script": "from pathlib import Path; raise SystemExit(0 if Path('feature.txt').read_text() == 'good' else 2)",
+                "inputs": ["feature.txt"],
+                "collect": True,
+            },
+            {
+                "id": "build",
+                "script": "from pathlib import Path; p=Path('.tmp/build.bin'); p.parent.mkdir(exist_ok=True); p.write_text('fresh')",
+                "external": "unknown",
+            },
+        ],
+    )
+    original_run = proof.run_logged
+    counts = {"pure": 0, "feature": 0, "build": 0}
+
+    def count_run(*args, **kwargs):
+        counts[kwargs["receipt_metadata"]["profile_id"]] += 1
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(proof, "run_logged", count_run)
+    with pytest.raises(SoloAIError, match="feature"):
+        validate(repo)
+    artifact = git_repo / ".tmp/build.bin"
+    assert artifact.is_file()
+    artifact.unlink()
+    (git_repo / "feature.txt").write_text("good", encoding="utf-8")
+    git(git_repo, "add", "feature.txt")
+    git(git_repo, "commit", "-m", "test: repair feature")
+    result = validate(repo)
+    assert result["result"] == "passed"
+    assert counts == {"pure": 1, "feature": 2, "build": 2}
+    assert artifact.read_text(encoding="utf-8") == "fresh"
 
 
 def test_interrupted_second_command_keeps_all_prior_attempt_costs(

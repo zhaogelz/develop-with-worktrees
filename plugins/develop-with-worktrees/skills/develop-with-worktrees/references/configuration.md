@@ -148,6 +148,14 @@ resource_class = "normal"
 commands = [["uv", "run", "pytest"]]
 ```
 
+`continue_on_failure = true` permits a normal nonzero check result to be
+collected while later independent profiles run. It defaults to `false`.
+`depends_on = ["unit"]` names earlier profiles in the same file; when a
+dependent profile is selected, its prerequisites are also selected. A failed
+prerequisite blocks only its dependents. Declare the relationship explicitly
+before a heavy browser, database, or build check; profile names and exit codes
+do not imply it. Keep coupled commands inside one profile.
+
 `resource_class = "light"` is reserved for short, local static checks such as
 lint or formatting. It has one machine-local slot and may run while a heavy
 integration check occupies the normal validation capacity. It does not make
