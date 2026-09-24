@@ -30,6 +30,8 @@ _DWW_TEST_LAYERS = ("dww_fast", "dww_full", "dww_stress")
 _DWW_FAST_MODULES = frozenset(
     {
         "tests/unit/test_config.py",
+        "tests/unit/test_native_delivery_state.py",
+        "tests/unit/test_native_migration.py",
         "tests/unit/test_proof.py",
         "tests/unit/test_routing.py",
         "tests/unit/test_safety.py",

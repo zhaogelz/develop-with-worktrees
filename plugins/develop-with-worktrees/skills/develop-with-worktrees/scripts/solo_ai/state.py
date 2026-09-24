@@ -26,7 +26,9 @@ from .util import (
     utc_timestamp,
 )
 
-STATE_SCHEMA = 11
+STATE_SCHEMA = 12
+LEGACY_STATE_SCHEMA = 11
+NATIVE_DELIVERY_SCHEMA = 1
 ROOT_BINDING_PROTOCOL_VERSION = 1
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
 IN_PLACE_MODE = "in-place"
@@ -51,9 +53,11 @@ class StateStore:
 
     def _empty(self) -> dict[str, Any]:
         return {
-            "schema_version": STATE_SCHEMA,
+            "schema_version": LEGACY_STATE_SCHEMA,
             "slots": {},
             "tasks": {},
+            "batches": {},
+            "integration_workspace": None,
             "host_root_bindings": {},
             "pending_operation_outcomes": {},
             "updated_at": utc_timestamp(),
@@ -134,36 +138,36 @@ class StateStore:
                 task.setdefault("mode", ISOLATED_MODE)
                 task.setdefault("integration", None)
                 task.setdefault("abandonment", None)
-            state["schema_version"] = STATE_SCHEMA
-            version = STATE_SCHEMA
+            state["schema_version"] = LEGACY_STATE_SCHEMA
+            version = LEGACY_STATE_SCHEMA
         elif version == 3:
             for task in state.get("tasks", {}).values():
                 task.setdefault("integration", None)
                 task.setdefault("abandonment", None)
-            state["schema_version"] = STATE_SCHEMA
-            version = STATE_SCHEMA
+            state["schema_version"] = LEGACY_STATE_SCHEMA
+            version = LEGACY_STATE_SCHEMA
         elif version == 4:
             for task in state.get("tasks", {}).values():
                 task.setdefault("request_id", None)
                 task.setdefault("supersedes", None)
                 task.setdefault("candidate_publication", None)
-            state["schema_version"] = STATE_SCHEMA
-            version = STATE_SCHEMA
+            state["schema_version"] = LEGACY_STATE_SCHEMA
+            version = LEGACY_STATE_SCHEMA
         elif version == 5:
             for task in state.get("tasks", {}).values():
                 task.setdefault("integration_policy", None)
-            state["schema_version"] = STATE_SCHEMA
-            version = STATE_SCHEMA
+            state["schema_version"] = LEGACY_STATE_SCHEMA
+            version = LEGACY_STATE_SCHEMA
         elif version == 6:
             for task in state.get("tasks", {}).values():
                 task.setdefault("root_anchor_file", None)
-            state["schema_version"] = STATE_SCHEMA
-            version = STATE_SCHEMA
+            state["schema_version"] = LEGACY_STATE_SCHEMA
+            version = LEGACY_STATE_SCHEMA
         elif version == 7:
             for task in state.get("tasks", {}).values():
                 task.setdefault("host_origin", None)
-            state["schema_version"] = STATE_SCHEMA
-            version = STATE_SCHEMA
+            state["schema_version"] = LEGACY_STATE_SCHEMA
+            version = LEGACY_STATE_SCHEMA
         elif version == 8:
             # 已经启动的旧任务仍必须保留 Ready 作为候选发布门禁；新策略只
             # 对新建的 schema 3 policy 生效，不能在活动现场热替换语义。
@@ -171,8 +175,8 @@ class StateStore:
                 policy = task.get("integration_policy")
                 if isinstance(policy, dict):
                     policy.setdefault("candidate_validation", "ready")
-            state["schema_version"] = STATE_SCHEMA
-            version = STATE_SCHEMA
+            state["schema_version"] = LEGACY_STATE_SCHEMA
+            version = LEGACY_STATE_SCHEMA
         elif version == 9:
             # 宿主与主锚点的关联只影响新协议任务；既有任务仍保持原有根绑定和
             # 生命周期语义，不能因一次读取迁移而被自动认领。
@@ -197,13 +201,14 @@ class StateStore:
                         + str(binding.get("root_anchor_file", ""))
                     ),
                 )
-            state["schema_version"] = STATE_SCHEMA
-        elif version != STATE_SCHEMA:
+            state["schema_version"] = LEGACY_STATE_SCHEMA
+        elif version not in {LEGACY_STATE_SCHEMA, STATE_SCHEMA}:
             raise SoloAIError(
                 "Unsupported local state schema; run doctor before changing this repository"
             )
         for slot in state.get("slots", {}).values():
             slot.setdefault("generation", 0)
+            slot.setdefault("released_task_id", None)
         for task in state.get("tasks", {}).values():
             task.setdefault("integration_policy", None)
             task.setdefault("root_anchor_file", None)
@@ -217,12 +222,15 @@ class StateStore:
                 policy.setdefault("candidate_validation", "ready")
         state.setdefault("host_root_bindings", {})
         state.setdefault("pending_operation_outcomes", {})
+        if state["schema_version"] == STATE_SCHEMA:
+            state.setdefault("batches", {})
+            state.setdefault("integration_workspace", None)
         self._apply_guard_quarantines(state)
         return state
 
     @staticmethod
     def integration_policy(
-        config: RepoConfig, *, legacy_explicit: bool = False
+        config: RepoConfig, *, legacy_explicit: bool = False, native: bool = False
     ) -> dict[str, Any]:
         seal_policy = "explicit" if legacy_explicit else config.integration.seal_policy
         mode = config.integration.mode
@@ -244,6 +252,8 @@ class StateStore:
         worktree_mode = config.integration.worktree_mode
         if worktree_mode == "reusable":
             identity += ":worktree-reusable-v1"
+        if native:
+            identity += ":native-task-head-v1"
         return {
             "schema_version": 3,
             "mode": mode,
@@ -254,6 +264,7 @@ class StateStore:
             "tail_policy": tail_policy,
             "tail_quiet_seconds": config.integration.tail_quiet_seconds,
             "worktree_mode": worktree_mode,
+            "delivery_model": "native-task-head" if native else "legacy-candidate",
             "activation_epoch": sha256_text(identity),
         }
 
@@ -695,8 +706,13 @@ class StateStore:
                         "released_worktree_resolved": None,
                         "released_managed_root_resolved": None,
                         "released_candidate_task_id": None,
+                        "released_task_id": None,
                     },
                 )
+                if state["schema_version"] == STATE_SCHEMA:
+                    slot.setdefault(
+                        "fixed_branch", f"{config.branch_prefix}slot-{slot_id}"
+                    )
                 if number <= config.slots and slot["status"] == "inactive":
                     slot["status"] = "idle"
                 if number > config.slots:
@@ -778,7 +794,18 @@ class StateStore:
                     "All managed worktree slots are busy, draining, or quarantined; no task was queued"
                 )
             slot = min(candidates, key=lambda item: float(item.get("last_used", 0.0)))
-            predecessor = slot.get("released_candidate_task_id")
+            native = state["schema_version"] == STATE_SCHEMA
+            predecessor = slot.get(
+                "released_task_id" if native else "released_candidate_task_id"
+            )
+            task_branch = (
+                str(
+                    slot.get("fixed_branch")
+                    or f"{config.branch_prefix}slot-{slot['id']}"
+                )
+                if native
+                else branch
+            )
             slot["generation"] = int(slot.get("generation", 0)) + 1
             task = {
                 "id": task_id,
@@ -788,7 +815,7 @@ class StateStore:
                 "slot_generation": slot["generation"],
                 "slot_predecessor_task_id": predecessor,
                 "worktree": slot["path"],
-                "branch": branch,
+                "branch": task_branch,
                 "base_head": base_head,
                 "base_ref": base_ref,
                 "base_worktree": str(base_worktree.resolve()),
@@ -823,7 +850,18 @@ class StateStore:
                 "request_id": request_id,
                 "supersedes": supersedes,
                 "candidate_publication": None,
-                "integration_policy": self.integration_policy(config),
+                "integration_policy": self.integration_policy(config, native=native),
+                "native_delivery": (
+                    {
+                        "schema_version": NATIVE_DELIVERY_SCHEMA,
+                        "ready_head": None,
+                        "batch_id": None,
+                        "attempts": [],
+                        "delivery": None,
+                    }
+                    if native
+                    else None
+                ),
                 "slot_worktree_identity": copy.deepcopy(
                     slot.get("released_worktree_identity")
                 ),
@@ -994,6 +1032,297 @@ class StateStore:
                 raise SoloAIError(f"Unknown task id: {task_id}")
             task.update(changes)
             task["updated_at"] = utc_timestamp()
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    @staticmethod
+    def _native_owned_task(
+        state: dict[str, Any], task_id: str, *, statuses: set[str]
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        if state.get("schema_version") != STATE_SCHEMA:
+            raise SoloAIError("Native task delivery has not been enabled")
+        task = state.get("tasks", {}).get(task_id)
+        if not isinstance(task, dict) or task.get("status") not in statuses:
+            raise SoloAIError("Native task changed status before delivery")
+        delivery = task.get("native_delivery")
+        if (
+            not isinstance(delivery, dict)
+            or delivery.get("schema_version") != NATIVE_DELIVERY_SCHEMA
+        ):
+            raise SoloAIError("Native task delivery identity is missing")
+        slot = state.get("slots", {}).get(str(task.get("slot_id")))
+        if (
+            not isinstance(slot, dict)
+            or slot.get("task_id") != task_id
+            or slot.get("generation") != task.get("slot_generation")
+        ):
+            raise SoloAIError("Native task lost its exact slot generation")
+        return task, slot, delivery
+
+    def mark_native_ready(self, task_id: str, *, head: str) -> dict[str, Any]:
+        """只记录调用方已核对的干净 Git HEAD，工位始终由原任务占有。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task, slot, delivery = self._native_owned_task(
+                state, task_id, statuses={"active", "ready"}
+            )
+            if task["status"] == "ready":
+                if delivery.get("ready_head") != head:
+                    raise SoloAIError("Ready head changed without a managed withdrawal")
+                return copy.deepcopy(task)
+            if delivery.get("batch_id") or task.get("candidate_head") != head:
+                raise SoloAIError("Task head changed before native Ready")
+            delivery["ready_head"] = head
+            delivery["ready_at"] = utc_timestamp()
+            task["status"] = "ready"
+            task["updated_at"] = utc_timestamp()
+            slot["status"] = "ready"
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def mark_native_waiting(self, task_id: str, *, head: str) -> dict[str, Any]:
+        """Finish 只提交待集成意图，不释放 slot 或创建候选。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task, slot, delivery = self._native_owned_task(
+                state, task_id, statuses={"ready", "waiting-integration"}
+            )
+            if delivery.get("ready_head") != head:
+                raise SoloAIError("Frozen native Ready head changed")
+            if delivery.get("batch_id"):
+                raise SoloAIError("Task is already owned by an integration batch")
+            task["status"] = "waiting-integration"
+            task["updated_at"] = utc_timestamp()
+            slot["status"] = "waiting-integration"
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def withdraw_native_ready(self, task_id: str, *, reason: str) -> dict[str, Any]:
+        """保留旧尝试，解除冻结后让同一代任务继续开发。"""
+
+        if not reason.strip() or "\n" in reason or "\r" in reason:
+            raise SoloAIError("Ready withdrawal requires a one-line reason")
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task, slot, delivery = self._native_owned_task(
+                state, task_id, statuses={"ready", "waiting-integration"}
+            )
+            if delivery.get("batch_id"):
+                raise SoloAIError("A sealed batch must be withdrawn before task repair")
+            delivery.setdefault("attempts", []).append(
+                {
+                    "ready_head": delivery.get("ready_head"),
+                    "withdrawn_at": utc_timestamp(),
+                    "reason": reason.strip(),
+                }
+            )
+            delivery["ready_head"] = None
+            delivery["ready_at"] = None
+            task["status"] = "active"
+            task["ready_proof"] = None
+            task["updated_at"] = utc_timestamp()
+            slot["status"] = "active"
+            return copy.deepcopy(task)
+
+        return self.mutate(update)
+
+    def seal_native_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """在同一状态事务里冻结成员 SHA 和工位归属。"""
+
+        batch_id = str(batch.get("id") or "")
+        members = batch.get("tasks")
+        if not batch_id or not isinstance(members, list) or not members:
+            raise SoloAIError("Native batch requires an id and frozen tasks")
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            if state.get("schema_version") != STATE_SCHEMA:
+                raise SoloAIError("Native task delivery has not been enabled")
+            batches = state.setdefault("batches", {})
+            if batch_id in batches:
+                existing = batches[batch_id]
+                if any(
+                    existing.get(key) != batch.get(key)
+                    for key in ("id", "base_ref", "base_head", "tasks")
+                ):
+                    raise SoloAIError(
+                        "Native batch id already names another generation"
+                    )
+                return copy.deepcopy(existing)
+            if any(
+                item.get("status") not in {"completed", "withdrawn", "cancelled"}
+                and item.get("base_ref") == batch.get("base_ref")
+                for item in batches.values()
+            ):
+                raise SoloAIError("Another batch owns this target branch")
+            identities: set[str] = set()
+            for member in members:
+                task_id = str(member.get("task_id") or "")
+                if not task_id or task_id in identities:
+                    raise SoloAIError("Native batch repeats a task identity")
+                identities.add(task_id)
+                task, _slot, delivery = self._native_owned_task(
+                    state, task_id, statuses={"waiting-integration"}
+                )
+                if (
+                    delivery.get("batch_id")
+                    or delivery.get("ready_head") != member.get("ready_head")
+                    or task.get("branch") != member.get("branch")
+                    or task.get("slot_generation") != member.get("slot_generation")
+                    or task.get("base_ref") != batch.get("base_ref")
+                ):
+                    raise SoloAIError("Native batch member changed after Ready")
+            batches[batch_id] = copy.deepcopy(batch)
+            for member in members:
+                task, slot, delivery = self._native_owned_task(
+                    state, str(member["task_id"]), statuses={"waiting-integration"}
+                )
+                delivery["batch_id"] = batch_id
+                task["status"] = "integrating"
+                task["updated_at"] = utc_timestamp()
+                slot["status"] = "integrating"
+            return copy.deepcopy(batch)
+
+        return self.mutate(update)
+
+    def native_batch(self, batch_id: str) -> dict[str, Any]:
+        batch = self.read().get("batches", {}).get(batch_id)
+        if not isinstance(batch, dict):
+            raise SoloAIError(f"Unknown native batch: {batch_id}")
+        return copy.deepcopy(batch)
+
+    def update_batch(self, batch_id: str, **changes: Any) -> dict[str, Any]:
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            if state.get("schema_version") != STATE_SCHEMA:
+                raise SoloAIError("Native task delivery has not been enabled")
+            batch = state.get("batches", {}).get(batch_id)
+            if not isinstance(batch, dict):
+                raise SoloAIError(f"Unknown native batch: {batch_id}")
+            batch.update(copy.deepcopy(changes))
+            batch["updated_at"] = utc_timestamp()
+            return copy.deepcopy(batch)
+
+        return self.mutate(update)
+
+    def mark_native_promoted(
+        self, batch_id: str, *, integration_head: str
+    ) -> dict[str, Any]:
+        """提升完成后先记录交付，释放失败时不得重新合并或验证。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            if state.get("schema_version") != STATE_SCHEMA:
+                raise SoloAIError("Native task delivery has not been enabled")
+            batch = state.get("batches", {}).get(batch_id)
+            if (
+                not isinstance(batch, dict)
+                or batch.get("status") not in {"validated", "promoted", "completed"}
+                or batch.get("integration_head") != integration_head
+            ):
+                raise SoloAIError("Native promotion identity changed")
+            if batch["status"] != "completed":
+                batch["status"] = "promoted"
+            batch["promoted_at"] = batch.get("promoted_at") or utc_timestamp()
+            for member in batch["tasks"]:
+                existing = state["tasks"].get(str(member["task_id"]))
+                if isinstance(existing, dict) and existing.get("status") == "finished":
+                    receipt = (existing.get("native_delivery") or {}).get("delivery")
+                    if (
+                        not isinstance(receipt, dict)
+                        or receipt.get("batch_id") != batch_id
+                        or receipt.get("integration_head") != integration_head
+                    ):
+                        raise SoloAIError("Promoted task has another delivery receipt")
+                    continue
+                task, slot, delivery = self._native_owned_task(
+                    state,
+                    str(member["task_id"]),
+                    statuses={"integrating", "delivered-pending-release"},
+                )
+                if delivery.get("batch_id") != batch_id:
+                    raise SoloAIError("Promoted task lost its batch binding")
+                task["status"] = "delivered-pending-release"
+                slot["status"] = "delivered-pending-release"
+                task["updated_at"] = utc_timestamp()
+            return copy.deepcopy(batch)
+
+        return self.mutate(update)
+
+    def complete_native_delivery(
+        self,
+        task_id: str,
+        *,
+        batch_id: str,
+        integration_head: str,
+        release_receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        """只释放已证明在主线里的精确任务代次；目录和固定分支保留。"""
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            task = state.get("tasks", {}).get(task_id)
+            if isinstance(task, dict) and task.get("status") == "finished":
+                delivery = (task.get("native_delivery") or {}).get("delivery")
+                if (
+                    isinstance(delivery, dict)
+                    and delivery.get("batch_id") == batch_id
+                    and delivery.get("integration_head") == integration_head
+                    and delivery.get("release_receipt") == release_receipt
+                ):
+                    return copy.deepcopy(task)
+                raise SoloAIError("Finished task has a different delivery receipt")
+            task, slot, delivery = self._native_owned_task(
+                state, task_id, statuses={"delivered-pending-release"}
+            )
+            batch = state.get("batches", {}).get(batch_id)
+            if (
+                not isinstance(batch, dict)
+                or batch.get("status") not in {"promoted", "completed"}
+                or batch.get("integration_head") != integration_head
+                or delivery.get("batch_id") != batch_id
+                or not any(
+                    member.get("task_id") == task_id
+                    and member.get("ready_head") == delivery.get("ready_head")
+                    for member in batch.get("tasks", [])
+                )
+            ):
+                raise SoloAIError("Delivered task does not match its promoted batch")
+            delivery["delivery"] = {
+                "batch_id": batch_id,
+                "integration_head": integration_head,
+                "release_receipt": copy.deepcopy(release_receipt),
+                "delivered_at": utc_timestamp(),
+            }
+            task["status"] = "finished"
+            task["lease"] = None
+            task["lease_owner"] = None
+            task["active_operation"] = None
+            task["updated_at"] = utc_timestamp()
+            slot.update(
+                {
+                    "status": "idle",
+                    "task_id": None,
+                    "last_used": time.time(),
+                    "quarantine_reason": None,
+                    "released_task_id": task_id,
+                    "released_worktree_identity": copy.deepcopy(
+                        task.get("slot_worktree_identity")
+                    ),
+                    "released_managed_root_identity": copy.deepcopy(
+                        task.get("slot_managed_root_identity")
+                    ),
+                    "released_worktree_resolved": task.get("slot_worktree_resolved"),
+                    "released_managed_root_resolved": task.get(
+                        "slot_managed_root_resolved"
+                    ),
+                }
+            )
+            if all(
+                state["tasks"][str(member["task_id"])].get("status") == "finished"
+                for member in batch["tasks"]
+            ):
+                batch["status"] = "completed"
+                batch["completed_at"] = utc_timestamp()
             return copy.deepcopy(task)
 
         return self.mutate(update)

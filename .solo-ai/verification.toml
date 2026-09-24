@@ -20,8 +20,8 @@ commands = [
 
 # Ruff 已锁定在 uv.lock；开发期先做格式与语法检查，完整输入闭包未变时可
 # 复用同仓库证明。Ready/Full 不隐式重复它，开发者需要时显式运行 development。
-# 若格式检查失败，先对审查过的改动路径运行 `uv run ruff format --diff
-# <path ...>` 获取补丁，再修复并重跑本检查；不要因此提前启动组合批次。
+# 格式不符时先记录 Ruff 的原样差异，便于在受保护工位按审查路径修复；
+# 不因此提前启动组合批次。
 [[profiles]]
 id = "dww-lint-development"
 paths = [
@@ -42,6 +42,7 @@ resource_class = "light"
 level = "development"
 commands = [
   ["uv", "run", "ruff", "check", "."],
+  ["uv", "run", "ruff", "format", "--diff", "."],
   ["uv", "run", "ruff", "format", "--check", "."],
 ]
 
@@ -71,7 +72,9 @@ environment = [
   "LC_CTYPE", "TERM", "NO_COLOR",
 ]
 input_closure = "complete"
-timeout_seconds = 600
+# Windows 上完整 fast 层在受管并发负载下曾到 600 秒仍在正常推进；
+# 保留可终止上限，同时容纳该环境的实际波动。
+timeout_seconds = 900
 resource_class = "normal"
 level = "ready"
 commands = [

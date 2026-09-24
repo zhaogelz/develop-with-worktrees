@@ -41,6 +41,7 @@ def test_fast_proof_covers_its_real_configuration_inputs_and_development_lint_is
     assert lint["level"] == "development"
     assert lint["commands"] == [
         ["uv", "run", "ruff", "check", "."],
+        ["uv", "run", "ruff", "format", "--diff", "."],
         ["uv", "run", "ruff", "format", "--check", "."],
     ]
     assert lint["resource_class"] == "light"
