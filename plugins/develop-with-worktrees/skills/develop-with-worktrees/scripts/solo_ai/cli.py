@@ -717,7 +717,10 @@ def _parser() -> argparse.ArgumentParser:
         "seal",
         help="explicitly close and integrate the exact listed tail candidates",
     )
-    batch_seal.add_argument("--candidate", action="append", required=True)
+    batch_seal.add_argument("--candidate", action="append")
+    batch_seal.add_argument(
+        "--task", action="append", help="freeze one exact native Ready task id"
+    )
     batch_seal.add_argument(
         "--after-failed-batch",
         help="create one reviewed idempotent generation after this exact failed batch",
@@ -750,6 +753,9 @@ def _parser() -> argparse.ArgumentParser:
     batch_reconcile.add_argument(
         "--reason",
         help="one-line basis for a forced smaller tail",
+    )
+    batch_reconcile.add_argument(
+        "--base", help="target branch for a native task-head batch"
     )
     _add_host_reference_arguments(batch_reconcile, role="integration batch")
     batch_recover = batch_sub.add_parser(
@@ -2358,11 +2364,32 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         raise SoloAIError(f"Unknown candidate command: {args.candidate_command}")
     if args.command == "batch":
         if args.batch_command == "status":
+            state = StateStore(repo).read()
+            if state["schema_version"] == STATE_SCHEMA:
+                batches = state.get("batches", {})
+                if args.batch:
+                    if args.batch not in batches:
+                        raise SoloAIError(f"Unknown native batch: {args.batch}")
+                    return {"batches": [batches[args.batch]]}
+                return {"batches": list(batches.values())}
             store = CandidateBatchStore(repo)
             if args.batch:
                 return {"batches": [store.batch(args.batch)]}
             return store.summary()
         if args.batch_command == "seal":
+            if args.task:
+                if args.candidate or args.after_failed_batch:
+                    raise SoloAIError(
+                        "Native task batches cannot name legacy candidates"
+                    )
+                from .native_batches import run_native_batch, seal_native_batch
+
+                frozen = seal_native_batch(
+                    repo, task_ids=args.task, cause=args.cause, reason=args.reason
+                )
+                return run_native_batch(repo, batch_id=str(frozen["id"]))
+            if not args.candidate:
+                raise SoloAIError("Batch seal requires --task or --candidate")
             return seal_batch(
                 repo,
                 candidate_ids=args.candidate,
@@ -2375,6 +2402,33 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         if args.batch_command == "reconcile":
             if args.reason is not None and not args.force:
                 raise SoloAIError("--reason is valid only with batch reconcile --force")
+            state = StateStore(repo).read()
+            if state["schema_version"] == STATE_SCHEMA:
+                from .native_batches import reconcile_native_batches
+
+                targets = {
+                    str(task["base_ref"])
+                    for task in state["tasks"].values()
+                    if task.get("status") == "waiting-integration"
+                }
+                if args.base:
+                    targets = {args.base} if args.base in targets else set()
+                if len(targets) > 1:
+                    raise SoloAIError(
+                        "Native reconcile requires --base for multiple targets"
+                    )
+                if not targets:
+                    return {"status": "no_waiting_native_tasks", "batch": None}
+                result = reconcile_native_batches(
+                    repo,
+                    base_ref=next(iter(targets)),
+                    cause=args.cause if args.force else None,
+                    reason=args.reason if args.force else None,
+                )
+                return {
+                    "status": "waiting" if result is None else result["status"],
+                    "batch": result,
+                }
             return reconcile_batches(
                 repo,
                 force=args.force,
@@ -2384,6 +2438,11 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 require_tail_reason=True,
             )
         if args.batch_command == "recover":
+            state = StateStore(repo).read()
+            if state["schema_version"] == STATE_SCHEMA:
+                from .native_batches import run_native_batch
+
+                return run_native_batch(repo, batch_id=args.batch)
             return recover_batch(repo, batch_id=args.batch)
         if args.batch_command == "recovery-source":
             return verified_recovery_source(repo, commit=args.commit)

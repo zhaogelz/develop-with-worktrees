@@ -2161,6 +2161,20 @@ def start(
         worktree = ensure_within(
             Path(task["worktree"]), store.managed_worktree_root(config)
         )
+        if task.get("native_delivery"):
+            try:
+                prepared = _activate_native_slot(
+                    repo,
+                    store=store,
+                    task=task,
+                    worktree=worktree,
+                    base_head=base_head,
+                )
+                create_anchor(repo, prepared)
+            except Exception as exc:
+                store.quarantine(task["id"], str(exc))
+                raise
+            return _complete_runtime_activation(repo, store=store, task=prepared)
         managed_root = worktree.absolute().parent
         try:
             activation_worktree_identity: dict[str, object]
@@ -2278,6 +2292,91 @@ def start(
             store.quarantine(task["id"], str(exc))
             raise
         return _complete_runtime_activation(repo, store=store, task=prepared)
+
+
+def _activate_native_slot(
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    worktree: Path,
+    base_head: str,
+) -> dict[str, Any]:
+    """只快进已交付的固定分支；旧分支和未知文件始终保留。"""
+
+    branch = str(task["branch"])
+    managed_root = worktree.absolute().parent
+    registered = next(
+        (item for item in repo.worktrees() if item.path == worktree), None
+    )
+    if registered is None:
+        if worktree.exists() and any(worktree.iterdir()):
+            raise SoloAIError(f"Unregistered non-empty slot path: {worktree}")
+        old_head = repo.ref_head(f"refs/heads/{branch}")
+        if old_head is None:
+            repo.git(["worktree", "add", "-b", branch, str(worktree), base_head])
+        else:
+            if not repo.is_ancestor(old_head, base_head):
+                raise SoloAIError(
+                    "Fixed slot branch is not an ancestor of the selected target; preserve it"
+                )
+            repo.git(["worktree", "add", str(worktree), branch])
+    else:
+        require_managed_directory_identity(
+            worktree,
+            managed_root=managed_root,
+            expected_resolved=task.get("slot_worktree_resolved"),
+            expected_root_resolved=task.get("slot_managed_root_resolved"),
+            expected_identity=task.get("slot_worktree_identity"),
+            expected_root_identity=task.get("slot_managed_root_identity"),
+        )
+        predecessor_id = task.get("slot_predecessor_task_id")
+        if predecessor_id:
+            predecessor = store.task(str(predecessor_id))
+            delivery = (predecessor or {}).get("native_delivery") or {}
+            if (
+                predecessor is None
+                or predecessor.get("status") != "finished"
+                or predecessor.get("base_ref") != task["base_ref"]
+                or not isinstance(delivery.get("delivery"), dict)
+                or predecessor.get("branch") != branch
+                or predecessor.get("worktree") != str(worktree)
+            ):
+                raise SoloAIError(
+                    "Idle fixed slot has no matching delivered predecessor"
+                )
+    if repo.branch(worktree) != branch or repo.ref_head(
+        f"refs/heads/{branch}"
+    ) != repo.head(worktree):
+        raise SoloAIError("Fixed slot is not attached to its recorded branch")
+    if not repo.is_clean(worktree):
+        raise SoloAIError("Fixed slot contains uncommitted changes")
+    if unknown := _unknown_ignored(repo, worktree):
+        raise SoloAIError(
+            "Fixed slot contains protected or unknown ignored content:\n"
+            + "\n".join(f"- {item}" for item in unknown[:20])
+        )
+    old_head = repo.head(worktree)
+    if not repo.is_ancestor(old_head, base_head):
+        raise SoloAIError(
+            "Fixed slot HEAD is not an ancestor of the selected target; preserve it"
+        )
+    if old_head != base_head:
+        repo.git(["merge", "--ff-only", base_head], cwd=worktree)
+    if repo.head(worktree) != base_head or repo.branch(worktree) != branch:
+        raise SoloAIError("Fixed slot did not reach its selected base exactly")
+    worktree_identity = path_identity(worktree)
+    root_identity = path_identity(managed_root)
+    return store.update_task(
+        str(task["id"]),
+        candidate_head=base_head,
+        baseline_paths=repo.changed_paths(worktree),
+        slot_worktree_identity=worktree_identity,
+        slot_managed_root_identity=root_identity,
+        slot_worktree_resolved=str(worktree.resolve()),
+        slot_managed_root_resolved=str(managed_root.resolve()),
+        runtime_activation_pending=True,
+    )
 
 
 def _path_is_safe(path: str) -> bool:
@@ -2679,6 +2778,22 @@ def ready(
         if _is_in_place(task):
             _assert_in_place_binding(repo, store, task, session_id=session_id)
         _require_current_structured_root_review(repo, task, store=store)
+        if task.get("native_delivery"):
+            frozen_head = str(task.get("candidate_head") or "")
+            _assert_exact_candidate(repo, task, candidate_head=frozen_head)
+            config = load_repo_config(repo, cwd=worktree)
+            store.require_slot_layout(config)
+            _run_declared_secret_scanner(
+                repo, cwd=worktree, scanner=config.secret_scanner
+            )
+            require_safe(
+                repo,
+                cwd=worktree,
+                base=str(task["base_head"]),
+                allowlist=config.sensitive_allowlist,
+            )
+            _assert_exact_candidate(repo, task, candidate_head=frozen_head)
+            return store.mark_native_ready(task_id, head=frozen_head)
         if not repo.is_clean(worktree):
             raise SoloAIError("Commit all task changes before Ready")
         candidate_first = _candidate_first(task)
@@ -4118,6 +4233,62 @@ def _apply_delivery_intent_result(
     return candidate_result
 
 
+def _finish_native(
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    lease: str,
+    session_id: str | None,
+    cause: str | None,
+    reason: str | None,
+) -> dict[str, Any]:
+    """冻结同一任务代次并保留固定工位，交付由批次另行完成。"""
+
+    task_id = str(task["id"])
+    tail_request = _normalize_finish_delivery_intent(cause=cause, reason=reason)
+    if task["status"] == "active":
+        ready(repo, task_id=task_id, lease=lease, session_id=session_id)
+    with maintenance_lock(repo), candidate_admission_lock(repo):
+        with store.operation(task_id, lease, "finish") as frozen:
+            require_anchor(repo, frozen, require_verified_origin=True)
+            _require_current_structured_root_review(repo, frozen, store=store)
+            if frozen.get("status") not in {"ready", "waiting-integration"}:
+                raise SoloAIError("Native Finish requires a frozen Ready task")
+            head = str((frozen.get("native_delivery") or {}).get("ready_head") or "")
+            _assert_exact_candidate(repo, frozen, candidate_head=head)
+            _stop_registered_processes(store, frozen)
+            _assert_exact_candidate(repo, frozen, candidate_head=head)
+            waiting = store.mark_native_waiting(
+                task_id, head=head, tail_request=tail_request
+            )
+    from .native_batches import reconcile_native_batches
+
+    batch = reconcile_native_batches(repo, base_ref=str(waiting["base_ref"]))
+    if batch is not None:
+        delivered = store.task(task_id)
+        return {
+            **delivered,
+            "outcome": "delivered"
+            if delivered["status"] == "finished"
+            else "integrating",
+            "delivered": delivered["status"] == "finished",
+            "batch_id": batch["id"],
+            "batch_status": batch["status"],
+        }
+    return {
+        **waiting,
+        "outcome": "waiting_integration",
+        "delivered": False,
+        "waiting": {
+            "reason": "awaiting_native_batch",
+            "base_ref": waiting["base_ref"],
+            "ready_head": head,
+            "next_action": "seal or reconcile the exact native task-head batch",
+        },
+    }
+
+
 def finish(
     repo: GitRepo,
     *,
@@ -4132,6 +4303,16 @@ def finish(
     store = StateStore(repo)
     initial = store.task(task_id)
     host_actor = normalize_host_reference(host_actor)
+    if initial.get("native_delivery"):
+        return _finish_native(
+            repo,
+            store=store,
+            task=initial,
+            lease=lease,
+            session_id=session_id,
+            cause=cause,
+            reason=reason,
+        )
     if not initial.get("integration_policy"):
         initial = store.ensure_task_integration_policy(task_id, config)
     policy = initial.get("integration_policy") or {}

@@ -29,6 +29,7 @@ from solo_ai.repo import GitRepo
 _DWW_TEST_LAYERS = ("dww_fast", "dww_full", "dww_stress")
 _DWW_FAST_MODULES = frozenset(
     {
+        "tests/integration/test_native_lifecycle.py",
         "tests/unit/test_config.py",
         "tests/unit/test_native_delivery_state.py",
         "tests/unit/test_native_migration.py",

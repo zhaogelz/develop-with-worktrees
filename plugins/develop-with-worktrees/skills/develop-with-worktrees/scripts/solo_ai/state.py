@@ -1082,7 +1082,13 @@ class StateStore:
 
         return self.mutate(update)
 
-    def mark_native_waiting(self, task_id: str, *, head: str) -> dict[str, Any]:
+    def mark_native_waiting(
+        self,
+        task_id: str,
+        *,
+        head: str,
+        tail_request: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Finish 只提交待集成意图，不释放 slot 或创建候选。"""
 
         def update(state: dict[str, Any]) -> dict[str, Any]:
@@ -1093,6 +1099,11 @@ class StateStore:
                 raise SoloAIError("Frozen native Ready head changed")
             if delivery.get("batch_id"):
                 raise SoloAIError("Task is already owned by an integration batch")
+            if tail_request is not None:
+                previous = delivery.get("tail_request")
+                if previous is not None and previous != tail_request:
+                    raise SoloAIError("Native Finish tail intent changed")
+                delivery["tail_request"] = copy.deepcopy(tail_request)
             task["status"] = "waiting-integration"
             task["updated_at"] = utc_timestamp()
             slot["status"] = "waiting-integration"
