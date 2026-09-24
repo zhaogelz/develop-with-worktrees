@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 
 import pytest
@@ -16,18 +17,24 @@ from solo_ai.lifecycle import (
     start,
     withdraw_ready,
 )
-from solo_ai.native_batches import run_native_batch, seal_native_batch
+from solo_ai.native_batches import (
+    repair_native_batch,
+    run_native_batch,
+    seal_native_batch,
+)
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
 from solo_ai.util import ActionableSoloAIError, SoloAIError
 
 
-def _native_repo(path: Path, *, slots: int = 1) -> tuple[GitRepo, StateStore]:
+def _native_repo(
+    path: Path, *, slots: int = 1, commands: list[CommandSpec] | None = None
+) -> tuple[GitRepo, StateStore]:
     repo = GitRepo(path)
     initialize(
         repo,
         slots=slots,
-        commands=[CommandSpec(("git", "diff", "--check", "main...HEAD"))],
+        commands=commands or [CommandSpec(("git", "diff", "--check", "main...HEAD"))],
         accept=True,
         accept_static_only=False,
     )
@@ -427,3 +434,180 @@ def test_native_ready_withdrawal_requires_exact_owner_and_new_head(
         store.task(task["id"])["native_delivery"]["attempts"][-1]["ready_head"]
         == first_head
     )
+
+
+def test_native_full_repair_uses_new_head_and_keeps_failed_attempt(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _native_repo(
+        git_repo,
+        commands=[CommandSpec(("git", "grep", "-q", "pass", "--", "repair.txt"))],
+    )
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name="repair one shared script")
+    (Path(task["worktree"]) / "repair.txt").write_text("fail\n", encoding="utf-8")
+    source = commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: source needs integration repair",
+        paths=["repair.txt"],
+    )["candidate_head"]
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver this task"
+    )
+    with pytest.raises(SoloAIError):
+        run_native_batch(repo, batch_id=batch["id"])
+    failed = store.native_batch(batch["id"])
+    assert failed["status"] == "validation-failed"
+    failed_attempt = failed["validation_attempt"]
+    old_head = failed["integration_head"]
+    with pytest.raises(SoloAIError, match="unchanged inputs"):
+        run_native_batch(repo, batch_id=batch["id"])
+    assert store.native_batch(batch["id"])["validation_attempts"] == [failed_attempt]
+
+    patch = git_repo.parent / "repair.patch"
+    patch.write_text(
+        "diff --git a/repair.txt b/repair.txt\n"
+        "--- a/repair.txt\n"
+        "+++ b/repair.txt\n"
+        "@@ -1 +1 @@\n"
+        "-fail\n"
+        "+pass\n",
+        encoding="utf-8",
+    )
+    real_read = native_batches.read_validation_attempt
+    monkeypatch.setattr(
+        native_batches,
+        "read_validation_attempt",
+        lambda *_args: {"state": "planned"},
+    )
+    with pytest.raises(SoloAIError, match="stopped ordinary failure"):
+        repair_native_batch(
+            repo,
+            batch_id=batch["id"],
+            expected_head=old_head,
+            patch_file=patch,
+            paths=["repair.txt"],
+            message="test: fix integration compatibility",
+            reason="shared script needs a portable value",
+        )
+    monkeypatch.setattr(native_batches, "read_validation_attempt", real_read)
+    real_remember = native_batches.batch_workspace.remember_head
+
+    def interrupted_receipt(*_args: object) -> str:
+        raise SoloAIError("interrupted after repair commit")
+
+    monkeypatch.setattr(
+        native_batches.batch_workspace, "remember_head", interrupted_receipt
+    )
+    with pytest.raises(SoloAIError, match="interrupted after repair commit"):
+        repair_native_batch(
+            repo,
+            batch_id=batch["id"],
+            expected_head=old_head,
+            patch_file=patch,
+            paths=["repair.txt"],
+            message="test: fix integration compatibility",
+            reason="shared script needs a portable value",
+        )
+    assert store.native_batch(batch["id"])["status"] == "repairing"
+    assert repo.head(Path(batch["worktree"])) != old_head
+    monkeypatch.setattr(native_batches.batch_workspace, "remember_head", real_remember)
+    repaired = repair_native_batch(
+        repo,
+        batch_id=batch["id"],
+        expected_head=old_head,
+        patch_file=patch,
+        paths=["repair.txt"],
+        message="test: fix integration compatibility",
+        reason="shared script needs a portable value",
+    )
+    assert repaired["status"] == "composed"
+    repair_head = repaired["integration_head"]
+    assert repair_head != old_head
+    assert repo.is_ancestor(source, repair_head)
+    assert repaired["repair_records"][0]["validation_attempt"] == failed_attempt
+    assert len(store.read()["tasks"]) == 1
+    assert CandidateBatchStore(repo).read()["candidates"] == {}
+
+    completed = run_native_batch(repo, batch_id=batch["id"])
+    assert completed["status"] == "completed"
+    assert completed["validation_attempts"][0] == failed_attempt
+    assert len(completed["validation_attempts"]) == 2
+    assert completed["integration_head"] == repair_head
+    assert repo.head(git_repo) == repair_head
+    assert repo.is_ancestor(source, repo.head(git_repo))
+
+
+def test_native_merge_conflict_repair_preserves_both_source_parents(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo, slots=2)
+    approve(repo, load_verification_config(repo))
+    (git_repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    git(git_repo, "add", "shared.txt")
+    git(git_repo, "commit", "-m", "test: common baseline")
+    tasks = [start(repo, name=f"conflicting source {index}") for index in (1, 2)]
+    sources = []
+    for index, task in enumerate(tasks, start=1):
+        (Path(task["worktree"]) / "shared.txt").write_text(
+            f"source {index}\n", encoding="utf-8"
+        )
+        sources.append(
+            commit_task(
+                repo,
+                task_id=task["id"],
+                lease=task["lease"],
+                message=f"test: conflicting source {index}",
+                paths=["shared.txt"],
+            )["candidate_head"]
+        )
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"] for task in tasks], cause="user", reason="merge both"
+    )
+    with pytest.raises(ActionableSoloAIError) as conflict:
+        run_native_batch(repo, batch_id=batch["id"])
+    assert conflict.value.code == "NATIVE_MERGE_CONFLICT"
+    conflicted = store.native_batch(batch["id"])
+    assert conflicted["status"] == "conflicted"
+    worktree = Path(conflicted["worktree"])
+    original = (worktree / "shared.txt").read_text(encoding="utf-8")
+    resolved = "source 1\nsource 2\n"
+    patch = git_repo.parent / "conflict-repair.patch"
+    patch.write_text(
+        "diff --git a/shared.txt b/shared.txt\n"
+        + "".join(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                resolved.splitlines(keepends=True),
+                fromfile="a/shared.txt",
+                tofile="b/shared.txt",
+            )
+        ),
+        encoding="utf-8",
+    )
+    repaired = repair_native_batch(
+        repo,
+        batch_id=batch["id"],
+        expected_head=conflicted["integration_head"],
+        patch_file=patch,
+        paths=["shared.txt"],
+        message="test: resolve both source edits",
+        reason="both values are required",
+    )
+    assert repaired["status"] == "composing"
+    merge_head = repaired["integration_head"]
+    assert repo.git(
+        ["rev-list", "--parents", "-n", "1", merge_head], cwd=worktree
+    ).stdout.strip().split() == [
+        merge_head,
+        conflicted["integration_head"],
+        sources[1],
+    ]
+    completed = run_native_batch(repo, batch_id=batch["id"])
+    assert completed["status"] == "completed"
+    assert all(repo.is_ancestor(source, repo.head(git_repo)) for source in sources)
+    assert CandidateBatchStore(repo).read()["candidates"] == {}

@@ -5397,6 +5397,31 @@ def test_rewritten_base_blocks_ready_until_explicit_retarget(git_repo: Path) -> 
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
 
 
+@pytest.mark.dww_fast
+def test_retarget_to_different_worktree_can_finish(git_repo: Path) -> None:
+    repo = initialized(git_repo)
+    source_worktree = git_repo.parent / "source-base"
+    git(git_repo, "worktree", "add", "-b", "source", str(source_worktree), "main")
+    task = start(repo, name="retarget across worktrees", base="source")
+    commit_one(repo, task, "retargeted.txt", "delivered\n", "test: retargeted")
+
+    rebound = retarget(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        base="main",
+        confirm=f"{task['id']}:main",
+    )
+    assert Path(rebound["base_worktree_resolved"]) == git_repo.resolve()
+    assert rebound["base_worktree_identity"] == path_identity(git_repo)
+
+    ready(repo, task_id=task["id"], lease=task["lease"])
+    assert finish(repo, task_id=task["id"], lease=task["lease"])["status"] == (
+        "completed"
+    )
+    assert (git_repo / "retargeted.txt").read_text(encoding="utf-8") == "delivered\n"
+
+
 def test_exact_commit_can_complete_reviewed_current_base_merge(
     git_repo: Path,
 ) -> None:

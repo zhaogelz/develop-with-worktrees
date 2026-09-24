@@ -15,7 +15,15 @@ from .proof import new_validation_attempt_id, read_validation_attempt, validate
 from .repo import GitRepo
 from .safety import require_safe
 from .state import STATE_SCHEMA, StateStore, candidate_admission_lock
-from .util import ActionableSoloAIError, SoloAIError, read_json, utc_timestamp
+from .util import (
+    ActionableSoloAIError,
+    SoloAIError,
+    atomic_write_text,
+    ensure_within,
+    read_json,
+    sha256_text,
+    utc_timestamp,
+)
 
 
 _TAIL_CAUSES = {"round-complete", "user", "dependency", "deploy"}
@@ -429,6 +437,175 @@ def _release(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[st
     return store.native_batch(str(batch["id"]))
 
 
+def repair_native_batch(
+    repo: GitRepo,
+    *,
+    batch_id: str,
+    expected_head: str,
+    patch_file: Path,
+    paths: list[str],
+    message: str,
+    reason: str,
+) -> dict[str, Any]:
+    """在拥有者集成区提交精确修复；中断后用同一输入恢复，不重复应用补丁。"""
+    if not paths or len(set(paths)) != len(paths):
+        raise SoloAIError("Native repair requires unique exact paths")
+    if not message.strip() or not reason.strip() or "\n" in reason or "\r" in reason:
+        raise SoloAIError("Native repair requires a commit message and one-line reason")
+    if not patch_file.is_file() or patch_file.is_symlink():
+        raise SoloAIError("Native repair patch must be one readable regular file")
+    patch_text = patch_file.read_text(encoding="utf-8")
+    if not patch_text.strip() or any(
+        marker in patch_text
+        for marker in (
+            "GIT binary patch",
+            "rename from ",
+            "copy from ",
+            "new file mode 120000",
+        )
+    ):
+        raise SoloAIError("Native repair accepts only an exact text patch")
+    digest = sha256_text(patch_text)
+    store = StateStore(repo)
+    with integration_turn(repo, batch_id):
+        batch = store.native_batch(batch_id)
+        if batch["status"] not in {"validation-failed", "conflicted", "repairing"}:
+            raise SoloAIError("Native repair requires a failed Full or merge conflict")
+        batch_workspace.require_owner(repo, store, batch)
+        worktree = Path(str(batch["worktree"])).resolve()
+        current_head = repo.head(worktree)
+        if expected_head != batch["integration_head"] or (
+            current_head != expected_head and batch["status"] != "repairing"
+        ):
+            raise SoloAIError("Native repair HEAD no longer matches the frozen batch")
+        requested = set(paths)
+        for name in requested:
+            target = ensure_within(worktree / name, worktree)
+            if (
+                Path(name).is_absolute()
+                or ".." in Path(name).parts
+                or ".git" in Path(name).parts
+                or target == worktree
+            ):
+                raise SoloAIError(
+                    "Native repair path escapes its integration workspace"
+                )
+        intent = batch.get("repair_intent")
+        if intent is None:
+            if batch["status"] == "validation-failed":
+                attempt = read_validation_attempt(
+                    repo, str(batch.get("validation_attempt") or "")
+                )
+                if (
+                    attempt.get("state") != "completed"
+                    or attempt.get("result") != "failed"
+                    or attempt.get("task_id") != batch_id
+                    or not repo.is_clean(worktree)
+                ):
+                    raise SoloAIError(
+                        "Native Full is not a stopped ordinary failure with a clean workspace"
+                    )
+            elif batch["status"] == "conflicted" and not batch.get("merge_intent"):
+                raise SoloAIError("Native merge conflict lost its exact source intent")
+            snapshot = repo.local_dir / "repair-patches" / f"{batch_id}-{digest}.patch"
+            atomic_write_text(snapshot, patch_text)
+            numstat = repo.git(
+                ["apply", "--numstat", "-z", str(snapshot)], cwd=worktree
+            ).stdout
+            entries = [entry.split("\t", 2) for entry in numstat.split("\0") if entry]
+            if (
+                not entries
+                or any(len(entry) != 3 for entry in entries)
+                or {entry[2] for entry in entries} != requested
+            ):
+                raise SoloAIError(
+                    "Native repair patch paths differ from exact path list"
+                )
+            intent = {
+                "head": expected_head,
+                "paths": sorted(requested),
+                "patch_sha256": digest,
+                "patch_file": str(snapshot),
+                "message": message,
+                "reason": reason,
+                "previous_status": batch["status"],
+                "validation_attempt": batch.get("validation_attempt"),
+                "started_at": utc_timestamp(),
+            }
+            batch = store.update_batch(
+                batch_id, status="repairing", repair_intent=intent
+            )
+        elif any(
+            intent.get(key) != value
+            for key, value in (
+                ("head", expected_head),
+                ("paths", sorted(requested)),
+                ("patch_sha256", digest),
+                ("message", message),
+                ("reason", reason),
+            )
+        ):
+            raise SoloAIError("Native repair retry changed its frozen inputs")
+        snapshot = Path(str(intent["patch_file"]))
+        if sha256_text(snapshot.read_text(encoding="utf-8")) != digest:
+            raise SoloAIError("Native repair patch snapshot changed")
+        actual_head = repo.head(worktree)
+        if actual_head == expected_head:
+            reverse = repo.git(
+                ["apply", "--reverse", "--check", str(snapshot)],
+                cwd=worktree,
+                check=False,
+            )
+            if reverse.returncode:
+                repo.git(["apply", "--check", str(snapshot)], cwd=worktree)
+                repo.git(["apply", str(snapshot)], cwd=worktree)
+            repo.git(["add", "--", *sorted(requested)], cwd=worktree)
+            if repo.git(["ls-files", "-u"], cwd=worktree).stdout.strip():
+                raise SoloAIError("Native merge still has unresolved paths")
+            repo.git(["diff", "--cached", "--check"], cwd=worktree)
+            repo.git(["commit", "-m", message], cwd=worktree)
+            actual_head = repo.head(worktree)
+        if actual_head == expected_head or not repo.is_clean(worktree):
+            raise SoloAIError("Native repair did not produce one clean new commit")
+        parents = (
+            repo.git(["rev-list", "--parents", "-n", "1", actual_head], cwd=worktree)
+            .stdout.strip()
+            .split()
+        )
+        if intent["previous_status"] == "conflicted":
+            merge_intent = batch.get("merge_intent") or {}
+            if parents != [
+                actual_head,
+                expected_head,
+                merge_intent.get("source_head"),
+            ]:
+                raise SoloAIError("Native conflict repair lost exact merge parents")
+            batch = _record_merge_result(repo, store, batch)
+        elif parents != [actual_head, expected_head]:
+            raise SoloAIError("Native Full repair must be one child of validated HEAD")
+        else:
+            batch_workspace.remember_head(repo, batch, actual_head)
+            batch = store.update_batch(
+                batch_id, status="composed", integration_head=actual_head
+            )
+        record = {
+            "previous_head": expected_head,
+            "repair_head": actual_head,
+            "paths": sorted(requested),
+            "patch_sha256": digest,
+            "reason": reason,
+            "previous_status": intent["previous_status"],
+            "validation_attempt": intent.get("validation_attempt"),
+            "completed_at": utc_timestamp(),
+        }
+        return store.update_batch(
+            batch_id,
+            repair_intent=None,
+            repair_records=[*batch.get("repair_records", []), record],
+            validation_error=None,
+        )
+
+
 def run_native_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
     """按当前持久阶段恢复；验证失败必须先修复，绝不盲目重跑。"""
 
@@ -437,7 +614,7 @@ def run_native_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
         batch = store.native_batch(batch_id)
         if batch["status"] in {"sealed", "composing"}:
             batch = _compose(repo, store, batch)
-        if batch["status"] == "conflicted":
+        if batch["status"] in {"conflicted", "repairing"}:
             raise SoloAIError("Native merge conflict requires an exact managed repair")
         if batch["status"] == "composed":
             batch = _validate(repo, store, batch)

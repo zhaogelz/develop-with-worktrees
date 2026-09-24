@@ -2826,6 +2826,8 @@ def retarget(
             base_ref=base,
             base_head=base_head,
             base_worktree=str(base_worktree.resolve()),
+            base_worktree_resolved=str(base_worktree.resolve()),
+            base_worktree_identity=path_identity(base_worktree),
             status="active",
             ready_proof=None,
         )

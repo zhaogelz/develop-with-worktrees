@@ -764,6 +764,16 @@ def _parser() -> argparse.ArgumentParser:
         help="resume an interrupted sealed generation from recorded Git facts",
     )
     batch_recover.add_argument("--batch", required=True)
+    batch_repair = batch_sub.add_parser(
+        "repair",
+        help="apply one exact text patch in an owned native integration workspace",
+    )
+    batch_repair.add_argument("--batch", required=True)
+    batch_repair.add_argument("--expected-head", required=True)
+    batch_repair.add_argument("--patch-file", required=True, type=Path)
+    batch_repair.add_argument("--path", required=True, action="append")
+    batch_repair.add_argument("--message", required=True)
+    batch_repair.add_argument("--reason", required=True)
     recovery_source = batch_sub.add_parser(
         "recovery-source",
         help="verify one passed exact source for recovery installation",
@@ -2451,6 +2461,22 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
 
                 return run_native_batch(repo, batch_id=args.batch)
             return recover_batch(repo, batch_id=args.batch)
+        if args.batch_command == "repair":
+            if StateStore(repo).read()["schema_version"] != STATE_SCHEMA:
+                raise SoloAIError(
+                    "Batch repair is available only for native task batches"
+                )
+            from .native_batches import repair_native_batch
+
+            return repair_native_batch(
+                repo,
+                batch_id=args.batch,
+                expected_head=args.expected_head,
+                patch_file=args.patch_file,
+                paths=args.path,
+                message=args.message,
+                reason=args.reason,
+            )
         if args.batch_command == "recovery-source":
             return verified_recovery_source(repo, commit=args.commit)
         if args.batch_command == "reopen":

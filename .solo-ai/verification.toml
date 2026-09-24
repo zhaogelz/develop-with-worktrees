@@ -73,8 +73,9 @@ environment = [
 ]
 input_closure = "complete"
 # Windows 上完整 fast 层在受管并发负载下曾到 600 秒仍在正常推进；
-# 保留可终止上限，同时容纳该环境的实际波动。
-timeout_seconds = 900
+# 2026-09-24 在 900 秒仍有测试输出且被受管终止；保留明确上限，
+# 按实际机器负载容纳整套 fast 层。
+timeout_seconds = 1500
 resource_class = "normal"
 level = "ready"
 commands = [
@@ -110,7 +111,9 @@ input_paths = [
 ]
 environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
 input_closure = "declared"
-timeout_seconds = 900
+# 2026-09-24: 本组第一条真实集成命令在 900 秒时仍正常推进且被终止。
+# 保留受管终止上限，按该次实测把单命令限时扩至 1500 秒。
+timeout_seconds = 1500
 resource_class = "heavy"
 level = "full"
 full_scope = "integration"
