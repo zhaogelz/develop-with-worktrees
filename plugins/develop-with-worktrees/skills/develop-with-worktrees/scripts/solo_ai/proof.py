@@ -719,6 +719,8 @@ def _runtime_adapter_policy(
         "command": _command_policy(command),
         "input_paths": list(adapter.input_paths),
         "input_hashes": input_hashes,
+        "environment": list(adapter.environment),
+        "required_outputs": list(adapter.required_outputs),
         "timeout_seconds": adapter.timeout_seconds,
         "context_contract": "dww-runtime-adapter-v1" if command else None,
     }

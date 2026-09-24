@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import fnmatch
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from .config import CommandSpec, RepoConfig, load_repo_config, load_verification_config
 from .proof import require_approved_plan
 from .repo import GitRepo
+from .state import StateStore
 from .util import (
     SoloAIError,
     atomic_write_json,
@@ -23,6 +25,10 @@ from .util import (
 ADAPTER_CONTEXT_SCHEMA = 1
 ADAPTER_RECEIPT_SCHEMA = 1
 BATCH_PORT_BLOCK_OFFSET = 3200
+
+
+def _environment_digest(names: tuple[str, ...]) -> str:
+    return sha256_text(stable_json({name: os.environ.get(name) for name in names}))
 
 
 def _context_record(operation: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -127,6 +133,7 @@ def _invoke(
     timeout_seconds: float,
     context: dict[str, Any],
     reusable_success: bool,
+    required_outputs: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     context_record = _context_record(operation, context)
     context_digest = sha256_text(stable_json(context_record))
@@ -152,7 +159,11 @@ def _invoke(
             raise SoloAIError(
                 "Stored runtime Adapter receipt identity changed; inspect it before retrying"
             )
-        if existing.get("result") == "passed" and _logs_exist(existing):
+        if (
+            existing.get("result") == "passed"
+            and _logs_exist(existing)
+            and all((cwd / output).exists() for output in required_outputs)
+        ):
             return {**existing, "reused": True}
     pending = repo.local_dir / "logs" / "pending" / f"{invocation_id}.log"
     result = run_logged(
@@ -170,6 +181,11 @@ def _invoke(
         },
     )
     log_path, log_digest = _content_address_log(repo, pending)
+    missing_outputs = (
+        [output for output in required_outputs if not (cwd / output).exists()]
+        if result.returncode == 0
+        else []
+    )
     receipt = {
         "schema_version": ADAPTER_RECEIPT_SCHEMA,
         "invocation_id": invocation_id,
@@ -178,7 +194,9 @@ def _invoke(
         "context_digest": context_digest,
         "command": command.redacted(),
         "command_digest": command.fingerprint,
-        "result": "passed" if result.returncode == 0 else "failed",
+        "result": (
+            "passed" if result.returncode == 0 and not missing_outputs else "failed"
+        ),
         "exit_code": result.returncode,
         "timed_out": result.timed_out,
         "duration_seconds": round(result.duration_seconds, 3),
@@ -186,10 +204,14 @@ def _invoke(
         "log_sha256": log_digest,
         "created_at": utc_timestamp(),
     }
+    if missing_outputs:
+        receipt["missing_outputs"] = missing_outputs
     atomic_write_json(receipt_path, receipt)
-    if result.returncode != 0:
+    if result.returncode != 0 or missing_outputs:
         raise SoloAIError(
-            f"Runtime Adapter {operation} {'timed out' if result.timed_out else 'failed'}. Local redacted log: {log_path}"
+            f"Runtime Adapter {operation} "
+            f"{'timed out' if result.timed_out else 'did not produce declared outputs' if missing_outputs else 'failed'}. "
+            f"Local redacted log: {log_path}"
         )
     return {**receipt, "reused": False}
 
@@ -219,20 +241,30 @@ def _task_activation_request(
     )
     slot_number = int(str(task["slot_id"]))
     slot_port_base = config.port_base + (slot_number - 1) * 100
+    environment_digest = _environment_digest(config.runtime_adapter.environment)
     return (
         config,
         command,
         {
-            "reason": "task-started",
+            "reason": (
+                "task-runtime-requested"
+                if task.get("native_delivery")
+                else "task-started"
+            ),
             "task_id": task["id"],
             "task_mode": task.get("mode"),
             "slot_id": task["slot_id"],
+            "slot_generation": task.get("slot_generation"),
             "worktree": str(worktree.resolve()),
             "base_ref": task.get("base_ref"),
             "base_head": task.get("base_head"),
+            "source_head": task.get("candidate_head"),
             "port_block_start": slot_port_base,
             "port_block_end": slot_port_base + 99,
             "adapter_inputs": adapter_inputs,
+            "environment_names": list(config.runtime_adapter.environment),
+            "environment_digest": environment_digest,
+            "rebuildable_outputs": list(config.cleanup_owned_paths),
         },
     )
 
@@ -281,8 +313,52 @@ def activate_task_runtime(
         timeout_seconds=config.runtime_adapter.timeout_seconds,
         context=context,
         reusable_success=True,
+        required_outputs=config.runtime_adapter.required_outputs,
     )
     return {"configured": True, **receipt}
+
+
+def prepare_task_runtime(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
+    """仅在项目实际使用任务运行时前执行声明的 Adapter 命令。"""
+
+    from .cleanup import require_managed_directory_identity
+    from .lifecycle import _assert_exact_candidate, _config_and_mode
+
+    _config_and_mode(repo)
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "runtime-prepare") as task:
+        if not task.get("native_delivery") or task.get("status") not in {
+            "active",
+            "ready",
+        }:
+            raise SoloAIError("Runtime prepare requires an active native task")
+        worktree = Path(str(task["worktree"]))
+        require_managed_directory_identity(
+            worktree,
+            managed_root=worktree.parent,
+            expected_resolved=task.get("slot_worktree_resolved"),
+            expected_root_resolved=task.get("slot_managed_root_resolved"),
+            expected_identity=task.get("slot_worktree_identity"),
+            expected_root_identity=task.get("slot_managed_root_identity"),
+        )
+        head = str(task.get("candidate_head") or "")
+        _assert_exact_candidate(repo, task, candidate_head=head)
+        try:
+            receipt = activate_task_runtime(repo, task=task)
+            _assert_exact_candidate(repo, task, candidate_head=head)
+        except Exception:
+            store.update_task(
+                task_id,
+                runtime_activation={
+                    "configured": True,
+                    "operation": "activate",
+                    "failed": True,
+                    "deferred": False,
+                },
+            )
+            raise
+        store.update_task(task_id, runtime_activation=receipt)
+        return {"task_id": task_id, "runtime_activation": receipt}
 
 
 def release_task_runtime(
@@ -298,6 +374,14 @@ def release_task_runtime(
     source_root = adapter_source.resolve() if adapter_source is not None else worktree
     config = load_repo_config(repo, cwd=source_root)
     command = config.runtime_adapter.release
+    if task.get("native_delivery") and (
+        (task.get("runtime_activation") or {}).get("deferred") is True
+    ):
+        return {
+            "configured": False,
+            "operation": "release",
+            "deferred": True,
+        }
     repair = task.get("runtime_adapter_repair") or {}
     if repair.get("release_required") and command is None:
         raise SoloAIError("Runtime Adapter repair removed its required release command")
@@ -324,6 +408,8 @@ def release_task_runtime(
         "reason": "runtime-adapter-repair" if repair else reason,
         "task_id": task["id"],
         "task_mode": task.get("mode"),
+        "slot_id": task.get("slot_id"),
+        "slot_generation": task.get("slot_generation"),
         "worktree": str(worktree.resolve()),
         "base_ref": task.get("base_ref"),
         "base_head": task.get("base_head"),
@@ -331,6 +417,7 @@ def release_task_runtime(
         "candidate_head": selected_candidate.get("head") or task.get("candidate_head"),
         "registered_processes": copy.deepcopy(task.get("processes", [])),
         "adapter_inputs": adapter_inputs,
+        "environment_digest": _environment_digest(config.runtime_adapter.environment),
     }
     if adapter_source is not None:
         context["adapter_source"] = str(source_root)
@@ -441,6 +528,7 @@ def _batch_context(
         "port_block_start": port_block_start,
         "port_block_end": port_block_start + 99,
         "adapter_inputs": adapter_inputs,
+        "environment_digest": _environment_digest(config.runtime_adapter.environment),
     }
     if batch.get("worktree_mode") == "reusable":
         from .batch_workspace import context_binding
@@ -628,6 +716,9 @@ def verify_runtime_effective(repo: GitRepo, *, candidate_id: str) -> dict[str, A
             "current_base_head": current_head,
             "base_worktree": str(base_worktree.resolve()),
             "adapter_inputs": adapter_inputs,
+            "environment_digest": _environment_digest(
+                config.runtime_adapter.environment
+            ),
         },
         reusable_success=False,
     )

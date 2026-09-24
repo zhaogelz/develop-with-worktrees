@@ -100,7 +100,7 @@ from .proof import (
 )
 from .repo import GitRepo
 from .routing import detect_existing_workflows
-from .runtime_adapter import verify_runtime_effective
+from .runtime_adapter import prepare_task_runtime, verify_runtime_effective
 from .state import FINAL_TASK_STATES, STATE_SCHEMA, StateStore
 from .status_views import status_view as query_status_view
 from .util import (
@@ -938,9 +938,14 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     runtime = sub.add_parser(
-        "runtime", help="ask the project Adapter to verify a delivered runtime"
+        "runtime", help="prepare a task runtime or verify delivered runtime"
     )
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_prepare = runtime_sub.add_parser(
+        "prepare", help="run a native task Adapter when its runtime is first needed"
+    )
+    runtime_prepare.add_argument("--task", required=True)
+    runtime_prepare.add_argument("--lease", required=True)
     runtime_verify = runtime_sub.add_parser(
         "verify", help="verify that one integrated candidate is effective at runtime"
     )
@@ -2518,6 +2523,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return CandidateBatchStore(repo).metrics()
         raise SoloAIError(f"Unknown batch command: {args.batch_command}")
     if args.command == "runtime":
+        if args.runtime_command == "prepare":
+            return prepare_task_runtime(repo, task_id=args.task, lease=args.lease)
         if args.runtime_command == "verify":
             return verify_runtime_effective(repo, candidate_id=args.candidate)
         raise SoloAIError(f"Unknown runtime command: {args.runtime_command}")

@@ -57,6 +57,8 @@ class RuntimeAdapterSpec:
     batch_release: CommandSpec | None
     verify_effective: CommandSpec | None
     input_paths: tuple[str, ...]
+    environment: tuple[str, ...]
+    required_outputs: tuple[str, ...]
     timeout_seconds: float
 
 
@@ -482,6 +484,21 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
         runtime_adapter_raw.get("input_paths", []),
         field="runtime_adapter.input_paths",
     )
+    runtime_environment = _strings(
+        runtime_adapter_raw.get("environment", []),
+        field="runtime_adapter.environment",
+        allow_empty=True,
+    )
+    if any(not name.isidentifier() for name in runtime_environment):
+        raise SoloAIError(
+            "runtime_adapter.environment must contain environment variable names"
+        )
+    runtime_required_outputs = _cleanup_paths(
+        runtime_adapter_raw.get("required_outputs"),
+        field="runtime_adapter.required_outputs",
+        default=(),
+        allow_patterns=False,
+    )
     if (
         runtime_activate
         or runtime_release
@@ -574,6 +591,8 @@ def load_repo_config(repo: GitRepo, *, cwd: Path | None = None) -> RepoConfig:
             batch_release=runtime_batch_release,
             verify_effective=runtime_verify_effective,
             input_paths=runtime_input_paths,
+            environment=runtime_environment,
+            required_outputs=runtime_required_outputs,
             timeout_seconds=runtime_timeout_seconds,
         ),
     )
@@ -920,6 +939,8 @@ integration = {{ mode = "batched", batch_size = 3, candidate_capacity = 10, seal
 # batch_release = ["uv", "run", "scripts/dww-runtime-adapter.py", "batch-release"]
 # verify_effective = ["uv", "run", "scripts/dww-runtime-adapter.py", "verify-effective"]
 # input_paths = ["scripts/dww-runtime-adapter.py", "deploy/**"]
+# environment = ["NODE_ENV", "TARGET_ARCH"]
+# required_outputs = ["dist"]
 # timeout_seconds = 300
 
 [lifecycle]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from solo_ai.native_batches import (
     seal_native_batch,
 )
 from solo_ai.repo import GitRepo
+from solo_ai.runtime_adapter import prepare_task_runtime
 from solo_ai.state import STATE_SCHEMA, StateStore
 from solo_ai.util import ActionableSoloAIError, SoloAIError
 
@@ -42,6 +44,84 @@ def _native_repo(
     store.mutate(lambda state: state.update(schema_version=STATE_SCHEMA))
     store.ensure_slots(load_repo_config(repo))
     return repo, store
+
+
+def test_native_start_defers_adapter_until_runtime_is_used(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _native_repo(git_repo)
+    script = git_repo / "adapter.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "context_path = Path(sys.argv[-1])\n"
+        "context = json.loads(context_path.read_text(encoding='utf-8'))\n"
+        "calls = context_path.parent.parent / 'calls.txt'\n"
+        "if sys.argv[1] == 'activate':\n"
+        "    output = Path(context['worktree']) / 'dist'\n"
+        "    output.mkdir(exist_ok=True)\n"
+        "    (output / 'bundle.txt').write_text(str(context['source_head']), encoding='utf-8')\n"
+        "with calls.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(sys.argv[1] + ':' + str(context.get('slot_generation')) + '\\n')\n",
+        encoding="utf-8",
+    )
+    (git_repo / "lock.txt").write_text("dependency-v1\n", encoding="utf-8")
+    ignore = git_repo / ".gitignore"
+    previous_ignore = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+    ignore.write_text(previous_ignore + "dist/\n", encoding="utf-8")
+    config_path = git_repo / ".solo-ai" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "cleanup = { owned_paths = [] }", 'cleanup = { owned_paths = ["dist"] }'
+        )
+        + "\n[runtime_adapter]\n"
+        + f"activate = ['{Path(sys.executable).as_posix()}', 'adapter.py', 'activate']\n"
+        + f"release = ['{Path(sys.executable).as_posix()}', 'adapter.py', 'release']\n"
+        + "input_paths = ['adapter.py', 'lock.txt']\n"
+        + "environment = ['DWW_TEST_RUNTIME_SIGNATURE']\n"
+        + "required_outputs = ['dist']\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "adapter.py", "lock.txt", ".gitignore", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: configure project runtime adapter")
+    calls = repo.local_dir / "runtime-adapter" / "calls.txt"
+    monkeypatch.setenv("DWW_TEST_RUNTIME_SIGNATURE", "first")
+
+    task = start(repo, name="defer adapter until needed")
+    assert task["runtime_activation"]["deferred"] is True
+    assert not calls.exists()
+    approve(repo, load_verification_config(repo))
+    first = prepare_task_runtime(repo, task_id=task["id"], lease=task["lease"])
+    second = prepare_task_runtime(repo, task_id=task["id"], lease=task["lease"])
+    assert first["runtime_activation"]["reused"] is False
+    assert second["runtime_activation"]["reused"] is True
+    assert calls.read_text(encoding="utf-8").splitlines() == ["activate:1"]
+
+    worktree = Path(task["worktree"])
+    (worktree / "dist" / "bundle.txt").unlink()
+    (worktree / "dist").rmdir()
+    rebuilt = prepare_task_runtime(repo, task_id=task["id"], lease=task["lease"])
+    assert rebuilt["runtime_activation"]["reused"] is False
+
+    monkeypatch.setenv("DWW_TEST_RUNTIME_SIGNATURE", "second")
+    third = prepare_task_runtime(repo, task_id=task["id"], lease=task["lease"])
+    assert third["runtime_activation"]["reused"] is False
+    (worktree / "feature.txt").write_text("ready\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: source after prepare",
+        paths=["feature.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "activate:1",
+        "activate:1",
+        "activate:1",
+        "release:1",
+    ]
+    assert store.task(task["id"])["runtime_release"]["result"] == "passed"
 
 
 def test_native_fixed_slot_waits_for_real_delivery_then_reuses_branch(

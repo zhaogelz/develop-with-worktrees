@@ -18,6 +18,8 @@ batch_activate = ["uv", "run", "scripts/dww-runtime-adapter.py", "batch-activate
 batch_release = ["uv", "run", "scripts/dww-runtime-adapter.py", "batch-release"]
 verify_effective = ["uv", "run", "scripts/dww-runtime-adapter.py", "verify-effective"]
 input_paths = ["scripts/dww-runtime-adapter.py", "deploy/**"]
+environment = ["NODE_ENV", "TARGET_ARCH"]
+required_outputs = ["dist"]
 timeout_seconds = 300
 ```
 
@@ -27,20 +29,40 @@ approval drift, timeout, nonzero exit, or task-tree contamination fail closed.
 The Adapter may create project-owned ignored runtime data, but must not mutate
 the tracked task tree or DWW state.
 
+For native fixed-slot tasks, include the project's lock files and preparation
+script in `input_paths`. The context contains their hashes, the selected
+environment digest, the slot generation, the exact source HEAD, and
+`rebuildable_outputs` from `cleanup.owned_paths`. The project Adapter decides
+whether to reuse dependency caches or rebuild those declared outputs. DWW does
+not delete caches, configuration, databases, uploads, or unknown files.
+Projects that read source directly can leave `activate` unset.
+`required_outputs` names optional top-level paths that must exist for a
+successful preparation receipt to be reused. Missing paths rerun the Adapter;
+the Adapter itself decides what to rebuild and must produce them before success.
+
 ## Task operations
 
 | Operation | When it runs | Key facts | Required outcome |
 |---|---|---|---|
-| `activate` | isolated Start after task, branch, worktree, slot, and anchor exist; before task becomes active | task/slot IDs, worktree, base ref/head, task port block, input hashes | successful receipt and a second clean identity check |
+| `activate` | legacy isolated Start; for native tasks, first `runtime prepare --task <id> --lease <lease>` or `dev start` | task/slot IDs and generation, source HEAD, worktree, base, task port block, input and environment digests | successful receipt and a second clean identity check |
 | `release` | after immutable candidate ref exists; before candidate activation and slot release | task, candidate identity, worktree, base, input hashes | resources released without contaminating the task tree |
 | `batch_activate` | before combined Full | batch/candidate IDs, frozen base, integration head, batch port block, runtime cycle | resources ready for this exact cycle |
 | `batch_release` | after Full attempt and before final batch transition | same cycle plus validation outcome/error | resources released for that exact outcome |
 | `verify_effective` | only after source is delivered into current base | delivered candidate and project runtime facts | fresh project-defined effectiveness evidence |
 
-At Start, `candidate_head` is deliberately absent: no candidate exists yet.
-`base_head` is the frozen task baseline. A real candidate first enters the
-context at release after Ready or Finish fixes it. Do not infer candidate identity
-from a task's internal bookkeeping field.
+Native Start performs only Git and identity preparation. It records whether
+activation is configured without running the Adapter. `runtime prepare` is an
+explicit first-use entry point; `dev start` calls it automatically. Repeating
+prepare with unchanged command, tracked inputs, environment digest, source HEAD,
+and task generation reuses its successful receipt. A new generation or changed
+input runs it again. The Adapter must check any project outputs it needs before
+reporting success and may replace only declared rebuildable outputs. When no
+native prepare ran, Finish has no task runtime to release.
+
+At legacy Start, `candidate_head` is deliberately absent: no candidate exists
+yet. `base_head` is the frozen task baseline. A real candidate first enters the
+context at release after Ready or Finish fixes it. Do not infer candidate
+identity from a task's internal bookkeeping field.
 
 ## Port blocks and workspace identity
 

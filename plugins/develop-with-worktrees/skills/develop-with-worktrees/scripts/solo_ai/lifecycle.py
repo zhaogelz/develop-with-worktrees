@@ -1341,9 +1341,17 @@ def _complete_runtime_activation(
     except Exception as exc:
         store.quarantine(str(task["id"]), str(exc))
         raise
-    from .runtime_adapter import activate_task_runtime
+    if task.get("native_delivery"):
+        config = load_repo_config(repo, cwd=Path(str(task["worktree"])))
+        runtime_activation = {
+            "configured": config.runtime_adapter.activate is not None,
+            "operation": "activate",
+            "deferred": True,
+        }
+    else:
+        from .runtime_adapter import activate_task_runtime
 
-    runtime_activation = activate_task_runtime(repo, task=task)
+        runtime_activation = activate_task_runtime(repo, task=task)
     refreshed = store.task(str(task["id"]))
     try:
         _assert_starting_task_identity(repo, refreshed)
@@ -4346,6 +4354,14 @@ def _finish_native(
             head = str((frozen.get("native_delivery") or {}).get("ready_head") or "")
             _assert_exact_candidate(repo, frozen, candidate_head=head)
             _stop_registered_processes(store, frozen)
+            frozen = store.task(task_id)
+            _assert_exact_candidate(repo, frozen, candidate_head=head)
+            from .runtime_adapter import release_task_runtime
+
+            runtime_release = release_task_runtime(
+                repo, task=frozen, reason="native-finish"
+            )
+            store.update_task(task_id, runtime_release=runtime_release)
             _assert_exact_candidate(repo, frozen, candidate_head=head)
             waiting = store.mark_native_waiting(
                 task_id, head=head, tail_request=tail_request
@@ -5593,6 +5609,10 @@ def _ready(kind: str, target: str | None, *, port: int) -> bool:
 def dev_start(repo: GitRepo, *, task_id: str, lease: str) -> dict[str, Any]:
     _, _, _ = _config_and_mode(repo)
     store = StateStore(repo)
+    if store.task(task_id).get("native_delivery"):
+        from .runtime_adapter import prepare_task_runtime
+
+        prepare_task_runtime(repo, task_id=task_id, lease=lease)
     with store.operation(task_id, lease, "dev-start") as task:
         if _is_in_place(task):
             raise SoloAIError(
