@@ -401,23 +401,20 @@ def test_plugin_install_and_clean_uninstall_in_temporary_codex_home(
     prepared = run_runner("ready", "--task", task_id, "--lease", lease, cwd=worktree)
     assert prepared.returncode == 0, prepared.stderr
     finished = run_runner(
-        "--json", "finish", "--task", task_id, "--lease", lease, cwd=worktree
-    )
-    assert finished.returncode == 0, finished.stderr
-    candidate_id = json.loads(finished.stdout)["result"]["candidate_id"]
-    tail = run_runner(
         "--json",
-        "batch",
-        "seal",
-        "--candidate",
-        candidate_id,
+        "finish",
+        "--task",
+        task_id,
+        "--lease",
+        lease,
         "--cause",
         "round-complete",
         "--reason",
         "the installation smoke task is the complete round",
+        cwd=worktree,
     )
-    assert tail.returncode == 0, tail.stderr
-    assert json.loads(tail.stdout)["result"]["status"] == "completed"
+    assert finished.returncode == 0, finished.stderr
+    assert json.loads(finished.stdout)["result"]["outcome"] == "delivered"
     assert (smoke_repo / "smoke.txt").exists()
     root_evidence = smoke_repo / "installed-root-evidence.json"
     root_evidence.write_text(

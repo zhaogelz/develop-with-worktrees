@@ -214,3 +214,112 @@ def test_native_migration_labels_legacy_non_ancestor_delivery(
     assert repo.ref_head(f"refs/heads/{old_branch}") == old_head
     assert repo.head(slot_path) == repo.head(git_repo)
     assert repo.branch(slot_path) == preview["slots"][0]["fixed_branch"]
+
+
+def test_native_migration_waits_for_failed_batch_but_keeps_reused_slot_history(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _legacy_repo(git_repo)
+    slot_path = git_repo.parent / "mixed-legacy-slot"
+    repo.git(["worktree", "add", "--detach", str(slot_path), "main"])
+    state = store._empty()
+    state["slots"]["01"] = {
+        "id": "01",
+        "path": str(slot_path),
+        "status": "idle",
+        "task_id": None,
+        "released_candidate_task_id": "task-newer",
+    }
+    atomic_write_json(store.path, state)
+    old_ref = "refs/dww/candidates/candidate-old"
+    old_head = repo.head()
+    repo.git(["update-ref", old_ref, old_head])
+    old_candidate = {
+        "candidate_id": "candidate-old",
+        "task_id": "task-older",
+        "branch": "legacy/older",
+        "head": old_head,
+        "ref": old_ref,
+        "base_ref": "main",
+        "status": "integrated",
+        "delivered": True,
+    }
+    pool = {
+        "candidates": {"candidate-old": old_candidate},
+        "batches": {"batch-failed": {"id": "batch-failed", "status": "failed"}},
+    }
+    monkeypatch.setattr(CandidateBatchStore, "read", lambda _self: pool)
+    monkeypatch.setattr(
+        CandidateBatchStore,
+        "project_candidates",
+        lambda _self, *_args, **_kwargs: [old_candidate],
+    )
+
+    blocked = preview_native_migration(repo, base_ref="main")
+    assert blocked["status"] == "blocked"
+    assert blocked["blockers"] == [
+        {
+            "kind": "unsettled-legacy-batch",
+            "batch_id": "batch-failed",
+            "status": "failed",
+        }
+    ]
+    assert store.read()["schema_version"] != STATE_SCHEMA
+
+    pool["batches"]["batch-failed"]["status"] = "retired"
+    ready = preview_native_migration(repo, base_ref="main")
+    assert ready["status"] == "ready"
+    enabled = enable_native_migration(
+        repo, base_ref="main", confirm=f"main:{ready['base_head']}"
+    )
+    assert enabled["status"] == "enabled"
+    assert enabled["migration"]["legacy_candidate_count"] == 1
+    assert enabled["migration"]["legacy_batch_count"] == 1
+    assert repo.ref_head(old_ref) == old_head
+    assert repo.branch(slot_path) == ready["slots"][0]["fixed_branch"]
+
+
+def test_native_migration_rejects_older_candidate_as_reused_slot_owner(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _legacy_repo(git_repo)
+    slot_path = git_repo.parent / "reused-attached-slot"
+    old_branch = "legacy/older-owner"
+    repo.git(["worktree", "add", "-b", old_branch, str(slot_path), "main"])
+    old_head = repo.head(slot_path)
+    state = store._empty()
+    state["slots"]["01"] = {
+        "id": "01",
+        "path": str(slot_path),
+        "status": "idle",
+        "task_id": None,
+        "released_candidate_task_id": "task-newer",
+    }
+    atomic_write_json(store.path, state)
+    old_candidate = {
+        "candidate_id": "candidate-old",
+        "task_id": "task-older",
+        "branch": old_branch,
+        "head": old_head,
+        "base_ref": "main",
+        "status": "integrated",
+        "delivered": True,
+    }
+    monkeypatch.setattr(
+        CandidateBatchStore,
+        "read",
+        lambda _self: {"candidates": {"candidate-old": old_candidate}, "batches": {}},
+    )
+    monkeypatch.setattr(
+        CandidateBatchStore,
+        "project_candidates",
+        lambda _self, *_args, **_kwargs: [old_candidate],
+    )
+
+    preview = preview_native_migration(repo, base_ref="main")
+    assert preview["status"] == "blocked"
+    assert {"kind": "attached-legacy-slot-unsettled", "slot_id": "01"} in preview[
+        "blockers"
+    ]
+    assert repo.branch(slot_path) == old_branch
+    assert store.read()["schema_version"] != STATE_SCHEMA
