@@ -1018,8 +1018,8 @@ An exact full batch freezes automatically. A smaller tail freezes only on an exp
 """
 
 
-def managed_block() -> str:
-    """当前 AGENTS.md 托管块：只保留执行时必须遵守的边界。"""
+def _pre_native_delivery_managed_block() -> str:
+    """固定工位成为默认前的完整托管块，仅用于精确升级。"""
 
     return f"""{MANAGED_START}
 ## Isolated coding tasks
@@ -1035,10 +1035,48 @@ An exact full batch freezes automatically. A smaller tail freezes only on an exp
 """
 
 
+def managed_block() -> str:
+    """当前原生交付托管块，保留旧块的精确升级入口。"""
+
+    previous = _pre_native_delivery_managed_block()
+    prior_rule = (
+        "An exact full batch freezes automatically. A smaller tail freezes only on "
+        "an explicit `round-complete`, `user`, `deploy`, or `dependency` cause with "
+        "one short reason; heartbeat, idle time, and task counts never seal a batch. "
+        "Ordinary completion does not request immediate integration: without a "
+        "cause, `Finish` publishes its candidate and releases its task worktree. Use "
+        "`round-complete` only after the current round has ended and its candidate "
+        "lane has no active producer; use `user` only when the user explicitly asks "
+        "to integrate now without waiting. Do not infer that exception from ordinary "
+        "completion or review wording. Candidate publication is not delivery: the "
+        "coordinator that freezes a full batch or tail follows integration, inspects "
+        "failures, and repairs deterministically within the agreed scope."
+    )
+    native_rule = (
+        "An exact full batch freezes automatically. A smaller tail freezes only on "
+        "an explicit `round-complete`, `user`, `deploy`, or `dependency` cause with "
+        "one short reason; heartbeat, idle time, and task counts never seal a batch. "
+        "Ordinary completion does not request immediate integration. In native "
+        "state, Ready freezes the exact task head and `Finish` leaves its fixed slot "
+        "owned while the task waits for real merge, Full, promotion, and release. In "
+        "legacy state, `Finish` publishes an immutable candidate and releases its "
+        "worktree. Use `round-complete` only after the current round has ended and "
+        "its lane has no active producer; use `user` only when the user explicitly "
+        "asks to integrate now without waiting. Do not infer that exception from "
+        "ordinary completion or review wording. Candidate publication is not "
+        "delivery: the coordinator that freezes a full batch or tail follows "
+        "integration, inspects failures, and repairs deterministically within the "
+        "agreed scope."
+    )
+    if previous.count(prior_rule) != 1:
+        raise RuntimeError("Previous managed block no longer has the delivery rule")
+    return previous.replace(prior_rule, native_rule)
+
+
 def _pre_objective_protocol_managed_block() -> str:
     """目标主锚点协议接入前的当前托管块；只用于无歧义升级。"""
 
-    current = managed_block()
+    current = _pre_native_delivery_managed_block()
     current_rule = (
         "Keep one task anchor per task. `Start` records the known purpose, scope, "
         "acceptance criteria, baseline, and progress; update it only when that "
@@ -1153,6 +1191,8 @@ def managed_agents_status(existing: str) -> str:
     block = existing[start:end].replace("\r\n", "\n") + "\n"
     if block == managed_block():
         return "current"
+    if block == _pre_native_delivery_managed_block():
+        return "known-legacy-native-delivery"
     if block == _pre_objective_protocol_managed_block():
         return "known-legacy-objective-protocol"
     if block == _pre_batch_delivery_managed_block():

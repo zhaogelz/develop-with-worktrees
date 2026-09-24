@@ -66,7 +66,7 @@ from solo_ai.lifecycle import (
     warm_slot,
 )
 from solo_ai.repo import GitRepo
-from solo_ai.state import STATE_SCHEMA, StateStore
+from solo_ai.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
 from solo_ai.status_views import status_view
 from solo_ai.util import (
     ActionableSoloAIError,
@@ -88,6 +88,9 @@ def initialized(path: Path) -> GitRepo:
     )
     assert result["decision"] == "adopted"
     # Most lifecycle tests exercise the legacy immediate-promotion transaction.
+    StateStore(repo).mutate(
+        lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
+    )
     # Candidate-first defaults have their own integration suite.
     config = path / ".solo-ai" / "config.toml"
     policy = config.read_text(encoding="utf-8")
@@ -4196,6 +4199,9 @@ def test_finish_retains_standard_tool_caches_created_by_validation(
     initialize(
         repo, slots=3, commands=[cache_command], accept=True, accept_static_only=False
     )
+    StateStore(repo).mutate(
+        lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
+    )
     task = start(repo, name="validate with standard caches")
     commit_one(repo, task, "cached.txt", "cached\n", "test: cache validation")
 
@@ -4220,6 +4226,7 @@ def test_dirty_primary_bootstrap_is_pending_then_first_finish_integrates(
         repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False
     )
     assert result["decision"] == "pending-primary-clean"
+    assert StateStore(repo).read()["schema_version"] == LEGACY_STATE_SCHEMA
     assert not (git_repo / ".solo-ai").exists()
     task = start(repo, name="isolated task")
     commit_one(repo, task, "task.txt", "isolated\n", "feat: isolated")
@@ -4243,6 +4250,9 @@ def test_linked_worktree_owns_initialization_and_batched_delivery(
 
     adopted = initialize(
         repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False
+    )
+    StateStore(repo).mutate(
+        lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
     )
     task = start(repo, name="linked release change")
     commit_one(repo, task, "release.txt", "release\n", "test: linked release")
@@ -4271,6 +4281,7 @@ def test_dirty_linked_worktree_bootstrap_records_and_rechecks_its_target(
     pending = initialize(
         repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False
     )
+    assert StateStore(repo).read()["schema_version"] == LEGACY_STATE_SCHEMA
     bootstrap = lifecycle._bootstrap(repo)
     task = start(repo, name="dirty linked release")
     commit_one(repo, task, "release.txt", "release\n", "test: dirty linked release")
@@ -4322,6 +4333,9 @@ def test_pending_bootstrap_rejects_a_replaced_target_before_merging(
     (linked / "README.md").write_text("dirty release\n", encoding="utf-8")
     repo = GitRepo(linked)
     initialize(repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False)
+    StateStore(repo).mutate(
+        lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
+    )
     task = start(repo, name="replaced bootstrap target")
     commit_one(repo, task, "release.txt", "release\n", "test: target replacement")
     git(linked, "restore", "README.md")
@@ -4347,6 +4361,9 @@ def test_legacy_dirty_bootstrap_uses_only_a_verifiable_target(
     repo = GitRepo(linked)
 
     initialize(repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False)
+    StateStore(repo).mutate(
+        lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
+    )
     bootstrap_path = repo.local_dir / "bootstrap.json"
     bootstrap = lifecycle._bootstrap(repo)
     for key in (

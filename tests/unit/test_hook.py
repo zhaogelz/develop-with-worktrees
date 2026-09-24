@@ -21,7 +21,7 @@ from solo_ai.lifecycle import (
     start,
 )
 from solo_ai.repo import GitRepo
-from solo_ai.state import StateStore
+from solo_ai.state import LEGACY_STATE_SCHEMA, StateStore
 
 HOOK_PATH = (
     Path(__file__).parents[2]
@@ -84,6 +84,9 @@ def _initialized(path: Path, *, slots: int = 1) -> GitRepo:
         accept_static_only=False,
     )
     assert result["decision"] == "adopted"
+    StateStore(repo).mutate(
+        lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
+    )
     return repo
 
 

@@ -1,12 +1,12 @@
 ---
 name: develop-with-worktrees
-description: "Use for a Git-repository change that needs safe local routing, isolated worktrees, exact commits, candidates, and local integration. It does not replace the host's task or subagent orchestration."
+description: "Use for a Git-repository change that needs safe local routing, isolated worktrees, exact commits, and local integration. It does not replace the host's task or subagent orchestration."
 ---
 
 # Develop with Worktrees
 
 DWW owns local Git routing, task identity, worktrees, anchors, exact commits,
-candidates, integration, recovery, and cleanup. The host owns task scheduling
+task heads, integration, recovery, and cleanup. The host owns task scheduling
 and messages. Run this skill's absolute `scripts/dww.py` path:
 
 ```text
@@ -49,81 +49,62 @@ and Codex sandbox note in [Lifecycle](references/lifecycle.md).
 
 ## Finish and follow delivery
 
-When one task is ready, Finish publishes its immutable source candidate and
-ends its write lease. The reusable worktree keeps the ordinary task branch
-visible until the next Start; this does not mean the whole development round is
-over. Compatible candidates freeze automatically in groups of three. A smaller
-tail needs a recorded `round-complete`, `user`, `deploy`, or `dependency` cause
-and one-line reason. Idle time, Hooks, and task counts never prove a round
-ended.
+For state schema 12, Ready freezes the exact task branch, slot generation,
+worktree, and source commit. Finish records it as waiting for integration. The
+slot stays owned until its task commit reaches the target branch and runtime
+release succeeds. The ordinary Git branch stays attached throughout.
 
-The normal personal-development flow is:
+A full compatible group freezes automatically. A smaller tail needs a recorded
+`round-complete`, `user`, `deploy`, or `dependency` cause and one-line
+reason. Idle time, Hooks, and task counts are not causes. Use
+`round-complete` only when that lane has no active producer, and `user` only
+for an explicit request to integrate now.
 
-1. Develop each change in its returned worktree and run only focused checks that
-   help the current change.
-2. Finish the task without a tail cause when other compatible work may still be
-   produced.
-3. Let the third compatible candidate trigger the combined validation.
-4. Use a tail cause only when the round really ended, the user explicitly asks
-   for immediate integration, or another concrete dependency requires it.
+One batch per target branch merges the original task commits, runs the selected
+combined checks on the exact merged head, and promotes only if the target
+still matches its frozen base. Follow the batch through recovery and release;
+Finish alone is not delivery. Shared integration repairs use the owned
+`batch repair` entry and a new validation attempt. Do not edit a frozen task
+or integration worktree outside its managed entry.
 
-Ready remains available for evidence or legacy policies, but it is not a default
-second full-project gate before every candidate. The combined batch is where
-the composed changes receive their required integration checks.
-For a normal batched candidate, an explicit Ready checks the frozen source and
-does not merge the current base. Another active batch can finish while the
-candidate is saved; the next batch reads the base only when its turn begins.
+For a new managed repository, Start performs light Git and identity checks.
+Project Runtime Adapter preparation runs at first use, such as
+`runtime prepare` or `dev start`. See [native delivery](references/native-delivery.md)
+for commands, migration, and recovery boundaries.
+
+Schema-11 repositories retain their candidate-first policy and legacy
+recovery until `migration preview` is clear and `migration enable` succeeds.
+The old flow is documented in [Lifecycle](references/lifecycle.md); do not
+reinterpret a legacy candidate as a native task head.
 
 When a focused formatting check fails, ask the project's formatter for a diff
-against the changed paths before editing again. Apply that diff, then rerun the
-focused check; do not turn a formatting failure into an unrelated full batch.
+against the changed paths, apply it, and rerun that focused check.
 
-Ordinary completion or review wording is not an immediate-integration request:
-without a cause, Finish publishes the candidate and makes its slot reusable.
-Use `round-complete` only after the actual round is over and its candidate lane
-has no active producer. Use `user` only when the user explicitly asks to
-integrate now without waiting for compatible work. A full batch does not wait for
-unrelated unfinished work.
-
-Follow each batch through integration and repair recorded, deterministic failures
-within scope. The host that freezes a batch remains responsible for that follow
-through. Use `status --compact` for a read-only view; candidate publication,
-current-base delivery, and runtime effectiveness are separate facts.
-
-When the actual round has ended, the host records the supported tail cause and
-continues local delivery and root acceptance with its checked evidence. It does
-not ask the user to run ordinary Finish, batch, or acceptance commands.
+Use `status --compact` for an exact read-only view. The host owns task
+splitting, waiting, and messages, and follows every frozen batch through local
+delivery or a recorded failure.
 
 ## User-facing status
 
-Report in the user's language and lead with the useful fact, not internal DWW
-state. Say plainly whether the change is being made, ready and waiting for local
-integration, integrated into the current base, or installed and verified by the
-current host. A published candidate is not delivery. If installation or host
-verification is not established, say so instead of implying that the current
-installation changed. Distinguish code committed but not integrated,
-integrated but not installed, installed but not verified in a real host session,
-and an installed version verified by the current host. Ask the user to review
-or trust a Hook only when the host explicitly reports a first-install or
-changed-definition review. A plugin version change, a parse/path/owner/lease
-error, or a single denial does not by itself justify repeated trust, a new
-session, or user-run validation. For those errors, state the actual cause and
-the next safe action instead of suggesting that trust might fix them. If host
-trust state cannot be read, say that the need for review is currently
-unconfirmed. Do not expose leases, raw state records, or lifecycle logs unless
-the user asks for diagnostic detail.
+Report in the user's language. State whether work is active, Ready, waiting for
+local integration, delivered to the local base, installed, or verified by the
+current host. Finish and a frozen source head are not delivery. If installation
+or host verification is unconfirmed, say so.
 
-The normal CLI wording follows the same distinction: “Change saved; waiting for
-local integration” is not “integrated” or “installed and verified.” Explain that
-wait only with recorded facts from the candidate's own frozen base and activation
-policy. For an explicit tail, say that a recorded delivery cause is still needed;
-do not infer a reason from task counts, unrelated tasks, UI state, or quiet time.
+Ask for Hook trust only when the host explicitly reports a first-install or
+changed-definition review. A version change, one denial, or an identity error
+does not itself justify repeated trust or a new session. Do not expose leases,
+raw state records, or logs unless the user asks for diagnostic detail.
+
+Describe waiting or a failed batch from its recorded base, owner, attempt, and
+next action. Do not infer a tail cause from counts, UI state, or quiet time.
 
 ## Read one reference for the active scenario
 
 | Scenario | Read first |
 | --- | --- |
-| Start, Commit, Ready, Finish, status, candidate, or tail | [Lifecycle](references/lifecycle.md) |
+| New fixed-slot Start, Ready, Finish, batch repair, or migration | [Native delivery](references/native-delivery.md) |
+| Legacy candidate, status, or tail recovery | [Lifecycle](references/lifecycle.md) |
 | Complete plan, root/child anchor, continuation, handoff, or close | [Task governance](references/task-governance.md) |
 | Policy fields, defaults, compatibility, approval, or capacity | [Configuration](references/configuration.md) |
 | Check selection, proof reuse, artifacts, or runtime effectiveness | [Verification reuse](references/verification-reuse.md) |

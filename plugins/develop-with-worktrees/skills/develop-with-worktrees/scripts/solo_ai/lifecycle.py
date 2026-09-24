@@ -657,6 +657,10 @@ def initialize(
                 "reason": "existing-workflow",
                 "workflows": existing,
             }
+        if StateStore(repo).path.exists():
+            raise SoloAIError(
+                "Existing local task state needs diagnosis before adoption; run doctor"
+            )
         if (repo.root / ".solo-ai" / "config.toml").exists() or _bootstrap(repo):
             raise SoloAIError(
                 "Repository is already adopted or has a pending bootstrap; run doctor"
@@ -792,7 +796,15 @@ def initialize(
         policy = repo.policy_path()
         verification = load_verification_config(repo, cwd=policy)
         approval = approve(repo, verification, cwd=policy)
-        StateStore(repo).ensure_slots(load_repo_config(repo, cwd=policy))
+        store = StateStore(repo)
+        if store.path.exists():
+            raise SoloAIError(
+                "Existing local task state needs diagnosis before native delivery; run doctor"
+            )
+        if clean_target:
+            store.mutate(lambda state: state.update(schema_version=STATE_SCHEMA))
+        # 待合入的 bootstrap 仍由旧事务交付，排空后再显式迁移。
+        store.ensure_slots(load_repo_config(repo, cwd=policy))
         return {
             "decision": "adopted" if clean_target else "pending-primary-clean",
             "slots": slots,

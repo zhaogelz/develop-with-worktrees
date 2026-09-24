@@ -19,6 +19,7 @@ from solo_ai.lifecycle import (
     start,
 )
 from solo_ai.repo import GitRepo
+from solo_ai.state import LEGACY_STATE_SCHEMA, StateStore
 from solo_ai.util import SoloAIError
 
 VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
@@ -27,6 +28,9 @@ VERIFY = CommandSpec(("git", "diff", "--check", "main...HEAD"))
 def initialized_batched(path: Path) -> GitRepo:
     repo = GitRepo(path)
     initialize(repo, slots=3, commands=[VERIFY], accept=True, accept_static_only=False)
+    StateStore(repo).mutate(
+        lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
+    )
     config = path / ".solo-ai" / "config.toml"
     config.write_text(
         config.read_text(encoding="utf-8")

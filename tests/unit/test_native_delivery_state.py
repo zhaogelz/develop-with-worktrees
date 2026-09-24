@@ -4,9 +4,28 @@ from pathlib import Path
 
 import pytest
 
+from solo_ai.config import CommandSpec
+from solo_ai.lifecycle import initialize, start
 from solo_ai.repo import GitRepo
 from solo_ai.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
 from solo_ai.util import SoloAIError, atomic_write_json
+
+
+def test_new_adoption_starts_on_native_fixed_slot(git_repo: Path) -> None:
+    repo = GitRepo(git_repo)
+    initialized = initialize(
+        repo,
+        slots=1,
+        commands=[CommandSpec(("git", "diff", "--check", "main...HEAD"))],
+        accept=True,
+        accept_static_only=False,
+    )
+
+    assert initialized["decision"] == "adopted"
+    assert StateStore(repo).read()["schema_version"] == STATE_SCHEMA
+    task = start(repo, name="first native task")
+    assert task["branch"] == "codex/slot-01"
+    assert task["native_delivery"]["schema_version"] == 1
 
 
 def _native_store(root: Path) -> StateStore:

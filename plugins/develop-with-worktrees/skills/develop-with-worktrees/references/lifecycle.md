@@ -1,5 +1,9 @@
 # Lifecycle reference
 
+This reference retains schema-11 candidate-first and direct compatibility
+procedures. New schema-12 fixed-slot tasks use [native delivery](native-delivery.md).
+Check `status --compact` before following a legacy procedure.
+
 Use this reference for normal route, Start, Commit, Ready, Finish, candidate,
 status, and tail-batch work. Use [recovery](recovery.md) when an exact operation
 is interrupted or fails, and [task governance](task-governance.md) for root and

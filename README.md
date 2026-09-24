@@ -12,23 +12,20 @@ task contract locally, and carries reviewed changes through local integration.
   acceptance criteria across continuation or handoff.
 - One confirmed plan kept at its root, so related work can resume from the same
   objective instead of asking you to copy it into every task.
-- Exact-path commits and immutable source candidates.
-- A normal Git branch still shows a saved candidate until it is delivered or
-  withdrawn; the task's worktree keeps showing that branch until its next use.
-- Combined validation and protected local promotion for compatible work.
-- A task starts with focused checks; Ready is not a second full-project gate for every candidate.
-- If Ready is requested for a normal candidate, it checks that candidate against
-  its saved starting point; it does not merge a moving base branch.
+- Exact-path commits on a fixed slot branch, preserved until delivery.
+- Real Git merges that keep the task commit in local history.
+- One combined validation and protected local promotion per target branch.
+- Fast Start; project runtime preparation runs when the task first needs it.
 - One local approval can cover the commands of the next unchanged step, without repeating approval for unrelated checks.
-- A recoverable record when composition or validation fails; the base branch
+- A recoverable record when merging or validation fails; the base branch
   stays unchanged until a batch succeeds.
 
 DWW is the Git lifecycle layer. Your host's task system still decides how work
 is split, scheduled, and discussed. Your project still owns its tests, runtime
 resources, and product decisions.
 
-Plainly: an integrated change has reached the local base; a retained worktree is
-kept for review and is not reusable; a reusable slot has been safely returned.
+Plainly: Finish can mean “waiting for integration.” A change is delivered only
+when its task commit reaches the local base and its resources are released.
 
 ## Install
 
@@ -64,30 +61,19 @@ you route (including a linked worktree) and delivers back to that recorded
 target. An old remote default or local default-branch preference does not change
 that choice.
 
-1. The host routes the repository. A managed change starts in an isolated
-   worktree; an existing mature workflow keeps ownership of its repository.
-2. The agent edits only there, runs focused checks for the change, and commits
-   the exact reviewed paths.
-3. `finish` preserves an immutable source candidate for local delivery and
-   makes the task worktree available for its next task. Its current branch and
-   files stay visible until then. It does not by itself move the base branch.
-4. Every three compatible candidates, DWW waits for the prior batch on the
-   target branch, then combines changes against the current base and runs the
-   affected repository checks, one batch at a time.
-5. When an actual round ends with a smaller final group, the agent records one
-   supported delivery cause and follows its tail delivery. DWW never uses idle
-   time, a task count, or a UI state as that cause.
+1. The host routes the repository and starts a managed change in a fixed
+   isolated worktree.
+2. The agent edits there, runs focused checks, and commits exact reviewed paths.
+3. Ready freezes the task commit. Finish queues it for local integration while
+   its branch and worktree stay assigned to that task.
+4. A full group integrates automatically. A smaller group needs a recorded
+   round, user, deployment, or dependency reason. DWW merges the actual task
+   commits, validates the combination, advances the local base, then releases
+   the slots.
 
-The host follows a published candidate through integration, recovery, or a
-recorded decision. The host still owns task splitting, waiting, and messages;
-you do not need to copy candidate IDs for the normal flow.
-
-After `finish`, the ordinary status is “Change saved; waiting for local
-integration.” It does not mean the change has reached the local base or that an
-installed plugin has been verified in a host session. When automatic integration
-is waiting for compatible work, the status counts only changes with the same
-frozen base and activation policy; an explicit tail instead waits for a recorded
-delivery cause.
+The host follows the batch through integration or recovery. It still owns task
+splitting, waiting, and messages. Finish alone does not claim delivery or
+verify an installed plugin.
 
 If formatting fails, ask the formatter for a diff on the reviewed changed paths,
 apply it, and rerun the focused check before continuing. A formatting error alone
@@ -98,6 +84,10 @@ should not start a combined batch.
 - If the repository already has a mature workflow, let it keep ownership. An
   exact locally approved [adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/delegated-adapters.md)
   is a maintainer option, not a default setup step.
+- Existing DWW repositories keep their recorded lifecycle until
+  `migration preview --base <branch>` reports no blockers and
+  `migration enable --base <branch> --confirm <branch>:<head>` succeeds.
+  This does not install a plugin or change another repository.
 - If an interrupted task, conflict, or combined check needs attention, follow
   the recorded [recovery](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
   path instead of guessing or cleaning the worktree.
@@ -117,8 +107,8 @@ When the host loads and trusts the Hook, native patches started outside Git also
 check ownership of the target worktree; another session gains no write permission
 by starting elsewhere.
 
-DWW preserves unknown or protected working-tree content and does not guess a
-candidate from UI state, hooks, or elapsed time. A conflict or failed combined
+DWW preserves unknown or protected working-tree content and does not infer a
+batch cause from UI state, hooks, or elapsed time. A conflict or failed combined
 check leaves the base branch unchanged and provides a recorded recovery route.
 Completed pure checks may be reused only when their declared inputs,
 environment, tool facts, and logs still match; required build output and mutable

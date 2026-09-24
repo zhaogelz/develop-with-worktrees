@@ -9,7 +9,7 @@ from solo_ai.config import render_repo_config, render_verification_config
 from solo_ai.native_migration import enable_native_migration, preview_native_migration
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
-from solo_ai.util import SoloAIError, atomic_write_json
+from solo_ai.util import SoloAIError, atomic_write_json, path_identity
 
 
 def _legacy_repo(root: Path) -> tuple[GitRepo, StateStore]:
@@ -84,6 +84,40 @@ def test_native_migration_enables_detached_idle_slot_and_retries(
         )["migration"]
         == enabled["migration"]
     )
+
+
+@pytest.mark.parametrize(
+    "recorded_field",
+    ["released_worktree_identity", "released_managed_root_identity"],
+)
+def test_native_migration_blocks_replaced_idle_slot_identity(
+    git_repo: Path, recorded_field: str
+) -> None:
+    repo, store = _legacy_repo(git_repo)
+    slot_path = git_repo.parent / "migration-identity-slot"
+    repo.git(["worktree", "add", "--detach", str(slot_path), "main"])
+    state = store._empty()
+    state["slots"]["01"] = {
+        "id": "01",
+        "path": str(slot_path),
+        "status": "idle",
+        "task_id": None,
+        "released_worktree_resolved": str(slot_path.resolve()),
+        "released_worktree_identity": path_identity(slot_path),
+        "released_managed_root_resolved": str(slot_path.parent.resolve()),
+        "released_managed_root_identity": path_identity(slot_path.parent),
+    }
+    state["slots"]["01"][recorded_field] = {"device": -1, "inode": -1}
+    atomic_write_json(store.path, state)
+
+    preview = preview_native_migration(repo, base_ref="main")
+    assert preview["status"] == "blocked"
+    assert {"kind": "slot-identity-mismatch", "slot_id": "01"} in preview["blockers"]
+    result = enable_native_migration(
+        repo, base_ref="main", confirm=f"main:{preview['base_head']}"
+    )
+    assert result["status"] == "blocked"
+    assert store.read()["schema_version"] != STATE_SCHEMA
 
 
 def test_native_migration_keeps_active_task_blocked(git_repo: Path) -> None:

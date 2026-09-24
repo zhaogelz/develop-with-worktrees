@@ -104,6 +104,7 @@ input_paths = [
   "tests/integration/test_verification_reuse.py",
   "tests/integration/test_host_handoffs.py",
   "tests/unit/test_proof.py", "tests/unit/test_root_context.py",
+  "tests/unit/test_native_migration.py",
   "tests/unit/test_hook.py", "tests/unit/test_test_temporary_directory.py", "uv.lock",
   "plugins/develop-with-worktrees/hooks/**",
   "plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts/**",
@@ -125,6 +126,7 @@ commands = [
   ["uv", "run", "pytest", "-q", "tests/integration/test_plugin_maintenance_script.py"],
   ["uv", "run", "pytest", "-q", "tests/integration/test_lifecycle.py::test_task_development_approval_uses_frozen_base_head"],
   ["uv", "run", "pytest", "-q", "tests/integration/test_candidate_batches.py::test_failed_combined_validation_preserves_base_and_generation_is_not_rerun"],
+  ["uv", "run", "pytest", "-q", "tests/unit/test_native_migration.py"],
 ]
 
 # 宽回归是明确里程碑入口（dww verify --level full --complete 或 CI），不会

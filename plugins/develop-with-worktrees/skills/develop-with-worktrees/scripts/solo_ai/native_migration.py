@@ -155,6 +155,22 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
         if not path.is_dir() or not repo.is_clean(path):
             blockers.append({"kind": "slot-not-clean", "slot_id": slot_id})
             continue
+        recorded_path = slot.get("released_worktree_resolved")
+        recorded_root = slot.get("released_managed_root_resolved")
+        if (
+            (recorded_path and Path(str(recorded_path)).resolve() != path)
+            or (
+                slot.get("released_worktree_identity") is not None
+                and path_identity(path) != slot["released_worktree_identity"]
+            )
+            or (recorded_root and Path(str(recorded_root)).resolve() != path.parent)
+            or (
+                slot.get("released_managed_root_identity") is not None
+                and path_identity(path.parent) != slot["released_managed_root_identity"]
+            )
+        ):
+            blockers.append({"kind": "slot-identity-mismatch", "slot_id": slot_id})
+            continue
         inventory = inspect_untracked(repo, cwd=path, expand_dependencies=False)
         if inventory["keep"] or inventory["protected"] or inventory["unknown_ignored"]:
             blockers.append({"kind": "unknown-slot-content", "slot_id": slot_id})

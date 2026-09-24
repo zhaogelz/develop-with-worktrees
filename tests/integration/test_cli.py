@@ -16,8 +16,9 @@ from conftest import declare_delegated_adapter, git
 from solo_ai import __version__
 import solo_ai.cli as cli_module
 from solo_ai.cli import _human
-from solo_ai.state import STATE_SCHEMA
-from solo_ai.util import SoloAIError
+from solo_ai.repo import GitRepo
+from solo_ai.state import STATE_SCHEMA, StateStore
+from solo_ai.util import SoloAIError, atomic_write_json
 
 
 def test_human_batch_output_accepts_direct_and_reconcile_results() -> None:
@@ -1289,6 +1290,9 @@ def test_cli_plan_and_verify_cover_registered_development_ready_full_and_stress_
     call_json(
         "init", "--accept", "--verify", '["git", "diff", "--check", "main...HEAD"]'
     )
+    # 本用例验证旧候选式 Ready 证明，显式使用 legacy 状态。
+    legacy_store = StateStore(GitRepo(git_repo))
+    atomic_write_json(legacy_store.path, legacy_store._empty())
     policy = git_repo / ".solo-ai" / "verification.toml"
     policy.write_text(
         """schema_version = 3

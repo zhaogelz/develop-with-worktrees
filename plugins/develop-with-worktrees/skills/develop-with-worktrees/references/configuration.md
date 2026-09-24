@@ -90,12 +90,12 @@ integration = { mode = "batched", worktree_mode = "reusable", batch_size = 3, ca
 | `port_base` | `20000` | start of deterministic task port blocks |
 | `remote_policy` | `local-only` | DWW lifecycle does not contact or mutate remotes |
 | `cleanup.owned_paths` | `[]` | exact top-level paths eligible only for explicit `prune-slot` |
-| `integration.mode` | `batched` | source candidates are locally integrated in batches |
-| `worktree_mode` | `reusable` | one serial integration workspace; `dedicated` remains compatible |
+| `integration.mode` | `batched` | frozen task heads are locally integrated in batches |
+| `worktree_mode` | `reusable` | one serial integration workspace; legacy `dedicated` remains compatible |
 | `batch_size` | `3` | exact automatic full-batch size, 1–5 |
-| `candidate_capacity` | `10` | held, pending, and sealed nonterminal capacity |
+| `candidate_capacity` | `10` | legacy candidate-pool limit; native slots control active capacity |
 | `seal_policy` | `auto_full` | freeze a complete exact lane automatically |
-| `candidate_validation` | `batch` | Finish publishes source; batch performs project validation |
+| `candidate_validation` | `batch` | legacy candidate option; native Ready freezes the source and batch runs Full |
 | `tail_policy` | `explicit` | small tail requires an explicit cause and reason |
 
 `tail_quiet_seconds` may remain in an older policy, but new explicit tails never
@@ -118,14 +118,29 @@ modes use the same candidate and base identity gates; details are in
 ## Candidate and state compatibility
 
 The tracked configuration schema is 2. Verification policy is schema 3; schema
-2 verification files are intentionally unsupported. Current local task state is
-read-upgraded to schema 6. The current candidate-pool schema is 6 and reads
-schemas 1 through 5 before the next write upgrades them to 6. These numbers refer
-to distinct objects and must not be substituted for one another.
+2 verification files are intentionally unsupported. Fresh local task state uses
+schema 12. Existing schema-11 task state stays on its recorded candidate flow
+until guarded `migration preview` and `migration enable` succeed. The separate
+legacy candidate-pool schema is 6. These numbers refer to distinct objects and
+must not be substituted for one another.
+
+Initialization writes schema 12 only for a new, state-free adoption with a
+clean target. A dirty target keeps the legacy lifecycle for its pending
+bootstrap; after that delivery is settled, use the guarded migration. A missing
+state file in an already adopted repository is a diagnostic condition, not
+permission to infer native migration.
 
 Candidate records retain a policy epoch and frozen base lane. Older direct or
-Ready-gated candidates remain under their recorded compatibility policy, rather
-than being silently converted to the current candidate-first default.
+Ready-gated candidates remain under their recorded compatibility policy rather
+than being silently converted to native task heads.
+
+For new fixed-slot tasks, `slots` bounds parallel development while one batch
+per target branch controls promotion. A complete batch freezes automatically;
+a smaller tail needs a supported cause and reason. `runtime_adapter.environment`
+and `required_outputs` help the project's first-use preparation distinguish a
+changed environment or missing generated output; see
+[Runtime Adapter](runtime-adapter.md). No project install or build command is
+hard-coded into DWW.
 
 ## Verification policy fields
 

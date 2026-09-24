@@ -48,7 +48,7 @@ from solo_ai.lifecycle import (
 from solo_ai.repo import GitRepo
 from solo_ai.proof import approval_plan
 from solo_ai.runtime_adapter import verify_runtime_effective
-from solo_ai.state import StateStore
+from solo_ai.state import LEGACY_STATE_SCHEMA, StateStore
 from solo_ai.status_views import status_view
 from solo_ai.task_context import anchor_path
 from solo_ai.util import ActionableSoloAIError, SoloAIError
@@ -84,6 +84,9 @@ def initialized_batched(
 ) -> GitRepo:
     repo = GitRepo(path)
     initialize(repo, slots=3, commands=[VERIFY], accept=True, accept_static_only=False)
+    StateStore(repo).mutate(
+        lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
+    )
     config = path / ".solo-ai" / "config.toml"
     original = config.read_text(encoding="utf-8")
     contents = original

@@ -16,7 +16,7 @@ DWW lifecycle router
                          |
                          v
 Git lifecycle
-  exact commit -> source candidate -> combined verification -> local promotion
+  exact commit -> frozen task head -> real merge -> combined verification -> local promotion
                          |
                          v
 Project contract
@@ -27,7 +27,7 @@ Project contract
 
 The host owns task decomposition, scheduling, waiting, and messages. DWW owns
 route admission, local task identity, worktrees, anchors, exact commits,
-candidate publication, local integration, and recovery receipts. The project
+frozen task heads, local integration, and recovery receipts. The project
 owns validation commands, ports, databases, browsers, deployment semantics, and
 product decisions.
 
@@ -39,7 +39,7 @@ coordinator.
 
 For an individual or small team, the default surface is deliberately narrow:
 route the repository, work in the returned isolated worktree, commit reviewed
-paths, publish a candidate, and follow its local delivery or recovery. The
+paths, freeze the task head, and follow its local delivery or recovery. The
 invariants below make that short path safe; they are not optional complexity.
 
 Some capabilities remain available only for a specific boundary. A delegated
@@ -101,25 +101,33 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   explicit amendments; its child anchors retain only their execution slices.
   Exact host identity may map to that root as a locator only; it never stores a
   second plan or becomes a scheduler.
-- An exact-path commit creates the only eligible task change. Candidate
-  publication is immutable source preservation, not delivery.
-- Candidate publication keeps its ordinary task branch and attached slot at the
-  frozen head while ending the old task's write lease. The immutable candidate
-  ref and batch record, rather than a later branch move, determine integration.
-  A new Start may reuse that slot only after checking its recorded predecessor,
-  candidate ref, directory, branch, HEAD, cleanliness, and unknown content.
-  It switches to the new frozen base without moving the old branch. Terminal
-  branches are retired only at their exact recorded head after delivery evidence
-  and no worktree occupation; changed branches are preserved.
-- New repositories publish source candidates, automatically freeze an exact
-  compatible group of three, and run affected combined checks before protected
-  local promotion. A smaller tail requires a recorded cause and reason.
-- A normal candidate's optional Ready validates its immutable source head against
-  the task's frozen source base. It does not synchronize a moving target branch.
-  The existing admission and integration ownership lets one batch per target
-  branch freeze the execution base, compose, validate, and promote. A later batch
-  waits for that owner to finish, then reads the promoted base. Source base and
-  batch execution base are separate facts, including during exact recovery.
+- An exact-path commit creates the only eligible task change. Ready freezes its
+  branch, worktree, generation, lease, and commit. Finish records waiting for
+  integration; it does not release the slot or claim delivery.
+- Fixed slot branches stay attached until the original task commit reaches the
+  target and runtime resources are released. A new Start checks the prior
+  delivery receipt and clean slot before fast-forwarding its fixed branch to a
+  new target baseline. Unknown or cancelled work is preserved.
+- A complete group freezes automatically. A smaller group needs a recorded
+  cause and reason. One owned integration workspace per target merges the
+  original task heads with Git merge commits, runs Full on the exact combined
+  head, then promotes only if the target still matches its frozen base. The
+  original task commits remain ancestors of the delivered target.
+- Independent ordinary check failures may be collected; failed prerequisites
+  block their dependents. Repair of an owned integration workspace creates a
+  traceable commit and a new validation attempt after the prior processes stop.
+  Ambiguous product, permission, or source changes return to their owner.
+- Native Start records identity and a light safety baseline. A project Runtime
+  Adapter prepares declared dependencies or outputs on first use under input,
+  environment, task-generation, and source-head signatures. It never treats an
+  old build directory as valid solely because it exists.
+- A clean new adoption starts in schema 12. A dirty first target keeps its
+  pending bootstrap on the recorded legacy transaction until delivered and
+  explicitly migrated; native batches do not bypass that target check.
+- Existing schema-11 repositories keep their recorded candidate lifecycle until
+  migration preview reports no active task, unsettled candidate or batch, owned
+  runtime resource, or unsafe slot. Enablement preserves historical refs and
+  proofs, marks legacy nonancestor delivery honestly, and is idempotent.
 - Local approval covers only the commands a lifecycle step will execute; an
   unchanged complete approval can cover a smaller step. Approval does not include
   proof-only facts such as lockfiles or tool versions.
@@ -141,11 +149,11 @@ tracked checkout. The important groups are:
 
 | Location | Authority |
 |---|---|
-| `solo-ai/state.json` | slots, task identity, leases, direct transactions |
+| `solo-ai/state.json` | slots, task heads, batches, leases, delivery and migration receipts |
 | `solo-ai/task-anchors/` and `root-anchors/` | active execution contracts and confirmed objectives |
 | `solo-ai/state.json` host-root fields and `root-close-receipts/` | exact host locator, expected task binding, and minimal cross-repository close recovery |
 | `solo-ai/proofs/` | validation evidence and logs |
-| `solo-ai/candidate-batches.json` | immutable candidates, batches, and reusable workspace ownership |
+| `solo-ai/candidate-batches.json` | read-only legacy candidates and batch recovery evidence after migration |
 | `solo-ai/runtime-adapter/` | content-addressed Adapter receipts |
 
 These are recovery evidence, not a public API for direct editing. The CLI and
@@ -161,9 +169,9 @@ A diagnostic blocker report authorizes no deletion.
 
 ## Delivery and runtime are separate
 
-A source candidate is published after its task finishes. It becomes delivered
-only when its completed batch is contained in the current base. An optional
-project runtime check may later determine whether that delivered source is
+A task is delivered only when its source commit is an ancestor of the promoted
+local base and its release receipt succeeds. An optional project runtime check
+may later determine whether that delivered source is
 effective in a running environment. DWW records the result but never interprets
 project-specific ports, databases, authentication, or deployment state.
 
