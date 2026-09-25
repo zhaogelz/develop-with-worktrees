@@ -47,13 +47,22 @@ def _require_inventory_visible(repo: GitRepo, worktree: Path) -> None:
             if not stat.S_ISDIR(entry.st_mode) or bool(
                 getattr(entry, "st_file_attributes", 0) & 0x0400
             ):
-                raise SoloAIError(f"Retained dependency root is not a plain directory: {path}")
+                raise SoloAIError(
+                    f"Retained dependency root is not a plain directory: {path}"
+                )
             opaque_roots.add(name)
     except OSError as exc:
         raise SoloAIError("Cannot inspect integration workspace roots") from exc
 
     for args in (
-        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--directory"],
+        [
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--directory",
+        ],
         ["ls-files", "--others", "--exclude-standard", "-z"],
     ):
         result = repo.git(
@@ -64,7 +73,9 @@ def _require_inventory_visible(repo: GitRepo, worktree: Path) -> None:
         for line in result.stderr.splitlines():
             match = _UNREADABLE_DIRECTORY.fullmatch(line.strip())
             if match is None or match.group(1).casefold() not in opaque_roots:
-                raise SoloAIError(f"Cannot inventory integration workspace safely: {line}")
+                raise SoloAIError(
+                    f"Cannot inventory integration workspace safely: {line}"
+                )
 
 
 def _require_legacy_pool_settled(
@@ -106,7 +117,9 @@ def _require_exact_binding(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     migration = state.get("native_migration")
     if state.get("schema_version") != STATE_SCHEMA or not isinstance(migration, dict):
-        raise SoloAIError("Legacy workspace adoption requires completed native migration")
+        raise SoloAIError(
+            "Legacy workspace adoption requires completed native migration"
+        )
     if state.get("integration_workspace") is not None:
         raise SoloAIError("Native integration workspace already has a binding")
     if migration.get("legacy_integration_workspace_adoption") is not None:
@@ -145,7 +158,9 @@ def _require_exact_binding(
         or migration.get("base_head") != head
         or repo.ref_head(f"refs/heads/{batch['base_ref']}") != head
     ):
-        raise SoloAIError("Legacy workspace and frozen native batch do not share an exact base")
+        raise SoloAIError(
+            "Legacy workspace and frozen native batch do not share an exact base"
+        )
     expected = f"{batch_id}:{head}:{generation}"
     if confirm != expected:
         raise SoloAIError(f"Legacy workspace adoption requires --confirm {expected!r}")
@@ -200,7 +215,10 @@ def adopt_legacy_integration_workspace(
             else None
         )
         if previous is not None:
-            if previous.get("batch_id") == batch_id and previous.get("confirm") == confirm:
+            if (
+                previous.get("batch_id") == batch_id
+                and previous.get("confirm") == confirm
+            ):
                 return {"status": "already-adopted", "receipt": previous}
             raise SoloAIError("Legacy integration workspace was already adopted")
 
@@ -238,7 +256,9 @@ def adopt_legacy_integration_workspace(
                 "head_ref": fresh_record["head_ref"],
             }
             current["integration_workspace"] = copy.deepcopy(fresh_record)
-            current["native_migration"]["legacy_integration_workspace_adoption"] = receipt
+            current["native_migration"]["legacy_integration_workspace_adoption"] = (
+                receipt
+            )
             return {"status": "adopted", "receipt": copy.deepcopy(receipt)}
 
         return store.mutate(adopt)
