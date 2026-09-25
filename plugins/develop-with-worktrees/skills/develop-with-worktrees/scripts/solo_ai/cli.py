@@ -83,6 +83,7 @@ from .lifecycle import (
     upgrade_root_task_to_objective_protocol,
     warm_slot,
 )
+from .legacy_workspace_adoption import adopt_legacy_integration_workspace
 from .native_migration import enable_native_migration, preview_native_migration
 from .orchestration import BatchStore
 from .orchestration.adapters import adapter_for
@@ -314,6 +315,14 @@ def _parser() -> argparse.ArgumentParser:
     migration_enable.add_argument("--base", required=True)
     migration_enable.add_argument(
         "--confirm", required=True, help="repeat BASE:HEAD from migration preview"
+    )
+    migration_adopt = migration_sub.add_parser(
+        "adopt-legacy-integration-workspace",
+        help="bind one verified idle legacy workspace after native migration",
+    )
+    migration_adopt.add_argument("--batch", required=True)
+    migration_adopt.add_argument(
+        "--confirm", required=True, help="repeat BATCH:LEGACY_HEAD:GENERATION"
     )
 
     delegated = sub.add_parser(
@@ -2197,6 +2206,10 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "migration":
         if args.migration_command == "preview":
             return preview_native_migration(repo, base_ref=args.base)
+        if args.migration_command == "adopt-legacy-integration-workspace":
+            return adopt_legacy_integration_workspace(
+                repo, batch_id=args.batch, confirm=args.confirm
+            )
         return enable_native_migration(repo, base_ref=args.base, confirm=args.confirm)
     if args.command == "start":
         return start(
