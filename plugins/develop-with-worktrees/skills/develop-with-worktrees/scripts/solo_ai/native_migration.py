@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .candidate_batches import CandidateBatchStore
+from .candidate_batches import CANDIDATE_REF_PREFIX, CandidateBatchStore
 from .cleanup import inspect_untracked
 from .config import load_repo_config
 from .repo import GitRepo
@@ -78,6 +78,35 @@ def _delivered_supersession(
         current.get("base_ref") == base_ref
         and current.get("status") == "integrated"
         and current.get("delivered") is True
+    )
+
+
+def _withdrawn_ancestor(
+    repo: GitRepo, candidate: dict[str, Any], *, base_head: str
+) -> bool:
+    """仅在撤回记录、保留引用及目标祖先关系均可核实时接受旧分支。"""
+
+    candidate_id = candidate.get("candidate_id")
+    head = candidate.get("head")
+    ref = candidate.get("ref")
+    withdrawal = candidate.get("withdrawal")
+    withdrawn_at = candidate.get("withdrawn_at")
+    return (
+        candidate.get("status") == "withdrawn"
+        and isinstance(candidate_id, str)
+        and bool(candidate_id)
+        and isinstance(head, str)
+        and bool(head)
+        and ref == f"{CANDIDATE_REF_PREFIX}{candidate_id}"
+        and isinstance(withdrawal, dict)
+        and withdrawal.get("ref_retention") == "preserved"
+        and withdrawal.get("source") in {"api", "cli"}
+        and isinstance(withdrawal.get("started_at"), str)
+        and bool(withdrawal["started_at"])
+        and isinstance(withdrawn_at, str)
+        and bool(withdrawn_at)
+        and repo.ref_head(ref) == head
+        and repo.is_ancestor(head, base_head)
     )
 
 
@@ -324,6 +353,7 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
                 or _delivered_supersession(
                     repo, candidate, candidates_by_id, base_ref=base_ref
                 )
+                or _withdrawn_ancestor(repo, candidate, base_head=base_head)
             )
         ]
         predecessor = matching[0] if len(matching) == 1 else None
