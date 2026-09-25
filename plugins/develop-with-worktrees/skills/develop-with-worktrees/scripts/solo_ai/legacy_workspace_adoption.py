@@ -91,6 +91,10 @@ def _require_legacy_pool_settled(
         or len(pool["batches"]) != migration.get("legacy_batch_count")
         or any(
             item.get("status") not in {"integrated", "withdrawn", "superseded"}
+            or (
+                item.get("status") == "integrated"
+                and item.get("delivered") is not True
+            )
             for item in candidates
         )
         or any(

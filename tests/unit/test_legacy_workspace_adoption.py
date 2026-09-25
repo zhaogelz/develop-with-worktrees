@@ -149,6 +149,7 @@ def test_adopts_exact_idle_record_once_without_touching_worktree(
         "legacy-identity",
         "missing-ref",
         "ordinary-content",
+        "unverified-delivery",
     ],
 )
 def test_rejects_drift_without_creating_binding(git_repo: Path, drift: str) -> None:
@@ -171,6 +172,18 @@ def test_rejects_drift_without_creating_binding(git_repo: Path, drift: str) -> N
         repo.git(
             ["update-ref", "-d", pool_store.read()["integration_workspace"]["head_ref"]]
         )
+    elif drift == "unverified-delivery":
+        pool = pool_store.read()
+        pool["candidates"]["candidate-unverified"] = {
+            "candidate_id": "candidate-unverified",
+            "status": "integrated",
+            "base_ref": "main",
+            "head": repo.head(),
+        }
+        atomic_write_json(pool_store.path, pool)
+        state = store.read()
+        state["native_migration"]["legacy_candidate_count"] = 1
+        atomic_write_json(store.path, state)
     else:
         (worktree / "notes.txt").write_text("unknown", encoding="utf-8")
 
