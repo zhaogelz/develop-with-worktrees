@@ -132,6 +132,12 @@ def test_adopts_exact_idle_record_once_without_touching_worktree(
         )["status"]
         == "already-adopted"
     )
+    state["integration_workspace"] = None
+    atomic_write_json(store.path, state)
+    with pytest.raises(SoloAIError, match="already adopted"):
+        adopt_legacy_integration_workspace(
+            repo, batch_id="batch-native", confirm=confirm
+        )
 
 
 @pytest.mark.parametrize(

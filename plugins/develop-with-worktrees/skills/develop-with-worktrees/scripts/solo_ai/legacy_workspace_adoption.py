@@ -215,9 +215,20 @@ def adopt_legacy_integration_workspace(
             else None
         )
         if previous is not None:
+            if not isinstance(previous, dict):
+                raise SoloAIError("Legacy workspace adoption receipt is malformed")
+            binding = state.get("integration_workspace")
             if (
                 previous.get("batch_id") == batch_id
                 and previous.get("confirm") == confirm
+                and isinstance(binding, dict)
+                and all(
+                    binding.get(key) == previous.get(key)
+                    for key in batch_workspace._LOCATION_KEYS
+                )
+                and type(binding.get("generation")) is int
+                and type(previous.get("generation")) is int
+                and binding["generation"] >= previous["generation"]
             ):
                 return {"status": "already-adopted", "receipt": previous}
             raise SoloAIError("Legacy integration workspace was already adopted")
@@ -254,6 +265,10 @@ def adopt_legacy_integration_workspace(
                 "generation": fresh_record["generation"],
                 "head": fresh_record["head"],
                 "head_ref": fresh_record["head_ref"],
+                **{
+                    key: copy.deepcopy(fresh_record[key])
+                    for key in batch_workspace._LOCATION_KEYS
+                },
             }
             current["integration_workspace"] = copy.deepcopy(fresh_record)
             current["native_migration"]["legacy_integration_workspace_adoption"] = (
