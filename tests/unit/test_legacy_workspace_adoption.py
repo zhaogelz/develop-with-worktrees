@@ -18,6 +18,9 @@ from solo_ai.state import STATE_SCHEMA, StateStore
 from solo_ai.util import CommandResult, SoloAIError, atomic_write_json, path_identity
 
 
+pytestmark = pytest.mark.dww_fast
+
+
 def _setup(
     git_repo: Path,
 ) -> tuple[GitRepo, StateStore, CandidateBatchStore, Path, str]:
