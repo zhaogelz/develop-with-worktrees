@@ -92,8 +92,7 @@ def _require_legacy_pool_settled(
         or any(
             item.get("status") not in {"integrated", "withdrawn", "superseded"}
             or (
-                item.get("status") == "integrated"
-                and item.get("delivered") is not True
+                item.get("status") == "integrated" and item.get("delivered") is not True
             )
             for item in candidates
         )
