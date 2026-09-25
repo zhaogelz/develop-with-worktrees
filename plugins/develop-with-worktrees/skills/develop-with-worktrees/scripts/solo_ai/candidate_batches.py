@@ -555,12 +555,40 @@ class CandidateBatchStore:
             release.get("result") == "passed" and release.get("exit_code") == 0
         )
         delivered = False
-        if (
+        validated = (
             batch.get("status") in {"validated", "promoted", "completed"}
             and batch.get("proof")
             and batch.get("validation_outcome") == "passed"
             and released
-        ):
+        )
+        legacy_ref = candidate.get("ref")
+        legacy_ref_head = self.repo.ref_head(str(legacy_ref)) if legacy_ref else None
+        legacy_snapshot_matches = any(
+            isinstance(item, dict)
+            and item.get("candidate_id") == candidate.get("candidate_id")
+            and item.get("head") == candidate.get("head")
+            and item.get("ref") == legacy_ref
+            for item in batch.get("candidates", [])
+        )
+        legacy_completed = (
+            status == "integrated"
+            and batch.get("status") == "completed"
+            and "validation_outcome" not in batch
+            and "runtime_release" not in batch
+            and batch.get("proof")
+            and batch.get("promoted_at")
+            and batch.get("completed_at")
+            and batch.get("integration_head")
+            and batch.get("integrated_head") == batch.get("integration_head")
+            and candidate.get("integrated_batch") == batch.get("id")
+            and candidate.get("candidate_id") in batch.get("candidate_ids", [])
+            and candidate.get("candidate_id") in batch.get("applied_candidate_ids", [])
+            and legacy_snapshot_matches
+            and candidate.get("integrated_at")
+            and legacy_ref
+            and legacy_ref_head in {None, candidate.get("head")}
+        )
+        if validated or legacy_completed:
             base_ref = f"refs/heads/{batch['base_ref']}"
             if ref_heads is not None and base_ref in ref_heads:
                 current_base = ref_heads[base_ref]

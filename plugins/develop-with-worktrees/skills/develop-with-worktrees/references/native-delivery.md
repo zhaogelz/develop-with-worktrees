@@ -59,6 +59,24 @@ checks active legacy tasks, unsettled candidates and batches, owned resources,
 and each slot's Git identity and unknown content. Finish or explicitly resolve
 those legacy records under their original rules. Historical candidates, refs,
 proofs, and failed evidence are retained.
+An old completed batch can prove a net-difference candidate's delivery through
+its exact recorded candidate snapshot and applied identity, completion and
+promotion receipts, proof, and composed head in the current target history,
+even if its terminal candidate ref has been pruned or it predates explicit
+validation and runtime-release fields. A ref that still exists must match the
+recorded head. A failed batch remains as failure evidence but no longer
+blocks migration once its workspace is recorded as released or retired, its
+runner is absent, and every source candidate has reached a terminal state.
+A clean idle slot may retain an attached superseded source branch when its exact
+candidate ref leads through recorded supersession links to a delivered candidate
+on the migration target. Missing receipts, live ownership, unfinished sources,
+unknown content, or broken links still block migration.
+A terminal task's explicitly retained, quarantined worktree may stay in place
+through migration when its abandonment record, slot generation, directory
+identity, branch, and HEAD still match exactly and tracked files are clean.
+Its ignored audit content is left untouched; the slot stays quarantined and is
+excluded from fixed-branch initialization. Any identity drift still blocks
+migration.
 
 When preview is ready, pass its exact branch and head to `migration enable`
 with `--base <branch>` and `--confirm <branch>:<head>`. Enablement initializes

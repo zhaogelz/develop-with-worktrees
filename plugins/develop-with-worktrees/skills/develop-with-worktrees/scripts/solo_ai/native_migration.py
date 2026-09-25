@@ -19,6 +19,128 @@ from .state import (
 from .util import SoloAIError, path_identity, utc_timestamp
 
 
+def _settled_failed_batch(
+    batch: dict[str, Any], candidates: dict[str, dict[str, Any]]
+) -> bool:
+    """失败证据仍保留；仅在资源已归还且所有来源都有终态时视为排空。"""
+
+    if batch.get("status") != "failed" or batch.get("run_owner") is not None:
+        return False
+    mode = batch.get("worktree_mode", "dedicated")
+    if mode == "reusable":
+        released = bool(batch.get("worktree_released_at"))
+    elif mode == "dedicated":
+        released = bool(batch.get("worktree_retired_at"))
+    else:
+        return False
+    ids = batch.get("candidate_ids")
+    return bool(
+        released
+        and isinstance(ids, list)
+        and ids
+        and all(
+            isinstance(candidate_id, str)
+            and candidate_id in candidates
+            and candidates[candidate_id].get("status")
+            in {"integrated", "withdrawn", "superseded"}
+            for candidate_id in ids
+        )
+    )
+
+
+def _delivered_supersession(
+    repo: GitRepo,
+    candidate: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+    *,
+    base_ref: str,
+) -> bool:
+    """核实附着的旧分支已被同一目标上的交付候选逐代替换。"""
+
+    current = candidate
+    seen: set[str] = set()
+    while current.get("status") == "superseded":
+        candidate_id = str(current.get("candidate_id"))
+        ref = current.get("ref")
+        if (
+            candidate_id in seen
+            or current.get("base_ref") != base_ref
+            or not isinstance(ref, str)
+            or repo.ref_head(ref) != current.get("head")
+        ):
+            return False
+        seen.add(candidate_id)
+        successor = by_id.get(str(current.get("superseded_by")))
+        if successor is None or successor.get("supersedes") != candidate_id:
+            return False
+        current = successor
+    return (
+        current.get("base_ref") == base_ref
+        and current.get("status") == "integrated"
+        and current.get("delivered") is True
+    )
+
+
+def _retained_slot_verified(
+    repo: GitRepo,
+    state: dict[str, Any],
+    slot_id: str,
+    slot: dict[str, Any],
+    path: Path,
+    registered: dict[Path, Any],
+) -> bool:
+    """保留终态隔离工位原样；只核验其记录和当前 Git 身份。"""
+
+    task_id = slot.get("task_id")
+    task = state["tasks"].get(str(task_id)) if task_id else None
+    abandonment = task.get("abandonment") if isinstance(task, dict) else None
+    if (
+        slot.get("status") != "quarantined"
+        or not isinstance(task, dict)
+        or task.get("status") != "abandoned"
+        or task.get("slot_id") != slot_id
+        or task.get("slot_generation") != slot.get("generation")
+        or task.get("quarantine_reason") != slot.get("quarantine_reason")
+        or task.get("active_operation") is not None
+        or task.get("processes")
+        or not isinstance(abandonment, dict)
+        or abandonment.get("phase") != "completed"
+        or abandonment.get("retained_worktree") is not True
+        or abandonment.get("task_id") != task_id
+        or abandonment.get("slot_id") != slot_id
+        or path not in registered
+        or not path.is_dir()
+        or not repo.is_clean(path)
+    ):
+        return False
+    branch = abandonment.get("branch")
+    tip = abandonment.get("branch_tip")
+    if not branch or not tip:
+        return False
+    if (
+        repo.branch(path) != branch
+        or repo.head(path) != tip
+        or repo.ref_head(f"refs/heads/{branch}") != tip
+    ):
+        return False
+    for record, prefix in (
+        (slot, "released_"),
+        (task, "slot_"),
+        (abandonment, ""),
+    ):
+        if (
+            record.get(f"{prefix}worktree_resolved") != str(path)
+            or record.get(f"{prefix}worktree_identity") != path_identity(path)
+            or record.get(f"{prefix}managed_root_resolved") != str(path.parent)
+            or record.get(f"{prefix}managed_root_identity")
+            != path_identity(path.parent)
+        ):
+            return False
+    return task.get("worktree") == str(path) and abandonment.get("worktree") == str(
+        path
+    )
+
+
 def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
     """列出旧状态排空和固定分支初始化的所有可观察阻塞。"""
 
@@ -48,6 +170,7 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
     for item in candidates:
         if item.get("task_id"):
             candidates_by_task.setdefault(str(item["task_id"]), []).append(item)
+    candidates_by_id = {str(item["candidate_id"]): item for item in candidates}
     blockers: list[dict[str, str]] = []
     if state.get("batches") or state.get("integration_workspace"):
         blockers.append({"kind": "native-state-already-present"})
@@ -86,7 +209,9 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
             }
         )
     for batch in pool["batches"].values():
-        if batch.get("status") not in {"completed", "retired", "withdrawn"}:
+        if batch.get("status") not in {"completed", "retired", "withdrawn"} and not (
+            _settled_failed_batch(batch, pool["candidates"])
+        ):
             blockers.append(
                 {
                     "kind": "unsettled-legacy-batch",
@@ -105,8 +230,17 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
 
     registered = {item.path.resolve(): item for item in repo.worktrees()}
     slots: list[dict[str, Any]] = []
+    retained_slot_ids: list[str] = []
     for slot_id, slot in sorted(state["slots"].items()):
         path = Path(str(slot["path"])).resolve()
+        if slot.get("status") == "quarantined" and slot.get("task_id"):
+            if _retained_slot_verified(repo, state, slot_id, slot, path, registered):
+                retained_slot_ids.append(slot_id)
+            else:
+                blockers.append(
+                    {"kind": "retained-slot-unverified", "slot_id": slot_id}
+                )
+            continue
         fixed_branch = f"{config.branch_prefix}slot-{slot_id}"
         entry = {
             "slot_id": slot_id,
@@ -185,7 +319,12 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
             for candidate in candidates_by_task.get(str(predecessor_id), [])
             if candidate.get("branch") == attached
             and candidate.get("head") == head
-            and candidate.get("delivered") is True
+            and (
+                candidate.get("delivered") is True
+                or _delivered_supersession(
+                    repo, candidate, candidates_by_id, base_ref=base_ref
+                )
+            )
         ]
         predecessor = matching[0] if len(matching) == 1 else None
         if attached is not None:
@@ -206,6 +345,7 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
         "base_head": base_head,
         "blockers": blockers,
         "slots": slots,
+        "retained_slot_ids": retained_slot_ids,
         "legacy_candidate_count": len(candidates),
         "legacy_batch_count": len(pool["batches"]),
     }
@@ -272,6 +412,7 @@ def enable_native_migration(
             "base_ref": base_ref,
             "base_head": base_head,
             "slot_ids": [str(slot["slot_id"]) for slot in checked["slots"]],
+            "retained_slot_ids": checked["retained_slot_ids"],
             "legacy_candidate_count": checked["legacy_candidate_count"],
             "legacy_batch_count": checked["legacy_batch_count"],
             "legacy_non_ancestor_candidate_ids": non_ancestor,
