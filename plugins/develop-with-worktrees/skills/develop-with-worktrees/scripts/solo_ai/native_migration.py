@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
+from . import batch_workspace
 from .candidate_batches import CandidateBatchStore
-from .cleanup import inspect_untracked
+from .cleanup import inspect_untracked, is_link_or_junction
 from .config import load_repo_config
 from .repo import GitRepo
 from .state import (
@@ -141,20 +143,131 @@ def _retained_slot_verified(
     )
 
 
+def _inspect_legacy_integration_workspace(
+    repo: GitRepo, store: StateStore, pool: dict[str, Any]
+) -> tuple[str, dict[str, Any] | None, dict[str, str] | None]:
+    """只核验旧空闲登记；旧成果可来自另一目标分支。"""
+
+    config = load_repo_config(repo)
+    worktree = store.managed_worktree_root(config) / "solo-ai-integration"
+    record = pool.get("integration_workspace")
+    registered = any(item.path == worktree for item in repo.worktrees())
+    exists = worktree.exists() or is_link_or_junction(worktree)
+    if record is None:
+        if exists or registered:
+            return (
+                "unowned",
+                None,
+                {"kind": "legacy-integration-workspace-unowned"},
+            )
+        return "absent", None, None
+    if not isinstance(record, dict):
+        return "blocked", None, {"kind": "legacy-integration-workspace-invalid"}
+    if record.get("owner") is not None or record.get("registering") is not False:
+        return (
+            "blocked",
+            None,
+            {"kind": "legacy-integration-workspace-owned"},
+        )
+    try:
+        generation = batch_workspace._generation(record.get("generation"))
+        head = record.get("head")
+        head_ref = record.get("head_ref")
+        if (
+            not exists
+            or not registered
+            or record.get("worktree") != str(worktree)
+            or not isinstance(head, str)
+            or not isinstance(head_ref, str)
+            or not head_ref.startswith("refs/dww/batch-heads/")
+        ):
+            raise SoloAIError("Old integration workspace identity is incomplete")
+        source_id = head_ref.removeprefix("refs/dww/batch-heads/")
+        source = pool.get("batches", {}).get(source_id)
+        if (
+            not source_id
+            or not isinstance(source, dict)
+            or source.get("status") != "completed"
+            or source.get("worktree_mode") != "reusable"
+            or not source.get("worktree_released_at")
+            or source.get("run_owner") is not None
+            or source.get("worktree_generation") != generation
+            or source.get("integration_ref") != head_ref
+            or source.get("integration_head") != head
+            or source.get("integrated_head") != head
+            or any(
+                source.get(key) != record.get(key)
+                for key in batch_workspace._LOCATION_KEYS
+            )
+        ):
+            raise SoloAIError("Old integration result has no exact completed receipt")
+        batch_workspace._require_saved_idle_head(repo, record)
+        batch_workspace._check_directory(worktree, record)
+        batch_workspace._check_git(repo, worktree, head)
+        batch_workspace.require_retained_contents(repo, worktree)
+    except (OSError, SoloAIError) as exc:
+        return (
+            "blocked",
+            None,
+            {"kind": "legacy-integration-workspace-unverified", "reason": str(exc)},
+        )
+    return "verified-idle", record, None
+
+
+def _native_integration_workspace_status(
+    repo: GitRepo, store: StateStore, state: dict[str, Any]
+) -> tuple[str, list[dict[str, str]]]:
+    """已升级也核查下一次集成会用到的工作树登记。"""
+
+    binding = state.get("integration_workspace")
+    if binding is None:
+        pool = CandidateBatchStore(repo).read()
+        old_status, _, problem = _inspect_legacy_integration_workspace(
+            repo, store, pool
+        )
+        if old_status == "absent":
+            return "available", []
+        if old_status == "verified-idle":
+            return "legacy-adoption-required", [
+                {"kind": "legacy-integration-workspace-unbound"}
+            ]
+        return old_status, [problem] if problem else []
+    if not isinstance(binding, dict):
+        return "blocked", [{"kind": "native-integration-workspace-invalid"}]
+    if binding.get("owner") is not None:
+        return "managed-active", []
+    try:
+        worktree = Path(str(binding["worktree"]))
+        batch_workspace._require_saved_idle_head(repo, binding)
+        batch_workspace._check_directory(worktree, binding)
+        batch_workspace._check_git(repo, worktree, str(binding["head"]))
+        batch_workspace.require_retained_contents(repo, worktree)
+    except (KeyError, OSError, SoloAIError) as exc:
+        return "blocked", [
+            {"kind": "native-integration-workspace-unverified", "reason": str(exc)}
+        ]
+    return "managed-idle", []
+
+
 def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
     """列出旧状态排空和固定分支初始化的所有可观察阻塞。"""
 
-    state = StateStore(repo).read()
+    store = StateStore(repo)
+    state = store.read()
     base_head = repo.ref_head(f"refs/heads/{base_ref}")
     if base_head is None:
         raise SoloAIError(f"Migration target branch does not exist: {base_ref}")
     if state["schema_version"] == STATE_SCHEMA:
+        workspace_status, blockers = _native_integration_workspace_status(
+            repo, store, state
+        )
         return {
             "status": "enabled",
             "base_ref": base_ref,
             "base_head": base_head,
-            "blockers": [],
+            "blockers": blockers,
             "slots": [],
+            "integration_workspace_status": workspace_status,
             "migration": state.get("native_migration"),
         }
 
@@ -219,14 +332,11 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
                     "status": str(batch.get("status")),
                 }
             )
-    workspace = pool.get("integration_workspace")
-    if isinstance(workspace, dict) and workspace.get("owner") is not None:
-        blockers.append(
-            {
-                "kind": "legacy-integration-workspace-owned",
-                "batch_id": str(workspace["owner"]),
-            }
-        )
+    workspace_status, _, workspace_problem = _inspect_legacy_integration_workspace(
+        repo, store, pool
+    )
+    if workspace_problem:
+        blockers.append(workspace_problem)
 
     registered = {item.path.resolve(): item for item in repo.worktrees()}
     slots: list[dict[str, Any]] = []
@@ -345,6 +455,7 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
         "base_head": base_head,
         "blockers": blockers,
         "slots": slots,
+        "integration_workspace_status": workspace_status,
         "retained_slot_ids": retained_slot_ids,
         "legacy_candidate_count": len(candidates),
         "legacy_batch_count": len(pool["batches"]),
@@ -394,6 +505,13 @@ def enable_native_migration(
         if checked["status"] != "ready" or checked["base_head"] != base_head:
             return checked
         pool = CandidateBatchStore(repo).read()
+        workspace_status, idle_workspace, workspace_problem = (
+            _inspect_legacy_integration_workspace(repo, store, pool)
+        )
+        if workspace_problem:
+            raise SoloAIError(
+                f"Legacy integration workspace changed: {workspace_problem['kind']}"
+            )
         candidates = CandidateBatchStore(repo).project_candidates(
             pool["candidates"].values(),
             pool["batches"],
@@ -416,11 +534,34 @@ def enable_native_migration(
             "legacy_candidate_count": checked["legacy_candidate_count"],
             "legacy_batch_count": checked["legacy_batch_count"],
             "legacy_non_ancestor_candidate_ids": non_ancestor,
+            "legacy_integration_workspace": (
+                {
+                    "generation": idle_workspace["generation"],
+                    "head": idle_workspace["head"],
+                    "head_ref": idle_workspace["head_ref"],
+                }
+                if idle_workspace is not None
+                else None
+            ),
         }
 
         def update(state: dict[str, Any]) -> dict[str, Any]:
             if state["schema_version"] != LEGACY_STATE_SCHEMA:
                 raise SoloAIError("Native migration state changed before enable")
+            if repo.ref_head(f"refs/heads/{base_ref}") != base_head:
+                raise SoloAIError("Native migration target changed before enable")
+            current_workspace_status, current_workspace, current_problem = (
+                _inspect_legacy_integration_workspace(
+                    repo, store, CandidateBatchStore(repo).read()
+                )
+            )
+            if (
+                current_problem
+                or current_workspace_status != workspace_status
+                or current_workspace != idle_workspace
+                or state.get("integration_workspace") is not None
+            ):
+                raise SoloAIError("Legacy integration workspace changed before enable")
             for item in checked["slots"]:
                 slot_id = str(item["slot_id"])
                 slot = state["slots"][slot_id]
@@ -435,7 +576,7 @@ def enable_native_migration(
                     slot["released_managed_root_identity"] = path_identity(managed_root)
             state["schema_version"] = STATE_SCHEMA
             state.setdefault("batches", {})
-            state.setdefault("integration_workspace", None)
+            state["integration_workspace"] = copy.deepcopy(idle_workspace)
             state["native_migration"] = receipt
             return {
                 "status": "enabled",

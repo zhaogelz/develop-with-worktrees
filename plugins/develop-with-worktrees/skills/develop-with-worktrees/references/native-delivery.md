@@ -56,8 +56,15 @@ evidence.
 
 Run `migration preview --base <branch>` for a read-only blocker list. It
 checks active legacy tasks, unsettled candidates and batches, owned resources,
-and each slot's Git identity and unknown content. Finish or explicitly resolve
-those legacy records under their original rules. Historical candidates, refs,
+the old integration workspace's saved result and directory identity, and each
+slot's Git identity and unknown content. A completed, released idle integration
+workspace is verified and carried into schema 12, including when its last batch
+targeted another branch. An existing directory without an exact legacy record,
+or a record whose saved ref, Git registration, identity, or contents have drifted,
+blocks migration and remains untouched. An already enabled preview reports
+whether the workspace is managed, available, or still needs legacy adoption.
+Finish or explicitly resolve those legacy records under their original rules.
+Historical candidates, refs,
 proofs, and failed evidence are retained.
 An old completed batch can prove a net-difference candidate's delivery through
 its exact recorded candidate snapshot and applied identity, completion and
