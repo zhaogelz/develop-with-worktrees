@@ -2597,6 +2597,7 @@ def verified_recovery_source(repo: GitRepo, *, commit: str) -> dict[str, Any]:
     ]
     if not matches:
         from .legacy_workspace_adoption import verified_pre_full_maintenance_source
+
         return verified_pre_full_maintenance_source(repo, commit=commit)
     if len(matches) != 1:
         raise SoloAIError(

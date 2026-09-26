@@ -222,7 +222,10 @@ def _require_exact_binding(
         )
         if (
             not isinstance(source_ref, str)
-            or (source_current is not None and not repo.is_ancestor(head, source_current))
+            or (
+                source_current is not None
+                and not repo.is_ancestor(head, source_current)
+            )
             or not isinstance(source_base, str)
             or not repo.is_ancestor(source_base, head)
             or source_batch.get("validation_outcome") != "passed"

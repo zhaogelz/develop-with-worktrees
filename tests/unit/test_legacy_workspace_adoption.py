@@ -409,9 +409,12 @@ def test_cross_target_adoption_accepts_source_branch_advance(
         ["commit-tree", tree, "-p", saved, "-m", "later delivery"]
     ).stdout.strip()
     repo.git(["update-ref", "refs/heads/release/test", advanced, saved])
-    assert adopt_legacy_integration_workspace(
-        repo, base_ref="main", confirm=confirm
-    )["status"] == "adopted"
+    assert (
+        adopt_legacy_integration_workspace(repo, base_ref="main", confirm=confirm)[
+            "status"
+        ]
+        == "adopted"
+    )
     assert repo.head(worktree) == saved
     assert store.read()["integration_workspace"]["head"] == saved
 
@@ -523,7 +526,9 @@ def test_pre_full_source_requires_exact_task_full_without_native_batch(
     assert result["validation_attempt"] == "full-attempt-maintenance"
 
 
-@pytest.mark.parametrize("drift", ["base", "proof", "task", "branch", "anchor", "extra-path"])
+@pytest.mark.parametrize(
+    "drift", ["base", "proof", "task", "branch", "anchor", "extra-path"]
+)
 def test_pre_full_source_rejects_changed_evidence(git_repo: Path, drift: str) -> None:
     repo, store, _, commit = _pre_full_setup(git_repo)
     if drift == "base":
