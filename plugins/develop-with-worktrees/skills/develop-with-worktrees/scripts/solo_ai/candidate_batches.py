@@ -2595,6 +2595,12 @@ def verified_recovery_source(repo: GitRepo, *, commit: str) -> dict[str, Any]:
         )
         and batch.get("validation_outcome") == "passed"
     ]
+    if not matches:
+        from .legacy_workspace_adoption import verified_pre_full_maintenance_source
+        from .state import StateStore
+
+        if StateStore(repo).read().get("native_migration"):
+            return verified_pre_full_maintenance_source(repo, commit=commit)
     if len(matches) != 1:
         raise SoloAIError(
             "Recovery source needs one exact passed promotion-blocked batch"

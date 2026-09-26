@@ -206,7 +206,7 @@ if ($Mode -eq 'RecoveryInstall') {
     $checked = @(& $uv run --script $runner --repo $SourceRepo --json batch recovery-source --commit $resolved)
     if ($LASTEXITCODE -ne 0) { Fail '恢复来源未通过精确 Full、日志、基线与候选核验。' }
     $checkedPayload = Read-Json ($checked -join "`n") 'recovery-source'
-    if (-not $checkedPayload.ok -or $checkedPayload.result.source_commit -ne $resolved -or $checkedPayload.result.purpose -ne 'recovery-install-only') {
+    if (-not $checkedPayload.ok -or $checkedPayload.result.source_commit -ne $resolved -or @('recovery-install-only', 'pre-full-maintenance-review') -notcontains $checkedPayload.result.purpose) {
         Fail '恢复来源核验结果不匹配。'
     }
     $recoveryEvidence = $checkedPayload.result

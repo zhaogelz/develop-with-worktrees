@@ -320,9 +320,11 @@ def _parser() -> argparse.ArgumentParser:
         "adopt-legacy-integration-workspace",
         help="bind one verified idle legacy workspace after native migration",
     )
-    migration_adopt.add_argument("--batch", required=True)
+    migration_adopt_target = migration_adopt.add_mutually_exclusive_group(required=True)
+    migration_adopt_target.add_argument("--batch")
+    migration_adopt_target.add_argument("--base")
     migration_adopt.add_argument(
-        "--confirm", required=True, help="repeat BATCH:LEGACY_HEAD:GENERATION"
+        "--confirm", required=True, help="repeat BATCH:HEAD:GEN or BASE:BASE_HEAD:HEAD:GEN"
     )
 
     delegated = sub.add_parser(
@@ -2208,7 +2210,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return preview_native_migration(repo, base_ref=args.base)
         if args.migration_command == "adopt-legacy-integration-workspace":
             return adopt_legacy_integration_workspace(
-                repo, batch_id=args.batch, confirm=args.confirm
+                repo, batch_id=args.batch, base_ref=args.base, confirm=args.confirm
             )
         return enable_native_migration(repo, base_ref=args.base, confirm=args.confirm)
     if args.command == "start":
