@@ -493,4 +493,3 @@ def test_pre_full_source_rejects_changed_evidence(git_repo: Path, drift: str) ->
         commit = moved
     with pytest.raises(SoloAIError):
         verified_pre_full_maintenance_source(repo, commit=commit)
-
