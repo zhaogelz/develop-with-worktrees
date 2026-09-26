@@ -324,7 +324,9 @@ def _parser() -> argparse.ArgumentParser:
     migration_adopt_target.add_argument("--batch")
     migration_adopt_target.add_argument("--base")
     migration_adopt.add_argument(
-        "--confirm", required=True, help="repeat BATCH:HEAD:GEN or BASE:BASE_HEAD:HEAD:GEN"
+        "--confirm",
+        required=True,
+        help="repeat BATCH:HEAD:GEN or BASE:BASE_HEAD:HEAD:GEN",
     )
 
     delegated = sub.add_parser(

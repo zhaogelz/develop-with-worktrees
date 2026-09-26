@@ -270,7 +270,14 @@ def test_cli_exposes_exact_one_time_command() -> None:
     assert args.batch == "batch-native"
     assert args.base is None
     alternate = _parser().parse_args(
-        ["migration", "adopt-legacy-integration-workspace", "--base", "main", "--confirm", "main:base:head:7"]
+        [
+            "migration",
+            "adopt-legacy-integration-workspace",
+            "--base",
+            "main",
+            "--confirm",
+            "main:base:head:7",
+        ]
     )
     assert alternate.base == "main"
 
@@ -347,9 +354,10 @@ def test_adopts_cross_target_idle_workspace_without_switching_head(
     assert result["status"] == "adopted"
     assert result["receipt"]["source_batch_id"] == "batch-legacy"
     assert result["receipt"]["base_ref"] == "main"
-    assert store.read()["integration_workspace"] == pool_store.read()[
-        "integration_workspace"
-    ]
+    assert (
+        store.read()["integration_workspace"]
+        == pool_store.read()["integration_workspace"]
+    )
     assert repo.head(worktree) == original
     assert (
         adopt_legacy_integration_workspace(repo, base_ref="main", confirm=confirm)[

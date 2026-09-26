@@ -246,7 +246,11 @@ def _require_exact_binding(
 
 
 def adopt_legacy_integration_workspace(
-    repo: GitRepo, *, batch_id: str | None = None, base_ref: str | None = None, confirm: str
+    repo: GitRepo,
+    *,
+    batch_id: str | None = None,
+    base_ref: str | None = None,
+    confirm: str,
 ) -> dict[str, Any]:
     """只导入原样空闲绑定与回执；不切换旧工作区 HEAD。"""
 
@@ -345,7 +349,9 @@ def adopt_legacy_integration_workspace(
         return store.mutate(adopt)
 
 
-def verified_pre_full_maintenance_source(repo: GitRepo, *, commit: str) -> dict[str, Any]:
+def verified_pre_full_maintenance_source(
+    repo: GitRepo, *, commit: str
+) -> dict[str, Any]:
     """核验尚未启动原生 Full 的 DWW 维护提交及其独立 Full 证明。"""
 
     store = StateStore(repo)
@@ -365,7 +371,9 @@ def verified_pre_full_maintenance_source(repo: GitRepo, *, commit: str) -> dict[
         or not isinstance(record, dict)
         or state.get("integration_workspace") is not None
     ):
-        raise SoloAIError("Pre-Full maintenance source needs one untouched native batch")
+        raise SoloAIError(
+            "Pre-Full maintenance source needs one untouched native batch"
+        )
     batch_id, batch = next(iter(batches.items()))
     base = migration.get("base_head")
     if (
@@ -481,11 +489,13 @@ def verified_pre_full_maintenance_source(repo: GitRepo, *, commit: str) -> dict[
         ).stdout.split("\0")
         if item
     ]
-    if not paths or not any(
-        item.startswith("plugins/develop-with-worktrees/") for item in paths
-    ) or any(
-        not item.startswith(("plugins/develop-with-worktrees/", "tests/"))
-        for item in paths
+    if (
+        not paths
+        or not any(item.startswith("plugins/develop-with-worktrees/") for item in paths)
+        or any(
+            not item.startswith(("plugins/develop-with-worktrees/", "tests/"))
+            for item in paths
+        )
     ):
         raise SoloAIError("Pre-Full maintenance source changes unrelated paths")
     if (
