@@ -19,7 +19,15 @@ from solo_ai.legacy_workspace_adoption import (
 )
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
-from solo_ai.util import CommandResult, SoloAIError, atomic_write_json, path_identity
+from solo_ai.task_context import anchor_origin, create_anchor
+from solo_ai.util import (
+    CommandResult,
+    SoloAIError,
+    atomic_write_json,
+    path_identity,
+    sha256_text,
+    stable_json,
+)
 
 
 pytestmark = pytest.mark.dww_fast
@@ -391,20 +399,52 @@ def test_cross_target_adoption_rejects_changed_evidence(
     assert store.read()["integration_workspace"] is None
 
 
+def test_cross_target_adoption_accepts_source_branch_advance(
+    git_repo: Path,
+) -> None:
+    repo, store, _, worktree, confirm = _cross_target_setup(git_repo)
+    saved = repo.head(worktree)
+    tree = repo.tree(saved)
+    advanced = repo.git(
+        ["commit-tree", tree, "-p", saved, "-m", "later delivery"]
+    ).stdout.strip()
+    repo.git(["update-ref", "refs/heads/release/test", advanced, saved])
+    assert adopt_legacy_integration_workspace(
+        repo, base_ref="main", confirm=confirm
+    )["status"] == "adopted"
+    assert repo.head(worktree) == saved
+    assert store.read()["integration_workspace"]["head"] == saved
+
+
+def test_adopts_same_target_without_native_batch(git_repo: Path) -> None:
+    repo, store, pool_store, worktree, _ = _setup(git_repo)
+    head = repo.head()
+    pool = pool_store.read()
+    pool["batches"]["batch-legacy"].update(
+        base_before=head,
+        validation_outcome="passed",
+        proof="d" * 64,
+        promoted_at="2026-09-25T00:00:00Z",
+        completed_at="2026-09-25T00:00:00Z",
+        runtime_release={"configured": False, "operation": "batch-release"},
+    )
+    atomic_write_json(pool_store.path, pool)
+    _passed_proof(repo, fingerprint="d" * 64, candidate=head, base=head)
+    state = store.read()
+    state["batches"] = {}
+    atomic_write_json(store.path, state)
+    result = adopt_legacy_integration_workspace(
+        repo, base_ref="main", confirm=f"main:{head}:{head}:7"
+    )
+    assert result["status"] == "adopted"
+    assert repo.head(worktree) == head
+
+
 def _pre_full_setup(
     git_repo: Path,
 ) -> tuple[GitRepo, StateStore, CandidateBatchStore, str]:
     repo, store, pool_store, _, _ = _setup(git_repo)
     base = repo.head()
-    legacy = pool_store.read()
-    legacy["batches"]["batch-legacy"].update(
-        base_before=base,
-        validation_outcome="passed",
-        proof="b" * 64,
-        runtime_release={"configured": False, "operation": "batch-release"},
-    )
-    atomic_write_json(pool_store.path, legacy)
-    _passed_proof(repo, fingerprint="b" * 64, candidate=base, base=base)
     task_tree = git_repo.parent / f"{git_repo.name}-slot-01"
     repo.git(["worktree", "add", "-b", "codex/slot-01", str(task_tree), base])
     source_file = task_tree / "plugins" / "develop-with-worktrees" / "fix.txt"
@@ -414,8 +454,15 @@ def _pre_full_setup(
     repo.git(["commit", "-m", "maintenance fix"], cwd=task_tree)
     commit = repo.head(task_tree)
     state = store.read()
+    state["batches"] = {}
     state["tasks"]["task-maintenance"] = {
         "id": "task-maintenance",
+        "name": "DWW maintenance recovery",
+        "anchor_contract": {
+            "implementation_target": "DWW plugin maintenance",
+            "scope_boundary": "verified plugin and test changes",
+            "acceptance_criteria": "exact Full and Ready",
+        },
         "status": "ready",
         "base_ref": "main",
         "base_head": base,
@@ -425,6 +472,9 @@ def _pre_full_setup(
         "slot_id": "01",
         "slot_generation": 1,
         "slot_worktree_identity": path_identity(task_tree),
+        "runtime_activation": {"configured": False},
+        "runtime_activation_pending": False,
+        "processes": [],
         "native_delivery": {"batch_id": None, "ready_head": commit},
         "validation_attempts": ["full-attempt-maintenance"],
     }
@@ -433,8 +483,17 @@ def _pre_full_setup(
         "generation": 1,
         "status": "ready",
     }
+    task = state["tasks"]["task-maintenance"]
+    task["anchor_origin"] = anchor_origin(task)
     atomic_write_json(store.path, state)
-    _passed_proof(repo, fingerprint="c" * 64, candidate=commit, base=base)
+    create_anchor(repo, task)
+    full_inputs = {
+        "candidate_head": commit,
+        "base_head": base,
+        "levels": ["ready", "full"],
+    }
+    proof_id = sha256_text(stable_json(full_inputs))
+    _passed_proof(repo, fingerprint=proof_id, candidate=commit, base=base)
     atomic_write_json(
         repo.local_dir / "validation-attempts" / "full-attempt-maintenance.json",
         {
@@ -447,13 +506,14 @@ def _pre_full_setup(
             "result": "passed",
             "candidate_head": commit,
             "base_head": base,
-            "proof": "c" * 64,
+            "proof": proof_id,
+            "profiles": [{"id": "maintenance-full", "state": "passed"}],
         },
     )
     return repo, store, pool_store, commit
 
 
-def test_pre_full_source_requires_exact_task_full_and_idle_batch(
+def test_pre_full_source_requires_exact_task_full_without_native_batch(
     git_repo: Path,
 ) -> None:
     repo, _, _, commit = _pre_full_setup(git_repo)
@@ -463,21 +523,30 @@ def test_pre_full_source_requires_exact_task_full_and_idle_batch(
     assert result["validation_attempt"] == "full-attempt-maintenance"
 
 
-@pytest.mark.parametrize("drift", ["batch", "proof", "task", "branch", "extra-path"])
+@pytest.mark.parametrize("drift", ["base", "proof", "task", "branch", "anchor", "extra-path"])
 def test_pre_full_source_rejects_changed_evidence(git_repo: Path, drift: str) -> None:
     repo, store, _, commit = _pre_full_setup(git_repo)
-    if drift == "batch":
-        state = store.read()
-        state["batches"]["batch-native"]["runtime_cycle"] = 1
-        atomic_write_json(store.path, state)
+    if drift == "base":
+        repo.git(["commit", "--allow-empty", "-m", "move main"])
     elif drift == "proof":
-        (repo.local_dir / "proofs" / f"{'c' * 64}.json").unlink()
+        proof_id = sha256_text(
+            stable_json(
+                {
+                    "candidate_head": commit,
+                    "base_head": repo.head(),
+                    "levels": ["ready", "full"],
+                }
+            )
+        )
+        (repo.local_dir / "proofs" / f"{proof_id}.json").unlink()
     elif drift == "task":
         state = store.read()
         state["tasks"]["task-maintenance"]["status"] = "active"
         atomic_write_json(store.path, state)
     elif drift == "branch":
         repo.git(["update-ref", "refs/heads/codex/slot-01", repo.head()])
+    elif drift == "anchor":
+        (repo.local_dir / "task-anchors" / "task-maintenance.md").unlink()
     else:
         task_tree = Path(store.read()["tasks"]["task-maintenance"]["worktree"])
         repo.git(["checkout", "-b", "extra-path", commit], cwd=task_tree)

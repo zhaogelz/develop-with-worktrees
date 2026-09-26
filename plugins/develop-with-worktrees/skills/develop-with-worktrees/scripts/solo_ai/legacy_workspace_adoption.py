@@ -215,10 +215,14 @@ def _require_exact_binding(
         source_ref = source_batch.get("base_ref")
         source_base = source_batch.get("base_before")
         fingerprint = source_batch.get("proof")
+        source_current = (
+            repo.ref_head(f"refs/heads/{source_ref}")
+            if isinstance(source_ref, str)
+            else None
+        )
         if (
             not isinstance(source_ref, str)
-            or source_ref == native_base_ref
-            or repo.ref_head(f"refs/heads/{source_ref}") != head
+            or (source_current is not None and not repo.is_ancestor(head, source_current))
             or not isinstance(source_base, str)
             or not repo.is_ancestor(source_base, head)
             or source_batch.get("validation_outcome") != "passed"
@@ -354,76 +358,19 @@ def verified_pre_full_maintenance_source(
 ) -> dict[str, Any]:
     """核验尚未启动原生 Full 的 DWW 维护提交及其独立 Full 证明。"""
 
+    from .task_context import require_anchor
+
     store = StateStore(repo)
-    pool_store = CandidateBatchStore(repo)
     state_digest = hashlib.sha256(store.path.read_bytes()).hexdigest()
-    pool_digest = hashlib.sha256(pool_store.path.read_bytes()).hexdigest()
     state = store.read()
-    pool = pool_store.read()
-    migration = state.get("native_migration")
-    batches = state.get("batches")
-    record = pool.get("integration_workspace")
+    base = repo.ref_head("refs/heads/main")
     if (
-        not isinstance(migration, dict)
-        or migration.get("base_ref") != "main"
-        or not isinstance(batches, dict)
-        or len(batches) != 1
-        or not isinstance(record, dict)
-        or state.get("integration_workspace") is not None
-    ):
-        raise SoloAIError(
-            "Pre-Full maintenance source needs one untouched native batch"
-        )
-    batch_id, batch = next(iter(batches.items()))
-    base = migration.get("base_head")
-    if (
-        not isinstance(base, str)
-        or repo.ref_head("refs/heads/main") != base
-        or not isinstance(batch, dict)
-        or batch.get("base_ref") != "main"
-        or batch.get("base_before") != base
-        or batch.get("integration_head") != base
-        or batch.get("runtime_cycle") != 0
-        or batch.get("validation_attempt")
-        or batch.get("proof")
-        or batch.get("validation_outcome")
-        or not repo.is_ancestor(base, commit)
+        state.get("schema_version") != STATE_SCHEMA
+        or not isinstance(base, str)
         or base == commit
+        or not repo.is_ancestor(base, commit)
     ):
-        raise SoloAIError("Pre-Full maintenance source base or batch changed")
-    _require_exact_binding(
-        repo,
-        store,
-        pool_store,
-        state,
-        pool,
-        batch_id=batch_id,
-        base_ref=None,
-        confirm=f"{batch_id}:{base}:{record.get('generation')}",
-    )
-    legacy_id = record["head_ref"].removeprefix("refs/dww/batch-heads/")
-    legacy_batch = pool["batches"][legacy_id]
-    legacy_proof_id = legacy_batch.get("proof")
-    legacy_base = legacy_batch.get("base_before")
-    if (
-        legacy_batch.get("validation_outcome") != "passed"
-        or not isinstance(legacy_proof_id, str)
-        or not isinstance(legacy_base, str)
-        or not repo.is_ancestor(legacy_base, base)
-    ):
-        raise SoloAIError("Legacy workspace source has no passed delivery")
-    legacy_proof = read_json(repo.local_dir / "proofs" / f"{legacy_proof_id}.json", {})
-    require_exact_passed_proof(
-        legacy_proof,
-        fingerprint=legacy_proof_id,
-        candidate_head=base,
-        base_head=legacy_base,
-    )
-    if "full" not in (legacy_proof.get("inputs") or {}).get("levels", []):
-        raise SoloAIError("Legacy workspace source lacks Full validation")
-    require_exact_passed_batch_release(
-        repo, receipt=copy.deepcopy(legacy_batch.get("runtime_release") or {})
-    )
+        raise SoloAIError("Maintenance source has no unchanged main base")
 
     tasks = [
         item
@@ -436,6 +383,17 @@ def verified_pre_full_maintenance_source(
     if len(tasks) != 1:
         raise SoloAIError("Pre-Full maintenance source needs one exact Ready task")
     task = tasks[0]
+    anchor = require_anchor(repo, task, require_verified_origin=True)
+    anchor_text = anchor.read_text(encoding="utf-8")
+    contract = task.get("anchor_contract")
+    if not isinstance(contract, dict):
+        raise SoloAIError("Recovery source task has no maintenance contract")
+    purpose = f"{task.get('name', '')} {contract.get('implementation_target', '')}"
+    if (
+        "dww" not in purpose.casefold()
+        and "develop-with-worktrees" not in purpose.casefold()
+    ):
+        raise SoloAIError("Recovery source task is not anchored to DWW maintenance")
     task_id = task.get("id")
     worktree = Path(str(task.get("worktree") or ""))
     slot = state.get("slots", {}).get(str(task.get("slot_id")), {})
@@ -443,9 +401,13 @@ def verified_pre_full_maintenance_source(
         task.get("base_ref") != "main"
         or task.get("base_head") != base
         or (task.get("native_delivery") or {}).get("batch_id") is not None
+        or (task.get("runtime_activation") or {}).get("configured") is not False
+        or task.get("runtime_activation_pending") is True
+        or task.get("processes")
         or not isinstance(slot, dict)
         or slot.get("task_id") != task_id
         or slot.get("generation") != task.get("slot_generation")
+        or slot.get("status") != "ready"
         or task.get("branch") != repo.branch(worktree)
         or repo.ref_head(f"refs/heads/{task.get('branch')}") != commit
         or repo.head(worktree) != commit
@@ -480,7 +442,16 @@ def verified_pre_full_maintenance_source(
     require_exact_passed_proof(
         proof, fingerprint=proof_id, candidate_head=commit, base_head=base
     )
-    if "full" not in (proof.get("inputs") or {}).get("levels", []):
+    inputs = proof.get("inputs") or {}
+    if (
+        "full" not in inputs.get("levels", [])
+        or sha256_text(stable_json(inputs)) != proof_id
+        or not attempt.get("profiles")
+        or any(
+            item.get("state") not in {"passed", "reused"}
+            for item in attempt["profiles"]
+        )
+    ):
         raise SoloAIError("Pre-Full maintenance proof is not Full")
     paths = [
         item
@@ -500,13 +471,12 @@ def verified_pre_full_maintenance_source(
         raise SoloAIError("Pre-Full maintenance source changes unrelated paths")
     if (
         hashlib.sha256(store.path.read_bytes()).hexdigest() != state_digest
-        or hashlib.sha256(pool_store.path.read_bytes()).hexdigest() != pool_digest
+        or anchor.read_text(encoding="utf-8") != anchor_text
         or repo.ref_head("refs/heads/main") != base
         or repo.ref_head(f"refs/heads/{task['branch']}") != commit
     ):
         raise SoloAIError("Pre-Full maintenance source changed during verification")
     return {
-        "batch_id": batch_id,
         "source_task_id": task_id,
         "source_commit": commit,
         "base_head": base,
