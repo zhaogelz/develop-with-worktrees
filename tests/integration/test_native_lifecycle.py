@@ -18,6 +18,7 @@ from solo_ai.lifecycle import (
     finish,
     initialize,
     ready,
+    recover,
     start,
     withdraw_ready,
 )
@@ -29,7 +30,7 @@ from solo_ai.native_batches import (
 from solo_ai.repo import GitRepo
 from solo_ai.runtime_adapter import prepare_task_runtime
 from solo_ai.state import STATE_SCHEMA, StateStore
-from solo_ai.util import ActionableSoloAIError, SoloAIError
+from solo_ai.util import ActionableSoloAIError, SoloAIError, path_identity
 
 
 def _native_repo(
@@ -180,6 +181,10 @@ def test_native_fixed_slot_waits_for_real_delivery_then_reuses_branch(
         integration_head=delivered_head,
         release_receipt={"result": "passed", "head": delivered_head},
     )
+    git(worktree, "switch", "--detach", delivered_head)
+    git(git_repo, "branch", "-D", branch)
+    assert repo.branch(worktree) is None
+    assert repo.ref_head(f"refs/heads/{branch}") is None
 
     second = start(repo, name="second native task")
     assert second["id"] != first["id"]
@@ -188,6 +193,103 @@ def test_native_fixed_slot_waits_for_real_delivery_then_reuses_branch(
     assert second["branch"] == branch
     assert repo.head(worktree) == delivered_head
     assert CandidateBatchStore(repo).read()["candidates"] == {}
+
+
+def test_native_start_preserves_detached_slot_with_unique_content(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo)
+    worktree = Path(str(store.read()["slots"]["01"]["path"]))
+    git(git_repo, "worktree", "add", "--detach", str(worktree), "main")
+    (worktree / "untracked.txt").write_text("unique\n", encoding="utf-8")
+    old_head = repo.head(worktree)
+
+    with pytest.raises(SoloAIError, match="Detached fixed slot contains"):
+        start(repo, name="preserve detached slot content")
+
+    assert repo.head(worktree) == old_head
+    assert repo.branch(worktree) is None
+    assert repo.ref_head("refs/heads/codex/slot-01") is None
+    assert (worktree / "untracked.txt").read_text(encoding="utf-8") == "unique\n"
+    assert store.read()["slots"]["01"]["status"] == "quarantined"
+
+
+def test_recover_explicitly_ends_clean_unactivated_fixed_slot_failure(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo)
+    slot = store.read()["slots"]["01"]
+    worktree = Path(str(slot["path"]))
+    git(git_repo, "worktree", "add", "--detach", str(worktree), "main")
+    old_head = repo.head(worktree)
+    store.mutate(
+        lambda state: state["slots"]["01"].update(
+            released_worktree_identity=path_identity(worktree),
+            released_managed_root_identity=path_identity(worktree.parent),
+            released_worktree_resolved=str(worktree.resolve()),
+            released_managed_root_resolved=str(worktree.parent.resolve()),
+        )
+    )
+    task = store.allocate(
+        load_repo_config(repo),
+        name="unactivated duplicate",
+        branch="unused-native-branch",
+        base_head=old_head,
+        base_ref="main",
+        base_worktree=git_repo,
+        anchor_contract={
+            "implementation_target": "fixed slot",
+            "scope_boundary": "clean unactivated task",
+            "acceptance_criteria": "terminal audit",
+        },
+    )
+    store.quarantine(task["id"], "Fixed slot is not attached to its recorded branch")
+    (git_repo / "later.txt").write_text("accepted\n", encoding="utf-8")
+    git(git_repo, "add", "later.txt")
+    git(git_repo, "commit", "-m", "test: advance accepted base")
+    reason = "Duplicate task has no source; replacement is already delivered"
+
+    with pytest.raises(SoloAIError, match="exact task id"):
+        recover(
+            repo,
+            task_id=task["id"],
+            abandon_unactivated=True,
+            confirm="other-task",
+            reason=reason,
+        )
+    unique = worktree / "unique.txt"
+    unique.write_text("preserve me\n", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="cleanliness"):
+        recover(
+            repo,
+            task_id=task["id"],
+            abandon_unactivated=True,
+            confirm=task["id"],
+            reason=reason,
+        )
+    assert unique.read_text(encoding="utf-8") == "preserve me\n"
+    assert store.task(task["id"])["status"] == "quarantined"
+    unique.unlink()
+    result = recover(
+        repo,
+        task_id=task["id"],
+        abandon_unactivated=True,
+        confirm=task["id"],
+        reason=reason,
+    )
+
+    assert result["status"] == "abandoned"
+    assert result["recovery"] == "preactivation-fixed-slot-release"
+    assert result["reason"] == reason
+    assert store.task(task["id"])["preactivation_release"]["tracked_files"] == []
+    assert store.read()["slots"]["01"]["status"] == "idle"
+    assert repo.branch(worktree) is None
+    assert repo.head(worktree) == repo.head(git_repo)
+    assert recover(repo, task_id=task["id"]) == result
+
+    reused = start(repo, name="next fixed slot task")
+    assert reused["slot_id"] == "01"
+    assert repo.branch(worktree) == "codex/slot-01"
 
 
 def test_native_batch_keeps_source_in_real_merge_history(git_repo: Path) -> None:

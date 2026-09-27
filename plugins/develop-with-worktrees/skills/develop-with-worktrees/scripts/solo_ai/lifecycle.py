@@ -1508,14 +1508,17 @@ def _is_dirty_preactivation_failure(task: dict[str, Any]) -> bool:
 
 def _preactivation_release_result(task: dict[str, Any]) -> dict[str, Any]:
     recovery = dict(task["preactivation_release"])
-    return {
+    result = {
         "id": task["id"],
         "status": "abandoned",
-        "recovery": "preactivation-dirty-slot-release",
+        "recovery": recovery.get("recovery_kind", "preactivation-dirty-slot-release"),
         "transaction_id": recovery["transaction_id"],
         "release_head": recovery["release_head"],
         "released_slot": task["slot_id"],
     }
+    if recovery.get("reason"):
+        result["reason"] = recovery["reason"]
+    return result
 
 
 def _preactivation_release_worktree(
@@ -1626,10 +1629,42 @@ def _preactivation_release_paths(
     return records
 
 
+def _is_clean_fixed_slot_preactivation_failure(task: dict[str, Any]) -> bool:
+    """只识别固定分支尚未创建、没有交付内容的领取失败。"""
+
+    return (
+        not _is_in_place(task)
+        and task.get("status") == "quarantined"
+        and task.get("quarantine_reason")
+        == "Fixed slot is not attached to its recorded branch"
+        and not task.get("candidate_head")
+        and not task.get("candidate_publication")
+        and not task.get("integration")
+        and not task.get("abandonment")
+        and not task.get("preactivation_release")
+        and task.get("ready_proof") is None
+        and task.get("runtime_activation") is None
+        and task.get("runtime_activation_pending") is not True
+        and not (task.get("native_delivery") or {}).get("ready_head")
+        and not (task.get("native_delivery") or {}).get("delivery")
+    )
+
+
 def _new_preactivation_release(
-    repo: GitRepo, *, store: StateStore, task: dict[str, Any], operation_id: str
+    repo: GitRepo,
+    *,
+    store: StateStore,
+    task: dict[str, Any],
+    operation_id: str,
+    clean_fixed_slot_reason: str | None = None,
 ) -> dict[str, Any]:
-    if not _is_dirty_preactivation_failure(task):
+    clean_fixed_slot = clean_fixed_slot_reason is not None
+    if clean_fixed_slot:
+        if not _is_clean_fixed_slot_preactivation_failure(task):
+            raise SoloAIError(
+                "Task is not an eligible fixed-slot pre-activation failure"
+            )
+    elif not _is_dirty_preactivation_failure(task):
         raise SoloAIError("Task is not an eligible dirty pre-activation Start failure")
     worktree, managed_root, resolved = _preactivation_release_worktree(repo, task)
     if repo.branch(worktree) is not None:
@@ -1640,8 +1675,10 @@ def _new_preactivation_release(
         raise SoloAIError("Pre-activation release found an unexpected task branch")
     if (repo.local_dir / "task-anchors" / f"{task['id']}.md").exists():
         raise SoloAIError("Pre-activation release found an unexpected task anchor")
-    if repo.is_clean(worktree):
-        raise SoloAIError("Pre-activation slot is clean; use ordinary Start recovery")
+    if repo.is_clean(worktree) != clean_fixed_slot:
+        raise SoloAIError(
+            "Pre-activation slot cleanliness does not match its recovery kind"
+        )
     if ordinary := repo.git(
         ["ls-files", "--others", "--exclude-standard"], cwd=worktree
     ).stdout.splitlines():
@@ -1661,6 +1698,10 @@ def _new_preactivation_release(
         raise SoloAIError(
             "Pre-activation release requires the current base to descend from task baseline"
         )
+    if clean_fixed_slot and not repo.is_ancestor(repo.head(worktree), release_head):
+        raise SoloAIError(
+            "Clean fixed slot HEAD is not in the current base history; preserve it"
+        )
     state = store.read()
     slot = state["slots"].get(str(task["slot_id"]))
     if (
@@ -1671,6 +1712,12 @@ def _new_preactivation_release(
         raise SoloAIError("Pre-activation release lost its exact quarantined slot")
     return {
         "schema_version": PREACTIVATION_RELEASE_SCHEMA,
+        "recovery_kind": (
+            "preactivation-fixed-slot-release"
+            if clean_fixed_slot
+            else "preactivation-dirty-slot-release"
+        ),
+        "reason": clean_fixed_slot_reason,
         "transaction_id": uuid.uuid4().hex,
         "phase": "prepared",
         "task_id": task["id"],
@@ -1689,11 +1736,15 @@ def _new_preactivation_release(
         "tracked_status": repo.git(
             ["status", "--porcelain=v1", "--untracked-files=all"], cwd=worktree
         ).stdout,
-        "tracked_files": _preactivation_release_paths(
-            repo,
-            worktree,
-            task_base=str(task["base_head"]),
-            release_head=release_head,
+        "tracked_files": (
+            []
+            if clean_fixed_slot
+            else _preactivation_release_paths(
+                repo,
+                worktree,
+                task_base=str(task["base_head"]),
+                release_head=release_head,
+            )
         ),
         "prepared_by_operation_id": operation_id,
         "prepared_at": utc_timestamp(),
@@ -2431,9 +2482,25 @@ def _activate_native_slot(
                 raise SoloAIError(
                     "Idle fixed slot has no matching delivered predecessor"
                 )
-    if repo.branch(worktree) != branch or repo.ref_head(
-        f"refs/heads/{branch}"
-    ) != repo.head(worktree):
+    current_branch = repo.branch(worktree)
+    branch_head = repo.ref_head(f"refs/heads/{branch}")
+    if current_branch is None and branch_head is None:
+        # 旧槽位可能在迁移或外部归还后保持 detached；只恢复没有独有内容的现场。
+        if not repo.is_clean(worktree):
+            raise SoloAIError("Detached fixed slot contains uncommitted changes")
+        if unknown := _unknown_ignored(repo, worktree):
+            raise SoloAIError(
+                "Detached fixed slot contains protected or unknown ignored content:\n"
+                + "\n".join(f"- {item}" for item in unknown[:20])
+            )
+        if not repo.is_ancestor(repo.head(worktree), base_head):
+            raise SoloAIError(
+                "Detached fixed slot HEAD is not an ancestor of the selected target"
+            )
+        repo.git(["switch", "-c", branch], cwd=worktree)
+        current_branch = repo.branch(worktree)
+        branch_head = repo.ref_head(f"refs/heads/{branch}")
+    if current_branch != branch or branch_head != repo.head(worktree):
         raise SoloAIError("Fixed slot is not attached to its recorded branch")
     if not repo.is_clean(worktree):
         raise SoloAIError("Fixed slot contains uncommitted changes")
@@ -5020,6 +5087,9 @@ def recover(
     task_id: str,
     repair_runtime_adapter_paths: list[str] | None = None,
     host_actor: dict[str, str] | None = None,
+    abandon_unactivated: bool = False,
+    confirm: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """根据持久化事务和 Git 事实恢复；失败时不轮换租约或改变现场。"""
     _, _, _ = _config_and_mode(repo)
@@ -5027,6 +5097,28 @@ def recover(
     host_actor = normalize_host_reference(host_actor)
     store.reconcile_operation_receipts()
     task = store.task(task_id)
+    if abandon_unactivated:
+        if confirm != task_id:
+            raise SoloAIError(
+                "Unactivated task release requires --confirm with the exact task id"
+            )
+        if not reason or not reason.strip() or "\n" in reason or "\r" in reason:
+            raise SoloAIError("Unactivated task release requires one-line --reason")
+        if repair_runtime_adapter_paths is not None:
+            raise SoloAIError(
+                "Unactivated task release cannot repair the Runtime Adapter"
+            )
+        release = task.get("preactivation_release") or {}
+        if release:
+            if (
+                release.get("recovery_kind") != "preactivation-fixed-slot-release"
+                or release.get("reason") != reason.strip()
+            ):
+                raise SoloAIError("Unactivated release reason or kind changed")
+        elif not _is_clean_fixed_slot_preactivation_failure(task):
+            raise SoloAIError(
+                "Task is not an eligible fixed-slot pre-activation failure"
+            )
     if task.get("status") in {
         "preactivation-releasing",
         "abandoned",
@@ -5153,6 +5245,22 @@ def recover(
         with store.recovery_operation(task_id) as recovery_task:
             operation_id = str(recovery_task["active_operation"]["id"])
             with maintenance_lock(repo):
+                if abandon_unactivated:
+                    transaction = _new_preactivation_release(
+                        repo,
+                        store=store,
+                        task=store.task(task_id),
+                        operation_id=operation_id,
+                        clean_fixed_slot_reason=reason.strip(),
+                    )
+                    prepared = store.prepare_preactivation_release(
+                        task_id,
+                        operation_id=operation_id,
+                        recovery=transaction,
+                    )
+                    return _resume_preactivation_release(
+                        repo, store=store, task=prepared
+                    )
                 if _is_dirty_preactivation_failure(store.task(task_id)):
                     transaction = _new_preactivation_release(
                         repo,

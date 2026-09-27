@@ -12,6 +12,10 @@ Use `status --compact` to distinguish these modes before acting.
 target base, and returns that slot's worktree and lease. It checks prior delivery,
 branch identity, cleanliness, and unknown files before reusing a slot. Start
 does not install dependencies, build output, or launch project services.
+For a registered idle slot left detached with no fixed branch, Start may recreate
+that branch only after checking its recorded directory identity, any delivered
+predecessor, clean worktree, unknown content, and detached HEAD ancestry in the
+selected target. Any mismatch remains quarantined with its files preserved.
 
 When a separately reviewed commit already exists in the same local Git object
 database, `merge-source --task <id> --lease <lease> --source <full-sha>` records

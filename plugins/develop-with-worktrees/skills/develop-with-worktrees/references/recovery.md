@@ -12,6 +12,7 @@ from a title, a worktree count, or a quiet log.
 | Bound root is stale | child anchor and current root | `anchor refresh-root`, then retry the blocked command | task worktree and current plan |
 | Start remains `starting` | activation receipt, worktree identity, contamination | retry the same request ID or `recover` after the cause is known | task, slot, anchor, and unexpected files |
 | Start was quarantined before activation because an old idle slot was dirty | task has no branch, anchor, activation, candidate, or ordinary untracked content; each tracked dirty blob equals the current descendant base or an exact blob in its post-baseline first-parent history | `recover` records and resumes the bounded pre-activation release | original scene, exact content fingerprints, accepted commit, slot generation, and ignored/protected content |
+| Start was quarantined before activation because a clean fixed slot was detached | exact task and slot identity, no branch, anchor, activation, Ready, candidate, or delivery; detached HEAD belongs to current target history | `recover --task <id> --abandon-unactivated --confirm <id> --reason <one-line>` ends an unneeded task with an audit reason, then the next Start can restore the idle branch | task remains distinct from any replacement delivery; unknown content and audit slots |
 | Candidate is `held` | publication and release receipt | repair or recover the exact release path | candidate ref, task anchor, and base |
 | Older published candidate has no ordinary branch | completed publication, original branch name, exact candidate ref and head | preview `candidate restore-branch --candidate <id>`, then use `--apply` for the exact missing branch | candidate ref and any current worktree; a conflicting branch is never overwritten |
 | Batch is interrupted but not failed | batch phase and live operation | `batch recover` for that recorded generation | batch, base, and validation receipt |
@@ -153,3 +154,11 @@ or file blob. A crash after the reset resumes from the recorded transaction and
 does not invent the missing task branch or anchor. The slot becomes reusable only
 after the post-reset identity and content checks pass. Any other dirty Start
 continues to use ordinary Start recovery and remains preserved on uncertainty.
+
+An explicitly abandoned clean fixed-slot Start uses the same durable release
+transaction. It requires the exact task ID and one-line reason and accepts only
+the recorded fixed-branch identity failure before any task branch, anchor, Ready,
+candidate, or delivery exists. The detached worktree must be clean and its HEAD
+must be an ancestor of the current descendant base. It records an `abandoned`
+terminal result; a separate replacement delivery does not become this task's
+delivery. The next Start performs the guarded fixed-branch restoration.

@@ -1123,6 +1123,15 @@ def _parser() -> argparse.ArgumentParser:
         help="recover an interrupted task from persisted identity and Git facts",
     )
     recover.add_argument("--task", required=True)
+    recover.add_argument(
+        "--abandon-unactivated",
+        action="store_true",
+        help="end an exact clean fixed-slot Start failure without treating it as delivered",
+    )
+    recover.add_argument("--confirm", help="exact task id for --abandon-unactivated")
+    recover.add_argument(
+        "--reason", help="one-line audit reason for --abandon-unactivated"
+    )
     _add_host_reference_arguments(recover, role="candidate publication recovery")
     recover.add_argument(
         "--repair-runtime-adapter",
@@ -2913,6 +2922,10 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             )
         return _status(repo, detailed=args.detailed)
     if args.command == "recover":
+        if (args.confirm or args.reason) and not args.abandon_unactivated:
+            raise SoloAIError(
+                "recover --confirm and --reason require --abandon-unactivated"
+            )
         if args.repair_path and not args.repair_runtime_adapter:
             raise SoloAIError("recover --path requires --repair-runtime-adapter")
         if args.repair_runtime_adapter and not args.repair_path:
@@ -2926,6 +2939,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 args.repair_path if args.repair_runtime_adapter else None
             ),
             host_actor=_resolved_host_reference(args),
+            abandon_unactivated=args.abandon_unactivated,
+            confirm=args.confirm,
+            reason=args.reason,
         )
     if args.command == "handoff":
         return handoff(
