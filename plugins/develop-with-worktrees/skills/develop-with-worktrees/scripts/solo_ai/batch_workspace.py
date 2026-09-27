@@ -1,18 +1,76 @@
 from __future__ import annotations
 
 import copy
+import os
+import re
+import stat
 from pathlib import Path
 from typing import Any
 
-from .cleanup import inspect_untracked, require_managed_directory_identity
+from .cleanup import (
+    OPAQUE_RECREATABLE_ROOTS,
+    inspect_untracked,
+    require_managed_directory_identity,
+)
 from .repo import GitRepo
 from .util import (
     ActionableSoloAIError,
     SoloAIError,
+    filesystem_path,
     is_link_or_junction,
     path_identity,
     utc_timestamp,
 )
+
+
+_UNREADABLE_DIRECTORY = re.compile(
+    r"warning: could not open directory '([^']+)/': Permission denied"
+)
+
+
+def require_inventory_visible(repo: GitRepo, worktree: Path) -> None:
+    """Git 漏报的拒绝访问目录只能是可核验的不透明依赖根。"""
+
+    opaque_roots: set[str] = set()
+    try:
+        for child in filesystem_path(worktree).iterdir():
+            name = child.name.casefold()
+            if name not in OPAQUE_RECREATABLE_ROOTS:
+                continue
+            path = worktree / child.name
+            entry = filesystem_path(path).lstat()
+            if not stat.S_ISDIR(entry.st_mode) or bool(
+                getattr(entry, "st_file_attributes", 0) & 0x0400
+            ):
+                raise SoloAIError(
+                    f"Retained dependency root is not a plain directory: {path}"
+                )
+            opaque_roots.add(name)
+    except OSError as exc:
+        raise SoloAIError("Cannot inspect integration workspace roots") from exc
+
+    for args in (
+        [
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--directory",
+        ],
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    ):
+        result = repo.git(
+            args,
+            cwd=worktree,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+        )
+        for line in result.stderr.splitlines():
+            match = _UNREADABLE_DIRECTORY.fullmatch(line.strip())
+            if match is None or match.group(1).casefold() not in opaque_roots:
+                raise SoloAIError(
+                    f"Cannot inventory integration workspace safely: {line}"
+                )
 
 
 class BatchWorkspacePending(ActionableSoloAIError):

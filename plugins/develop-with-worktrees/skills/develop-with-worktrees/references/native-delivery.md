@@ -103,10 +103,18 @@ the first native batch may stop with `OWNERSHIP_DRIFT` because native state has
 no binding for that existing directory. After reviewing the exact legacy pool
 record and sealed native batch, use the one-time managed command
 `migration adopt-legacy-integration-workspace --batch <id> --confirm <id>:<legacy-head>:<generation>`.
+If no native batch exists, use
+`migration adopt-legacy-integration-workspace --base main --confirm main:<migration-head>:<legacy-head>:<generation>`
+after confirming that `main` still points to the recorded migration head.
 It requires the completed legacy batch receipt, persistent head ref, unchanged
 directory and Git identity, clean tracked files, retained-content boundary,
-and unchanged native migration base. An unreadable ignored directory is accepted
-only when it is an existing plain top-level opaque dependency root. The command
+and unchanged native target base. The old result may belong to another release
+branch, including while the first native batch is sealed. In that case its
+source branch ancestry, passed Full proof, promotion, and release receipt must
+match the recorded old delivery; the sealed native batch must still be waiting
+on the unchanged target base and must not have claimed the worktree. An
+unreadable ignored directory is accepted only when it is an existing plain
+top-level opaque dependency root. The command
 copies the idle record into native state unchanged and writes an adoption receipt
 in the same atomic state update. It does not check out, move, or clean the
 worktree. Continue the sealed batch with `batch recover --batch <id>` only after

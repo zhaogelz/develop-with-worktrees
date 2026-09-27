@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,14 @@ from solo_ai.config import (
 from solo_ai.native_migration import enable_native_migration, preview_native_migration
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
-from solo_ai.util import SoloAIError, atomic_write_json, path_identity
+from solo_ai.util import (
+    CommandResult,
+    SoloAIError,
+    atomic_write_json,
+    path_identity,
+    sha256_text,
+    stable_json,
+)
 
 
 def _legacy_repo(root: Path) -> tuple[GitRepo, StateStore]:
@@ -40,6 +48,7 @@ def _idle_integration_scene(
     worktree.parent.mkdir(parents=True)
     if source_ref != "main":
         repo.git(["branch", source_ref, "main"])
+    source_base = repo.ref_head(f"refs/heads/{source_ref}")
     repo.git(["worktree", "add", "--detach", str(worktree), source_ref])
     if source_ref != "main":
         (worktree / "release-only.txt").write_text("release\n", encoding="utf-8")
@@ -80,6 +89,41 @@ def _idle_integration_scene(
         "integrated_head": head,
         **location,
     }
+    if source_ref != "main":
+        proof_inputs = {
+            "candidate_head": head,
+            "base_head": source_base,
+            "levels": ["ready", "full"],
+        }
+        fingerprint = sha256_text(stable_json(proof_inputs))
+        log = repo.local_dir / "logs" / "content" / f"{fingerprint}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("passed\n", encoding="utf-8")
+        atomic_write_json(
+            repo.local_dir / "proofs" / f"{fingerprint}.json",
+            {
+                "schema_version": 3,
+                "fingerprint": fingerprint,
+                "result": "passed",
+                "inputs": proof_inputs,
+                "runs": [
+                    {
+                        "exit_code": 0,
+                        "timed_out": False,
+                        "log": str(log),
+                        "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
+                    }
+                ],
+            },
+        )
+        pool["batches"]["batch-legacy-idle"].update(
+            base_before=source_base,
+            validation_outcome="passed",
+            proof=fingerprint,
+            promoted_at="2026-09-01T00:00:00Z",
+            completed_at="2026-09-01T00:00:00Z",
+            runtime_release={"configured": False, "operation": "batch-release"},
+        )
     atomic_write_json(pool_store.path, pool)
     atomic_write_json(store.path, store._empty())
     return repo, store, record, worktree
@@ -144,6 +188,31 @@ def test_native_migration_blocks_existing_worktree_without_legacy_binding(
     assert result["status"] == "blocked"
     assert store.read()["schema_version"] != STATE_SCHEMA
     assert worktree.exists()
+
+
+def test_native_preview_blocks_unreadable_unknown_workspace_directory(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _, _, _ = _idle_integration_scene(git_repo)
+    original_git = repo.git
+
+    def warned_git(args: list[str], **kwargs: object) -> CommandResult:
+        result = original_git(args, **kwargs)
+        if args[:2] == ["ls-files", "--others"]:
+            return CommandResult(
+                result.args,
+                result.returncode,
+                result.stdout,
+                "warning: could not open directory 'unknown/': Permission denied\n",
+            )
+        return result
+
+    monkeypatch.setattr(repo, "git", warned_git)
+    preview = preview_native_migration(repo, base_ref="main")
+    assert preview["status"] == "blocked"
+    assert any(
+        "Cannot inventory" in item.get("reason", "") for item in preview["blockers"]
+    )
 
 
 @pytest.mark.parametrize("drift", ["saved-ref", "directory-identity", "unknown-file"])
