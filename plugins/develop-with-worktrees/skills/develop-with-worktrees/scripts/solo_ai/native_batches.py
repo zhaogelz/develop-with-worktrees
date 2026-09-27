@@ -421,7 +421,9 @@ def _run_full(
             validation_error="Native batch target or workspace changed during Full validation",
         )
         _release_runtime(repo, store, releasing)
-        raise SoloAIError("Native batch target or workspace changed during Full validation")
+        raise SoloAIError(
+            "Native batch target or workspace changed during Full validation"
+        )
     releasing = store.update_batch(
         str(batch["id"]),
         status="runtime_releasing",

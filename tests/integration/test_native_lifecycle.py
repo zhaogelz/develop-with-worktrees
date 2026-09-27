@@ -337,15 +337,15 @@ def test_native_batch_preserves_runtime_workspace_changes_before_promotion(
 
     def dirty_runtime(*args: object, **kwargs: object) -> dict[str, object]:
         receipt = original(*args, **kwargs)
-        (Path(batch["worktree"]) / "guard.txt").write_text(
-            "dirty\n", encoding="utf-8"
-        )
+        (Path(batch["worktree"]) / "guard.txt").write_text("dirty\n", encoding="utf-8")
         return receipt
 
     monkeypatch.setattr(native_batches, "validate", record_full)
     monkeypatch.setattr(
         native_batches,
-        "activate_batch_runtime" if operation == "activate" else "release_batch_runtime",
+        "activate_batch_runtime"
+        if operation == "activate"
+        else "release_batch_runtime",
         dirty_runtime,
     )
     with pytest.raises(SoloAIError, match="workspace changed"):
@@ -370,12 +370,12 @@ def test_native_batch_preserves_runtime_workspace_changes_before_promotion(
 
     monkeypatch.setattr(
         native_batches,
-        "activate_batch_runtime" if operation == "activate" else "release_batch_runtime",
+        "activate_batch_runtime"
+        if operation == "activate"
+        else "release_batch_runtime",
         original,
     )
-    (Path(batch["worktree"]) / "guard.txt").write_text(
-        "clean\n", encoding="utf-8"
-    )
+    (Path(batch["worktree"]) / "guard.txt").write_text("clean\n", encoding="utf-8")
     completed = run_native_batch(repo, batch_id=batch["id"])
     assert completed["status"] == "completed"
     assert len(full_calls) == 1
