@@ -117,6 +117,9 @@ runtime effects are run again.
 DWW itself is local-only: it does not fetch, pull, push, open pull requests,
 deploy, rebase, squash, amend, or rewrite history. An explicitly requested
 remote publish is a separate operation from a clean integrated base.
+If the two histories have diverged, an exact local source can enter a managed
+task through `merge-source` for a reviewed, history-preserving merge before
+publication.
 
 ## Find the right detail
 

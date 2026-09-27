@@ -1203,6 +1203,16 @@ def _safe_git_ls_files(tokens: list[_ReadToken]) -> bool:
     return all(argument.value.lower() in allowed for argument in tokens[2:])
 
 
+def _safe_git_ls_remote(tokens: list[_ReadToken]) -> bool:
+    """只查询固定 origin 的 main 引用，不接收 Git 选项或任意 URL。"""
+    return (
+        len(tokens) == 4
+        and tokens[0].value == "git"
+        and tokens[2].value == "origin"
+        and tokens[3].value == "refs/heads/main"
+    )
+
+
 def _safe_select(tokens: list[_ReadToken]) -> bool:
     if len(tokens) < 3 or _command_name(tokens[0]) != "select-object":
         return False
@@ -1265,6 +1275,8 @@ def _safe_read_only_command(tokens: list[_ReadToken]) -> bool:
         )
     if subcommand == "ls-files":
         return _safe_git_ls_files(tokens)
+    if subcommand == "ls-remote":
+        return _safe_git_ls_remote(tokens)
     return subcommand == "worktree" and [token.value for token in tokens[2:]] in (
         ["list"],
         ["list", "--porcelain"],
@@ -1399,6 +1411,36 @@ def _main_primary_worktree(root: Path) -> Path | None:
     if _run_git(str(primary), "branch", "--show-current") != "main":
         return None
     return primary
+
+
+def _exact_origin_main_push(command: str, root: Path) -> bool:
+    """只放行干净 main 主工作树的精确 SHA 到 origin/main 发布形状。"""
+    if any(character in command for character in ("\r", "\n", "\x00")):
+        return False
+    tokens = _tokenize_read_only(command)
+    if not tokens or tokens[0].value != "git":
+        return False
+    values = [token.value for token in tokens]
+    if len(values) == 4:
+        if values[1:3] != ["push", "origin"]:
+            return False
+        refspec = values[3]
+    elif len(values) == 5:
+        if values[1:4] != ["push", "--dry-run", "origin"]:
+            return False
+        refspec = values[4]
+    else:
+        return False
+    match = re.fullmatch(r"([0-9a-f]{40}):refs/heads/main", refspec)
+    if match is None:
+        return False
+    primary = _main_primary_worktree(root)
+    return bool(
+        primary is not None
+        and root.resolve() == primary
+        and _run_git(str(root), "rev-parse", "HEAD") == match.group(1)
+        and _run_git(str(root), "status", "--porcelain") == ""
+    )
 
 
 def _plugin_release_invocation(command: str, root: Path) -> bool:
@@ -1985,6 +2027,8 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
                 "DWW plugin maintenance command is blocked unless it exactly matches "
                 "the trusted query, add, or Install contract."
             )
+        if _exact_origin_main_push(command, root):
+            return None
     task = (
         _task_for_worktree(state, guard, dww_target_root)
         if dww_target_root is not None

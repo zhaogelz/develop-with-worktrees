@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 原生批次在运行时激活、Full、释放与晋升前核对集成区清洁和精确 HEAD；适配器污染保留现场，阻止错误晋升，清理后只恢复未完成阶段。
+- 受管 `merge-source` 将本仓已有的精确提交接入隔离任务，保留双方 Git 历史并沿用精确路径提交及批次 Full；Codex Hook 仅新增 origin/main 精确只读查询和干净主线 SHA 的 dry-run/普通非强制推送形状。
 - 普通 batched 候选的显式 Ready 固定来源基线，不再提前合并移动中的 main；候选保存和整批集成仍分开，旧 direct、requires-ready 与 in-place 路径保持。
 - 延后批次在前批完成后读取执行基线；晋升受阻恢复分别核对候选来源与批次执行基线，保留精确 Full 证明和外部主线变化拒绝。
 - 过时手工 merge 的 Commit 拒绝补充任务与两侧 HEAD 诊断，保留现场供受管修复。
