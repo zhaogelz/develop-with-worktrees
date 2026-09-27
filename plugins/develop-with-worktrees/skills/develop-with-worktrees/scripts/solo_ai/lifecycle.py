@@ -2637,7 +2637,9 @@ def prepare_merge_source(
                 }
         else:
             if merge_head.returncode == 0 or not repo.is_clean(worktree):
-                raise SoloAIError("Unowned merge or dirty task blocks source preparation")
+                raise SoloAIError(
+                    "Unowned merge or dirty task blocks source preparation"
+                )
             if repo.is_ancestor(source_head, task_head, cwd=worktree):
                 raise SoloAIError("Merge source is already in the task history")
             preparation = {
@@ -2659,10 +2661,14 @@ def prepare_merge_source(
             check=False,
         )
         if merge_head.returncode != 0 or merge_head.stdout.strip() != source_head:
-            raise SoloAIError("Merge source did not leave its exact MERGE_HEAD; preserve worktree")
+            raise SoloAIError(
+                "Merge source did not leave its exact MERGE_HEAD; preserve worktree"
+            )
         return {
             **task,
-            "merge_source_status": "prepared" if result.returncode == 0 else "conflicted",
+            "merge_source_status": "prepared"
+            if result.returncode == 0
+            else "conflicted",
         }
 
 

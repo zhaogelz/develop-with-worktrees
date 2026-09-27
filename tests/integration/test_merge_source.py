@@ -84,7 +84,9 @@ def test_exact_local_merge_source_keeps_both_histories(git_repo: Path) -> None:
     )
     merged = committed["candidate_head"]
     assert committed["merge_source_preparation"] is None
-    assert repo.git(["rev-list", "--parents", "-n", "1", merged]).stdout.strip().split() == [
+    assert repo.git(
+        ["rev-list", "--parents", "-n", "1", merged]
+    ).stdout.strip().split() == [
         merged,
         base,
         source,
@@ -164,6 +166,34 @@ def test_merge_source_rejects_moved_target_and_slot_generation(git_repo: Path) -
         )
 
 
+def test_merge_source_commit_rechecks_prepared_slot_generation(git_repo: Path) -> None:
+    repo, store, base, source, _other_source = _divergent_repo(git_repo)
+    task = start(repo, name="freeze source slot")
+    prepared = prepare_merge_source(
+        repo, task_id=task["id"], lease=task["lease"], source_head=source
+    )
+    assert prepared["merge_source_status"] == "prepared"
+    store.mutate(
+        lambda state: state["slots"][task["slot_id"]].update(
+            generation=task["slot_generation"] + 1
+        )
+    )
+    with pytest.raises(SoloAIError, match="exact slot generation"):
+        commit_task(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            message="test: must reject changed slot",
+            paths=["remote.txt"],
+        )
+    assert repo.head(Path(task["worktree"])) == base
+    assert (
+        repo.git(["rev-parse", "MERGE_HEAD"], cwd=Path(task["worktree"]))
+        .stdout.strip()
+        == source
+    )
+
+
 def test_merge_source_conflict_retry_keeps_exact_parents(git_repo: Path) -> None:
     repo, _store, _base, _source, _other_source = _divergent_repo(git_repo)
     git(git_repo, "switch", "remote-side")
@@ -196,7 +226,9 @@ def test_merge_source_conflict_retry_keeps_exact_parents(git_repo: Path) -> None
         paths=["remote.txt", "conflict.txt"],
     )
     merged = committed["candidate_head"]
-    assert repo.git(["rev-list", "--parents", "-n", "1", merged]).stdout.strip().split() == [
+    assert repo.git(
+        ["rev-list", "--parents", "-n", "1", merged]
+    ).stdout.strip().split() == [
         merged,
         base,
         source,
