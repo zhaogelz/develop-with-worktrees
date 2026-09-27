@@ -14,6 +14,24 @@ PLUGIN_ROOT = Path(__file__).parents[2] / "plugins" / "develop-with-worktrees"
 SCRIPT = PLUGIN_ROOT / "maintain-dww-plugin.ps1"
 
 
+def _fake_uv_for_self_contained_helpers(tmp_path: Path) -> str:
+    """模拟调用临时脚本，避免假辅助脚本触发真实包下载。"""
+    runner = tmp_path / "fake-uv.py"
+    runner.write_text(
+        "import subprocess, sys\n"
+        "args = sys.argv[1:]\n"
+        "if not args or args[0] != 'run' or '--script' not in args:\n"
+        "    raise SystemExit(2)\n"
+        "index = args.index('--script')\n"
+        "raise SystemExit(subprocess.call([sys.executable, args[index + 1], *args[index + 2:]]))\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.cmd").write_text(
+        f'@"{sys.executable}" "%~dp0fake-uv.py" %*\r\n', encoding="utf-8"
+    )
+    return f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
 @pytest.mark.dww_fast
 @pytest.mark.skipif(
     os.name != "nt", reason="PowerShell maintenance path is Windows-only"
@@ -198,6 +216,7 @@ else:
     log = tmp_path / "fake-codex.log"
     env = {
         **os.environ,
+        "PATH": _fake_uv_for_self_contained_helpers(tmp_path),
         "CODEX_HOME": str(codex_home),
         "DWW_FAKE_CODEX_STATE": str(state),
         "DWW_FAKE_CODEX_LOG": str(log),
@@ -454,6 +473,7 @@ else:
     )
     env = {
         **os.environ,
+        "PATH": _fake_uv_for_self_contained_helpers(tmp_path),
         "CODEX_HOME": str(codex_home),
         "DWW_FAKE_CODEX_STATE": str(state),
     }
