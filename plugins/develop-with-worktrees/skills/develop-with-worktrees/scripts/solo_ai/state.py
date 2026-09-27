@@ -1419,6 +1419,10 @@ class StateStore:
                 not slot
                 or slot.get("task_id") != task_id
                 or slot.get("status") != "quarantined"
+                or (
+                    state["schema_version"] == STATE_SCHEMA
+                    and slot.get("generation") != task.get("slot_generation")
+                )
             ):
                 raise SoloAIError("Quarantined Start lost its exact managed slot")
             task.update(
@@ -1978,6 +1982,8 @@ class StateStore:
                     "quarantine_reason": None,
                 }
             )
+            if state["schema_version"] == STATE_SCHEMA:
+                slot["released_task_id"] = task_id
             return copy.deepcopy(task)
 
         return self.mutate(update)

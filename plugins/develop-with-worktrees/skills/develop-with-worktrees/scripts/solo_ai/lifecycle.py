@@ -1383,6 +1383,50 @@ def _complete_runtime_activation(
     }
 
 
+def _native_released_predecessor(
+    store: StateStore, task: dict[str, Any], worktree: Path
+) -> dict[str, Any] | None:
+    """校验固定槽位前驱；普通关闭返回其已完成归还事务。"""
+
+    predecessor_id = task.get("slot_predecessor_task_id")
+    if not predecessor_id:
+        return None
+    predecessor = store.task(str(predecessor_id))
+    delivery = (predecessor or {}).get("native_delivery") or {}
+    abandonment = (predecessor or {}).get("abandonment") or {}
+    delivered = (
+        predecessor is not None
+        and predecessor.get("status") == "finished"
+        and isinstance(delivery, dict)
+        and isinstance(delivery.get("delivery"), dict)
+    )
+    abandoned = (
+        predecessor is not None
+        and predecessor.get("status") == "abandoned"
+        and predecessor.get("slot_generation") == int(task["slot_generation"]) - 1
+        and isinstance(abandonment, dict)
+        and bool(abandonment.get("transaction_id"))
+        and abandonment.get("phase") == "completed"
+        and abandonment.get("retained_worktree") is not True
+        and abandonment.get("task_id") == predecessor_id
+        and abandonment.get("slot_id") == task["slot_id"]
+        and abandonment.get("worktree") == str(worktree)
+        and abandonment.get("branch") == task["branch"]
+        and abandonment.get("base_ref") == task["base_ref"]
+        and bool(abandonment.get("base_head"))
+    )
+    if (
+        predecessor is None
+        or not (delivered or abandoned)
+        or predecessor.get("slot_id") != task["slot_id"]
+        or predecessor.get("base_ref") != task["base_ref"]
+        or predecessor.get("branch") != task["branch"]
+        or predecessor.get("worktree") != str(worktree)
+    ):
+        raise SoloAIError("Idle fixed slot has no matching released predecessor")
+    return abandonment if abandoned else None
+
+
 def _resume_quarantined_start(
     repo: GitRepo,
     *,
@@ -1405,6 +1449,17 @@ def _resume_quarantined_start(
         raise SoloAIError(
             "Only a quarantined pre-activation Start can use this recovery path"
         )
+    slot = store.read()["slots"].get(str(task.get("slot_id")))
+    if (
+        not slot
+        or slot.get("task_id") != task["id"]
+        or slot.get("status") != "quarantined"
+        or (
+            task.get("native_delivery")
+            and slot.get("generation") != task.get("slot_generation")
+        )
+    ):
+        raise SoloAIError("Quarantined Start lost its exact slot generation")
     worktree = Path(str(task["worktree"]))
     managed_root = worktree.absolute().parent
     identity_fields = (
@@ -1442,6 +1497,18 @@ def _resume_quarantined_start(
             + "\n".join(f"- {item}" for item in unknown[:20])
         )
 
+    if task.get("native_delivery"):
+        abandonment = _native_released_predecessor(store, task, worktree)
+        if abandonment is not None and (
+            repo.head(worktree) not in {abandonment["base_head"], task["base_head"]}
+            or not repo.is_ancestor(
+                str(abandonment["base_head"]), str(task["base_head"])
+            )
+        ):
+            raise SoloAIError(
+                "Quarantined fixed slot HEAD does not follow its released predecessor"
+            )
+
     branch = str(task["branch"])
     branch_head = repo.ref_head(f"refs/heads/{branch}")
     if branch_head is None:
@@ -1454,7 +1521,10 @@ def _resume_quarantined_start(
             raise SoloAIError(
                 "Quarantined Start has ambiguous partial activation facts"
             )
-        repo.git(["reset", "--hard", str(task["base_head"])], cwd=worktree)
+        if not repo.is_ancestor(repo.head(worktree), str(task["base_head"])):
+            raise SoloAIError(
+                "Quarantined Start detached HEAD is not in its recorded base history"
+            )
         repo.git(["switch", "-c", branch, str(task["base_head"])], cwd=worktree)
         branch_head = repo.head(worktree)
     elif (
@@ -1463,6 +1533,16 @@ def _resume_quarantined_start(
         or task.get("candidate_head") not in {None, branch_head}
     ):
         raise SoloAIError("Quarantined Start branch or worktree identity is ambiguous")
+
+    if task.get("native_delivery") and branch_head != task["base_head"]:
+        if task.get("candidate_head") is not None or not repo.is_ancestor(
+            branch_head, str(task["base_head"])
+        ):
+            raise SoloAIError(
+                "Quarantined fixed slot branch is not in its recorded base history"
+            )
+        repo.git(["merge", "--ff-only", str(task["base_head"])], cwd=worktree)
+        branch_head = repo.head(worktree)
 
     if not repo.is_clean(worktree) or repo.head(worktree) != branch_head:
         raise SoloAIError("Quarantined Start worktree changed during recovery")
@@ -2467,20 +2547,15 @@ def _activate_native_slot(
             expected_identity=task.get("slot_worktree_identity"),
             expected_root_identity=task.get("slot_managed_root_identity"),
         )
-        predecessor_id = task.get("slot_predecessor_task_id")
-        if predecessor_id:
-            predecessor = store.task(str(predecessor_id))
-            delivery = (predecessor or {}).get("native_delivery") or {}
+        abandonment = _native_released_predecessor(store, task, worktree)
+        if abandonment is not None:
             if (
-                predecessor is None
-                or predecessor.get("status") != "finished"
-                or predecessor.get("base_ref") != task["base_ref"]
-                or not isinstance(delivery.get("delivery"), dict)
-                or predecessor.get("branch") != branch
-                or predecessor.get("worktree") != str(worktree)
+                repo.branch(worktree) is not None
+                or repo.ref_head(f"refs/heads/{branch}") is not None
+                or repo.head(worktree) != abandonment["base_head"]
             ):
                 raise SoloAIError(
-                    "Idle fixed slot has no matching delivered predecessor"
+                    "Idle fixed slot does not match its completed abandonment release"
                 )
     current_branch = repo.branch(worktree)
     branch_head = repo.ref_head(f"refs/heads/{branch}")

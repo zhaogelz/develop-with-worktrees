@@ -9,11 +9,12 @@ Use `status --compact` to distinguish these modes before acting.
 ## Task and slot
 
 `start` claims an idle fixed slot branch, records its generation and exact
-target base, and returns that slot's worktree and lease. It checks prior delivery,
+target base, and returns that slot's worktree and lease. It checks prior delivery
+or a completed ordinary abandonment release,
 branch identity, cleanliness, and unknown files before reusing a slot. Start
 does not install dependencies, build output, or launch project services.
 For a registered idle slot left detached with no fixed branch, Start may recreate
-that branch only after checking its recorded directory identity, any delivered
+that branch only after checking its recorded directory identity, any released
 predecessor, clean worktree, unknown content, and detached HEAD ancestry in the
 selected target. Any mismatch remains quarantined with its files preserved.
 

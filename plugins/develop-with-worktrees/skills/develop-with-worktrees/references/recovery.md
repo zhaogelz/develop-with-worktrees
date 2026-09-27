@@ -25,6 +25,13 @@ from a title, a worktree count, or a quiet log.
 `status --compact --task <task-id>` and `status --compact --batch <batch-id>`
 are read-only snapshots. Add history only when investigating terminal records.
 
+Resuming a clean pre-activation Start verifies the owned slot generation and the
+same released predecessor as ordinary Start before changing Git. A missing branch
+is created only from a detached HEAD already in the recorded base history; an
+interrupted native branch creation advances only by fast-forward to that base.
+Unique commits, conflicting release records, unknown files, and replaced
+directories remain preserved. This clean recovery does not use `reset --hard`.
+
 ## Root and task continuity
 
 Start and `bind-root` already return the current complete root. After a real
