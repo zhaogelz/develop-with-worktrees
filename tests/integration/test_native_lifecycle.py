@@ -363,6 +363,11 @@ def test_native_batch_preserves_runtime_workspace_changes_before_promotion(
     assert len(full_calls) == (0 if operation == "activate" else 1)
     attempt = paused.get("validation_attempt")
 
+    with pytest.raises(SoloAIError, match="workspace changed"):
+        run_native_batch(repo, batch_id=batch["id"])
+    assert repo.head(git_repo) == target_before
+    assert len(full_calls) == (0 if operation == "activate" else 1)
+
     monkeypatch.setattr(
         native_batches,
         "activate_batch_runtime" if operation == "activate" else "release_batch_runtime",

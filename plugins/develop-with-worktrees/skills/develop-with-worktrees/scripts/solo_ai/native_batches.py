@@ -258,6 +258,15 @@ def _compose(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[st
     return store.update_batch(str(batch["id"]), status="composed")
 
 
+def _require_runtime_workspace(
+    repo: GitRepo, store: StateStore, batch: dict[str, Any]
+) -> None:
+    worktree = Path(str(batch["worktree"]))
+    if repo.head(worktree) != batch["integration_head"] or not repo.is_clean(worktree):
+        raise SoloAIError("Native runtime workspace changed; preserve its files")
+    batch_workspace.require_owner(repo, store, batch)
+
+
 def _activate_runtime(
     repo: GitRepo, store: StateStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
@@ -273,7 +282,9 @@ def _activate_runtime(
             proof=None,
         )
     try:
+        _require_runtime_workspace(repo, store, batch)
         receipt = activate_batch_runtime(repo, batch=batch)
+        _require_runtime_workspace(repo, store, batch)
     except BaseException as exc:
         store.update_batch(
             str(batch["id"]),
@@ -293,12 +304,15 @@ def _release_runtime(
     repo: GitRepo, store: StateStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
     try:
+        if batch["status"] == "runtime_release_pending":
+            _require_runtime_workspace(repo, store, batch)
         receipt = release_batch_runtime(
             repo,
             batch=batch,
             validation_outcome=str(batch["validation_outcome"]),
             validation_error=batch.get("validation_error"),
         )
+        _require_runtime_workspace(repo, store, batch)
     except BaseException as exc:
         store.update_batch(
             str(batch["id"]),
@@ -356,6 +370,7 @@ def _run_full(
     verification: Any,
 ) -> dict[str, Any]:
     worktree = Path(str(batch["worktree"]))
+    _require_runtime_workspace(repo, store, batch)
     attempt = new_validation_attempt_id("full")
     batch = store.update_batch(
         str(batch["id"]),
@@ -394,15 +409,19 @@ def _run_full(
         )
         _release_runtime(repo, store, releasing)
         raise
-    if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["base_before"]:
+    if (
+        repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["base_before"]
+        or repo.head(worktree) != batch["integration_head"]
+        or not repo.is_clean(worktree)
+    ):
         releasing = store.update_batch(
             str(batch["id"]),
             status="runtime_releasing",
             validation_outcome="failed",
-            validation_error="Native batch target moved during Full validation",
+            validation_error="Native batch target or workspace changed during Full validation",
         )
         _release_runtime(repo, store, releasing)
-        raise SoloAIError("Native batch target moved during Full validation")
+        raise SoloAIError("Native batch target or workspace changed during Full validation")
     releasing = store.update_batch(
         str(batch["id"]),
         status="runtime_releasing",
@@ -464,6 +483,7 @@ def _recover_validation(
 
 
 def _promote(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[str, Any]:
+    _require_runtime_workspace(repo, store, batch)
     require_exact_passed_batch_release(
         repo, receipt=dict(batch.get("runtime_release") or {})
     )
