@@ -2563,6 +2563,109 @@ def _run_declared_secret_scanner(
         )
 
 
+def _require_merge_source_slot(
+    repo: GitRepo, store: StateStore, task: dict[str, Any]
+) -> Path:
+    worktree = Path(str(task["worktree"]))
+    resolved = require_managed_directory_identity(
+        worktree,
+        managed_root=worktree.absolute().parent,
+        expected_resolved=str(task["slot_worktree_resolved"]),
+        expected_root_resolved=str(task["slot_managed_root_resolved"]),
+        expected_identity=dict(task["slot_worktree_identity"]),
+        expected_root_identity=dict(task["slot_managed_root_identity"]),
+    )
+    slot = store.read()["slots"].get(str(task["slot_id"]))
+    if (
+        not isinstance(slot, dict)
+        or slot.get("task_id") != task["id"]
+        or slot.get("generation") != task.get("slot_generation")
+        or not any(item.path == resolved for item in repo.worktrees())
+    ):
+        raise SoloAIError("Merge source task lost its exact slot generation")
+    common = repo.git(
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=worktree,
+    ).stdout.strip()
+    if Path(common).resolve() != repo.common_dir:
+        raise SoloAIError("Merge source worktree belongs to another repository")
+    return worktree
+
+
+def prepare_merge_source(
+    repo: GitRepo, *, task_id: str, lease: str, source_head: str
+) -> dict[str, Any]:
+    """把本仓现有的精确提交作为一次受管任务合并来源。"""
+    if not re.fullmatch(r"[0-9a-f]{40}", source_head):
+        raise SoloAIError("Merge source requires one full lowercase commit SHA")
+    _, _, _ = _config_and_mode(repo)
+    store = StateStore(repo)
+    with store.operation(task_id, lease, "merge-source") as task:
+        if _is_in_place(task) or task.get("status") != "active":
+            raise SoloAIError("Merge source requires an active isolated task")
+        _require_current_structured_root_review(repo, task, store=store)
+        worktree = _require_merge_source_slot(repo, store, task)
+        task_head = str(task.get("candidate_head") or "")
+        base_head = str(task["base_head"])
+        if repo.branch(worktree) != task["branch"] or repo.head(worktree) != task_head:
+            raise SoloAIError("Merge source task branch or HEAD changed")
+        if repo.ref_head(f"refs/heads/{task['base_ref']}") != base_head:
+            raise SoloAIError("Merge source target base moved; preserve this task")
+        commit_type = repo.git(["cat-file", "-t", source_head], check=False)
+        if commit_type.returncode != 0 or commit_type.stdout.strip() != "commit":
+            raise SoloAIError("Merge source commit is absent from this repository")
+        preparation = task.get("merge_source_preparation")
+        merge_head = repo.git(
+            ["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+            cwd=worktree,
+            check=False,
+        )
+        if preparation:
+            if preparation != {
+                "task_head": task_head,
+                "base_head": base_head,
+                "source_head": source_head,
+            }:
+                raise SoloAIError("Prepared merge source identity changed")
+            if merge_head.returncode == 0:
+                if merge_head.stdout.strip() != source_head:
+                    raise SoloAIError("Prepared MERGE_HEAD changed; preserve worktree")
+                unresolved = repo.git(["ls-files", "-u"], cwd=worktree).stdout.strip()
+                return {
+                    **task,
+                    "merge_source_status": "conflicted" if unresolved else "prepared",
+                }
+        else:
+            if merge_head.returncode == 0 or not repo.is_clean(worktree):
+                raise SoloAIError("Unowned merge or dirty task blocks source preparation")
+            if repo.is_ancestor(source_head, task_head, cwd=worktree):
+                raise SoloAIError("Merge source is already in the task history")
+            preparation = {
+                "task_head": task_head,
+                "base_head": base_head,
+                "source_head": source_head,
+            }
+            task = store.update_task(task_id, merge_source_preparation=preparation)
+        if not repo.is_clean(worktree):
+            raise SoloAIError("Prepared merge source worktree changed; preserve it")
+        result = repo.git(
+            ["merge", "--no-ff", "--no-commit", "--no-edit", source_head],
+            cwd=worktree,
+            check=False,
+        )
+        merge_head = repo.git(
+            ["rev-parse", "--verify", "-q", "MERGE_HEAD"],
+            cwd=worktree,
+            check=False,
+        )
+        if merge_head.returncode != 0 or merge_head.stdout.strip() != source_head:
+            raise SoloAIError("Merge source did not leave its exact MERGE_HEAD; preserve worktree")
+        return {
+            **task,
+            "merge_source_status": "prepared" if result.returncode == 0 else "conflicted",
+        }
+
+
 def commit_task(
     repo: GitRepo,
     *,
@@ -2589,6 +2692,8 @@ def commit_task(
             raise SoloAIError(
                 "Task branch identity no longer matches its recorded task"
             )
+        if task.get("merge_source_preparation"):
+            _require_merge_source_slot(repo, store, task)
         if not paths:
             raise SoloAIError(
                 "Commit requires one or more exact --path values; inspect the task diff before staging"
@@ -2604,6 +2709,8 @@ def commit_task(
             cwd=worktree,
             check=False,
         )
+        if task.get("merge_source_preparation") and merge_head.returncode != 0:
+            raise SoloAIError("Prepared merge source lacks its exact MERGE_HEAD")
         changed = set(repo.changed_paths(worktree))
         requested = set(paths)
         repair = task.get("runtime_adapter_repair") or {}
@@ -2663,6 +2770,7 @@ def commit_task(
         )
         if merge_head.returncode == 0:
             preparation = task.get("repair_preparation") or {}
+            source_preparation = task.get("merge_source_preparation") or {}
             merge_head_value = merge_head.stdout.strip()
             repair_merge = bool(
                 task.get("supersedes")
@@ -2678,7 +2786,14 @@ def commit_task(
                     str(task["base_head"]), current_base_head, cwd=worktree
                 )
             )
-            if not repair_merge and not base_merge:
+            source_merge = bool(
+                source_preparation.get("source_head") == merge_head_value
+                and source_preparation.get("task_head") == repo.head(worktree)
+                and source_preparation.get("task_head") == task.get("candidate_head")
+                and source_preparation.get("base_head") == task.get("base_head")
+                and current_base_head == task.get("base_head")
+            )
+            if not repair_merge and not base_merge and not source_merge:
                 raise ActionableSoloAIError(
                     "Only the current recorded base or a recorded candidate repair may complete a prepared merge. "
                     f"Task {task_id} prepared a merge of {merge_head_value}, but "
@@ -2716,6 +2831,8 @@ def commit_task(
             "ready_proof": None,
             "status": "active",
         }
+        if merge_head.returncode == 0 and source_merge:
+            changes["merge_source_preparation"] = None
         if _is_in_place(task):
             changes["expected_head"] = changes["candidate_head"]
         updated = store.update_task(task_id, **changes)

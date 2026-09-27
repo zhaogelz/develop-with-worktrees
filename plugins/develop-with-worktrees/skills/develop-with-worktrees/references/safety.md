@@ -222,6 +222,17 @@ remote, run a dry-run first, and use an ordinary non-force push. Remote
 divergence stops publication; it does not authorize an automatic pull, rebase,
 merge, deletion, tag, PR, or deployment.
 
+On a trusted Windows Hook, the narrow remote read is
+`git ls-remote origin refs/heads/main`. Publishing uses the current full local
+`main` SHA as `git push --dry-run origin <sha>:refs/heads/main`, followed by the
+same refspec without `--dry-run` after the coordinator checks its result. The
+Hook checks a clean primary `main` worktree and exact HEAD, and rejects force,
+other remotes, branches, and refspecs. It does not record authorization or
+perform the push itself. If local and remote histories have diverged, a reviewed
+local merge source can be prepared through the managed task command documented
+in [native delivery](native-delivery.md), then delivered and checked before
+publication.
+
 ## What DWW does not enforce
 
 DWW provides lifecycle safety, not an operating-system sandbox. A specialized

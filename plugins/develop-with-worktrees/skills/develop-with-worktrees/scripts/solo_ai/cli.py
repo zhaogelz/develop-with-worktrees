@@ -68,6 +68,7 @@ from .lifecycle import (
     local_enabled,
     list_root_task_anchors,
     maintenance_lock,
+    prepare_merge_source,
     ready,
     withdraw_ready,
     recover,
@@ -1034,6 +1035,13 @@ def _parser() -> argparse.ArgumentParser:
     commit.add_argument("--message", required=True)
     commit.add_argument("--path", action="append", default=[], required=True)
     commit.add_argument("--session")
+
+    merge_source = sub.add_parser(
+        "merge-source", help="prepare one exact local commit as a managed merge source"
+    )
+    merge_source.add_argument("--task", required=True)
+    merge_source.add_argument("--lease", required=True)
+    merge_source.add_argument("--source", required=True)
 
     for name in ("ready", "finish"):
         item = sub.add_parser(name)
@@ -2609,6 +2617,10 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             message=args.message,
             paths=args.path,
             session_id=args.session,
+        )
+    if args.command == "merge-source":
+        return prepare_merge_source(
+            repo, task_id=args.task, lease=args.lease, source_head=args.source
         )
     if args.command == "ready":
         return ready(repo, task_id=args.task, lease=args.lease, session_id=args.session)

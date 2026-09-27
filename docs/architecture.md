@@ -106,6 +106,11 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
 - An exact-path commit creates the only eligible task change. Ready freezes its
   branch, worktree, generation, lease, and commit. Finish records waiting for
   integration; it does not release the slot or claim delivery.
+- A separately reviewed commit already present in the local object database may
+  enter an active isolated task through one recorded `merge-source` preparation.
+  It freezes the task HEAD, target base, and source HEAD; exact-path Commit
+  verifies `MERGE_HEAD` before completing the ordinary merge. No remote fetch
+  or second integration state machine is part of this preparation.
 - Fixed slot branches stay attached until the original task commit reaches the
   target and runtime resources are released. A new Start checks the prior
   delivery receipt and clean slot before fast-forwarding its fixed branch to a

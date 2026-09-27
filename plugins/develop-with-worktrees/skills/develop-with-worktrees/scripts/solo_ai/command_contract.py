@@ -24,6 +24,7 @@ TOP_LEVEL_COMMANDS = frozenset(
         "host-handoff",
         "start",
         "commit",
+        "merge-source",
         "ready",
         "ready-withdraw",
         "finish",

@@ -13,6 +13,14 @@ target base, and returns that slot's worktree and lease. It checks prior deliver
 branch identity, cleanliness, and unknown files before reusing a slot. Start
 does not install dependencies, build output, or launch project services.
 
+When a separately reviewed commit already exists in the same local Git object
+database, `merge-source --task <id> --lease <lease> --source <full-sha>` records
+the task HEAD, target base, and exact source before preparing a no-fast-forward
+merge. A repeated call accepts only the same source and `MERGE_HEAD`. Review and
+resolve any conflicts in the task worktree, then use ordinary `commit` with all
+changed exact paths. An undeclared merge source, moved target, or changed task
+HEAD remains blocked. This command performs no fetch or remote publication.
+
 Edit only the returned worktree. `commit --path <exact path>` stages the
 reviewed paths. `ready --task <id> --lease <lease>` freezes the branch, worktree,
 generation, source head, and selected check evidence. A changed branch, dirty

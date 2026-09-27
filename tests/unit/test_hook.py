@@ -426,6 +426,71 @@ def test_hook_denies_unadopted_write_and_permits_strict_read(git_repo: Path) -> 
     assert alias_like["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_hook_allows_only_clean_primary_main_exact_origin_push(git_repo: Path) -> None:
+    repo = _initialized(git_repo)
+    head = repo.head(git_repo)
+    dry_run = f"git push --dry-run origin {head}:refs/heads/main"
+    publish = f"git push origin {head}:refs/heads/main"
+    assert HOOK.decide(_payload(git_repo, tool="Bash", command=dry_run)) is None
+    assert HOOK.decide(_payload(git_repo, tool="Bash", command=publish)) is None
+
+    rejected = (
+        f"git push --dry-run --force origin {head}:refs/heads/main",
+        f"git push --dry-run origin {head}:refs/heads/other",
+        f"git push --force origin {head}:refs/heads/main",
+        f"git push origin +{head}:refs/heads/main",
+        f"git push backup {head}:refs/heads/main",
+        f"git push origin {head}:refs/heads/other",
+        f"git push origin {head}:refs/tags/release",
+        "git push origin :refs/heads/main",
+        f"git push --mirror origin {head}:refs/heads/main",
+        f"git push origin {head}:refs/heads/main; git status",
+        f"git push\norigin {head}:refs/heads/main",
+        f"C:/fake/git push origin {head}:refs/heads/main",
+        f"git push origin {head}:refs/heads/main\x00",
+        f"git push origin {'0' * 40}:refs/heads/main",
+    )
+    for command in rejected:
+        result = HOOK.decide(_payload(git_repo, tool="Bash", command=command))
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    dirty = git_repo / "untracked.txt"
+    dirty.write_text("keep me\n", encoding="utf-8")
+    result = HOOK.decide(_payload(git_repo, tool="Bash", command=dry_run))
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    dirty.unlink()
+
+    linked = git_repo.parent / "linked-worktree"
+    git(git_repo, "worktree", "add", "--detach", str(linked), head)
+    result = HOOK.decide(_payload(linked, tool="Bash", command=dry_run))
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    git(git_repo, "switch", "-c", "other")
+    result = HOOK.decide(_payload(git_repo, tool="Bash", command=dry_run))
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    git(git_repo, "switch", "--detach", head)
+    result = HOOK.decide(_payload(git_repo, tool="Bash", command=dry_run))
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_hook_rejects_origin_push_when_git_identity_query_fails(
+    git_repo: Path, monkeypatch
+) -> None:
+    repo = _initialized(git_repo)
+    head = repo.head(git_repo)
+    real_run_git = HOOK._run_git
+
+    def fail_status(cwd: str, *args: str) -> str | None:
+        if args == ("status", "--porcelain"):
+            return None
+        return real_run_git(cwd, *args)
+
+    monkeypatch.setattr(HOOK, "_run_git", fail_status)
+    command = f"git push --dry-run origin {head}:refs/heads/main"
+    result = HOOK.decide(_payload(git_repo, tool="Bash", command=command))
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_hook_allows_only_the_session_that_chose_current_task(git_repo: Path) -> None:
     repo = GitRepo(git_repo)
     choice = choose(
@@ -1486,6 +1551,21 @@ def test_read_only_parser_accepts_common_repository_enumeration() -> None:
     assert HOOK._strict_read_only_bash("git worktree list --porcelain")
     assert HOOK._strict_read_only_bash("Get-FileHash -LiteralPath README.md")
     assert HOOK._strict_read_only_bash("Get-FileHash -Path README.md -Algorithm SHA256")
+
+
+def test_read_only_parser_limits_remote_head_query_to_origin_main() -> None:
+    assert HOOK._strict_read_only_bash("git ls-remote origin refs/heads/main")
+    for command in (
+        "git ls-remote origin",
+        "git ls-remote backup refs/heads/main",
+        "git ls-remote https://example.com/repo.git refs/heads/main",
+        "C:/fake/git ls-remote origin refs/heads/main",
+        "git ls-remote origin refs/heads/other",
+        "git ls-remote --upload-pack=helper origin refs/heads/main",
+        "git -c protocol.ext.allow=always ls-remote origin refs/heads/main",
+        "git ls-remote origin refs/heads/main; git push origin main",
+    ):
+        assert not HOOK._strict_read_only_bash(command)
 
 
 def test_read_only_parser_rejects_writes_and_external_rg_preprocessors() -> None:
