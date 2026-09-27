@@ -300,6 +300,89 @@ def test_native_batch_activates_and_releases_runtime_around_full(
     assert request["cwd"] == Path(batch["worktree"])
 
 
+@pytest.mark.parametrize("operation", ["activate", "release"])
+def test_native_batch_preserves_runtime_workspace_changes_before_promotion(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    repo, store = _native_repo(git_repo)
+    (git_repo / "guard.txt").write_text("clean\n", encoding="utf-8")
+    git(git_repo, "add", "guard.txt")
+    git(git_repo, "commit", "-m", "test: tracked runtime guard")
+    task = start(repo, name=f"dirty batch {operation}")
+    (Path(task["worktree"]) / "feature.txt").write_text("ready\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: native runtime source",
+        paths=["feature.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver now"
+    )
+    approve(repo, load_verification_config(repo))
+    target_before = repo.head(git_repo)
+    original = (
+        native_batches.activate_batch_runtime
+        if operation == "activate"
+        else native_batches.release_batch_runtime
+    )
+    full_calls = []
+    real_validate = native_batches.validate
+
+    def record_full(*args: object, **kwargs: object) -> dict[str, object]:
+        full_calls.append(True)
+        return real_validate(*args, **kwargs)
+
+    def dirty_runtime(*args: object, **kwargs: object) -> dict[str, object]:
+        receipt = original(*args, **kwargs)
+        (Path(batch["worktree"]) / "guard.txt").write_text("dirty\n", encoding="utf-8")
+        return receipt
+
+    monkeypatch.setattr(native_batches, "validate", record_full)
+    monkeypatch.setattr(
+        native_batches,
+        "activate_batch_runtime"
+        if operation == "activate"
+        else "release_batch_runtime",
+        dirty_runtime,
+    )
+    with pytest.raises(SoloAIError, match="workspace changed"):
+        run_native_batch(repo, batch_id=batch["id"])
+    paused = store.native_batch(batch["id"])
+    assert paused["status"] == (
+        "runtime_activation_pending"
+        if operation == "activate"
+        else "runtime_release_pending"
+    )
+    assert repo.head(git_repo) == target_before
+    assert (Path(batch["worktree"]) / "guard.txt").read_text(
+        encoding="utf-8"
+    ) == "dirty\n"
+    assert len(full_calls) == (0 if operation == "activate" else 1)
+    attempt = paused.get("validation_attempt")
+
+    with pytest.raises(SoloAIError, match="workspace changed"):
+        run_native_batch(repo, batch_id=batch["id"])
+    assert repo.head(git_repo) == target_before
+    assert len(full_calls) == (0 if operation == "activate" else 1)
+
+    monkeypatch.setattr(
+        native_batches,
+        "activate_batch_runtime"
+        if operation == "activate"
+        else "release_batch_runtime",
+        original,
+    )
+    (Path(batch["worktree"]) / "guard.txt").write_text("clean\n", encoding="utf-8")
+    completed = run_native_batch(repo, batch_id=batch["id"])
+    assert completed["status"] == "completed"
+    assert len(full_calls) == 1
+    if operation == "release":
+        assert completed["validation_attempt"] == attempt
+
+
 def test_native_finish_explicit_tail_delivers_without_candidate(git_repo: Path) -> None:
     repo, store = _native_repo(git_repo)
     task = start(repo, name="finish a native tail")
