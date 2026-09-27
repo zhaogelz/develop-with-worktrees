@@ -9,14 +9,20 @@ import pytest
 from solo_ai.candidate_batches import CandidateBatchStore
 from solo_ai.cli import _parser
 from solo_ai.config import (
+    CommandSpec,
     load_repo_config,
+    load_verification_config,
     render_repo_config,
     render_verification_config,
+    verification_config_from_text,
 )
 from solo_ai.legacy_workspace_adoption import (
     adopt_legacy_integration_workspace,
     verified_pre_full_maintenance_source,
 )
+from solo_ai.proof import read_validation_attempt, validate
+from solo_ai import proof as proof_module
+from solo_ai import legacy_workspace_adoption as adoption_module
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
 from solo_ai.task_context import anchor_origin, create_anchor
@@ -25,8 +31,6 @@ from solo_ai.util import (
     SoloAIError,
     atomic_write_json,
     path_identity,
-    sha256_text,
-    stable_json,
 )
 
 
@@ -375,6 +379,76 @@ def test_adopts_cross_target_idle_workspace_without_switching_head(
     )
 
 
+def test_adopts_cross_target_before_sealed_native_batch(
+    git_repo: Path,
+) -> None:
+    repo, store, _, worktree, _ = _cross_target_setup(git_repo)
+    base = repo.ref_head("refs/heads/main")
+    old_head = repo.head(worktree)
+    state = store.read()
+    state["batches"]["batch-native"] = {
+        "id": "batch-native",
+        "status": "sealed",
+        "base_ref": "main",
+        "base_before": base,
+        "integration_head": base,
+        "worktree": str(worktree),
+    }
+    state["batches"]["batch-queued"] = {
+        "id": "batch-queued",
+        "status": "sealed",
+        "base_ref": "main",
+        "base_before": base,
+        "integration_head": base,
+        "worktree": str(worktree),
+    }
+    atomic_write_json(store.path, state)
+    assert (
+        adopt_legacy_integration_workspace(
+            repo,
+            batch_id="batch-native",
+            confirm=f"batch-native:{old_head}:7",
+        )["status"]
+        == "adopted"
+    )
+    assert repo.head(worktree) == old_head
+    assert store.read()["batches"]["batch-native"]["status"] == "sealed"
+
+
+def test_cross_target_sealed_batch_rejects_claimed_workspace(
+    git_repo: Path,
+) -> None:
+    repo, store, _, worktree, _ = _cross_target_setup(git_repo)
+    base = repo.ref_head("refs/heads/main")
+    old_head = repo.head(worktree)
+    state = store.read()
+    state["batches"]["batch-native"] = {
+        "id": "batch-native",
+        "status": "sealed",
+        "base_ref": "main",
+        "base_before": base,
+        "integration_head": base,
+        "worktree": str(worktree),
+    }
+    state["batches"]["batch-claimed"] = {
+        "id": "batch-claimed",
+        "status": "composing",
+        "base_ref": "main",
+        "base_before": base,
+        "integration_head": base,
+        "worktree": str(worktree),
+        "worktree_generation": 8,
+    }
+    atomic_write_json(store.path, state)
+    with pytest.raises(SoloAIError, match="Frozen native batch"):
+        adopt_legacy_integration_workspace(
+            repo,
+            batch_id="batch-native",
+            confirm=f"batch-native:{old_head}:7",
+        )
+    assert store.read()["integration_workspace"] is None
+
+
 @pytest.mark.parametrize(
     "drift", ["confirm", "native-batch", "source-branch", "proof", "ordinary-content"]
 )
@@ -447,6 +521,17 @@ def _pre_full_setup(
     git_repo: Path,
 ) -> tuple[GitRepo, StateStore, CandidateBatchStore, str]:
     repo, store, pool_store, _, _ = _setup(git_repo)
+    verification_file = git_repo / ".solo-ai" / "verification.toml"
+    verification_file.write_text(
+        render_verification_config(
+            [CommandSpec(("git", "status", "--short"))],
+            static_only=False,
+            discovery_fallback=True,
+        ).replace("environment = []", 'environment = ["DWW_TEST_ENV"]'),
+        encoding="utf-8",
+    )
+    repo.git(["add", ".solo-ai/config.toml", ".solo-ai/verification.toml"])
+    repo.git(["commit", "-m", "track verification policy"])
     base = repo.head()
     task_tree = git_repo.parent / f"{git_repo.name}-slot-01"
     repo.git(["worktree", "add", "-b", "codex/slot-01", str(task_tree), base])
@@ -490,30 +575,26 @@ def _pre_full_setup(
     task["anchor_origin"] = anchor_origin(task)
     atomic_write_json(store.path, state)
     create_anchor(repo, task)
-    full_inputs = {
-        "candidate_head": commit,
-        "base_head": base,
-        "levels": ["ready", "full"],
-    }
-    proof_id = sha256_text(stable_json(full_inputs))
-    _passed_proof(repo, fingerprint=proof_id, candidate=commit, base=base)
-    atomic_write_json(
-        repo.local_dir / "validation-attempts" / "full-attempt-maintenance.json",
-        {
-            "schema_version": 1,
-            "id": "full-attempt-maintenance",
-            "owner": {"kind": "task", "id": "task-maintenance"},
-            "task_id": "task-maintenance",
-            "level": "full",
-            "state": "completed",
-            "result": "passed",
-            "candidate_head": commit,
-            "base_head": base,
-            "proof": proof_id,
-            "profiles": [{"id": "maintenance-full", "state": "passed"}],
-        },
-    )
+    _run_pre_full(repo, task_tree, base, commit, "full-attempt-maintenance")
     return repo, store, pool_store, commit
+
+
+def _run_pre_full(
+    repo: GitRepo, worktree: Path, base: str, commit: str, attempt_id: str
+) -> None:
+    validate(
+        repo,
+        cwd=worktree,
+        base=base,
+        verification=load_verification_config(repo, cwd=worktree),
+        task_id="task-maintenance",
+        level="full",
+        expected_base_head=base,
+        expected_candidate_head=commit,
+        validation_base_ref="main",
+        attempt_id=attempt_id,
+        attempt_owner={"kind": "task", "id": "task-maintenance"},
+    )
 
 
 def test_pre_full_source_requires_exact_task_full_without_native_batch(
@@ -526,6 +607,65 @@ def test_pre_full_source_requires_exact_task_full_without_native_batch(
     assert result["validation_attempt"] == "full-attempt-maintenance"
 
 
+def test_pre_full_source_accepts_latest_matching_full_after_environment_change(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store, _, commit = _pre_full_setup(git_repo)
+    monkeypatch.setenv("DWW_TEST_ENV", "second-full")
+    task_tree = Path(store.read()["tasks"]["task-maintenance"]["worktree"])
+    _run_pre_full(repo, task_tree, repo.head(), commit, "full-attempt-second")
+    state = store.read()
+    state["tasks"]["task-maintenance"]["validation_attempts"].append(
+        "full-attempt-second"
+    )
+    atomic_write_json(store.path, state)
+    result = verified_pre_full_maintenance_source(repo, commit=commit)
+    assert result["validation_attempt"] == "full-attempt-second"
+
+
+def test_pre_full_source_rejects_current_environment_drift(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _, _, commit = _pre_full_setup(git_repo)
+    monkeypatch.setenv("DWW_TEST_ENV", "changed-after-full")
+    with pytest.raises(SoloAIError, match="no current exact task Full"):
+        verified_pre_full_maintenance_source(repo, commit=commit)
+
+
+def test_pre_full_source_rejects_current_tool_drift(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _, _, commit = _pre_full_setup(git_repo)
+    original_tool = proof_module._tool
+
+    def changed_tool(command: CommandSpec, cwd: Path) -> dict[str, str | None]:
+        facts = original_tool(command, cwd)
+        if command.argv[0] == "git":
+            return {**facts, "version": "changed-after-full"}
+        return facts
+
+    monkeypatch.setattr(proof_module, "_tool", changed_tool)
+    with pytest.raises(SoloAIError, match="no current exact task Full"):
+        verified_pre_full_maintenance_source(repo, commit=commit)
+
+
+def test_pre_full_source_rejects_current_verification_policy_drift(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store, _, commit = _pre_full_setup(git_repo)
+    worktree = Path(store.read()["tasks"]["task-maintenance"]["worktree"])
+    current = (worktree / ".solo-ai" / "verification.toml").read_text(encoding="utf-8")
+    changed = verification_config_from_text(
+        current.replace('environment = ["DWW_TEST_ENV"]', "environment = []"),
+        source=worktree / ".solo-ai" / "verification.toml",
+    )
+    monkeypatch.setattr(
+        adoption_module, "load_verification_config", lambda *_args, **_kwargs: changed
+    )
+    with pytest.raises(SoloAIError, match="no current exact task Full"):
+        verified_pre_full_maintenance_source(repo, commit=commit)
+
+
 @pytest.mark.parametrize(
     "drift", ["base", "proof", "task", "branch", "anchor", "extra-path"]
 )
@@ -534,15 +674,7 @@ def test_pre_full_source_rejects_changed_evidence(git_repo: Path, drift: str) ->
     if drift == "base":
         repo.git(["commit", "--allow-empty", "-m", "move main"])
     elif drift == "proof":
-        proof_id = sha256_text(
-            stable_json(
-                {
-                    "candidate_head": commit,
-                    "base_head": repo.head(),
-                    "levels": ["ready", "full"],
-                }
-            )
-        )
+        proof_id = read_validation_attempt(repo, "full-attempt-maintenance")["proof"]
         (repo.local_dir / "proofs" / f"{proof_id}.json").unlink()
     elif drift == "task":
         state = store.read()

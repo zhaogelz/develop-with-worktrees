@@ -4,82 +4,34 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import os
-import re
-import stat
 from pathlib import Path
 from typing import Any
 
 from . import batch_workspace
 from .candidate_batches import CandidateBatchStore
-from .cleanup import OPAQUE_RECREATABLE_ROOTS
-from .config import load_repo_config
+from .config import load_repo_config, load_verification_config
 from .integration import integration_turn
-from .native_migration import _settled_failed_batch
-from .proof import read_validation_attempt, require_exact_passed_proof
+from .native_migration import (
+    _inspect_legacy_integration_workspace,
+    _settled_failed_batch,
+)
+from .proof import (
+    frozen_validation_environment,
+    proof_inputs,
+    read_validation_attempt,
+    require_exact_passed_proof,
+)
 from .repo import GitRepo
-from .runtime_adapter import require_exact_passed_batch_release
 from .state import STATE_SCHEMA, StateStore, candidate_admission_lock
 from .util import (
     DirectoryLock,
     SoloAIError,
-    filesystem_path,
     path_identity,
     read_json,
     sha256_text,
     stable_json,
     utc_timestamp,
 )
-
-
-_UNREADABLE_DIRECTORY = re.compile(
-    r"warning: could not open directory '([^']+)/': Permission denied"
-)
-
-
-def _require_inventory_visible(repo: GitRepo, worktree: Path) -> None:
-    """Git 漏报的拒绝访问目录只能是可核验的不透明依赖根。"""
-
-    opaque_roots: set[str] = set()
-    try:
-        for child in filesystem_path(worktree).iterdir():
-            name = child.name.casefold()
-            if name not in OPAQUE_RECREATABLE_ROOTS:
-                continue
-            path = worktree / child.name
-            entry = filesystem_path(path).lstat()
-            if not stat.S_ISDIR(entry.st_mode) or bool(
-                getattr(entry, "st_file_attributes", 0) & 0x0400
-            ):
-                raise SoloAIError(
-                    f"Retained dependency root is not a plain directory: {path}"
-                )
-            opaque_roots.add(name)
-    except OSError as exc:
-        raise SoloAIError("Cannot inspect integration workspace roots") from exc
-
-    for args in (
-        [
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-            "--directory",
-        ],
-        ["ls-files", "--others", "--exclude-standard", "-z"],
-    ):
-        result = repo.git(
-            args,
-            cwd=worktree,
-            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
-        )
-        for line in result.stderr.splitlines():
-            match = _UNREADABLE_DIRECTORY.fullmatch(line.strip())
-            if match is None or match.group(1).casefold() not in opaque_roots:
-                raise SoloAIError(
-                    f"Cannot inventory integration workspace safely: {line}"
-                )
 
 
 def _require_legacy_pool_settled(
@@ -172,18 +124,36 @@ def _require_exact_binding(
         or not isinstance(native_base_ref, str)
         or native_base_ref != migration.get("base_ref")
         or not isinstance(migration_head, str)
-        or repo.ref_head(f"refs/heads/{native_base_ref}") != migration_head
+        or (
+            batch is None
+            and repo.ref_head(f"refs/heads/{native_base_ref}") != migration_head
+        )
     ):
         raise SoloAIError("Legacy workspace or native migration identity changed")
     if batch is not None:
         if (
             batch.get("worktree") != str(worktree)
-            or batch.get("base_before") != head
-            or batch.get("integration_head") != head
-            or migration_head != head
+            or batch.get("base_ref") != native_base_ref
+            or not isinstance(batch.get("base_before"), str)
+            or batch.get("integration_head") != batch.get("base_before")
+            or repo.ref_head(f"refs/heads/{native_base_ref}")
+            != batch.get("base_before")
+            or not repo.is_ancestor(migration_head, batch["base_before"])
+            or any(
+                other_id != batch_id
+                and isinstance(other, dict)
+                and other.get("worktree") == str(worktree)
+                and not other.get("worktree_released_at")
+                and (
+                    other.get("worktree_generation") is not None
+                    or other.get("merge_intent") is not None
+                    or other.get("applied_task_ids")
+                )
+                for other_id, other in batches.items()
+            )
         ):
             raise SoloAIError(
-                "Legacy workspace and frozen native batch do not share an exact base"
+                "Frozen native batch no longer owns an exact unchanged target base"
             )
         expected = f"{batch_id}:{head}:{generation}"
     else:
@@ -192,63 +162,13 @@ def _require_exact_binding(
         raise SoloAIError(f"Legacy workspace adoption requires --confirm {expected!r}")
 
     _require_legacy_pool_settled(pool_store, pool, migration)
-    source_batch = pool["batches"].get(head_ref.removeprefix("refs/dww/batch-heads/"))
-    if (
-        not isinstance(source_batch, dict)
-        or source_batch.get("status") != "completed"
-        or source_batch.get("worktree_mode") != "reusable"
-        or not source_batch.get("worktree_released_at")
-        or source_batch.get("run_owner") is not None
-        or source_batch.get("worktree_generation") != generation
-        or source_batch.get("integration_ref") != head_ref
-        or source_batch.get("integration_head") != head
-        or source_batch.get("integrated_head") != head
-        or any(
-            source_batch.get(key) != record.get(key)
-            for key in batch_workspace._LOCATION_KEYS
+    workspace_status, verified_record, problem = _inspect_legacy_integration_workspace(
+        repo, store, pool, target_base_ref=native_base_ref
+    )
+    if workspace_status != "verified-idle" or verified_record != record:
+        raise SoloAIError(
+            f"Legacy idle workspace is not verified: {problem or workspace_status}"
         )
-    ):
-        raise SoloAIError("Legacy idle head has no exact completed batch receipt")
-    if batch is not None and source_batch.get("base_ref") != native_base_ref:
-        raise SoloAIError("Legacy completed batch belongs to another target")
-    if batch is None:
-        source_ref = source_batch.get("base_ref")
-        source_base = source_batch.get("base_before")
-        fingerprint = source_batch.get("proof")
-        source_current = (
-            repo.ref_head(f"refs/heads/{source_ref}")
-            if isinstance(source_ref, str)
-            else None
-        )
-        if (
-            not isinstance(source_ref, str)
-            or (
-                source_current is not None
-                and not repo.is_ancestor(head, source_current)
-            )
-            or not isinstance(source_base, str)
-            or not repo.is_ancestor(source_base, head)
-            or source_batch.get("validation_outcome") != "passed"
-            or not source_batch.get("promoted_at")
-            or not source_batch.get("completed_at")
-            or not isinstance(fingerprint, str)
-            or not fingerprint
-        ):
-            raise SoloAIError("Cross-target legacy delivery is not exact and complete")
-        proof = read_json(repo.local_dir / "proofs" / f"{fingerprint}.json", {})
-        require_exact_passed_proof(
-            proof, fingerprint=fingerprint, candidate_head=head, base_head=source_base
-        )
-        if "full" not in (proof.get("inputs") or {}).get("levels", []):
-            raise SoloAIError("Cross-target legacy delivery requires passed Full")
-        require_exact_passed_batch_release(
-            repo, receipt=copy.deepcopy(source_batch.get("runtime_release") or {})
-        )
-    batch_workspace._require_saved_idle_head(repo, record)
-    batch_workspace._check_directory(worktree, record)
-    batch_workspace._check_git(repo, worktree, head)
-    _require_inventory_visible(repo, worktree)
-    batch_workspace.require_retained_contents(repo, worktree)
     return record, batch
 
 
@@ -435,27 +355,99 @@ def verified_pre_full_maintenance_source(
         and attempt.get("candidate_head") == commit
         and attempt.get("base_head") == base
     ]
-    if len(passed) != 1:
-        raise SoloAIError("Pre-Full maintenance source needs one exact task Full")
-    attempt = passed[0]
-    proof_id = attempt.get("proof")
-    if not isinstance(proof_id, str) or not proof_id:
-        raise SoloAIError("Pre-Full maintenance Full proof is missing")
-    proof = read_json(repo.local_dir / "proofs" / f"{proof_id}.json", {})
-    require_exact_passed_proof(
-        proof, fingerprint=proof_id, candidate_head=commit, base_head=base
-    )
-    inputs = proof.get("inputs") or {}
-    if (
-        "full" not in inputs.get("levels", [])
-        or sha256_text(stable_json(inputs)) != proof_id
-        or not attempt.get("profiles")
-        or any(
-            item.get("state") not in {"passed", "reused"}
-            for item in attempt["profiles"]
-        )
-    ):
-        raise SoloAIError("Pre-Full maintenance proof is not Full")
+    if not passed:
+        raise SoloAIError("Pre-Full maintenance source needs a passed task Full")
+    verification = load_verification_config(repo, cwd=worktree)
+    verified: tuple[dict[str, Any], str] | None = None
+    for attempt in reversed(passed):
+        try:
+            proof_id = attempt.get("proof")
+            if not isinstance(proof_id, str) or not proof_id:
+                raise SoloAIError("Pre-Full maintenance Full proof is missing")
+            proof = read_json(repo.local_dir / "proofs" / f"{proof_id}.json", {})
+            require_exact_passed_proof(
+                proof, fingerprint=proof_id, candidate_head=commit, base_head=base
+            )
+            inputs = proof.get("inputs") or {}
+            profiles = attempt.get("profiles")
+            full_scope = attempt.get("full_scope")
+            if (
+                inputs.get("levels") != ["ready", "full"]
+                or sha256_text(stable_json(inputs)) != proof_id
+                or not isinstance(profiles, list)
+                or not profiles
+                or full_scope not in {"integration", "complete"}
+                or any(
+                    not isinstance(item, dict)
+                    or item.get("state") not in {"passed", "reused"}
+                    or not isinstance(item.get("fingerprint"), str)
+                    for item in profiles
+                )
+            ):
+                raise SoloAIError("Pre-Full maintenance proof is not Full")
+            execution_ids: set[str] = set()
+            for item in profiles:
+                profile_id = item["fingerprint"]
+                profile_proof = read_json(
+                    repo.local_dir / "profile-proofs" / f"{profile_id}.json", {}
+                )
+                profile_inputs = profile_proof.get("inputs")
+                if (
+                    profile_proof.get("fingerprint") != profile_id
+                    or profile_proof.get("result") != "passed"
+                    or not isinstance(profile_inputs, dict)
+                    or sha256_text(stable_json(profile_inputs)) != profile_id
+                ):
+                    raise SoloAIError("Pre-Full maintenance profile proof changed")
+                execution = profile_inputs.get("full_execution")
+                if execution is not None:
+                    if not isinstance(execution, str) or not execution:
+                        raise SoloAIError(
+                            "Pre-Full maintenance execution identity changed"
+                        )
+                    execution_ids.add(execution)
+            if len(execution_ids) > 1:
+                raise SoloAIError("Pre-Full maintenance execution identity changed")
+            validation_environment = frozen_validation_environment(
+                repo,
+                cwd=worktree,
+                base=base,
+                validation_base_ref="main",
+                expected_base_head=base,
+                full_scope=full_scope,
+            )
+            current_inputs, records = proof_inputs(
+                repo,
+                cwd=worktree,
+                base=base,
+                verification=verification,
+                task_id=task_id,
+                levels=("ready", "full"),
+                full_scopes=(
+                    ("integration", "complete")
+                    if full_scope == "complete"
+                    else ("integration",)
+                ),
+                force_task_scope=task.get("mode") == "in-place",
+                expected_candidate_head=commit,
+                full_execution_id=next(iter(execution_ids), None),
+                validation_environment=validation_environment,
+            )
+            if (
+                current_inputs != inputs
+                or [item.get("id") for item in profiles]
+                != [record[0].profile_id for record in records]
+                or [item.get("fingerprint") for item in profiles]
+                != [record[2] for record in records]
+            ):
+                raise SoloAIError("Pre-Full maintenance Full inputs changed")
+            verified = (attempt, proof_id)
+            break
+        except SoloAIError:
+            continue
+    if verified is None:
+        raise SoloAIError("Pre-Full maintenance source has no current exact task Full")
+    attempt, proof_id = verified
     paths = [
         item
         for item in repo.git(

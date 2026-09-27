@@ -10,7 +10,9 @@ from . import batch_workspace
 from .candidate_batches import CANDIDATE_REF_PREFIX, CandidateBatchStore
 from .cleanup import inspect_untracked, is_link_or_junction
 from .config import load_repo_config
+from .proof import require_exact_passed_proof
 from .repo import GitRepo
+from .runtime_adapter import require_exact_passed_batch_release
 from .state import (
     FINAL_TASK_STATES,
     LEGACY_STATE_SCHEMA,
@@ -18,7 +20,7 @@ from .state import (
     StateStore,
     candidate_admission_lock,
 )
-from .util import SoloAIError, path_identity, utc_timestamp
+from .util import SoloAIError, path_identity, read_json, utc_timestamp
 
 
 def _settled_failed_batch(
@@ -173,7 +175,11 @@ def _retained_slot_verified(
 
 
 def _inspect_legacy_integration_workspace(
-    repo: GitRepo, store: StateStore, pool: dict[str, Any]
+    repo: GitRepo,
+    store: StateStore,
+    pool: dict[str, Any],
+    *,
+    target_base_ref: str | None = None,
 ) -> tuple[str, dict[str, Any] | None, dict[str, str] | None]:
     """只核验旧空闲登记；旧成果可来自另一目标分支。"""
 
@@ -230,9 +236,48 @@ def _inspect_legacy_integration_workspace(
             )
         ):
             raise SoloAIError("Old integration result has no exact completed receipt")
+        if target_base_ref is not None and source.get("base_ref") != target_base_ref:
+            source_ref = source.get("base_ref")
+            source_base = source.get("base_before")
+            fingerprint = source.get("proof")
+            source_current = (
+                repo.ref_head(f"refs/heads/{source_ref}")
+                if isinstance(source_ref, str)
+                else None
+            )
+            if (
+                not isinstance(source_ref, str)
+                or (
+                    source_current is not None
+                    and not repo.is_ancestor(head, source_current)
+                )
+                or not isinstance(source_base, str)
+                or not repo.is_ancestor(source_base, head)
+                or source.get("validation_outcome") != "passed"
+                or not source.get("promoted_at")
+                or not source.get("completed_at")
+                or not isinstance(fingerprint, str)
+                or not fingerprint
+            ):
+                raise SoloAIError(
+                    "Cross-target legacy delivery is not exact and complete"
+                )
+            proof = read_json(repo.local_dir / "proofs" / f"{fingerprint}.json", {})
+            require_exact_passed_proof(
+                proof,
+                fingerprint=fingerprint,
+                candidate_head=head,
+                base_head=source_base,
+            )
+            if "full" not in (proof.get("inputs") or {}).get("levels", []):
+                raise SoloAIError("Cross-target legacy delivery requires passed Full")
+            require_exact_passed_batch_release(
+                repo, receipt=copy.deepcopy(source.get("runtime_release") or {})
+            )
         batch_workspace._require_saved_idle_head(repo, record)
         batch_workspace._check_directory(worktree, record)
         batch_workspace._check_git(repo, worktree, head)
+        batch_workspace.require_inventory_visible(repo, worktree)
         batch_workspace.require_retained_contents(repo, worktree)
     except (OSError, SoloAIError) as exc:
         return (
@@ -252,7 +297,10 @@ def _native_integration_workspace_status(
     if binding is None:
         pool = CandidateBatchStore(repo).read()
         old_status, _, problem = _inspect_legacy_integration_workspace(
-            repo, store, pool
+            repo,
+            store,
+            pool,
+            target_base_ref=(state.get("native_migration") or {}).get("base_ref"),
         )
         if old_status == "absent":
             return "available", []
@@ -362,7 +410,7 @@ def preview_native_migration(repo: GitRepo, *, base_ref: str) -> dict[str, Any]:
                 }
             )
     workspace_status, _, workspace_problem = _inspect_legacy_integration_workspace(
-        repo, store, pool
+        repo, store, pool, target_base_ref=base_ref
     )
     if workspace_problem:
         blockers.append(workspace_problem)
@@ -536,7 +584,9 @@ def enable_native_migration(
             return checked
         pool = CandidateBatchStore(repo).read()
         workspace_status, idle_workspace, workspace_problem = (
-            _inspect_legacy_integration_workspace(repo, store, pool)
+            _inspect_legacy_integration_workspace(
+                repo, store, pool, target_base_ref=base_ref
+            )
         )
         if workspace_problem:
             raise SoloAIError(
@@ -582,7 +632,10 @@ def enable_native_migration(
                 raise SoloAIError("Native migration target changed before enable")
             current_workspace_status, current_workspace, current_problem = (
                 _inspect_legacy_integration_workspace(
-                    repo, store, CandidateBatchStore(repo).read()
+                    repo,
+                    store,
+                    CandidateBatchStore(repo).read(),
+                    target_base_ref=base_ref,
                 )
             )
             if (
