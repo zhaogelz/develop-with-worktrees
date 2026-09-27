@@ -50,21 +50,26 @@ and Codex sandbox note in [Lifecycle](references/lifecycle.md).
 ## Finish and follow delivery
 
 For state schema 12, Ready freezes the exact task branch, slot generation,
-worktree, and source commit. Finish records it as waiting for integration. The
-slot stays owned until its task commit reaches the target branch and runtime
-release succeeds. The ordinary Git branch stays attached throughout.
+worktree, and source commit. Finish releases any configured task runtime before
+recording the head as waiting for integration. The slot stays owned until batch
+validation, batch runtime release, exact promotion into the target branch, and
+worktree/slot return succeed. The ordinary Git branch stays attached throughout.
 
-A full compatible group freezes automatically. A smaller tail needs a recorded
+A full compatible group freezes automatically. An explicit smaller tail needs a recorded
 `round-complete`, `user`, `deploy`, or `dependency` cause and one-line
 reason. Idle time, Hooks, and task counts are not causes. Use
-`round-complete` only when that lane has no active producer, and `user` only
-for an explicit request to integrate now.
+`round-complete` only after the agreed round is actually over and that lane
+has no active producer, and `user` only for an explicit request to integrate now.
+Check the exact target lane before closing a tail; a source task's Finish alone
+does not end a parallel round. Start's separate internal capacity path is
+described in [Native delivery](references/native-delivery.md).
 
 One batch per target branch merges the original task commits, runs the selected
-combined checks on the exact merged head, and promotes only if the target
-still matches its frozen base. Follow the batch through recovery and release;
-Finish alone is not delivery. Shared integration repairs use the owned
-`batch repair` entry and a new validation attempt. Do not edit a frozen task
+combined checks on the exact merged head, releases configured batch runtime,
+and promotes only if the target still matches its frozen base. It then returns
+the integration worktree and task slots. Follow the exact batch through recovery
+and release; Finish alone is not delivery. Shared integration repairs use the
+owned `batch repair` entry and a new validation attempt. Do not edit a frozen task
 or integration worktree outside its managed entry.
 
 For a new managed repository, Start performs light Git and identity checks.

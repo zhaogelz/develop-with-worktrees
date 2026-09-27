@@ -29,7 +29,7 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 
 已确认的本地 DWW 市场在日常维护时只刷新这个插件，不反复切换市场来源。从旧本地来源首次迁移是单独、可核验的维护动作，不属于普通任务步骤。
 若 DWW 自身故障阻断升级，可按[恢复路径](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)安装已通过完整验证的恢复版，不必先完成正常合入。
-正常源码任务完成后仍应 `finish` 并归还工作树；需要发布插件时，由协调者启动一个独立、短生命周期的维护任务，不把普通开发工作树留作发布用途。
+原生模式下，正常源码任务 Finish 后仍占有工位，直到本地集成和工位归还完成；旧候选模式在发布候选后归还源码工作树。需要发布插件时，由协调者启动独立的短生命周期维护任务，不为发布而额外保留开发工作树。
 
 ## 默认怎么工作
 

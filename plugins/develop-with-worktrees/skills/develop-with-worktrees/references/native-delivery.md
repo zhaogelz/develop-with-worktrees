@@ -25,20 +25,26 @@ Edit only the returned worktree. `commit --path <exact path>` stages the
 reviewed paths. `ready --task <id> --lease <lease>` freezes the branch, worktree,
 generation, source head, and selected check evidence. A changed branch, dirty
 tree, old lease, or moved slot requires a managed withdrawal and a new Ready
-head. `finish --task <id> --lease <lease>` records that frozen head as waiting
-for integration; it does not release the slot or claim delivery.
+head. `finish --task <id> --lease <lease>` releases any configured task runtime,
+then records that frozen head as waiting for integration; it does not release
+the slot or claim delivery.
 
-An exact full group freezes automatically. A smaller tail needs a concrete
+An exact full group freezes automatically. An explicit smaller tail needs a concrete
 `round-complete`, `user`, `deploy`, or `dependency` cause and one-line reason.
-Use `round-complete` only when that lane has no active producer. Ordinary task
-completion does not imply an immediate tail.
+Use `round-complete` only after the agreed round really ends and the exact
+target lane has no active producer. Check the remaining agreed work and parallel
+sources before closing a tail; ordinary task completion does not imply an
+immediate tail. A blocked native Start may internally seal a capacity batch
+only when no fixed slot is free and eligible finished sources are waiting;
+this is not a host-selected tail cause or permission to finish active development.
 
 ## Integration and repair
 
 One integration workspace owns a target branch at a time. It freezes the base
 and ordered Ready heads, performs real Git merges, runs selected Full profiles
-on the composed head, and advances only the exact unchanged base. The source
-commits and any integration repair commit remain in the delivered ancestry.
+on the composed head, releases configured batch runtime after Full, then
+promotes only to the exact unchanged base. The source commits and any integration
+repair commit remain in the delivered ancestry.
 Later batches wait for the prior batch, then use its delivered base.
 
 `batch status --batch <id>` and `status --compact` expose waiting and failed
@@ -51,9 +57,10 @@ attempt, and keeps the failed attempt. Semantic
 source changes return to the task owner. Do not edit the integration worktree
 directly or retry an unchanged failed input in a loop.
 
-After promotion, runtime release and the delivery receipt must succeed before
-the slot is idle. A release failure retries only its unfinished tail. A cancelled
-or unknown slot is preserved, not reset for another task.
+After promotion, the integration worktree and task slots return under exact
+identity checks; delivery receipts must succeed before a slot is idle. A release
+failure retries only its unfinished tail. A cancelled or unknown slot is
+preserved, not reset for another task.
 
 Project runtime preparation is on demand; see [Runtime Adapter](runtime-adapter.md).
 Pure proof reuse requires its declared inputs, tools, environment, command,

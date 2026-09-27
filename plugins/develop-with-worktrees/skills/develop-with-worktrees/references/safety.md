@@ -4,6 +4,16 @@ Use this reference before trusting a Hook, releasing a worktree, retiring a batc
 or publishing remotely. DWW's CLI and persisted Git facts own lifecycle truth.
 The Codex Hook is optional scoped hardening, not the only safety boundary.
 
+The DWW Hook's routing, owner, and supported-operation checks are separate from
+the host's filesystem sandbox and automatic approval review. Report the exact
+layer and reason for a denial. Verify the facts or use a substantively safer
+supported route; do not change tasks, tools, command spelling, trust state, or
+claimed identity merely to evade the same boundary. A reviewed escalation for
+a Git metadata sandbox error repeats the same DWW command under host review;
+it does not override a Hook owner denial or a rejected host approval. A verified
+ownership transfer uses the formal handoff in [Recovery](recovery.md), keeping
+the same task and its work; it never substitutes a guessed session identity.
+
 ## Hook trust and scope
 
 A trusted plugin Hook may deny supported Codex local writes to a protected base
@@ -118,7 +128,9 @@ non-link legacy `releases/` directory, is an acceptable starting layout. The
 legacy directory is preserved when `Install` initializes the new market;
 unknown, linked, or mixed existing content remains rejected.
 
-Ordinary source tasks Finish and return their worktrees. A coordinator starts a
+In native state, an ordinary source Finish leaves its fixed worktree owned until
+its Ready head is delivered and the slot return succeeds. In legacy state,
+candidate publication returns the source worktree. A coordinator starts a
 separate short-lived maintenance task only when a plugin release is needed; an
 ordinary development worktree is never retained merely to publish a package.
 
@@ -140,10 +152,13 @@ the base unchanged. See [Runtime Adapter](runtime-adapter.md).
 
 Finish never cleans dependency caches. Retained known dependency roots are
 opaque, including normal package links; their ancestors must not be links.
-Candidate publication releases the old task lease while leaving its clean
-worktree attached to the exact task branch. That branch provides ordinary Git
-visibility; the immutable candidate ref remains the integration source. Start
-checks predecessor ownership, branch, HEAD, candidate ref, directory identity,
+In legacy candidate-first state, candidate publication releases the old task
+lease while leaving its clean worktree attached to the exact task branch. That
+branch provides ordinary Git visibility; the immutable candidate ref remains
+the integration source. In native state, Ready freezes the exact task head;
+Finish releases configured task runtime and records waiting for integration,
+while the fixed slot stays owned. Start checks predecessor ownership, branch,
+HEAD, delivery evidence (or the legacy candidate ref), directory identity,
 cleanliness, and unknown content before reusing an attached idle slot. Terminal
 branch retirement checks exact provenance, delivery evidence, HEAD, and
 worktree occupation; moved and occupied branches are preserved.
@@ -180,10 +195,14 @@ task.
 
 ## Runtime and validation boundaries
 
-Adapter activation happens after an exact isolated task and anchor exist; release
-happens after the immutable candidate ref exists. Batch activation and release
-wrap combined Full when configured. An uncertain or nonzero Adapter result,
-approval drift, timeout, or contamination blocks advancement. Successful release
+Adapter activation happens after an exact isolated task and anchor exist. In
+legacy state, task runtime release follows creation of the immutable candidate
+ref. In native state, Finish releases configured task runtime before recording
+the Ready head as waiting. Configured batch activation and batch runtime release
+wrap combined Full; successful batch runtime release precedes exact promotion.
+Native integration worktree and task-slot return follows promotion. An uncertain
+or nonzero Adapter result, approval drift, timeout, or contamination blocks
+advancement. Successful release
 is required before promotion. Runtime resources and effects remain project-owned;
 DWW supplies identity and port facts but does not interpret services, databases,
 authentication, or browsers.

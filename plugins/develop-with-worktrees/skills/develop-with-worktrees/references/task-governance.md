@@ -35,6 +35,16 @@ the recorded task or base worktree for `anchor update`; the digest prevents a
 stale editor from overwriting newer content. Do not copy chat transcripts, hidden
 reasoning, credentials, leases, or unrelated history into an anchor.
 
+When work crosses host tasks, preserve the specific authorization already given
+in the existing root scope/progress and handoff context: its original instruction,
+purpose, repository, exact receiving task, categories of information, allowed
+actions, and endpoint. Record only the facts needed for that handoff; ordinary
+single-task work needs no extra fields or approval step. Check the original
+instruction and recipient before acting. A root records the objective and its
+authorization basis but grants no new permission. Continue within an already
+clear scope; ask once only for a material missing choice or permission. Do not
+pass leases, credentials, or whole raw conversations.
+
 ## Confirmed-objective root anchors
 
 Create exactly one root anchor before the first related child when the user has
@@ -78,6 +88,10 @@ A child starts with `--root-anchor <root-id>`. A cross-repository child must als
 supply the exact external root file; DWW records that one non-linked locator and
 does not discover repositories or copy the root. Root anchors do not define
 candidate membership, task dependencies, scheduler ownership, or batch scope.
+They also cannot enlarge a user instruction or authorize an external action on
+their own. Technical `--confirm`, `--accept`, and `--force` arguments verify an
+exact operation under existing authority; their presence alone does not require
+the user to repeat that authority.
 Use the verified native Hook session for a child owner: a scheduler or subagent
 ID alone is not proof of that session. If CLI and Hook identities differ, stop
 writes and use formal handoff to the verified owner; do not create a replacement
