@@ -9,12 +9,32 @@ worktree count, or session guess.
 
 | Role | Identity | Responsibility |
 |---|---|---|
-| Source | task that published the candidate | owns the original implementation record |
+| Source | native task whose Ready head waits for integration, or legacy task that published a candidate | owns the original implementation record |
 | Coordinator | host task that actually froze the batch | follows that batch through integration and recovery |
-| Repair assignee | exact task that claims a prepared repair | prepares and publishes the replacement candidate |
+| Repair assignee (legacy) | exact task that claims a prepared candidate repair | prepares and publishes the replacement candidate |
 
-Publishing a candidate may end the source task's coding round. It does not end
-the coordinator's delivery responsibility.
+In native state, Finish ends the source's coding slice but leaves its fixed slot
+owned while the Ready head waits for integration. In legacy state, candidate
+publication releases the source worktree. Neither transition ends the
+coordinator's delivery responsibility. Native shared integration repairs use
+the managed `batch repair` entry; the candidate notification sequence below
+applies to legacy candidate repair.
+
+After a source finishes its agreed slice, the host coordinating the round checks
+the remaining agreed work and active producers in the exact target lane. An
+exact full batch freezes automatically. Only a genuinely ended smaller round
+with no active producer supports `round-complete`; an ordinary Finish, quiet
+interval, or task count does not. Follow only the returned exact task, target
+branch, and batch through validation, scoped repair, promotion, and release or
+a recorded failure. Do not claim delivery from Finish or take over an unrelated
+batch.
+
+For authorization carried in a host handoff, follow
+[Task governance](task-governance.md): preserve the original instruction and
+the exact recipient, purpose, information scope, and allowed action in the
+existing context. This records prior authority; it grants no new permission.
+Keep leases, credentials, and raw conversation dumps out of messages. Proceed
+within clear prior authorization; ask only for an essential missing fact.
 
 ## Repair handoff sequence
 

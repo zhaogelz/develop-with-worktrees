@@ -46,9 +46,11 @@ plugin from its existing local source. A first move from an older local source
 is a separate, verified maintenance action; it is not a routine task step.
 If DWW itself blocks an upgrade, the [recovery path](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
 can install a fully validated recovery version before normal integration completes.
-Normal source tasks still Finish and return their worktrees. When a plugin
-release is needed, the coordinator starts a separate short-lived maintenance
-task instead of retaining an ordinary development worktree for publishing.
+In native state, normal source tasks Finish and wait in their assigned worktrees
+until local integration and slot return succeed. Legacy candidate publication
+returns its source worktree. When a plugin release is needed, the coordinator
+starts a separate short-lived maintenance task instead of retaining a development
+worktree for publishing.
 
 ## Default flow
 
