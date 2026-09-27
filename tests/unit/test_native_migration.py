@@ -4,8 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from solo_ai import batch_workspace
 from solo_ai.candidate_batches import CandidateBatchStore
-from solo_ai.config import render_repo_config, render_verification_config
+from solo_ai.config import (
+    load_repo_config,
+    render_repo_config,
+    render_verification_config,
+)
 from solo_ai.native_migration import enable_native_migration, preview_native_migration
 from solo_ai.repo import GitRepo
 from solo_ai.state import STATE_SCHEMA, StateStore
@@ -21,6 +26,170 @@ def _legacy_repo(root: Path) -> tuple[GitRepo, StateStore]:
     )
     repo = GitRepo(root)
     return repo, StateStore(repo)
+
+
+def _idle_integration_scene(
+    root: Path, *, source_ref: str = "main"
+) -> tuple[GitRepo, StateStore, dict[str, object], Path]:
+    """建立已完成并归还的旧集成工作区，保留真实 Git 注册和引用。"""
+
+    repo, store = _legacy_repo(root)
+    worktree = (
+        store.managed_worktree_root(load_repo_config(repo)) / "solo-ai-integration"
+    )
+    worktree.parent.mkdir(parents=True)
+    if source_ref != "main":
+        repo.git(["branch", source_ref, "main"])
+    repo.git(["worktree", "add", "--detach", str(worktree), source_ref])
+    if source_ref != "main":
+        (worktree / "release-only.txt").write_text("release\n", encoding="utf-8")
+        repo.git(["add", "release-only.txt"], cwd=worktree)
+        repo.git(["commit", "-m", "test: release result"], cwd=worktree)
+        repo.git(["update-ref", f"refs/heads/{source_ref}", repo.head(worktree)])
+    head = repo.head(worktree)
+    head_ref = "refs/dww/batch-heads/batch-legacy-idle"
+    repo.git(["update-ref", head_ref, head])
+    location = {
+        "worktree": str(worktree),
+        "worktree_resolved": str(worktree.resolve()),
+        "worktree_identity": path_identity(worktree),
+        "managed_root_resolved": str(worktree.parent.resolve()),
+        "managed_root_identity": path_identity(worktree.parent),
+    }
+    record: dict[str, object] = {
+        **location,
+        "generation": 7,
+        "owner": None,
+        "registering": False,
+        "head": head,
+        "head_ref": head_ref,
+    }
+    pool_store = CandidateBatchStore(repo)
+    pool = pool_store._empty()
+    pool["integration_workspace"] = record
+    pool["batches"]["batch-legacy-idle"] = {
+        "id": "batch-legacy-idle",
+        "status": "completed",
+        "worktree_mode": "reusable",
+        "worktree_released_at": "2026-09-01T00:00:00Z",
+        "run_owner": None,
+        "worktree_generation": 7,
+        "base_ref": source_ref,
+        "integration_ref": head_ref,
+        "integration_head": head,
+        "integrated_head": head,
+        **location,
+    }
+    atomic_write_json(pool_store.path, pool)
+    atomic_write_json(store.path, store._empty())
+    return repo, store, record, worktree
+
+
+@pytest.mark.parametrize("source_ref", ["main", "release/preflight"])
+def test_native_migration_carries_verified_idle_integration_workspace(
+    git_repo: Path, source_ref: str
+) -> None:
+    repo, store, record, worktree = _idle_integration_scene(
+        git_repo, source_ref=source_ref
+    )
+    base = repo.ref_head("refs/heads/main")
+    assert base is not None
+    if source_ref != "main":
+        assert not repo.is_ancestor(str(record["head"]), base)
+
+    preview = preview_native_migration(repo, base_ref="main")
+    assert preview["status"] == "ready"
+    assert preview["integration_workspace_status"] == "verified-idle"
+
+    enabled = enable_native_migration(repo, base_ref="main", confirm=f"main:{base}")
+    assert enabled["status"] == "enabled"
+    assert store.read()["integration_workspace"] == record
+    assert repo.head(worktree) == record["head"]
+    assert repo.ref_head(str(record["head_ref"])) == record["head"]
+    after = preview_native_migration(repo, base_ref="main")
+    assert after["blockers"] == []
+    assert after["integration_workspace_status"] == "managed-idle"
+
+    state = store.read()
+    next_batch = {
+        "id": "batch-native-next",
+        "status": "sealed",
+        "base_before": base,
+        "integration_head": base,
+    }
+    state["batches"][next_batch["id"]] = next_batch
+    atomic_write_json(store.path, state)
+    acquired = batch_workspace.acquire(repo, store, next_batch, worktree)
+    assert acquired["worktree_generation"] == 8
+    assert acquired["integration_ref"] == "refs/dww/batch-heads/batch-native-next"
+    assert store.read()["integration_workspace"]["owner"] == next_batch["id"]
+    assert repo.head(worktree) == base
+
+
+def test_native_migration_blocks_existing_worktree_without_legacy_binding(
+    git_repo: Path,
+) -> None:
+    repo, store, _record, worktree = _idle_integration_scene(git_repo)
+    pool_store = CandidateBatchStore(repo)
+    pool = pool_store.read()
+    pool.pop("integration_workspace")
+    atomic_write_json(pool_store.path, pool)
+
+    preview = preview_native_migration(repo, base_ref="main")
+    assert preview["status"] == "blocked"
+    assert {"kind": "legacy-integration-workspace-unowned"} in preview["blockers"]
+    result = enable_native_migration(
+        repo, base_ref="main", confirm=f"main:{repo.ref_head('refs/heads/main')}"
+    )
+    assert result["status"] == "blocked"
+    assert store.read()["schema_version"] != STATE_SCHEMA
+    assert worktree.exists()
+
+
+@pytest.mark.parametrize("drift", ["saved-ref", "directory-identity", "unknown-file"])
+def test_native_migration_preserves_unverified_idle_workspace(
+    git_repo: Path, drift: str
+) -> None:
+    repo, store, _record, worktree = _idle_integration_scene(git_repo)
+    if drift == "saved-ref":
+        repo.git(["update-ref", "-d", "refs/dww/batch-heads/batch-legacy-idle"])
+    elif drift == "directory-identity":
+        pool_store = CandidateBatchStore(repo)
+        pool = pool_store.read()
+        pool["integration_workspace"]["worktree_identity"] = {
+            "device": -1,
+            "inode": -1,
+        }
+        atomic_write_json(pool_store.path, pool)
+    else:
+        (worktree / "untracked.txt").write_text("keep me\n", encoding="utf-8")
+
+    preview = preview_native_migration(repo, base_ref="main")
+    assert preview["status"] == "blocked"
+    assert any(
+        item["kind"] == "legacy-integration-workspace-unverified"
+        for item in preview["blockers"]
+    )
+    assert store.read()["schema_version"] != STATE_SCHEMA
+
+
+def test_upgraded_preview_reports_missing_legacy_workspace_binding(
+    git_repo: Path,
+) -> None:
+    repo, store, _record, _worktree = _idle_integration_scene(git_repo)
+    state = store.read()
+    state["schema_version"] = STATE_SCHEMA
+    state["integration_workspace"] = None
+    state["native_migration"] = {
+        "base_ref": "main",
+        "base_head": repo.ref_head("refs/heads/main"),
+    }
+    atomic_write_json(store.path, state)
+
+    preview = preview_native_migration(repo, base_ref="main")
+    assert preview["status"] == "enabled"
+    assert preview["integration_workspace_status"] == "legacy-adoption-required"
+    assert {"kind": "legacy-integration-workspace-unbound"} in preview["blockers"]
 
 
 def test_native_migration_preview_reports_active_legacy_task(git_repo: Path) -> None:
