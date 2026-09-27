@@ -66,12 +66,13 @@ failure.
 An installed DWW bug can block promotion of its own fix. The installed
 `maintain-dww-plugin.ps1` supports `-Mode RecoveryInstall` with the same exact
 `-SourceRepo`, `-SourceCommit`, and `-CodexPath` arguments as ordinary Install.
-The source must be the exact composed commit of one promotion-blocked batch
-whose Full validation passed. `batch recovery-source --commit <full-sha>` is a
-read-only preflight: it verifies the unchanged main base, proof and log hashes,
-candidate identities and refs, and runtime release evidence. A legacy failed
-batch is eligible only when its failure was promotion and its Full passed.
-Missing, changed, superseded, or unverified sources are rejected.
+`batch recovery-source --commit <full-sha>` is a read-only preflight. It accepts
+the existing promotion-blocked legacy batch after passed Full, or one frozen
+native DWW maintenance task with a clean, exact source commit and passed
+task-level Full proof. The native source can be checked before an integration
+batch exists; its main base, task and slot identity, anchor, proof inputs, logs,
+and runtime state must still match. Missing, changed, superseded, or unverified
+sources are rejected.
 
 RecoveryInstall archives the immutable commit and uses the normal marketplace
 and CLI installer. It does not execute an arbitrary source runner, overwrite an
@@ -81,6 +82,12 @@ receipt. After recovery, complete normal integration and Install from main;
 verify the actual host before declaring runtime success. A recovery package
 does not mean that its source has been delivered. Host review is still required
 when the host reports a changed Hook definition.
+
+The installed maintenance entry and its installed recovery-source verifier must
+both support the native source before RecoveryInstall can use it. A fix present
+only in an uninstalled task worktree cannot authorize its own installation;
+preserve the verified source and use an explicitly supported host maintenance
+channel if the installed verifier still understands only legacy batches.
 
 For `RETAINED_DISPOSAL_ACCESS_DENIED`, inspect the reported filesystem object
 and execution identity. Sandbox approval and a Windows administrator token are
