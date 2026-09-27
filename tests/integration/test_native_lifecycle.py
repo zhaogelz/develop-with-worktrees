@@ -13,6 +13,7 @@ from solo_ai import cli as cli_module
 from solo_ai.candidate_batches import CandidateBatchStore
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
+    abandon,
     approve,
     commit_task,
     finish,
@@ -212,6 +213,241 @@ def test_native_start_preserves_detached_slot_with_unique_content(
     assert repo.ref_head("refs/heads/codex/slot-01") is None
     assert (worktree / "untracked.txt").read_text(encoding="utf-8") == "unique\n"
     assert store.read()["slots"]["01"]["status"] == "quarantined"
+
+
+@pytest.mark.parametrize("advance_base", [False, True])
+def test_native_zero_change_abandon_releases_and_reuses_fixed_slot(
+    git_repo: Path, advance_base: bool
+) -> None:
+    repo, store = _native_repo(git_repo)
+    first = start(repo, name="zero-change maintenance")
+    worktree = Path(first["worktree"])
+    assert (
+        abandon(
+            repo,
+            task_id=first["id"],
+            lease=first["lease"],
+            confirm=first["id"],
+            reason="maintenance complete without source changes",
+        )["status"]
+        == "abandoned"
+    )
+    assert repo.branch(worktree) is None
+    assert repo.ref_head(f"refs/heads/{first['branch']}") is None
+    if advance_base:
+        (git_repo / "later.txt").write_text("accepted\n", encoding="utf-8")
+        git(git_repo, "add", "later.txt")
+        git(git_repo, "commit", "-m", "test: advance base after maintenance")
+    second = start(repo, name="follow-up maintenance")
+    assert second["slot_predecessor_task_id"] == first["id"]
+    assert second["slot_generation"] == first["slot_generation"] + 1
+    assert second["worktree"] == first["worktree"]
+    assert second["branch"] == first["branch"]
+    assert repo.branch(worktree) == first["branch"]
+    assert repo.head(worktree) == repo.head(git_repo)
+
+
+def test_native_start_accepts_completed_abandonment_predecessor(git_repo: Path) -> None:
+    repo, store = _native_repo(git_repo)
+    first = start(repo, name="maintenance with exact release record")
+    abandon(repo, task_id=first["id"], lease=first["lease"], confirm=first["id"])
+    store.mutate(
+        lambda state: state["slots"]["01"].update(released_task_id=first["id"])
+    )
+    second = start(repo, name="reuse exact released predecessor")
+    assert second["slot_predecessor_task_id"] == first["id"]
+    assert second["worktree"] == first["worktree"]
+    assert repo.head(Path(second["worktree"])) == repo.head(git_repo)
+
+
+def test_quarantined_start_preserves_unique_detached_commit(git_repo: Path) -> None:
+    repo, store = _native_repo(git_repo)
+    worktree = Path(str(store.read()["slots"]["01"]["path"]))
+    git(git_repo, "worktree", "add", "--detach", str(worktree), "main")
+    store.mutate(
+        lambda state: state["slots"]["01"].update(
+            released_worktree_identity=path_identity(worktree),
+            released_managed_root_identity=path_identity(worktree.parent),
+            released_worktree_resolved=str(worktree.resolve()),
+            released_managed_root_resolved=str(worktree.parent.resolve()),
+        )
+    )
+    task = store.allocate(
+        load_repo_config(repo),
+        name="interrupted fixed-slot start",
+        branch="unused-native-branch",
+        base_head=repo.head(git_repo),
+        base_ref="main",
+        base_worktree=git_repo,
+        anchor_contract={
+            "implementation_target": "fixed slot",
+            "scope_boundary": "unactivated task",
+            "acceptance_criteria": "preserve unique detached commit",
+        },
+    )
+    store.quarantine(task["id"], "simulated interrupted activation")
+    (worktree / "unique.txt").write_text("preserve me\n", encoding="utf-8")
+    git(worktree, "add", "unique.txt")
+    git(worktree, "commit", "-m", "test: unique detached commit")
+    unique_head = repo.head(worktree)
+    with pytest.raises(SoloAIError, match="detached HEAD"):
+        recover(repo, task_id=task["id"])
+    assert repo.head(worktree) == unique_head
+    assert repo.branch(worktree) is None
+    assert (worktree / "unique.txt").read_text(encoding="utf-8") == "preserve me\n"
+    assert store.task(task["id"])["status"] == "quarantined"
+
+
+@pytest.mark.parametrize("unique_commit", [False, True])
+def test_quarantined_native_start_checks_branch_before_resuming(
+    git_repo: Path, unique_commit: bool
+) -> None:
+    repo, store = _native_repo(git_repo)
+    worktree = Path(str(store.read()["slots"]["01"]["path"]))
+    git(git_repo, "worktree", "add", "--detach", str(worktree), "main")
+    old_head = repo.head(worktree)
+    store.mutate(
+        lambda state: state["slots"]["01"].update(
+            released_worktree_identity=path_identity(worktree),
+            released_managed_root_identity=path_identity(worktree.parent),
+            released_worktree_resolved=str(worktree.resolve()),
+            released_managed_root_resolved=str(worktree.parent.resolve()),
+        )
+    )
+    (git_repo / "later.txt").write_text("accepted\n", encoding="utf-8")
+    git(git_repo, "add", "later.txt")
+    git(git_repo, "commit", "-m", "test: advance base before interrupted start")
+    base_head = repo.head(git_repo)
+    task = store.allocate(
+        load_repo_config(repo),
+        name="interrupted fixed-slot branch creation",
+        branch="unused-native-branch",
+        base_head=base_head,
+        base_ref="main",
+        base_worktree=git_repo,
+        anchor_contract={
+            "implementation_target": "fixed slot",
+            "scope_boundary": "interrupted native start",
+            "acceptance_criteria": "exact base or preserve unique commit",
+        },
+    )
+    store.quarantine(task["id"], "simulated interruption after branch creation")
+    git(worktree, "switch", "-c", task["branch"], old_head)
+    if unique_commit:
+        (worktree / "unique.txt").write_text("preserve me\n", encoding="utf-8")
+        git(worktree, "add", "unique.txt")
+        git(worktree, "commit", "-m", "test: unique branch commit")
+    before = repo.head(worktree)
+    if unique_commit:
+        with pytest.raises(SoloAIError, match="recorded base history"):
+            recover(repo, task_id=task["id"])
+        assert repo.head(worktree) == before
+        assert (worktree / "unique.txt").read_text(encoding="utf-8") == "preserve me\n"
+        assert store.task(task["id"])["status"] == "quarantined"
+    else:
+        assert recover(repo, task_id=task["id"])["status"] == "active"
+        assert repo.head(worktree) == base_head
+        assert store.task(task["id"])["candidate_head"] == base_head
+        assert repo.branch(worktree) == task["branch"]
+
+
+def test_native_release_transaction_drift_blocks_start_and_recovery(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo)
+    first = start(repo, name="completed maintenance")
+    abandon(
+        repo,
+        task_id=first["id"],
+        lease=first["lease"],
+        confirm=first["id"],
+        reason="completed without source changes",
+    )
+    worktree = Path(first["worktree"])
+    released_head = repo.head(worktree)
+    store.mutate(
+        lambda state: state["tasks"][first["id"]]["abandonment"].update(
+            phase="prepared"
+        )
+    )
+    with pytest.raises(SoloAIError, match="released predecessor"):
+        start(repo, name="blocked follow-up")
+    quarantined_id = store.read()["slots"]["01"]["task_id"]
+    assert quarantined_id is not None
+    with pytest.raises(SoloAIError, match="released predecessor"):
+        recover(repo, task_id=quarantined_id)
+    assert repo.head(worktree) == released_head
+    assert repo.branch(worktree) is None
+    assert repo.ref_head(f"refs/heads/{first['branch']}") is None
+    assert store.task(quarantined_id)["status"] == "quarantined"
+
+
+def test_quarantined_native_start_rejects_slot_generation_drift_before_git_write(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo)
+    worktree = Path(str(store.read()["slots"]["01"]["path"]))
+    git(git_repo, "worktree", "add", "--detach", str(worktree), "main")
+    old_head = repo.head(worktree)
+    store.mutate(
+        lambda state: state["slots"]["01"].update(
+            released_worktree_identity=path_identity(worktree),
+            released_managed_root_identity=path_identity(worktree.parent),
+            released_worktree_resolved=str(worktree.resolve()),
+            released_managed_root_resolved=str(worktree.parent.resolve()),
+        )
+    )
+    task = store.allocate(
+        load_repo_config(repo),
+        name="generation drift",
+        branch="unused-native-branch",
+        base_head=old_head,
+        base_ref="main",
+        base_worktree=git_repo,
+        anchor_contract={
+            "implementation_target": "fixed slot",
+            "scope_boundary": "quarantined pre-activation",
+            "acceptance_criteria": "no Git write on generation drift",
+        },
+    )
+    store.quarantine(task["id"], "simulated interruption")
+    store.mutate(
+        lambda state: state["slots"]["01"].update(
+            generation=task["slot_generation"] + 1
+        )
+    )
+    with pytest.raises(SoloAIError, match="slot generation"):
+        recover(repo, task_id=task["id"])
+    assert repo.branch(worktree) is None
+    assert repo.head(worktree) == old_head
+    assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+    assert store.task(task["id"])["status"] == "quarantined"
+
+
+def test_native_abandonment_release_recovers_once_and_reuses_slot(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _native_repo(git_repo)
+    first = start(repo, name="interrupted maintenance close")
+    original = StateStore.publish_abandonment_release
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("interrupted release publication")
+
+    monkeypatch.setattr(StateStore, "publish_abandonment_release", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted release publication"):
+        abandon(repo, task_id=first["id"], lease=first["lease"], confirm=first["id"])
+    assert store.task(first["id"])["status"] == "abandoned"
+    assert store.read()["slots"]["01"]["status"] == "release-checking"
+    assert repo.ref_head(f"refs/heads/{first['branch']}") is None
+    monkeypatch.setattr(StateStore, "publish_abandonment_release", original)
+    assert recover(repo, task_id=first["id"])["status"] == "abandoned"
+    assert recover(repo, task_id=first["id"])["status"] == "abandoned"
+    assert store.read()["slots"]["01"]["status"] == "idle"
+    second = start(repo, name="reuse recovered close")
+    assert second["slot_predecessor_task_id"] == first["id"]
+    assert second["slot_generation"] == first["slot_generation"] + 1
+    assert repo.head(Path(second["worktree"])) == repo.head(git_repo)
 
 
 def test_recover_explicitly_ends_clean_unactivated_fixed_slot_failure(

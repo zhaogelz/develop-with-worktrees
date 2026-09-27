@@ -5,6 +5,13 @@ work and sends messages. In Codex Desktop, DWW records the exact injected host
 task ID. It never derives a source or coordinator from a title, UI count,
 worktree count, or session guess.
 
+A scheduled subagent task ID is not its Hook session ID: Codex subagent Hooks
+use the parent session ID ([Codex Hooks, Common input fields](https://learn.chatgpt.com/docs/hooks)).
+For delegated coding, the verified lifecycle owner performs managed writes while
+the subagent may prepare patches and tests for that owner. An independent host
+task needs its own verified Hook identity; `CODEX_THREAD_ID` alone is not proof
+of write ownership.
+
 ## Roles
 
 | Role | Identity | Responsibility |
