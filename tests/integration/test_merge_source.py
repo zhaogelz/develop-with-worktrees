@@ -188,8 +188,7 @@ def test_merge_source_commit_rechecks_prepared_slot_generation(git_repo: Path) -
         )
     assert repo.head(Path(task["worktree"])) == base
     assert (
-        repo.git(["rev-parse", "MERGE_HEAD"], cwd=Path(task["worktree"]))
-        .stdout.strip()
+        repo.git(["rev-parse", "MERGE_HEAD"], cwd=Path(task["worktree"])).stdout.strip()
         == source
     )
 
