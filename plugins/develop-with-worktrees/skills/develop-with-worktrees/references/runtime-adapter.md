@@ -46,7 +46,7 @@ the Adapter itself decides what to rebuild and must produce them before success.
 |---|---|---|---|
 | `activate` | legacy isolated Start; for native tasks, first `runtime prepare --task <id> --lease <lease>` or `dev start` | task/slot IDs and generation, source HEAD, worktree, base, task port block, input and environment digests | successful receipt and a second clean identity check |
 | `release` | after immutable candidate ref exists; before candidate activation and slot release | task, candidate identity, worktree, base, input hashes | resources released without contaminating the task tree |
-| `batch_activate` | before combined Full | batch/candidate IDs, frozen base, integration head, batch port block, runtime cycle | resources ready for this exact cycle |
+| `batch_activate` | before combined Full | batch ID, ordered `task_ids` for native delivery or `candidate_ids` for legacy delivery, frozen base, integration head, batch port block, runtime cycle | resources ready for this exact cycle |
 | `batch_release` | after Full attempt and before final batch transition | same cycle plus validation outcome/error | resources released for that exact outcome |
 | `verify_effective` | only after source is delivered into current base | delivered candidate and project runtime facts | fresh project-defined effectiveness evidence |
 

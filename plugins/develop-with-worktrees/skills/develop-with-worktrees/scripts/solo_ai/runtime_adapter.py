@@ -517,10 +517,15 @@ def _batch_context(
     ):
         raise SoloAIError("Batch Runtime Adapter requires a positive runtime_cycle")
     port_block_start = config.port_base + BATCH_PORT_BLOCK_OFFSET
+    native = isinstance(batch.get("tasks"), list)
     context = {
         "batch_id": batch["id"],
         "runtime_cycle": runtime_cycle,
-        "candidate_ids": list(batch["candidate_ids"]),
+        **(
+            {"task_ids": [str(item["task_id"]) for item in batch["tasks"]]}
+            if native
+            else {"candidate_ids": list(batch["candidate_ids"])}
+        ),
         "worktree": str(worktree.resolve()),
         "base_ref": batch["base_ref"],
         "base_head": batch["base_before"],
@@ -535,7 +540,7 @@ def _batch_context(
         from .candidate_batches import CandidateBatchStore
 
         context["worktree_binding"] = context_binding(
-            repo, CandidateBatchStore(repo), batch
+            repo, StateStore(repo) if native else CandidateBatchStore(repo), batch
         )
     return config, context
 

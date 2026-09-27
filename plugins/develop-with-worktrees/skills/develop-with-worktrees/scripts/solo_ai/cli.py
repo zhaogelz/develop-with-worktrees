@@ -1331,7 +1331,11 @@ def _approval_request(repo: GitRepo, args: argparse.Namespace) -> dict[str, Any]
             "all",
         }:
             raise SoloAIError("--batch requires a batch approval scope")
-        batch = CandidateBatchStore(repo).batch(args.batch)
+        batch = (
+            StateStore(repo).native_batch(args.batch)
+            if args.batch.startswith("batch-native-")
+            else CandidateBatchStore(repo).batch(args.batch)
+        )
         cwd = Path(str(batch["worktree"]))
         verification = load_verification_config(repo, cwd=cwd)
         config = load_repo_config(repo, cwd=cwd)
