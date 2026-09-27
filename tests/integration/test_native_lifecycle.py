@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import difflib
+import argparse
+import json
 import sys
 from pathlib import Path
 
 import pytest
 from conftest import git
 from solo_ai import native_batches
+from solo_ai import cli as cli_module
 from solo_ai.candidate_batches import CandidateBatchStore
 from solo_ai.config import CommandSpec, load_repo_config, load_verification_config
 from solo_ai.lifecycle import (
@@ -226,6 +229,75 @@ def test_native_batch_keeps_source_in_real_merge_history(git_repo: Path) -> None
     ]
     assert store.read()["slots"]["01"]["status"] == "idle"
     assert CandidateBatchStore(repo).read()["candidates"] == {}
+
+
+def test_native_batch_activates_and_releases_runtime_around_full(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo)
+    adapter = git_repo / "batch_adapter.py"
+    adapter.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "context = json.loads(Path(sys.argv[-1]).read_text(encoding='utf-8'))\n"
+        "events = Path(sys.argv[-1]).parent.parent / 'batch-events.jsonl'\n"
+        "with events.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps({'operation': sys.argv[1], "
+        "'cycle': context['runtime_cycle'], "
+        "'task_ids': context['task_ids'], "
+        "'binding': context['worktree_binding'], "
+        "'outcome': context.get('validation_outcome')}) + '\\n')\n",
+        encoding="utf-8",
+    )
+    config = git_repo / ".solo-ai" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "\n[runtime_adapter]\n"
+        + f"batch_activate = ['{Path(sys.executable).as_posix()}', 'batch_adapter.py', 'activate']\n"
+        + f"batch_release = ['{Path(sys.executable).as_posix()}', 'batch_adapter.py', 'release']\n"
+        + "input_paths = ['batch_adapter.py']\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "batch_adapter.py", ".solo-ai/config.toml")
+    git(git_repo, "commit", "-m", "test: configure batch adapter")
+    task = start(repo, name="native batch runtime")
+    (Path(task["worktree"]) / "feature.txt").write_text("ready\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: native batch source",
+        paths=["feature.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver now"
+    )
+    approve(repo, load_verification_config(repo))
+    delivered = run_native_batch(repo, batch_id=batch["id"])
+    events = [
+        json.loads(line)
+        for line in (repo.local_dir / "runtime-adapter" / "batch-events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [event["operation"] for event in events] == ["activate", "release"]
+    assert [event["cycle"] for event in events] == [1, 1]
+    assert all(event["task_ids"] == [task["id"]] for event in events)
+    assert all(event["binding"]["owner"] == batch["id"] for event in events)
+    assert events[-1]["outcome"] == "passed"
+    assert delivered["runtime_release"]["result"] == "passed"
+    request = cli_module._approval_request(
+        repo,
+        argparse.Namespace(
+            task=None,
+            slot=None,
+            batch=batch["id"],
+            candidate=None,
+            scope="batch-full",
+        ),
+    )
+    assert request["cwd"] == Path(batch["worktree"])
 
 
 def test_native_finish_explicit_tail_delivers_without_candidate(git_repo: Path) -> None:

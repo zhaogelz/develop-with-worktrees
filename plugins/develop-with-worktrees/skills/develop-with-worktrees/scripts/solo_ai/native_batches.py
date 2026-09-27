@@ -13,6 +13,11 @@ from .config import load_repo_config, load_verification_config
 from .integration import integration_turn
 from .proof import new_validation_attempt_id, read_validation_attempt, validate
 from .repo import GitRepo
+from .runtime_adapter import (
+    activate_batch_runtime,
+    release_batch_runtime,
+    require_exact_passed_batch_release,
+)
 from .safety import require_safe
 from .state import STATE_SCHEMA, StateStore, candidate_admission_lock
 from .util import (
@@ -253,6 +258,69 @@ def _compose(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[st
     return store.update_batch(str(batch["id"]), status="composed")
 
 
+def _activate_runtime(
+    repo: GitRepo, store: StateStore, batch: dict[str, Any]
+) -> dict[str, Any]:
+    if batch["status"] == "composed":
+        batch = store.update_batch(
+            str(batch["id"]),
+            status="runtime_activating",
+            runtime_cycle=int(batch.get("runtime_cycle", 0)) + 1,
+            runtime_activation=None,
+            runtime_release=None,
+            validation_outcome=None,
+            validation_error=None,
+            proof=None,
+        )
+    try:
+        receipt = activate_batch_runtime(repo, batch=batch)
+    except BaseException as exc:
+        store.update_batch(
+            str(batch["id"]),
+            status="runtime_activation_pending",
+            runtime_activation_error=str(exc),
+        )
+        raise
+    return store.update_batch(
+        str(batch["id"]),
+        status="runtime_active",
+        runtime_activation=receipt,
+        runtime_activation_error=None,
+    )
+
+
+def _release_runtime(
+    repo: GitRepo, store: StateStore, batch: dict[str, Any]
+) -> dict[str, Any]:
+    try:
+        receipt = release_batch_runtime(
+            repo,
+            batch=batch,
+            validation_outcome=str(batch["validation_outcome"]),
+            validation_error=batch.get("validation_error"),
+        )
+    except BaseException as exc:
+        store.update_batch(
+            str(batch["id"]),
+            status="runtime_release_pending",
+            runtime_release_error=str(exc),
+        )
+        raise
+    outcome = str(batch["validation_outcome"])
+    return store.update_batch(
+        str(batch["id"]),
+        status=(
+            "validated"
+            if outcome == "passed"
+            else "validation-failed"
+            if outcome == "failed"
+            else "composed"
+        ),
+        runtime_release=receipt,
+        runtime_release_error=None,
+    )
+
+
 def _validate(
     repo: GitRepo, store: StateStore, batch: dict[str, Any]
 ) -> dict[str, Any]:
@@ -277,6 +345,17 @@ def _validate(
         base=str(batch["base_before"]),
         allowlist=config.sensitive_allowlist,
     )
+    batch = _activate_runtime(repo, store, batch)
+    return _run_full(repo, store, batch, verification)
+
+
+def _run_full(
+    repo: GitRepo,
+    store: StateStore,
+    batch: dict[str, Any],
+    verification: Any,
+) -> dict[str, Any]:
+    worktree = Path(str(batch["worktree"]))
     attempt = new_validation_attempt_id("full")
     batch = store.update_batch(
         str(batch["id"]),
@@ -297,19 +376,40 @@ def _validate(
             attempt_id=attempt,
             attempt_owner={"kind": "batch", "id": str(batch["id"])},
         )
-    except Exception as exc:
-        store.update_batch(
-            str(batch["id"]), status="validation-failed", validation_error=str(exc)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        releasing = store.update_batch(
+            str(batch["id"]),
+            status="runtime_releasing",
+            validation_outcome="interrupted",
+            validation_error=str(exc),
         )
+        _release_runtime(repo, store, releasing)
+        raise
+    except Exception as exc:
+        releasing = store.update_batch(
+            str(batch["id"]),
+            status="runtime_releasing",
+            validation_outcome="failed",
+            validation_error=str(exc),
+        )
+        _release_runtime(repo, store, releasing)
         raise
     if repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["base_before"]:
+        releasing = store.update_batch(
+            str(batch["id"]),
+            status="runtime_releasing",
+            validation_outcome="failed",
+            validation_error="Native batch target moved during Full validation",
+        )
+        _release_runtime(repo, store, releasing)
         raise SoloAIError("Native batch target moved during Full validation")
-    return store.update_batch(
+    releasing = store.update_batch(
         str(batch["id"]),
-        status="validated",
+        status="runtime_releasing",
         proof=str(proof["fingerprint"]),
         validation_outcome="passed",
     )
+    return _release_runtime(repo, store, releasing)
 
 
 def _recover_validation(
@@ -334,11 +434,13 @@ def _recover_validation(
             next_action={"kind": "wait_for_validation", "batch_id": batch["id"]},
         )
     if attempt.get("result") != "passed":
-        store.update_batch(
+        releasing = store.update_batch(
             str(batch["id"]),
-            status="validation-failed",
+            status="runtime_releasing",
+            validation_outcome="failed",
             validation_error=str(attempt.get("error") or attempt["result"]),
         )
+        _release_runtime(repo, store, releasing)
         raise SoloAIError("Native Full did not pass; preserve its failed attempt")
     fingerprint = str(attempt.get("proof") or "")
     proof = read_json(repo.local_dir / "proofs" / f"{fingerprint}.json", {})
@@ -352,15 +454,19 @@ def _recover_validation(
         or inputs.get("base_head") != batch["base_before"]
     ):
         raise SoloAIError("Native passed attempt has no matching exact proof")
-    return store.update_batch(
+    releasing = store.update_batch(
         str(batch["id"]),
-        status="validated",
+        status="runtime_releasing",
         proof=fingerprint,
         validation_outcome="passed",
     )
+    return _release_runtime(repo, store, releasing)
 
 
 def _promote(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[str, Any]:
+    require_exact_passed_batch_release(
+        repo, receipt=dict(batch.get("runtime_release") or {})
+    )
     base_ref = str(batch["base_ref"])
     integration_head = str(batch["integration_head"])
     matching = [
@@ -618,8 +724,17 @@ def run_native_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
             raise SoloAIError("Native merge conflict requires an exact managed repair")
         if batch["status"] == "composed":
             batch = _validate(repo, store, batch)
+        if batch["status"] in {"runtime_activating", "runtime_activation_pending"}:
+            batch = _activate_runtime(repo, store, batch)
+        if batch["status"] == "runtime_active":
+            verification = load_verification_config(
+                repo, cwd=Path(str(batch["worktree"]))
+            )
+            batch = _run_full(repo, store, batch, verification)
         if batch["status"] == "validating":
             batch = _recover_validation(repo, store, batch)
+        if batch["status"] in {"runtime_releasing", "runtime_release_pending"}:
+            batch = _release_runtime(repo, store, batch)
         if batch["status"] == "validation-failed":
             raise SoloAIError("Native Full failed; unchanged inputs will not be rerun")
         if batch["status"] == "validated":
