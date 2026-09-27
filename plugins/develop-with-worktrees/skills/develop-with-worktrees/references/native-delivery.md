@@ -71,6 +71,11 @@ A clean idle slot may retain an attached superseded source branch when its exact
 candidate ref leads through recorded supersession links to a delivered candidate
 on the migration target. Missing receipts, live ownership, unfinished sources,
 unknown content, or broken links still block migration.
+A clean idle slot may also retain an attached withdrawn candidate branch when
+the slot's recorded predecessor, branch, and HEAD match that candidate, its
+completed withdrawal audit and preserved candidate ref match the HEAD, and the
+commit is an ancestor of the selected target head. The candidate's original
+target may differ; the current target's Git ancestry is checked directly.
 A terminal task's explicitly retained, quarantined worktree may stay in place
 through migration when its abandonment record, slot generation, directory
 identity, branch, and HEAD still match exactly and tracked files are clean.

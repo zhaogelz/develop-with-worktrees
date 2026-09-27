@@ -485,6 +485,102 @@ def test_native_migration_checks_attached_superseded_slot_lineage(
         assert repo.branch(slot_path) == old_branch
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "missing-withdrawal",
+        "missing-ref",
+        "moved-ref",
+        "not-ancestor",
+        "wrong-owner",
+    ],
+)
+def test_native_migration_checks_withdrawn_ancestor_slot(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    repo, store = _legacy_repo(git_repo)
+    slot_path = git_repo.parent / "withdrawn-ancestor-slot"
+    old_branch = "legacy/withdrawn-source"
+    repo.git(["worktree", "add", "-b", old_branch, str(slot_path), "main"])
+    base_head = repo.head()
+    (slot_path / "source.txt").write_text("source\n", encoding="utf-8")
+    repo.git(["add", "source.txt"], cwd=slot_path)
+    repo.git(["commit", "-m", "test: withdrawn source"], cwd=slot_path)
+    old_head = repo.head(slot_path)
+    old_ref = "refs/dww/candidates/candidate-old"
+    if case != "missing-ref":
+        repo.git(
+            ["update-ref", old_ref, base_head if case == "moved-ref" else old_head]
+        )
+    if case != "not-ancestor":
+        repo.git(["merge", "--ff-only", old_branch])
+        (git_repo / "later.txt").write_text("later\n", encoding="utf-8")
+        repo.git(["add", "later.txt"])
+        repo.git(["commit", "-m", "test: later target commit"])
+    assert repo.is_ancestor(old_head, repo.head()) is (case != "not-ancestor")
+
+    state = store._empty()
+    state["slots"]["01"] = {
+        "id": "01",
+        "path": str(slot_path),
+        "status": "idle",
+        "task_id": None,
+        "released_candidate_task_id": (
+            "task-newer" if case == "wrong-owner" else "task-old"
+        ),
+    }
+    atomic_write_json(store.path, state)
+    candidate = {
+        "candidate_id": "candidate-old",
+        "task_id": "task-old",
+        "branch": old_branch,
+        "head": old_head,
+        "ref": old_ref,
+        "base_ref": "legacy/other-target",
+        "status": "withdrawn",
+        "delivered": False,
+        "withdrawal": {
+            "reason": "source commit is in the target history",
+            "source": "cli",
+            "started_at": "2026-09-25T00:00:00Z",
+            "ref_retention": "preserved",
+        },
+        "withdrawn_at": "2026-09-25T00:00:00Z",
+    }
+    if case == "missing-withdrawal":
+        candidate.pop("withdrawal")
+    monkeypatch.setattr(
+        CandidateBatchStore,
+        "read",
+        lambda _self: {"candidates": {"candidate-old": candidate}, "batches": {}},
+    )
+    monkeypatch.setattr(
+        CandidateBatchStore,
+        "project_candidates",
+        lambda _self, *_args, **_kwargs: [candidate],
+    )
+
+    preview = preview_native_migration(repo, base_ref="main")
+    if case == "valid":
+        assert preview["status"] == "ready"
+        enabled = enable_native_migration(
+            repo, base_ref="main", confirm=f"main:{preview['base_head']}"
+        )
+        assert enabled["status"] == "enabled"
+        assert store.read()["schema_version"] == STATE_SCHEMA
+        assert repo.branch(slot_path) == preview["slots"][0]["fixed_branch"]
+        assert repo.ref_head(old_ref) == old_head
+        assert repo.ref_head(f"refs/heads/{old_branch}") == old_head
+    else:
+        assert preview["status"] == "blocked"
+        assert {"kind": "attached-legacy-slot-unsettled", "slot_id": "01"} in preview[
+            "blockers"
+        ]
+        assert store.read()["schema_version"] != STATE_SCHEMA
+        assert repo.branch(slot_path) == old_branch
+
+
 def test_native_migration_preserves_verified_retained_slot(git_repo: Path) -> None:
     repo, store = _legacy_repo(git_repo)
     slot_path = git_repo.parent / "retained-slot"
