@@ -91,12 +91,14 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   plugin publication as a separate, short-lived maintenance task rather than
   retaining a normal development worktree for release work.
   If DWW itself blocks promotion, the installed maintenance entry accepts
-  `RecoveryInstall` for one exact composed commit with a passed Full proof and
-  intact logs, frozen base, candidate identities, and runtime-release receipt.
-  It packages that immutable commit without first requiring main promotion;
-  ordinary `Install` still requires main. Recovery installation preserves the
-  previous release and records its proof in the existing release receipt. It
-  does not disable Hooks, rewrite lifecycle state, or claim source delivery.
+  `RecoveryInstall` for one exact source with a passed Full proof. A composed
+  batch still needs intact logs, frozen base, candidate identities, and
+  runtime-release receipt. A frozen native maintenance task may instead qualify
+  before its first integration batch when its task-level Full proof, logs,
+  inputs, environment, and source head match exactly. Neither case claims main
+  delivery; ordinary `Install` still requires main. Recovery installation
+  preserves the previous release and records its proof in the existing release
+  receipt. It does not disable Hooks or rewrite lifecycle state.
 - A confirmed objective has one root anchor. It retains the complete plan and
   explicit amendments; its child anchors retain only their execution slices.
   Exact host identity may map to that root as a locator only; it never stores a
@@ -128,6 +130,12 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   migration preview reports no active task, unsettled candidate or batch, owned
   runtime resource, or unsafe slot. Enablement preserves historical refs and
   proofs, marks legacy nonancestor delivery honestly, and is idempotent.
+- A verifiable idle legacy integration workspace is carried into native state
+  during migration. An already migrated repository may adopt the same recorded
+  workspace once through the exact maintenance command, preserving its path,
+  directory identity, Git head, persistent ref, and retained content. Unknown
+  ownership or changed identity blocks adoption instead of replacing the old
+  workspace. A later native batch claims the next generation before using it.
 - Local approval covers only the commands a lifecycle step will execute; an
   unchanged complete approval can cover a smaller step. Approval does not include
   proof-only facts such as lockfiles or tool versions.
