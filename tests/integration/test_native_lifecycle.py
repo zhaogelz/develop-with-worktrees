@@ -196,6 +196,131 @@ def test_native_fixed_slot_waits_for_real_delivery_then_reuses_branch(
     assert CandidateBatchStore(repo).read()["candidates"] == {}
 
 
+def _deliver_slot_selection_tasks(
+    repo: GitRepo,
+    store: StateStore,
+    git_repo: Path,
+    tasks: list[dict[str, object]],
+) -> None:
+    sources = []
+    for task in tasks:
+        filename = f"feature-{task['slot_id']}.txt"
+        (Path(str(task["worktree"])) / filename).write_text(
+            f"slot {task['slot_id']}\n", encoding="utf-8"
+        )
+        committed = commit_task(
+            repo,
+            task_id=str(task["id"]),
+            lease=str(task["lease"]),
+            message=f"test: change from slot {task['slot_id']}",
+            paths=[filename],
+        )
+        sources.append((task, committed["candidate_head"]))
+        ready(repo, task_id=str(task["id"]), lease=str(task["lease"]))
+        finish(repo, task_id=str(task["id"]), lease=str(task["lease"]))
+
+    base_before = repo.head(git_repo)
+    for task, source_head in sources:
+        git(
+            git_repo,
+            "merge",
+            "--no-ff",
+            source_head,
+            "-m",
+            f"test: deliver slot {task['slot_id']}",
+        )
+    delivered_head = repo.head(git_repo)
+    batch = {
+        "id": "native-slot-selection-batch",
+        "base_ref": "main",
+        "base_head": base_before,
+        "status": "sealed",
+        "integration_head": delivered_head,
+        "tasks": [
+            {
+                "task_id": task["id"],
+                "slot_generation": task["slot_generation"],
+                "branch": task["branch"],
+                "ready_head": source_head,
+            }
+            for task, source_head in sources
+        ],
+    }
+    store.seal_native_batch(batch)
+    store.update_batch(batch["id"], status="validated")
+    store.mark_native_promoted(batch["id"], integration_head=delivered_head)
+    for task, _ in sources:
+        store.complete_native_delivery(
+            str(task["id"]),
+            batch_id=batch["id"],
+            integration_head=delivered_head,
+            release_receipt={"result": "passed", "head": delivered_head},
+        )
+
+
+def test_native_start_prefers_latest_delivered_slot_and_keeps_parallel_slots_distinct(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo, slots=3)
+    first = start(repo, name="first parallel task")
+    second = start(repo, name="second parallel task")
+    assert first["slot_id"] != second["slot_id"]
+    _deliver_slot_selection_tasks(repo, store, git_repo, [first, second])
+
+    latest = start(repo, name="latest delivered task", request_id="latest-delivered")
+    assert latest["slot_id"] == second["slot_id"]
+    assert (
+        start(repo, name="latest delivered task", request_id="latest-delivered")["id"]
+        == latest["id"]
+    )
+    parallel = start(repo, name="another parallel task")
+    assert parallel["slot_id"] == first["slot_id"]
+
+
+def test_native_start_does_not_prefer_recent_abandonment_over_delivery(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo, slots=3)
+    first = start(repo, name="first delivered task")
+    second = start(repo, name="second delivered task")
+    _deliver_slot_selection_tasks(repo, store, git_repo, [first, second])
+
+    recent = start(repo, name="maintenance to abandon")
+    assert recent["slot_id"] == second["slot_id"]
+    abandon(
+        repo,
+        task_id=recent["id"],
+        lease=recent["lease"],
+        confirm=recent["id"],
+    )
+    following = start(repo, name="prefer remaining successful slot")
+    assert following["slot_id"] == first["slot_id"]
+
+
+def test_native_start_skips_incompatible_idle_slot_without_capacity_delivery(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo, slots=2)
+    first = start(repo, name="first delivered task")
+    second = start(repo, name="second delivered task")
+    _deliver_slot_selection_tasks(repo, store, git_repo, [first, second])
+
+    second_worktree = Path(second["worktree"])
+    (second_worktree / "independent.txt").write_text("preserve\n", encoding="utf-8")
+    git(second_worktree, "add", "independent.txt")
+    git(second_worktree, "commit", "-m", "test: divergent idle branch")
+    divergent_head = repo.head(second_worktree)
+    chosen = start(repo, name="skip incompatible idle slot")
+    assert chosen["slot_id"] == first["slot_id"]
+
+    with pytest.raises(ActionableSoloAIError) as error:
+        start(repo, name="no compatible idle slot")
+    assert error.value.code == "NO_COMPATIBLE_SLOT"
+    assert repo.head(second_worktree) == divergent_head
+    assert store.read()["slots"][str(second["slot_id"])]["status"] == "idle"
+    assert store.read()["batches"]["native-slot-selection-batch"]["status"] == "completed"
+
+
 def test_native_start_preserves_detached_slot_with_unique_content(
     git_repo: Path,
 ) -> None:

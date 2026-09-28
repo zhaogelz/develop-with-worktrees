@@ -796,8 +796,70 @@ class StateStore:
                     context={"base_ref": base_ref, "slots": config.slots},
                     next_action={"kind": "inspect_capacity", "base_ref": base_ref},
                 )
-            slot = min(candidates, key=lambda item: float(item.get("last_used", 0.0)))
             native = state["schema_version"] == STATE_SCHEMA
+            if native:
+                registered = {item.path: item for item in self.repo.worktrees()}
+                compatible = []
+                successful = []
+                for candidate in candidates:
+                    previous = state["tasks"].get(candidate.get("released_task_id"))
+                    if previous and previous.get("base_ref") != base_ref:
+                        continue
+                    fixed_branch = str(
+                        candidate.get("fixed_branch")
+                        or f"{config.branch_prefix}slot-{candidate['id']}"
+                    )
+                    old_head = self.repo.ref_head(f"refs/heads/{fixed_branch}")
+                    slot_path = Path(str(candidate["path"]))
+                    registered_slot = registered.get(slot_path.resolve())
+                    if old_head is None and registered_slot is not None:
+                        old_head = registered_slot.head
+                    if old_head and not self.repo.is_ancestor(old_head, base_head):
+                        continue
+                    compatible.append(candidate)
+                    delivery = (previous or {}).get("native_delivery") or {}
+                    if (
+                        registered_slot is not None
+                        and slot_path.is_dir()
+                        and previous is not None
+                        and previous.get("status") == "finished"
+                        and previous.get("slot_id") == candidate["id"]
+                        and previous.get("slot_generation") == candidate.get("generation")
+                        and previous.get("branch") == fixed_branch
+                        and previous.get("worktree") == candidate["path"]
+                        and isinstance(delivery.get("delivery"), dict)
+                    ):
+                        successful.append(candidate)
+                if not compatible:
+                    raise ActionableSoloAIError(
+                        "Idle fixed-slot branches are not compatible with the selected target; no task was queued",
+                        code="NO_COMPATIBLE_SLOT",
+                        context={
+                            "base_ref": base_ref,
+                            "base_head": base_head,
+                            "idle_slots": [item["id"] for item in candidates],
+                        },
+                        next_action={"kind": "inspect_slot_ancestry", "base_ref": base_ref},
+                    )
+                slot = (
+                    min(
+                        successful,
+                        key=lambda item: (
+                            -float(item.get("last_used", 0.0)),
+                            int(item["id"]),
+                        ),
+                    )
+                    if successful
+                    else min(
+                        compatible,
+                        key=lambda item: (
+                            float(item.get("last_used", 0.0)),
+                            int(item["id"]),
+                        ),
+                    )
+                )
+            else:
+                slot = min(candidates, key=lambda item: float(item.get("last_used", 0.0)))
             predecessor = slot.get(
                 "released_task_id" if native else "released_candidate_task_id"
             )

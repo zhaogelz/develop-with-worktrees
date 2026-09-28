@@ -13,6 +13,14 @@ target base, and returns that slot's worktree and lease. It checks prior deliver
 or a completed ordinary abandonment release,
 branch identity, cleanliness, and unknown files before reusing a slot. Start
 does not install dependencies, build output, or launch project services.
+For native slots, Start first prefers the most recently delivered idle slot
+whose branch can fast-forward to the selected target. It uses the recorded
+delivery receipt, not an abandonment's later `last_used` time. If no delivered
+slot qualifies, it uses the previous least-recently-used choice among compatible
+idle slots. A slot bound to another target or with a divergent branch is skipped;
+when all idle slots are incompatible, Start reports that condition without
+triggering capacity delivery. The selected slot still passes the full ownership,
+identity, cleanliness, and unknown-content checks before use.
 For a registered idle slot left detached with no fixed branch, Start may recreate
 that branch only after checking its recorded directory identity, any released
 predecessor, clean worktree, unknown content, and detached HEAD ancestry in the
