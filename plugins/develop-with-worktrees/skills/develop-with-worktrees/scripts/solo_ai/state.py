@@ -824,7 +824,8 @@ class StateStore:
                         and previous is not None
                         and previous.get("status") == "finished"
                         and previous.get("slot_id") == candidate["id"]
-                        and previous.get("slot_generation") == candidate.get("generation")
+                        and previous.get("slot_generation")
+                        == candidate.get("generation")
                         and previous.get("branch") == fixed_branch
                         and previous.get("worktree") == candidate["path"]
                         and isinstance(delivery.get("delivery"), dict)
@@ -839,7 +840,10 @@ class StateStore:
                             "base_head": base_head,
                             "idle_slots": [item["id"] for item in candidates],
                         },
-                        next_action={"kind": "inspect_slot_ancestry", "base_ref": base_ref},
+                        next_action={
+                            "kind": "inspect_slot_ancestry",
+                            "base_ref": base_ref,
+                        },
                     )
                 slot = (
                     min(
@@ -859,7 +863,9 @@ class StateStore:
                     )
                 )
             else:
-                slot = min(candidates, key=lambda item: float(item.get("last_used", 0.0)))
+                slot = min(
+                    candidates, key=lambda item: float(item.get("last_used", 0.0))
+                )
             predecessor = slot.get(
                 "released_task_id" if native else "released_candidate_task_id"
             )

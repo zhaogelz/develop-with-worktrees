@@ -318,7 +318,9 @@ def test_native_start_skips_incompatible_idle_slot_without_capacity_delivery(
     assert error.value.code == "NO_COMPATIBLE_SLOT"
     assert repo.head(second_worktree) == divergent_head
     assert store.read()["slots"][str(second["slot_id"])]["status"] == "idle"
-    assert store.read()["batches"]["native-slot-selection-batch"]["status"] == "completed"
+    assert (
+        store.read()["batches"]["native-slot-selection-batch"]["status"] == "completed"
+    )
 
 
 def test_native_start_preserves_detached_slot_with_unique_content(
