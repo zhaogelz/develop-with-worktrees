@@ -9,6 +9,12 @@ DWW owns local Git routing, task identity, worktrees, anchors, exact commits,
 task heads, integration, recovery, and cleanup. The host owns task scheduling
 and messages. Run this skill's absolute `scripts/dww.py` path:
 
+When an agent creates a task in a saved local project, follow the user's Local
+preference before the host creation call: explicitly select that project's saved
+local directory, then let DWW `start` allocate the coding worktree. Use a host
+worktree when the user explicitly requests one. The host owns that choice;
+installing DWW alone does not change it or make every repository managed.
+
 ```text
 uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
 ```
