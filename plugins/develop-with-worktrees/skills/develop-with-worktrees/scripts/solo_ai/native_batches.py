@@ -18,7 +18,7 @@ from .runtime_adapter import (
     release_batch_runtime,
     require_exact_passed_batch_release,
 )
-from .safety import require_safe
+from .safety import SensitiveContentError, require_safe
 from .state import STATE_SCHEMA, StateStore, candidate_admission_lock
 from .util import (
     ActionableSoloAIError,
@@ -353,12 +353,28 @@ def _validate(
         batch_id=str(batch["id"]),
     )
     _run_secret_scanner(repo, cwd=worktree, scanner=config.secret_scanner)
-    require_safe(
-        repo,
-        cwd=worktree,
-        base=str(batch["base_before"]),
-        allowlist=config.sensitive_allowlist,
-    )
+    try:
+        require_safe(
+            repo,
+            cwd=worktree,
+            base=str(batch["base_before"]),
+            allowlist=config.sensitive_allowlist,
+        )
+    except SensitiveContentError as exc:
+        store.update_batch(
+            str(batch["id"]),
+            status="preflight-failed",
+            validation_error=str(exc),
+            preflight_failure={
+                "head": batch["integration_head"],
+                "base_before": batch["base_before"],
+                "findings": [
+                    {"path": item.path, "line": item.line, "rule": item.rule}
+                    for item in exc.findings
+                ],
+            },
+        )
+        raise
     batch = _activate_runtime(repo, store, batch)
     return _run_full(repo, store, batch, verification)
 
@@ -597,8 +613,15 @@ def repair_native_batch(
     store = StateStore(repo)
     with integration_turn(repo, batch_id):
         batch = store.native_batch(batch_id)
-        if batch["status"] not in {"validation-failed", "conflicted", "repairing"}:
-            raise SoloAIError("Native repair requires a failed Full or merge conflict")
+        if batch["status"] not in {
+            "preflight-failed",
+            "validation-failed",
+            "conflicted",
+            "repairing",
+        }:
+            raise SoloAIError(
+                "Native repair requires a failed preflight, failed Full, or merge conflict"
+            )
         batch_workspace.require_owner(repo, store, batch)
         worktree = Path(str(batch["worktree"])).resolve()
         current_head = repo.head(worktree)
@@ -620,7 +643,21 @@ def repair_native_batch(
                 )
         intent = batch.get("repair_intent")
         if intent is None:
-            if batch["status"] == "validation-failed":
+            if batch["status"] == "preflight-failed":
+                failure = batch.get("preflight_failure") or {}
+                if (
+                    failure.get("head") != expected_head
+                    or failure.get("base_before") != batch["base_before"]
+                    or not failure.get("findings")
+                    or batch.get("validation_attempt")
+                    or not repo.is_clean(worktree)
+                    or requested != {".solo-ai/config.toml"}
+                ):
+                    raise SoloAIError(
+                        "Native preflight repair requires its recorded finding, "
+                        "a clean workspace, and only the exact policy path"
+                    )
+            elif batch["status"] == "validation-failed":
                 attempt = read_validation_attempt(
                     repo, str(batch.get("validation_attempt") or "")
                 )
@@ -724,6 +761,11 @@ def repair_native_batch(
             "reason": reason,
             "previous_status": intent["previous_status"],
             "validation_attempt": intent.get("validation_attempt"),
+            "preflight_failure": (
+                batch.get("preflight_failure")
+                if intent["previous_status"] == "preflight-failed"
+                else None
+            ),
             "completed_at": utc_timestamp(),
         }
         return store.update_batch(
@@ -731,6 +773,7 @@ def repair_native_batch(
             repair_intent=None,
             repair_records=[*batch.get("repair_records", []), record],
             validation_error=None,
+            preflight_failure=None,
         )
 
 
@@ -759,6 +802,10 @@ def run_native_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
             batch = _release_runtime(repo, store, batch)
         if batch["status"] == "validation-failed":
             raise SoloAIError("Native Full failed; unchanged inputs will not be rerun")
+        if batch["status"] == "preflight-failed":
+            raise SoloAIError(
+                "Native preflight failed; unchanged inputs will not be rerun"
+            )
         if batch["status"] == "validated":
             batch = _promote(repo, store, batch)
         if batch["status"] in {"promoted", "completed"}:

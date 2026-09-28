@@ -124,7 +124,12 @@ from .util import (
     stable_json,
     utc_timestamp,
 )
-from .validation_queue import estimate_validation, queue_status, set_capacity
+from .validation_queue import (
+    estimate_validation,
+    queue_status,
+    recover_zeroed_queue,
+    set_capacity,
+)
 
 
 def _add_host_reference_arguments(
@@ -290,6 +295,13 @@ def _parser() -> argparse.ArgumentParser:
         metavar="AUTO_OR_1_TO_4",
         help="auto or 1..4; this local setting never changes tracked repository policy",
     )
+    settings.add_argument(
+        "--recover-zeroed-queue",
+        metavar="SHA256",
+        help="recover only one exact all-zero machine queue state after reviewing live processes",
+    )
+    settings.add_argument("--confirm", help="repeat the exact damaged queue SHA-256")
+    settings.add_argument("--confirm-no-live-validation", action="store_true")
     sub.add_parser(
         "doctor",
         help="read-only mode, policy, approval, task, and uninstall readiness report",
@@ -2219,6 +2231,23 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "enable":
         return set_local_enabled(repo, enabled=True)
     if args.command == "settings":
+        if args.recover_zeroed_queue is not None:
+            if (
+                args.validation_capacity is not None
+                or args.confirm != args.recover_zeroed_queue
+            ):
+                raise SoloAIError(
+                    "Zeroed queue recovery requires its exact SHA-256 confirmation "
+                    "and cannot change capacity"
+                )
+            return recover_zeroed_queue(
+                expected_sha256=args.recover_zeroed_queue,
+                confirm_no_live_validation=args.confirm_no_live_validation,
+            )
+        if args.confirm is not None or args.confirm_no_live_validation:
+            raise SoloAIError(
+                "Queue recovery confirmation needs --recover-zeroed-queue"
+            )
         return (
             set_capacity(args.validation_capacity)
             if args.validation_capacity is not None

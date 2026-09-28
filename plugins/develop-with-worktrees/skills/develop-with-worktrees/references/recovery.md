@@ -51,6 +51,18 @@ identity checks. See [task governance](task-governance.md).
 
 ## Validation and batch recovery
 
+If the machine validation queue's `state.json` is entirely zeroed and normal
+queue reads fail, first confirm that no validation command is still running.
+The narrowly scoped `settings --recover-zeroed-queue <sha256> --confirm <sha256>
+--confirm-no-live-validation` command accepts only the exact damaged bytes. It
+holds the machine queue lock, rejects live or unknown tickets and visible
+validation processes, saves the original bytes and an audit receipt, then
+atomically restores an empty queue. The operator's no-live confirmation covers
+processes whose environment cannot be read by the host. It does not accept a
+truncated or otherwise malformed nonzero JSON file. Run the interrupted Full
+again through its original task or batch after recovery; the recovery receipt is
+not validation proof.
+
 An active validation process is observed, not duplicated because its output is
 quiet. An incomplete Full receives a fresh execution identity for non-pure or
 incomplete checks. A complete pure profile can reuse an exact matching proof;
