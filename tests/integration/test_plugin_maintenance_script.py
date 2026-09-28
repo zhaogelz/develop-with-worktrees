@@ -57,7 +57,10 @@ def test_plugin_maintenance_script_has_a_single_stable_entrypoint() -> None:
     assert source.index("Write-Receipt $activeReceipt $newReceipt") < source.index(
         "Remove-Item -LiteralPath $stage"
     )
-    assert source.index("installed-by-cli") < source.index(
+    assert source.index("恢复版尚未通过 CLI 回读") < source.index(
+        "try { Remove-Item -LiteralPath $previous"
+    )
+    assert source.index("installed-by-cli") < source.rindex(
         "Remove-Item -LiteralPath $previous"
     )
     assert "PluginCreatorRoot" not in source.split("param(", 1)[1].split(")", 1)[0]
@@ -155,7 +158,8 @@ import sys
 
 manifest = Path(sys.argv[1]) / '.codex-plugin' / 'plugin.json'
 payload = json.loads(manifest.read_text(encoding='utf-8'))
-payload['version'] = payload['version'].split('+', 1)[0] + '+codex.fake'
+suffix = '+codex.next' if (manifest.parent.parent / 'new-release-marker.txt').exists() else '+codex.fake'
+payload['version'] = payload['version'].split('+', 1)[0] + suffix
 manifest.write_text(json.dumps(payload), encoding='utf-8')
 with Path(os.environ['DWW_FAKE_HELPER_LOG']).open('a', encoding='utf-8') as handle:
     handle.write('cachebuster\\n')
@@ -200,7 +204,9 @@ elif args[:2] == ['plugin', 'add']:
     if os.environ.get('DWW_FAKE_CODEX_FAIL_PLUGIN_ADD') == '1':
         print('plugin install failed', file=sys.stderr)
         raise SystemExit(6)
-    state['plugins'] = [{'name': 'develop-with-worktrees', 'version': '0.5.0-beta.7+codex.fake'}]
+    manifest = pathlib.Path(state['marketplaces'][0]['root']) / 'plugins' / 'develop-with-worktrees' / '.codex-plugin' / 'plugin.json'
+    version = json.loads(manifest.read_text(encoding='utf-8'))['version']
+    state['plugins'] = [{'name': 'develop-with-worktrees', 'version': version}]
     state_path.write_text(json.dumps(state), encoding='utf-8')
     print(json.dumps({'installed': True}))
 else:
@@ -418,6 +424,126 @@ else:
     assert promoted_receipt["recovery_source"] == active_receipt["recovery_source"]
     assert not previous.exists()
     assert helper_log.read_text(encoding="utf-8").splitlines() == [
+        "create",
+        "cachebuster",
+        "validate",
+    ]
+
+    (source_plugin / "new-release-marker.txt").write_text(
+        "new source\n", encoding="utf-8"
+    )
+    git("add", ".")
+    git("commit", "-m", "test: change plugin tree after recovery")
+    new_main = git("rev-parse", "HEAD")
+    command[command.index("-SourceCommit") + 1] = new_main
+    shutil.copytree(active, previous / "plugins" / "develop-with-worktrees")
+    (
+        previous
+        / "plugins"
+        / "develop-with-worktrees"
+        / ".codex-plugin"
+        / "plugin.json"
+    ).write_text(
+        json.dumps({"name": "develop-with-worktrees", "version": old_version}),
+        encoding="utf-8",
+    )
+    (previous / "active-release.json").write_text(
+        json.dumps(
+            {
+                "release_id": f"{'0' * 40}-{'1' * 40}",
+                "source_commit": "0" * 40,
+                "source_tree": "1" * 40,
+                "package_version": old_version,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (market / "active-release.json").write_text(
+        json.dumps(active_receipt), encoding="utf-8"
+    )
+    state_payload = json.loads(state.read_text(encoding="utf-8"))
+    state.write_text(json.dumps({**state_payload, "plugins": []}), encoding="utf-8")
+    not_installed = subprocess.run(
+        command,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+    assert not_installed.returncode != 0
+    assert previous.is_dir()
+    assert (
+        json.loads((market / "active-release.json").read_text(encoding="utf-8"))[
+            "source_commit"
+        ]
+        == commit
+    )
+    state.write_text(json.dumps(state_payload), encoding="utf-8")
+    unknown_previous = previous / "unknown.txt"
+    unknown_previous.write_text("preserve\n", encoding="utf-8")
+    unknown_layout = subprocess.run(
+        command,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+    assert unknown_layout.returncode != 0
+    assert unknown_previous.read_text(encoding="utf-8") == "preserve\n"
+    unknown_previous.unlink()
+    failed_new_install = subprocess.run(
+        command,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env={**env, "DWW_FAKE_CODEX_FAIL_PLUGIN_ADD": "1"},
+    )
+    assert failed_new_install.returncode != 0
+    assert (
+        json.loads((previous / "active-release.json").read_text(encoding="utf-8"))[
+            "source_commit"
+        ]
+        == commit
+    )
+    assert (
+        json.loads((market / "active-release.json").read_text(encoding="utf-8"))[
+            "source_commit"
+        ]
+        == new_main
+    )
+    new_tree_install = subprocess.run(
+        command,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+    assert new_tree_install.returncode == 0, new_tree_install.stderr
+    new_tree_receipt = json.loads(
+        (market / "active-release.json").read_text(encoding="utf-8")
+    )
+    assert new_tree_receipt["source_commit"] == new_main
+    assert new_tree_receipt["source_tree"] != tree
+    assert new_tree_receipt["package_version"] == "0.5.0-beta.7+codex.next"
+    assert json.loads(state.read_text(encoding="utf-8"))["plugins"] == [
+        {"name": "develop-with-worktrees", "version": "0.5.0-beta.7+codex.next"},
+    ]
+    assert (active / "new-release-marker.txt").read_text(
+        encoding="utf-8"
+    ) == "new source\n"
+    assert not previous.exists()
+    assert helper_log.read_text(encoding="utf-8").splitlines() == [
+        "create",
+        "cachebuster",
+        "validate",
         "create",
         "cachebuster",
         "validate",

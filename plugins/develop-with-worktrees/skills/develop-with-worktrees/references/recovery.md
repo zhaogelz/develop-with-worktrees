@@ -101,7 +101,9 @@ the previous release and includes the validation identity in the release
 receipt. After recovery, complete normal integration and Install from main;
 when main contains the recovery commit with an identical plugin tree, Install
 verifies the recovery receipt and installed version before promoting its source
-identity and removing the retained previous release.
+identity and removing the retained previous release. If main has a newer plugin
+tree, Install first verifies that recovery version and the old backup, then
+switches to the new tree through its normal staged release path.
 Verify the actual host before declaring runtime success. A recovery package
 does not mean that its source has been delivered. Host review is still required
 when the host reports a changed Hook definition.

@@ -262,11 +262,16 @@ if ($resumingInstall -and -not $activeMatches -and $Mode -eq 'Install' -and $nul
     $recoveryProperty = $receipt.PSObject.Properties['recovery_source']
     $recovery = if ($null -ne $recoveryProperty) { $recoveryProperty.Value } else { $null }
     $source = [string]$receipt.source_commit
+    $sourceTree = $null
+    if ($source -match '^[0-9a-f]{40}$') {
+        $sourceTreeOutput = & $git -C $SourceRepo rev-parse "$source`:plugins/$PluginName" 2>$null
+        if ($LASTEXITCODE -eq 0) { $sourceTree = ($sourceTreeOutput -join '').Trim() }
+    }
     if (
         $null -ne $recovery -and
-        $source -match '^[0-9a-f]{40}$' -and
-        $receipt.release_id -eq "$source-$tree" -and
-        $receipt.source_tree -eq $tree -and
+        $null -ne $sourceTree -and
+        $receipt.release_id -eq "$source-$sourceTree" -and
+        $receipt.source_tree -eq $sourceTree -and
         $recovery.source_commit -eq $source -and
         @('recovery-install-only', 'pre-full-maintenance-review') -contains $recovery.purpose -and
         [string]$recovery.proof -match '^[0-9a-f]{64}$' -and
@@ -281,13 +286,39 @@ if ($resumingInstall -and -not $activeMatches -and $Mode -eq 'Install' -and $nul
         $sourceIsAncestor = $false
         & $git -C $SourceRepo merge-base --is-ancestor $source $resolved
         if ($LASTEXITCODE -eq 0) { $sourceIsAncestor = $true }
-        if (
-            $sourceIsAncestor -and
-            $activeManifest.name -eq $PluginName -and
-            $activeManifest.version -eq $receipt.package_version
-        ) {
-            $activeMatches = $true
-            $promotingRecovery = $true
+        if ($sourceIsAncestor -and $activeManifest.name -eq $PluginName -and $activeManifest.version -eq $receipt.package_version) {
+            if ($sourceTree -eq $tree) {
+                $activeMatches = $true
+                $promotingRecovery = $true
+            } else {
+                # 恢复版已在 main，先确认 CLI 正在使用它，再结束旧备份。
+                # 此后按普通发布切换新树；若中断，恢复版仍有活跃回执。
+                Assert-Expected-Marketplace (Get-Marketplace)
+                if (-not (Get-InstalledPlugin ([string]$receipt.package_version))) {
+                    Fail '恢复版尚未通过 CLI 回读，保留 .previous-release。'
+                }
+                $previousEntries = @(Get-ChildItem -LiteralPath $previous -Force | ForEach-Object { $_.Name } | Sort-Object)
+                if (($previousEntries -join ',') -ne 'active-release.json,plugins' -or
+                    -not (Test-OrdinaryDirectory (Join-Path $previous 'plugins')) -or
+                    -not (Test-OrdinaryDirectory (Join-Path $previous "plugins\$PluginName")) -or
+                    @(Get-ChildItem -LiteralPath (Join-Path $previous 'plugins') -Force).Count -ne 1) {
+                    Fail '旧备份包含未知布局，保留 .previous-release。'
+                }
+                $previousManifestPath = Join-Path $previous "plugins\$PluginName\.codex-plugin\plugin.json"
+                Require-Path $previousManifestPath '旧备份插件清单'
+                try {
+                    $previousReceipt = Get-Content -LiteralPath (Join-Path $previous 'active-release.json') -Raw -Encoding utf8 | ConvertFrom-Json
+                    $previousManifest = Get-Content -LiteralPath $previousManifestPath -Raw -Encoding utf8 | ConvertFrom-Json
+                } catch { Fail '旧备份回执或插件清单无法读取，保留现场。' }
+                if ($previousReceipt.release_id -ne "$($previousReceipt.source_commit)-$($previousReceipt.source_tree)" -or
+                    $previousManifest.name -ne $PluginName -or
+                    $previousManifest.version -ne $previousReceipt.package_version) {
+                    Fail '旧备份回执与插件身份不一致，保留现场。'
+                }
+                try { Remove-Item -LiteralPath $previous -Recurse -Force }
+                catch { Fail "旧备份未能清理，保留现场：$($_.Exception.Message)" }
+                $resumingInstall = $false
+            }
         }
     }
 }
