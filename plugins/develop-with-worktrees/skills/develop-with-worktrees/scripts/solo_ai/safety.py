@@ -16,6 +16,20 @@ class Finding:
     rule: str
 
 
+class SensitiveContentError(SoloAIError):
+    """内建敏感扫描的精确失败，供受管恢复记录。"""
+
+    def __init__(self, findings: list[Finding]) -> None:
+        self.findings = tuple(findings)
+        summary = "\n".join(
+            f"- {item.path}{':' + str(item.line) if item.line else ''}: {item.rule}"
+            for item in findings
+        )
+        super().__init__(
+            f"Sensitive-content gate blocked the task:\n{summary}\nNo secret values were written to the report."
+        )
+
+
 _SENSITIVE_NAMES = (
     ".env",
     ".env.*",
@@ -108,10 +122,4 @@ def require_safe(
 ) -> None:
     findings = scan(repo, cwd=cwd, base=base, staged=staged, allowlist=allowlist)
     if findings:
-        summary = "\n".join(
-            f"- {item.path}{':' + str(item.line) if item.line else ''}: {item.rule}"
-            for item in findings
-        )
-        raise SoloAIError(
-            f"Sensitive-content gate blocked the task:\n{summary}\nNo secret values were written to the report."
-        )
+        raise SensitiveContentError(findings)

@@ -30,6 +30,7 @@ from solo_ai.native_batches import (
 )
 from solo_ai.repo import GitRepo
 from solo_ai.runtime_adapter import prepare_task_runtime
+from solo_ai.safety import Finding, SensitiveContentError
 from solo_ai.state import STATE_SCHEMA, StateStore
 from solo_ai.util import ActionableSoloAIError, SoloAIError, path_identity
 
@@ -1239,6 +1240,108 @@ def test_native_full_repair_uses_new_head_and_keeps_failed_attempt(
     assert completed["integration_head"] == repair_head
     assert repo.head(git_repo) == repair_head
     assert repo.is_ancestor(source, repo.head(git_repo))
+
+
+def test_native_sensitive_preflight_records_failure_then_repairs_exact_policy(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _native_repo(git_repo)
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name="repair generated asset scan policy")
+    (Path(task["worktree"]) / "source.txt").write_text("safe\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: safe source",
+        paths=["source.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver this task"
+    )
+    config_path = Path(task["worktree"]) / ".solo-ai" / "config.toml"
+    original = config_path.read_text(encoding="utf-8")
+    updated = original.replace(
+        "sensitive_allowlist = []", 'sensitive_allowlist = ["source.txt"]'
+    )
+    assert updated != original
+    patch = git_repo.parent / "preflight-policy.patch"
+    patch.write_text(
+        "diff --git a/.solo-ai/config.toml b/.solo-ai/config.toml\n"
+        + "".join(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile="a/.solo-ai/config.toml",
+                tofile="b/.solo-ai/config.toml",
+            )
+        ),
+        encoding="utf-8",
+    )
+    real_require_safe = native_batches.require_safe
+
+    def preflight_scan(*args: object, **kwargs: object) -> None:
+        scan_worktree = Path(str(kwargs["cwd"]))
+        if (
+            "source.txt"
+            not in load_repo_config(repo, cwd=scan_worktree).sensitive_allowlist
+        ):
+            raise SensitiveContentError([Finding("source.txt", 1, "assigned-secret")])
+        real_require_safe(*args, **kwargs)
+
+    monkeypatch.setattr(native_batches, "require_safe", preflight_scan)
+    with pytest.raises(SensitiveContentError):
+        run_native_batch(repo, batch_id=batch["id"])
+    failed = store.native_batch(batch["id"])
+    assert failed["status"] == "preflight-failed"
+    assert failed.get("validation_attempt") is None
+    assert failed["preflight_failure"]["findings"] == [
+        {"path": "source.txt", "line": 1, "rule": "assigned-secret"}
+    ]
+    with pytest.raises(SoloAIError, match="unchanged inputs"):
+        run_native_batch(repo, batch_id=batch["id"])
+    assert store.native_batch(batch["id"]).get("validation_attempt") is None
+    with pytest.raises(SoloAIError, match="only the exact policy path"):
+        repair_native_batch(
+            repo,
+            batch_id=batch["id"],
+            expected_head=failed["integration_head"],
+            patch_file=patch,
+            paths=["source.txt"],
+            message="test: reject source path",
+            reason="source repair is outside this recovery path",
+        )
+    repaired = repair_native_batch(
+        repo,
+        batch_id=batch["id"],
+        expected_head=failed["integration_head"],
+        patch_file=patch,
+        paths=[".solo-ai/config.toml"],
+        message="test: allow reviewed generated asset",
+        reason="generated asset has the reviewed false positive",
+    )
+    assert repaired["status"] == "composed"
+    assert repaired["preflight_failure"] is None
+    assert repaired["repair_records"][-1]["previous_status"] == "preflight-failed"
+    assert (
+        repaired["repair_records"][-1]["preflight_failure"]
+        == failed["preflight_failure"]
+    )
+    with pytest.raises(SoloAIError, match="failed preflight"):
+        repair_native_batch(
+            repo,
+            batch_id=batch["id"],
+            expected_head=repaired["integration_head"],
+            patch_file=patch,
+            paths=[".solo-ai/config.toml"],
+            message="test: reject unfailed composed batch",
+            reason="the recorded preflight finding was already repaired",
+        )
+    completed = run_native_batch(repo, batch_id=batch["id"])
+    assert completed["status"] == "completed"
+    assert completed["validation_attempt"] is not None
+    assert repo.head(git_repo) == completed["integration_head"]
 
 
 def test_native_merge_conflict_repair_preserves_both_source_parents(

@@ -72,6 +72,14 @@ attempt, and keeps the failed attempt. Semantic
 source changes return to the task owner. Do not edit the integration worktree
 directly or retry an unchanged failed input in a loop.
 
+If the built-in sensitive-content scan blocks a composed batch before Full,
+the batch records `preflight-failed` with the finding paths and rules but no
+Full attempt. `batch recover` preserves that failure. After reviewing the
+finding and confirming a false positive, `batch repair` accepts only an exact
+patch to `.solo-ai/config.toml` for that batch. The repair keeps the preflight
+finding in its record and reruns the scan and Full on the new head. A composed
+batch without a recorded failure cannot be repaired through this path.
+
 After promotion, the integration worktree and task slots return under exact
 identity checks; delivery receipts must succeed before a slot is idle. A release
 failure retries only its unfinished tail. A cancelled or unknown slot is
