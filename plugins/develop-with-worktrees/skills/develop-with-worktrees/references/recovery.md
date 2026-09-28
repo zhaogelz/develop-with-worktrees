@@ -99,7 +99,10 @@ and CLI installer. It does not execute an arbitrary source runner, overwrite an
 installed cache, disable protection, or change Git/DWW state by hand. It keeps
 the previous release and includes the validation identity in the release
 receipt. After recovery, complete normal integration and Install from main;
-verify the actual host before declaring runtime success. A recovery package
+when main contains the recovery commit with an identical plugin tree, Install
+verifies the recovery receipt and installed version before promoting its source
+identity and removing the retained previous release.
+Verify the actual host before declaring runtime success. A recovery package
 does not mean that its source has been delivered. Host review is still required
 when the host reports a changed Hook definition.
 

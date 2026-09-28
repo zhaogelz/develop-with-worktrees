@@ -121,10 +121,13 @@ the script keeps at most one `.previous-release` together with its one
 `.stage-*` recovery scene. Once the new active receipt is written, it removes
 the stage immediately. A later run rejects any remaining stage, and also
 rejects a previous release unless the active receipt and active plugin exactly
-match the requested source commit and tree. That one exact state may only
-continue marketplace/plugin installation and read-back; a successful read-back
-removes the previous release, while another install failure preserves it. The
-resume path will not switch marketplace sources. The script never creates
+match the requested source commit and tree. Ordinary Install also accepts a
+RecoveryInstall receipt for an ancestor commit when its recovery proof is present,
+the plugin tree and installed package version are unchanged, and the requested
+commit is the current main. It then promotes the receipt after CLI read-back.
+These states only continue marketplace/plugin installation and read-back; a
+successful read-back removes the previous release, while another install failure
+preserves it. The resume path will not switch marketplace sources. The script never creates
 `releases/` or accumulates old plugin copies.
 
 `Check` is a read-only layout report: it does not call Codex or write files. A

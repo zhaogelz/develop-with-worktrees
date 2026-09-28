@@ -246,6 +246,8 @@ if (-not (Test-Path -LiteralPath $marketplacePath -PathType Leaf)) {
 if (-not (Test-Local-DwwMarket $MarketplaceRoot)) { Fail '稳定市场清单不是指定的本地 DWW 来源。' }
 
 $activeMatches = $false
+$promotingRecovery = $false
+$receipt = $null
 if (Test-Path -LiteralPath $activeReceipt -PathType Leaf) {
     try {
         $receipt = Get-Content -LiteralPath $activeReceipt -Raw -Encoding utf8 | ConvertFrom-Json
@@ -253,6 +255,42 @@ if (Test-Path -LiteralPath $activeReceipt -PathType Leaf) {
     } catch { Fail '现有 active-release.json 无法读取，保留现场。' }
 }
 $resumingInstall = Test-Path -LiteralPath $previous
+if ($resumingInstall -and -not (Test-OrdinaryDirectory $previous)) {
+    Fail '发现 .previous-release 不是普通非链接目录，保留现场。'
+}
+if ($resumingInstall -and -not $activeMatches -and $Mode -eq 'Install' -and $null -ne $receipt) {
+    $recoveryProperty = $receipt.PSObject.Properties['recovery_source']
+    $recovery = if ($null -ne $recoveryProperty) { $recoveryProperty.Value } else { $null }
+    $source = [string]$receipt.source_commit
+    if (
+        $null -ne $recovery -and
+        $source -match '^[0-9a-f]{40}$' -and
+        $receipt.release_id -eq "$source-$tree" -and
+        $receipt.source_tree -eq $tree -and
+        $recovery.source_commit -eq $source -and
+        @('recovery-install-only', 'pre-full-maintenance-review') -contains $recovery.purpose -and
+        [string]$recovery.proof -match '^[0-9a-f]{64}$' -and
+        -not [string]::IsNullOrWhiteSpace([string]$recovery.validation_attempt) -and
+        -not [string]::IsNullOrWhiteSpace([string]$recovery.source_task_id) -and
+        (Test-Path -LiteralPath $activePlugin -PathType Container)
+    ) {
+        $manifestPath = Join-Path $activePlugin '.codex-plugin\plugin.json'
+        Require-Path $manifestPath '恢复版插件清单'
+        try { $activeManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 | ConvertFrom-Json }
+        catch { Fail '恢复版插件清单无法读取，保留现场。' }
+        $sourceIsAncestor = $false
+        & $git -C $SourceRepo merge-base --is-ancestor $source $resolved
+        if ($LASTEXITCODE -eq 0) { $sourceIsAncestor = $true }
+        if (
+            $sourceIsAncestor -and
+            $activeManifest.name -eq $PluginName -and
+            $activeManifest.version -eq $receipt.package_version
+        ) {
+            $activeMatches = $true
+            $promotingRecovery = $true
+        }
+    }
+}
 if ($resumingInstall -and -not $activeMatches) {
     Fail '发现 .previous-release，但 active-release 与本次精确源码不匹配；拒绝覆盖，请先按回执核查。'
 }
@@ -323,6 +361,12 @@ if (-not (Get-InstalledPlugin ([string]$receipt.package_version))) {
         }
     }
     if (-not (Get-InstalledPlugin ([string]$receipt.package_version))) { Fail 'CLI 未能回读已安装的精确插件身份。' }
+}
+if ($promotingRecovery) {
+    $receipt.source_commit = $resolved
+    $receipt.release_id = $releaseId
+    $receipt | Add-Member -NotePropertyName promoted_at_utc -NotePropertyValue (Get-Date).ToUniversalTime().ToString('o') -Force
+    Write-Receipt $activeReceipt $receipt
 }
 Write-Receipt (Join-Path $MarketplaceRoot 'install-verification.json') ([ordered]@{ release_id = $receipt.release_id; status = 'installed-by-cli'; codex_version = $cliVersion.Output.Trim(); marketplace_root = $MarketplaceRoot; package_version = $receipt.package_version; host_runtime_verified = $false })
 if ($Mode -eq 'RecoveryInstall') {

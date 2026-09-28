@@ -375,6 +375,66 @@ def test_native_zero_change_abandon_releases_and_reuses_fixed_slot(
     assert repo.head(worktree) == repo.head(git_repo)
 
 
+def test_abandon_releases_duplicate_task_heads_delivered_through_another_task(
+    git_repo: Path,
+) -> None:
+    repo, store = _native_repo(git_repo, slots=2)
+    first = start(repo, name="earlier source")
+    first_worktree = Path(first["worktree"])
+    (first_worktree / "earlier.txt").write_text("delivered\n", encoding="utf-8")
+    git(first_worktree, "add", "earlier.txt")
+    git(first_worktree, "commit", "-m", "test: earlier source")
+    first_head = repo.head(first_worktree)
+
+    second = start(repo, name="later source containing the earlier commit")
+    second_worktree = Path(second["worktree"])
+    git(second_worktree, "merge", "--no-ff", "--no-edit", first_head)
+    (second_worktree / "later.txt").write_text("delivered\n", encoding="utf-8")
+    git(second_worktree, "add", "later.txt")
+    git(second_worktree, "commit", "-m", "test: later source")
+    second_head = repo.head(second_worktree)
+    git(git_repo, "merge", "--no-ff", "--no-edit", second_head)
+
+    with pytest.raises(SoloAIError, match="referenced by active task"):
+        abandon(
+            repo,
+            task_id=first["id"],
+            lease=first["lease"],
+            confirm=first["id"],
+            reason="duplicate source already delivered",
+        )
+    own_delivery = dict(store.task(second["id"])["native_delivery"])
+    store.update_task(
+        second["id"], native_delivery={**own_delivery, "batch_id": "batch-own"}
+    )
+    with pytest.raises(SoloAIError, match="own delivery record"):
+        abandon(
+            repo,
+            task_id=second["id"],
+            lease=second["lease"],
+            confirm=second["id"],
+            reason="duplicate source already delivered",
+        )
+    store.update_task(second["id"], native_delivery=own_delivery)
+    for task in (second, first):
+        assert (
+            abandon(
+                repo,
+                task_id=task["id"],
+                lease=task["lease"],
+                confirm=task["id"],
+                reason="duplicate source already delivered",
+            )["status"]
+            == "abandoned"
+        )
+        assert repo.ref_head(f"refs/heads/{task['branch']}") is None
+        assert store.task(task["id"])["abandonment"]["branch_tip"] in {
+            first_head,
+            second_head,
+        }
+        assert store.task(task["id"])["abandonment"]["integrated_elsewhere"] is True
+
+
 def test_native_start_accepts_completed_abandonment_predecessor(git_repo: Path) -> None:
     repo, store = _native_repo(git_repo)
     first = start(repo, name="maintenance with exact release record")
