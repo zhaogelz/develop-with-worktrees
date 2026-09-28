@@ -88,6 +88,7 @@ commands = [
 # 职责到测试的最小映射，不是宽回归入口。
 [[profiles]]
 id = "dww-batch-integration"
+depends_on = ["repository-static-ready", "dww-fast-ready"]
 paths = [
   ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
   "scripts/verify_repository.py", "tests/**", "uv.lock",
@@ -135,6 +136,7 @@ commands = [
 # 因日常候选或尾批自动重复执行。压力层仍有独立显式入口。
 [[profiles]]
 id = "dww-core-complete"
+depends_on = ["repository-static-ready", "dww-fast-ready"]
 paths = [
   ".github/**", ".solo-ai/**", "AGENTS.md", "pyproject.toml",
   "scripts/verify_repository.py", "tests/**", "uv.lock",

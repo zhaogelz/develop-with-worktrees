@@ -13,15 +13,18 @@ when that improves recovery, but do not split every test case or break a
 project's coupled command pipeline merely to increase caching. Keep useful
 project-internal parallelism inside the command.
 
-For independent profiles, set `continue_on_failure = true` only when a
-nonzero command exit is an ordinary check failure and the next profile can run
-in a trustworthy environment. The default remains fail-fast. A profile may set
+Independent profiles collect ordinary assertion failures by default. The
+default ordinary exit code is `1`; a profile may declare additional codes with
+`ordinary_failure_exit_codes`, or use `continue_on_failure = false` to stop at
+its first ordinary failure. Reserve different codes for runtime and environment
+errors in project commands. A profile may set
 `depends_on = ["preflight"]` for an earlier profile in the same verification
 file. DWW includes that prerequisite when selecting the dependent profile and
 marks the dependent `blocked` if the prerequisite fails. The dependent command
 does not start. Commands inside one profile still stop on the first failure.
-Input or identity drift, interruption, and timeout stop the attempt; a timeout
-is not treated as an ordinary independent assertion failure.
+Input or identity drift, command execution error, unexpected exit code,
+interruption, and timeout stop the attempt. Failure collection does not turn a
+failed or blocked required profile into a passing Full proof.
 
 Each evidence record binds the profile, declared inputs, tool/platform facts,
 declared environment hashes, applicable frozen base, complete command receipts,

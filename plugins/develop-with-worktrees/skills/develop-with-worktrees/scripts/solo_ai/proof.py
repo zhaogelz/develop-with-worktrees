@@ -543,6 +543,7 @@ def _verification_policy(verification: VerificationConfig) -> dict[str, Any]:
                 "frozen_base": profile.frozen_base,
                 "full_scope": profile.full_scope,
                 "continue_on_failure": profile.continue_on_failure,
+                "ordinary_failure_exit_codes": list(profile.ordinary_failure_exit_codes),
                 "depends_on": list(profile.depends_on),
             }
             for profile in verification.profiles
@@ -703,6 +704,7 @@ def _profile_policy(profile: VerificationProfile) -> dict[str, Any]:
         "frozen_base": profile.frozen_base,
         "full_scope": profile.full_scope,
         "continue_on_failure": profile.continue_on_failure,
+        "ordinary_failure_exit_codes": list(profile.ordinary_failure_exit_codes),
         "depends_on": list(profile.depends_on),
     }
 
@@ -1296,7 +1298,8 @@ def _require_stored_proof_identity(
 
 def _deterministic_failure(profile: VerificationProfile, proof: dict[str, Any]) -> bool:
     return (
-        profile.external_state == "none"
+        proof.get("failure_kind") == "assertion"
+        and profile.external_state == "none"
         and profile.input_closure == "complete"
         and bool(proof.get("runs"))
         and not any(bool(run.get("timed_out")) for run in proof.get("runs", []))
@@ -1636,7 +1639,7 @@ def _run_profile(
                         "queue_ticket": queue_claim["id"],
                     },
                 )
-            except BaseException:
+            except BaseException as error:
                 receipt = read_json(receipt_path, {})
                 if receipt:
                     runs.append(
@@ -1654,8 +1657,17 @@ def _run_profile(
                     repo,
                     attempt_id,
                     profile.profile_id,
-                    state="interrupted",
+                    state=(
+                        "interrupted"
+                        if isinstance(error, (KeyboardInterrupt, SystemExit))
+                        else "failed"
+                    ),
                     current_command=None,
+                    error_reason=(
+                        "interrupted_command"
+                        if isinstance(error, (KeyboardInterrupt, SystemExit))
+                        else "command_execution_error"
+                    ),
                     runs=copy.deepcopy(runs),
                 )
                 raise
@@ -1720,10 +1732,20 @@ def _run_profile(
                     base=base,
                     expected_base_head=expected_base_head,
                 )
+                failure_kind = (
+                    "timeout"
+                    if result.timed_out
+                    else (
+                        "assertion"
+                        if result.returncode in profile.ordinary_failure_exit_codes
+                        else "runtime"
+                    )
+                )
                 proof = {
                     "schema_version": PROOF_SCHEMA,
                     "fingerprint": fingerprint,
                     "result": "failed",
+                    "failure_kind": failure_kind,
                     "inputs": inputs,
                     "runs": runs,
                     "queue": {
@@ -1738,12 +1760,21 @@ def _run_profile(
                     attempt_id,
                     profile.profile_id,
                     state="timed_out" if result.timed_out else "failed",
+                    error_reason=(
+                        "non_assertion_exit:" + str(result.returncode)
+                        if failure_kind == "runtime"
+                        else None
+                    ),
                     proof=fingerprint,
                     completed_at=utc_timestamp(),
                 )
                 if result.timed_out:
                     raise SoloAIError(
                         f"Validation timed out in profile {profile.profile_id}. Local redacted log: {log_path}"
+                    )
+                if failure_kind == "runtime":
+                    raise SoloAIError(
+                        f"Validation failed with non-ordinary exit code {result.returncode} in profile {profile.profile_id}. Local redacted log: {log_path}"
                     )
                 raise ProfileAssertionFailed(
                     f"Validation failed in profile {profile.profile_id}. Local redacted log: {log_path}"
@@ -1854,6 +1885,7 @@ def validate(
                 "selection": profile_selection_reason(profile, inputs["files"]),
                 "depends_on": list(profile.depends_on),
                 "continue_on_failure": profile.continue_on_failure,
+                "ordinary_failure_exit_codes": list(profile.ordinary_failure_exit_codes),
                 "decision": profile_execution_decision(
                     repo,
                     profile=profile,

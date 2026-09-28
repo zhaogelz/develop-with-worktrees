@@ -74,9 +74,19 @@ def configure_collecting_profiles(root: Path, profiles: list[dict]) -> GitRepo:
                 f"input_paths = {json.dumps(item.get('inputs', ['README.md']))}",
                 'input_closure = "complete"',
                 f"external_state = {json.dumps(item.get('external', 'none'))}",
-                f"continue_on_failure = {str(item.get('collect', False)).lower()}",
+                *(
+                    [f"continue_on_failure = {str(item['collect']).lower()}"]
+                    if "collect" in item
+                    else []
+                ),
+                *(
+                    [f"ordinary_failure_exit_codes = {json.dumps(item['ordinary_codes'])}"]
+                    if "ordinary_codes" in item
+                    else []
+                ),
                 f"depends_on = {json.dumps(item.get('depends', []))}",
                 f"resource_class = {json.dumps(item.get('resource', 'normal'))}",
+                f"timeout_seconds = {item.get('timeout', 2700)}",
                 f"commands = [{json.dumps([sys.executable, '-c', item['script']])}]",
             ]
         )
@@ -179,8 +189,18 @@ def test_collects_two_independent_failures_and_keeps_success(git_repo: Path) -> 
     repo = configure_collecting_profiles(
         git_repo,
         [
-            {"id": "first", "script": "raise SystemExit(2)", "collect": True},
-            {"id": "second", "script": "raise SystemExit(3)", "collect": True},
+            {
+                "id": "first",
+                "script": "raise SystemExit(2)",
+                "collect": True,
+                "ordinary_codes": [2],
+            },
+            {
+                "id": "second",
+                "script": "raise SystemExit(3)",
+                "collect": True,
+                "ordinary_codes": [3],
+            },
             {"id": "success", "script": "pass"},
         ],
     )
@@ -204,13 +224,113 @@ def test_collects_two_independent_failures_and_keeps_success(git_repo: Path) -> 
     assert success["runs"][0]["exit_code"] == 0
 
 
+def test_default_collection_blocks_direct_and_indirect_dependencies(
+    git_repo: Path,
+) -> None:
+    repo = configure_collecting_profiles(
+        git_repo,
+        [
+            {"id": "first", "script": "raise SystemExit(1)"},
+            {
+                "id": "child",
+                "script": "raise AssertionError('must not run')",
+                "depends": ["first"],
+            },
+            {
+                "id": "grandchild",
+                "script": "raise AssertionError('must not run')",
+                "depends": ["child"],
+            },
+            {"id": "second", "script": "raise SystemExit(1)"},
+            {"id": "success", "script": "pass"},
+        ],
+    )
+    attempt_id = "default-collect-dependencies"
+    with pytest.raises(SoloAIError, match="first, second"):
+        proof.validate(
+            repo,
+            cwd=repo.root,
+            base="main",
+            verification=load_verification_config(repo),
+            level="full",
+            expected_candidate_head=repo.head(repo.root),
+            attempt_id=attempt_id,
+        )
+    attempt = proof.read_validation_attempt(repo, attempt_id)
+    assert attempt["summary"]["failed"] == 2
+    assert attempt["summary"]["blocked"] == 2
+    assert attempt["summary"]["passed"] == 1
+    assert attempt["profiles"][1]["error_reason"] == "dependency_not_passed:first"
+    assert attempt["profiles"][2]["error_reason"] == "dependency_not_passed:child"
+
+
+@pytest.mark.parametrize(
+    ("first", "expected"),
+    [
+        ({"collect": False, "script": "raise SystemExit(1)"}, "Validation failed"),
+        ({"script": "raise SystemExit(70)"}, "non-ordinary exit code"),
+        (
+            {"script": "import time; time.sleep(1)", "timeout": 0.05},
+            "timed out",
+        ),
+    ],
+)
+def test_fail_fast_and_runtime_errors_stop_default_collection(
+    git_repo: Path, first: dict, expected: str
+) -> None:
+    repo = configure_collecting_profiles(
+        git_repo,
+        [
+            {"id": "first", **first},
+            {
+                "id": "later",
+                "script": (
+                    "from pathlib import Path; p=Path('.tmp/later'); "
+                    "p.parent.mkdir(exist_ok=True); p.write_text('ran')"
+                ),
+            },
+        ],
+    )
+    with pytest.raises(SoloAIError, match=expected):
+        validate(repo)
+    assert not (git_repo / ".tmp/later").exists()
+
+
+@pytest.mark.parametrize("error", [OSError("process unavailable"), SoloAIError("cleanup failed")])
+def test_command_or_cleanup_error_stops_collection(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    repo = configure_collecting_profiles(
+        git_repo,
+        [
+            {"id": "first", "script": "pass"},
+            {"id": "later", "script": "pass"},
+        ],
+    )
+    calls: list[str] = []
+
+    def fail_run(*args, **kwargs):
+        calls.append(kwargs["receipt_metadata"]["profile_id"])
+        raise error
+
+    monkeypatch.setattr(proof, "run_logged", fail_run)
+    with pytest.raises(type(error), match=str(error)):
+        validate(repo)
+    assert calls == ["first"]
+
+
 def test_failed_prerequisite_blocks_heavy_check_but_keeps_independent_check(
     git_repo: Path,
 ) -> None:
     repo = configure_collecting_profiles(
         git_repo,
         [
-            {"id": "preflight", "script": "raise SystemExit(2)", "collect": True},
+            {
+                "id": "preflight",
+                "script": "raise SystemExit(2)",
+                "collect": True,
+                "ordinary_codes": [2],
+            },
             {
                 "id": "browser",
                 "script": "from pathlib import Path; p=Path('.tmp/heavy'); p.parent.mkdir(exist_ok=True); p.write_text('ran')",
@@ -273,6 +393,7 @@ def test_repair_reuses_unaffected_pure_check_and_rebuilds_output(
                 "script": "from pathlib import Path; raise SystemExit(0 if Path('feature.txt').read_text() == 'good' else 2)",
                 "inputs": ["feature.txt"],
                 "collect": True,
+                "ordinary_codes": [2],
             },
             {
                 "id": "build",

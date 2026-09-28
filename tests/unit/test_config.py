@@ -14,6 +14,7 @@ from solo_ai.config import (
     render_agents,
     render_repo_config,
     render_verification_config,
+    verification_config_from_text,
 )
 from solo_ai.config import (
     _legacy_managed_block,
@@ -42,9 +43,38 @@ def test_renders_safe_default_reuse_policy() -> None:
         [CommandSpec(("uv", "run", "pytest"))], static_only=False
     )
     assert "cross_task_reuse = false" in rendered
+    assert "continue_on_failure = true" in rendered
     assert 'external_state = "unknown"' in rendered
     assert "{port}" in render_repo_config()
     assert "cleanup = { owned_paths = [] }" in render_repo_config()
+
+
+def test_verification_collects_by_default_but_accepts_explicit_fail_fast() -> None:
+    rendered = render_verification_config(
+        [CommandSpec(("uv", "run", "pytest"))], static_only=False
+    )
+    default = verification_config_from_text(rendered, source=Path("default.toml"))
+    assert default.profiles[0].continue_on_failure is True
+    assert default.profiles[0].ordinary_failure_exit_codes == (1,)
+
+    explicit = rendered.replace(
+        "continue_on_failure = true", "continue_on_failure = false"
+    )
+    fail_fast = verification_config_from_text(explicit, source=Path("explicit.toml"))
+    assert fail_fast.profiles[0].continue_on_failure is False
+
+
+@pytest.mark.parametrize("codes", ['[0]', '[70]', '[true]', '[1, 1]', '"1"'])
+def test_rejects_invalid_ordinary_failure_exit_codes(codes: str) -> None:
+    rendered = render_verification_config(
+        [CommandSpec(("uv", "run", "pytest"))], static_only=False
+    )
+    rendered = rendered.replace(
+        "continue_on_failure = true",
+        f"continue_on_failure = true\nordinary_failure_exit_codes = {codes}",
+    )
+    with pytest.raises(SoloAIError, match="ordinary_failure_exit_codes"):
+        verification_config_from_text(rendered, source=Path("invalid.toml"))
 
 
 def test_discovery_fallback_renders_a_conservative_integration_full_profile() -> None:
