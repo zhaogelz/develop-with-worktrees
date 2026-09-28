@@ -582,7 +582,9 @@ def _initialization_plan(
                     "commands": [command.redacted() for command in profile.commands],
                     "cross_task_reuse": profile.cross_task_reuse,
                     "continue_on_failure": profile.continue_on_failure,
-                    "ordinary_failure_exit_codes": list(profile.ordinary_failure_exit_codes),
+                    "ordinary_failure_exit_codes": list(
+                        profile.ordinary_failure_exit_codes
+                    ),
                     "depends_on": list(profile.depends_on),
                     "external_state": profile.external_state,
                     "input_paths": list(profile.input_paths),

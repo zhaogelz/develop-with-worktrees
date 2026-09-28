@@ -543,7 +543,9 @@ def _verification_policy(verification: VerificationConfig) -> dict[str, Any]:
                 "frozen_base": profile.frozen_base,
                 "full_scope": profile.full_scope,
                 "continue_on_failure": profile.continue_on_failure,
-                "ordinary_failure_exit_codes": list(profile.ordinary_failure_exit_codes),
+                "ordinary_failure_exit_codes": list(
+                    profile.ordinary_failure_exit_codes
+                ),
                 "depends_on": list(profile.depends_on),
             }
             for profile in verification.profiles
@@ -1885,7 +1887,9 @@ def validate(
                 "selection": profile_selection_reason(profile, inputs["files"]),
                 "depends_on": list(profile.depends_on),
                 "continue_on_failure": profile.continue_on_failure,
-                "ordinary_failure_exit_codes": list(profile.ordinary_failure_exit_codes),
+                "ordinary_failure_exit_codes": list(
+                    profile.ordinary_failure_exit_codes
+                ),
                 "decision": profile_execution_decision(
                     repo,
                     profile=profile,

@@ -64,7 +64,7 @@ def test_verification_collects_by_default_but_accepts_explicit_fail_fast() -> No
     assert fail_fast.profiles[0].continue_on_failure is False
 
 
-@pytest.mark.parametrize("codes", ['[0]', '[70]', '[true]', '[1, 1]', '"1"'])
+@pytest.mark.parametrize("codes", ["[0]", "[70]", "[true]", "[1, 1]", '"1"'])
 def test_rejects_invalid_ordinary_failure_exit_codes(codes: str) -> None:
     rendered = render_verification_config(
         [CommandSpec(("uv", "run", "pytest"))], static_only=False

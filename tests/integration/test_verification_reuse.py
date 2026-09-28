@@ -80,7 +80,9 @@ def configure_collecting_profiles(root: Path, profiles: list[dict]) -> GitRepo:
                     else []
                 ),
                 *(
-                    [f"ordinary_failure_exit_codes = {json.dumps(item['ordinary_codes'])}"]
+                    [
+                        f"ordinary_failure_exit_codes = {json.dumps(item['ordinary_codes'])}"
+                    ]
                     if "ordinary_codes" in item
                     else []
                 ),
@@ -296,7 +298,9 @@ def test_fail_fast_and_runtime_errors_stop_default_collection(
     assert not (git_repo / ".tmp/later").exists()
 
 
-@pytest.mark.parametrize("error", [OSError("process unavailable"), SoloAIError("cleanup failed")])
+@pytest.mark.parametrize(
+    "error", [OSError("process unavailable"), SoloAIError("cleanup failed")]
+)
 def test_command_or_cleanup_error_stops_collection(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
