@@ -252,7 +252,11 @@ It keeps the immutable candidate ref and frozen withdrawal audit facts. It is no
 task abandonment. The normal `abandon --reason <one-line>` requires a releasable
 worktree, then performs its recorded cleanup and releases the slot; it refuses a
 candidate already held by an active batch. When a reviewed isolated worktree must
-remain exactly in place, use `abandon --retain-worktree --reason <one-line>` with
+be retired after its commits reached the base through another task, normal
+`abandon` requires an audit reason, no own delivery record, and the exact task
+confirmation. It still checks other active references and unknown worktree
+content. When an isolated worktree must remain exactly in place, use
+`abandon --retain-worktree --reason <one-line>` with
 the exact task confirmation. It requires no registered development process or
 runtime-adapter activation, rechecks the branch, HEAD, and full worktree status,
 then records the task as terminal while retaining every file and quarantining the

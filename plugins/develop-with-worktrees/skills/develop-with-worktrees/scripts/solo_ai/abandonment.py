@@ -191,10 +191,25 @@ def new_transaction(
     base_head = repo.ref_head(f"refs/heads/{task['base_ref']}")
     if base_head is None:
         raise SoloAIError("Recorded base branch is missing")
-    if expected_tip != task["base_head"] and repo.is_ancestor(expected_tip, base_head):
-        raise SoloAIError(
-            "Task candidate is already integrated; Recover must finish cleanup"
-        )
+    integrated_elsewhere = expected_tip != task["base_head"] and repo.is_ancestor(
+        expected_tip, base_head
+    )
+    if integrated_elsewhere:
+        native_delivery = task.get("native_delivery") or {}
+        if (
+            task.get("integration")
+            or task.get("candidate_publication")
+            or task.get("candidate_delivery")
+            or native_delivery.get("batch_id")
+            or native_delivery.get("delivery")
+        ):
+            raise SoloAIError(
+                "Task candidate has its own delivery record; Recover must finish cleanup"
+            )
+        if not (reason or "").strip():
+            raise SoloAIError(
+                "Abandoning a source already in the base requires one audit reason"
+            )
     assert_task_not_held_by_candidate_delivery(repo, task=task)
     _assert_no_active_reference(repo, store, task=task, candidate=expected_tip)
     tracked_status = repo.git(
@@ -243,6 +258,7 @@ def new_transaction(
         "branch_tip": expected_tip,
         "base_ref": task["base_ref"],
         "base_head": base_head,
+        "integrated_elsewhere": integrated_elsewhere,
         "tracked_status": tracked_status,
         "ordinary_untracked": ordinary,
         "audit": _audit_metadata(reason=reason, source=source, action="abandon"),
@@ -405,6 +421,10 @@ def resume(repo: GitRepo, *, store: StateStore, task: dict[str, Any]) -> dict[st
     if branch_head not in {None, expected_tip}:
         raise SoloAIError("Task branch advanced during abandonment")
     if branch_head is not None:
+        if transaction.get("integrated_elsewhere"):
+            current_base = repo.ref_head(f"refs/heads/{transaction['base_ref']}")
+            if current_base is None or not repo.is_ancestor(expected_tip, current_base):
+                raise SoloAIError("Source is no longer in the base before abandonment")
         verifications = _active_ref_snapshot(
             repo, store, task=task, candidate=expected_tip
         )

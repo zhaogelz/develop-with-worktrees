@@ -318,7 +318,111 @@ else:
     assert resumed_log.count("plugin marketplace add") == 2
     assert resumed_log.count("plugin add develop-with-worktrees@dww-stable-local") == 2
 
+    git("commit", "--allow-empty", "-m", "test: merge recovery source to main")
+    promoted = git("rev-parse", "HEAD")
+    command[command.index("-SourceCommit") + 1] = promoted
     previous = market / ".previous-release"
+    shutil.copytree(active, previous / "plugins" / "develop-with-worktrees")
+    (previous / "active-release.json").write_text(
+        json.dumps(
+            {
+                "release_id": "old-release",
+                "source_commit": "0" * 40,
+                "source_tree": "1" * 40,
+                "package_version": old_version,
+            }
+        ),
+        encoding="utf-8",
+    )
+    active_receipt = json.loads(
+        (market / "active-release.json").read_text(encoding="utf-8")
+    )
+    active_receipt["recovery_source"] = None
+    (market / "active-release.json").write_text(
+        json.dumps(active_receipt), encoding="utf-8"
+    )
+    missing_proof = subprocess.run(
+        command,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+    assert missing_proof.returncode != 0
+    assert previous.is_dir()
+    assert (
+        json.loads((market / "active-release.json").read_text(encoding="utf-8"))[
+            "source_commit"
+        ]
+        == commit
+    )
+
+    git("switch", "-c", "unrelated", commit)
+    git("commit", "--allow-empty", "-m", "test: unrelated identical plugin tree")
+    unrelated = git("rev-parse", "HEAD")
+    git("switch", "main")
+    active_receipt["source_commit"] = unrelated
+    active_receipt["release_id"] = f"{unrelated}-{tree}"
+    active_receipt["recovery_source"] = {
+        "source_commit": unrelated,
+        "purpose": "pre-full-maintenance-review",
+        "proof": "a" * 64,
+        "validation_attempt": "full-attempt-test",
+        "source_task_id": "task-test",
+    }
+    (market / "active-release.json").write_text(
+        json.dumps(active_receipt), encoding="utf-8"
+    )
+    unrelated_install = subprocess.run(
+        command,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+    assert unrelated_install.returncode != 0
+    assert previous.is_dir()
+
+    active_receipt["source_commit"] = commit
+    active_receipt["release_id"] = f"{commit}-{tree}"
+    active_receipt["recovery_source"] = {
+        "source_commit": commit,
+        "base_head": commit,
+        "purpose": "pre-full-maintenance-review",
+        "proof": "a" * 64,
+        "validation_attempt": "full-attempt-test",
+        "source_task_id": "task-test",
+    }
+    (market / "active-release.json").write_text(
+        json.dumps(active_receipt), encoding="utf-8"
+    )
+    promoted_install = subprocess.run(
+        command,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+    assert promoted_install.returncode == 0, promoted_install.stderr
+    promoted_receipt = json.loads(
+        (market / "active-release.json").read_text(encoding="utf-8")
+    )
+    assert promoted_receipt["source_commit"] == promoted
+    assert promoted_receipt["source_tree"] == tree
+    assert promoted_receipt["recovery_source"] == active_receipt["recovery_source"]
+    assert not previous.exists()
+    assert helper_log.read_text(encoding="utf-8").splitlines() == [
+        "create",
+        "cachebuster",
+        "validate",
+    ]
+
     previous.mkdir()
     marker = previous / "preserve-me.txt"
     marker.write_text("do not overwrite\n", encoding="utf-8")
