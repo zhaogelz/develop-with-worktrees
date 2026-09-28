@@ -5545,8 +5545,8 @@ def test_deinit_preserves_a_user_edited_managed_block(git_repo: Path) -> None:
     agents = git_repo / "AGENTS.md"
     agents.write_text(
         agents.read_text(encoding="utf-8").replace(
-            "Keep one task anchor per task.",
-            "Our team keeps one task anchor per task.",
+            "Review exact paths for `commit`",
+            "Our team reviews exact paths for `commit`",
         ),
         encoding="utf-8",
     )
