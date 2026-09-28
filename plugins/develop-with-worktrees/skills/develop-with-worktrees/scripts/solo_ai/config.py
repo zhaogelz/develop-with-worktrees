@@ -97,7 +97,8 @@ class VerificationProfile:
     level: str
     frozen_base: bool
     full_scope: str | None
-    continue_on_failure: bool = False
+    continue_on_failure: bool = True
+    ordinary_failure_exit_codes: tuple[int, ...] = (1,)
     depends_on: tuple[str, ...] = ()
 
 
@@ -127,6 +128,9 @@ class VerificationConfig:
                     "frozen_base": profile.frozen_base,
                     "full_scope": profile.full_scope,
                     "continue_on_failure": profile.continue_on_failure,
+                    "ordinary_failure_exit_codes": list(
+                        profile.ordinary_failure_exit_codes
+                    ),
                     "depends_on": list(profile.depends_on),
                 }
                 for profile in self.profiles
@@ -221,6 +225,23 @@ def _strings(raw: Any, *, field: str, allow_empty: bool) -> tuple[str, ...]:
         raise SoloAIError(f"{field} must not be empty")
     if any(not item for item in raw):
         raise SoloAIError(f"{field} cannot contain an empty string")
+    return tuple(raw)
+
+
+def _ordinary_failure_exit_codes(raw: Any, *, field: str) -> tuple[int, ...]:
+    # 64 以上保留给常见命令/环境错误；不能把未知非零退出当作测试断言。
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(
+            isinstance(code, bool) or not isinstance(code, int) or not 1 <= code < 64
+            for code in raw
+        )
+        or len(set(raw)) != len(raw)
+    ):
+        raise SoloAIError(
+            f"{field} must be a non-empty array of unique exit codes from 1 to 63"
+        )
     return tuple(raw)
 
 
@@ -733,8 +754,12 @@ def _parse_verification_config(
                 frozen_base=frozen_base,
                 full_scope=full_scope,
                 continue_on_failure=_boolean(
-                    raw.get("continue_on_failure", False),
+                    raw.get("continue_on_failure", True),
                     field=f"profiles[{index}].continue_on_failure",
+                ),
+                ordinary_failure_exit_codes=_ordinary_failure_exit_codes(
+                    raw.get("ordinary_failure_exit_codes", [1]),
+                    field=f"profiles[{index}].ordinary_failure_exit_codes",
                 ),
                 depends_on=_strings(
                     raw.get("depends_on", []),
@@ -967,6 +992,7 @@ def render_verification_config(
                 'id = "default"',
                 'paths = ["**"]',
                 "cross_task_reuse = false",
+                "continue_on_failure = true",
                 'external_state = "unknown"',
                 'input_paths = ["**"]',
                 "environment = []",

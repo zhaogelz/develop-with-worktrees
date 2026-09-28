@@ -46,6 +46,14 @@ arguments verify an exact operation, not a new user decision. Preserve and
 report affected unknown base content while continuing unrelated read-only or
 isolated work.
 
+When a review or check finds a failure, continue examining related code, old
+assertions, and independent checks within the agreed scope. Group the findings,
+repair the authorized problem set, then run focused checks and the required
+managed Full. A failed prerequisite blocks its dependents; runtime, timeout,
+cleanup, identity, or input errors stop the attempt. Do not rerun a long check
+on the same unchanged candidate after a deterministic failure. A repaired
+candidate needs a new validation attempt and cannot inherit the old proof.
+
 A confirmed complete plan needs one root anchor before its first child. The root
 retains the full plan; each child retains its execution slice. With an exact host
 task identity, create the root with its stable request ID and derived acceptance

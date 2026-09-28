@@ -21,6 +21,8 @@ task contract locally, and carries reviewed changes through local integration.
 - One local approval can cover the commands of the next unchanged step, without repeating approval for unrelated checks.
 - A recoverable record when merging or validation fails; the base branch
   stays unchanged until a batch succeeds.
+- Independent checks continue after ordinary failures by default, so one
+  validation attempt can report related failures together.
 
 DWW is the Git lifecycle layer. Your host's task system still decides how work
 is split, scheduled, and discussed. Your project still owns its tests, runtime

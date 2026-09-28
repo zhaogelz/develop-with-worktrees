@@ -163,8 +163,13 @@ resource_class = "normal"
 commands = [["uv", "run", "pytest"]]
 ```
 
-`continue_on_failure = true` permits a normal nonzero check result to be
-collected while later independent profiles run. It defaults to `false`.
+`continue_on_failure` defaults to `true`: a declared ordinary check failure is
+collected while later independent profiles run. Explicit `false` stops at that
+failure. `ordinary_failure_exit_codes` defaults to `[1]`; it may list distinct
+codes from 1 to 63 when a project's test runner uses other codes for assertions.
+Unknown exit codes, command execution errors, and timeouts stop the attempt.
+The project must give runtime or environment failures a distinct exit code when
+its command otherwise uses `1` for both infrastructure and assertions.
 `depends_on = ["unit"]` names earlier profiles in the same file; when a
 dependent profile is selected, its prerequisites are also selected. A failed
 prerequisite blocks only its dependents. Declare the relationship explicitly

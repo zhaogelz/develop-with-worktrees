@@ -2764,6 +2764,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     "resource_class": profile.resource_class,
                     "depends_on": list(profile.depends_on),
                     "continue_on_failure": profile.continue_on_failure,
+                    "ordinary_failure_exit_codes": list(
+                        profile.ordinary_failure_exit_codes
+                    ),
                     "timeout_seconds": profile.timeout_seconds,
                     "commands": [command.redacted() for command in profile.commands],
                     "fingerprint": fingerprint,
