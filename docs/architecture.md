@@ -144,6 +144,10 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
 - Local approval covers only the commands a lifecycle step will execute; an
   unchanged complete approval can cover a smaller step. Approval does not include
   proof-only facts such as lockfiles or tool versions.
+- Existing user authorization covers in-scope lifecycle work across turns.
+  Technical confirmation arguments bind an exact operation; they do not create
+  a separate user-approval requirement. Host permission and Hook trust remain
+  separate decisions reported by the host.
 - A passed pure proof is reusable only under matching declared inputs,
   environment, tools, and logs. Runtime effects and required artifacts are not
   replaced by a prior success report.

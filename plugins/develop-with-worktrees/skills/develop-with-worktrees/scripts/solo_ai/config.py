@@ -1035,8 +1035,8 @@ An exact full batch freezes automatically. A smaller tail freezes only on an exp
 """
 
 
-def managed_block() -> str:
-    """当前原生交付托管块，保留旧块的精确升级入口。"""
+def _pre_short_managed_block() -> str:
+    """缩短前的原生交付托管块，仅用于精确升级。"""
 
     previous = _pre_native_delivery_managed_block()
     prior_rule = (
@@ -1071,6 +1071,21 @@ def managed_block() -> str:
     if previous.count(prior_rule) != 1:
         raise RuntimeError("Previous managed block no longer has the delivery rule")
     return previous.replace(prior_rule, native_rule)
+
+
+def managed_block() -> str:
+    """所有仓库共用的简短 DWW 入口；细节由已安装技能负责。"""
+
+    return f"""{MANAGED_START}
+## Isolated coding tasks
+
+Before modifying repository files, read the installed `develop-with-worktrees` skill and route the repository. For a managed route, run `start` and work only in its returned worktree; for other routes, follow the recorded lifecycle owner.
+
+Review exact paths for `commit`, then complete local delivery through the installed skill. Do not bypass failed gates, discard unknown content or other tasks' work, or use DWW to fetch, pull, push, deploy, rebase, squash, amend, or rewrite history.
+
+For a confirmed plan, keep its one root anchor and the task's one child anchor. Follow the installed skill for continuation, batches, and terminal transitions; do not duplicate those rules here.
+{MANAGED_END}
+"""
 
 
 def _pre_objective_protocol_managed_block() -> str:
@@ -1191,6 +1206,8 @@ def managed_agents_status(existing: str) -> str:
     block = existing[start:end].replace("\r\n", "\n") + "\n"
     if block == managed_block():
         return "current"
+    if block == _pre_short_managed_block():
+        return "known-legacy-long-managed-block"
     if block == _pre_native_delivery_managed_block():
         return "known-legacy-native-delivery"
     if block == _pre_objective_protocol_managed_block():
@@ -1213,15 +1230,16 @@ def managed_agents_status(existing: str) -> str:
 
 
 def render_agents(existing: str) -> str:
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    replacement = managed_block().replace("\n", newline)
     if MANAGED_START in existing or MANAGED_END in existing:
         start, end = _managed_region(existing)
         managed_agents_status(existing)
-        replacement = managed_block()
         if existing[end:].startswith(("\r\n", "\n")):
-            replacement = replacement.rstrip("\n")
+            replacement = replacement.rstrip("\r\n")
         return existing[:start] + replacement + existing[end:]
     prefix = existing.rstrip()
-    return (prefix + "\n\n" if prefix else "") + managed_block()
+    return (prefix + newline * 2 if prefix else "") + replacement
 
 
 def remove_managed_agents_block(existing: str) -> str:

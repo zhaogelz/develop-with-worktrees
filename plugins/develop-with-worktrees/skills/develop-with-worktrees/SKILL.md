@@ -33,6 +33,13 @@ and commit only reviewed exact paths. Do not bypass failed gates, discard unknow
 content, or use DWW to fetch, pull, push, deploy, rebase, squash, amend, or
 rewrite history.
 
+Within the user's already authorized task scope, create or refresh anchors,
+run focused checks, commit exact paths, and follow eligible local integration
+without asking again. Technical `--accept`, `--confirm`, and `--force`
+arguments verify an exact operation, not a new user decision. Preserve and
+report affected unknown base content while continuing unrelated read-only or
+isolated work.
+
 A confirmed complete plan needs one root anchor before its first child. The root
 retains the full plan; each child retains its execution slice. With an exact host
 task identity, create the root with its stable request ID and derived acceptance
