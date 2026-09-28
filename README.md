@@ -13,6 +13,8 @@ task contract locally, and carries reviewed changes through local integration.
 - One confirmed plan kept at its root, so related work can resume from the same
   objective instead of asking you to copy it into every task.
 - Exact-path commits on a fixed slot branch, preserved until delivery.
+- Reused worktrees keep local dependencies; the next task prefers a suitable
+  slot that was recently delivered.
 - Real Git merges that keep the task commit in local history.
 - One combined validation and protected local promotion per target branch.
 - Fast Start; project runtime preparation runs when the task first needs it.
