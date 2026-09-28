@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import re
+import stat
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -150,6 +153,105 @@ def capacity_details() -> dict[str, Any]:
 
 def _default_queue_state() -> dict[str, Any]:
     return {"schema_version": QUEUE_SCHEMA, "active": {}}
+
+
+def _live_validation_processes() -> list[int]:
+    """检查可见的领取环境与 DWW 验证命令；不可见进程由人工确认兜底。"""
+    live: list[int] = []
+    for process in psutil.process_iter():
+        if process.pid == os.getpid():
+            continue
+        try:
+            environment = process.environ()
+            command = [str(part).casefold() for part in process.cmdline()]
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+        runner = any(part.endswith("dww.py") for part in command)
+        if environment.get(INHERITED_CLAIM_ENV) or (
+            runner
+            and ("verify" in command or ("batch" in command and "recover" in command))
+        ):
+            live.append(process.pid)
+    return live
+
+
+def recover_zeroed_queue(
+    *, expected_sha256: str, confirm_no_live_validation: bool
+) -> dict[str, Any]:
+    """保留全零损坏原件并在锁内恢复空队列；不接受普通 JSON 或未知票据。"""
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise SoloAIError("Queue recovery requires an exact lowercase SHA-256")
+    if not confirm_no_live_validation:
+        raise SoloAIError(
+            "Queue recovery requires reviewed no-live-validation confirmation"
+        )
+    state_path = _queue_state_path()
+    with DirectoryLock(_queue_lock(), wait=True):
+        if state_path.is_symlink() or not state_path.exists():
+            raise SoloAIError("Queue recovery requires one existing plain state file")
+        if not stat.S_ISREG(state_path.lstat().st_mode):
+            raise SoloAIError("Queue recovery state path is not a plain file")
+        damaged = state_path.read_bytes()
+        digest = hashlib.sha256(damaged).hexdigest()
+        if (
+            digest != expected_sha256
+            or not damaged
+            or len(damaged) > 1024 * 1024
+            or any(damaged)
+        ):
+            raise SoloAIError("Queue recovery accepts only the exact zeroed state")
+        ticket_root = _ticket_root()
+        tickets: list[str] = []
+        if ticket_root.exists():
+            if ticket_root.is_symlink() or not ticket_root.is_dir():
+                raise SoloAIError("Queue recovery ticket root changed")
+            for path in ticket_root.iterdir():
+                if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+                    raise SoloAIError("Queue recovery found unknown ticket content")
+                ticket = _read_ticket(path)
+                if ticket is None or ticket["id"] != path.stem:
+                    raise SoloAIError("Queue recovery found an unreadable ticket")
+                if process_matches(ticket.get("owner", {})):
+                    raise SoloAIError("Queue recovery found a live ticket owner")
+                tickets.append(ticket["id"])
+        live = _live_validation_processes()
+        if live:
+            raise SoloAIError("Queue recovery found live validation processes")
+        recovery_root = _queue_root() / "recovery"
+        if recovery_root.is_symlink():
+            raise SoloAIError("Queue recovery audit directory is linked")
+        recovery_root.mkdir(exist_ok=True)
+        backup = recovery_root / f"{digest}.state.bin"
+        if backup.exists():
+            if backup.is_symlink() or backup.read_bytes() != damaged:
+                raise SoloAIError("Queue recovery audit backup changed")
+        else:
+            with backup.open("xb") as handle:
+                handle.write(damaged)
+                handle.flush()
+                os.fsync(handle.fileno())
+        receipt = recovery_root / f"{digest}.json"
+        audit = {
+            "schema_version": 1,
+            "kind": "zeroed-queue-recovery",
+            "damaged_sha256": digest,
+            "damaged_bytes": len(damaged),
+            "stale_ticket_ids": sorted(tickets),
+            "prepared_at": utc_timestamp(),
+            "status": "prepared",
+        }
+        atomic_write_json(receipt, audit)
+        atomic_write_json(state_path, _default_queue_state())
+        atomic_write_json(
+            receipt, {**audit, "status": "recovered", "recovered_at": utc_timestamp()}
+        )
+    return {
+        "recovered": True,
+        "damaged_sha256": digest,
+        "backup": str(backup),
+        "receipt": str(receipt),
+        "stale_ticket_count": len(tickets),
+    }
 
 
 def _read_ticket(path: Path) -> dict[str, Any] | None:

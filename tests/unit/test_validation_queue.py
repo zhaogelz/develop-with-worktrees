@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -143,3 +144,84 @@ def test_local_duration_median_produces_only_an_advisory(monkeypatch, tmp_path) 
 
     assert estimate["estimated_seconds"] == 700.0
     assert estimate["advisory"]
+
+
+def test_zeroed_queue_recovery_preserves_bytes_and_rejects_changed_input(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(queue, "_live_validation_processes", lambda: [])
+    root = queue._queue_root()
+    root.mkdir(parents=True)
+    damaged = b"\0" * 775
+    state_path = queue._queue_state_path()
+    state_path.write_bytes(damaged)
+    digest = hashlib.sha256(damaged).hexdigest()
+    ticket_root = queue._ticket_root()
+    ticket_root.mkdir()
+    ticket = ticket_root / "validation-stale.json"
+    queue.atomic_write_json(
+        ticket,
+        {
+            "schema_version": queue.QUEUE_SCHEMA,
+            "id": "validation-stale",
+            "resource_class": "heavy",
+            "owner": {"pid": -1},
+            "created_monotonic": 1.0,
+        },
+    )
+    with pytest.raises(queue.SoloAIError, match="exact zeroed state"):
+        queue.recover_zeroed_queue(
+            expected_sha256="a" * 64, confirm_no_live_validation=True
+        )
+    assert state_path.read_bytes() == damaged
+    recovered = queue.recover_zeroed_queue(
+        expected_sha256=digest, confirm_no_live_validation=True
+    )
+    assert recovered["damaged_sha256"] == digest
+    assert Path(recovered["backup"]).read_bytes() == damaged
+    receipt = json.loads(Path(recovered["receipt"]).read_text(encoding="utf-8"))
+    assert receipt["stale_ticket_ids"] == ["validation-stale"]
+    assert receipt["status"] == "recovered"
+    assert queue.queue_status()["active_units"] == 0
+    assert not ticket.exists()
+    with pytest.raises(queue.SoloAIError, match="exact zeroed state"):
+        queue.recover_zeroed_queue(
+            expected_sha256=digest, confirm_no_live_validation=True
+        )
+
+
+def test_zeroed_queue_recovery_rejects_live_ticket_and_validation_process(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    root = queue._queue_root()
+    root.mkdir(parents=True)
+    damaged = b"\0" * 32
+    queue._queue_state_path().write_bytes(damaged)
+    digest = hashlib.sha256(damaged).hexdigest()
+    ticket_root = queue._ticket_root()
+    ticket_root.mkdir()
+    ticket = ticket_root / "validation-live.json"
+    queue.atomic_write_json(
+        ticket,
+        {
+            "schema_version": queue.QUEUE_SCHEMA,
+            "id": "validation-live",
+            "resource_class": "heavy",
+            "owner": queue.process_snapshot(),
+            "created_monotonic": 1.0,
+        },
+    )
+    monkeypatch.setattr(queue, "_live_validation_processes", lambda: [])
+    with pytest.raises(queue.SoloAIError, match="live ticket owner"):
+        queue.recover_zeroed_queue(
+            expected_sha256=digest, confirm_no_live_validation=True
+        )
+    ticket.unlink()
+    monkeypatch.setattr(queue, "_live_validation_processes", lambda: [123])
+    with pytest.raises(queue.SoloAIError, match="live validation processes"):
+        queue.recover_zeroed_queue(
+            expected_sha256=digest, confirm_no_live_validation=True
+        )
+    assert queue._queue_state_path().read_bytes() == damaged
