@@ -123,8 +123,11 @@ the stage immediately. A later run rejects any remaining stage, and also
 rejects a previous release unless the active receipt and active plugin exactly
 match the requested source commit and tree. Ordinary Install also accepts a
 RecoveryInstall receipt for an ancestor commit when its recovery proof is present,
-the plugin tree and installed package version are unchanged, and the requested
-commit is the current main. It then promotes the receipt after CLI read-back.
+its own source tree and installed package version are verified, and the requested
+commit is the current main. If the tree is unchanged, it promotes the receipt
+after CLI read-back. If main has a new tree, it first verifies the active recovery
+install and the exact old-backup layout, clears that old backup, then uses the
+ordinary staged switch to install the new tree.
 These states only continue marketplace/plugin installation and read-back; a
 successful read-back removes the previous release, while another install failure
 preserves it. The resume path will not switch marketplace sources. The script never creates
