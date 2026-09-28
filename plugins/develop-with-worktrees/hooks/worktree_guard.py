@@ -1102,7 +1102,9 @@ def _safe_get_content(tokens: list[_ReadToken]) -> bool:
                     return False
                 if "," in value and (
                     lowered != "-literalpath"
-                    or not all(part and not part.startswith("-") for part in value.split(","))
+                    or not all(
+                        part and not part.startswith("-") for part in value.split(",")
+                    )
                 ):
                     return False
                 path_seen = True

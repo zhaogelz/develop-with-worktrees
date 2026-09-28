@@ -294,7 +294,9 @@ def test_managed_policy_separates_local_lifecycle_from_explicit_publish() -> Non
     )
     assert "task's one child anchor" in policy
     assert "one root anchor" in policy
-    assert "installed skill for continuation, batches, and terminal transitions" in policy
+    assert (
+        "installed skill for continuation, batches, and terminal transitions" in policy
+    )
     assert "round-complete" not in policy
 
 

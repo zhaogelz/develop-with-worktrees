@@ -1540,9 +1540,7 @@ def test_read_only_parser_accepts_quoted_search_text_and_limited_pipeline() -> N
     assert HOOK._strict_read_only_bash(
         "rg --no-config -n -A 3 'anchor|scope' README.md"
     )
-    assert HOOK._strict_read_only_bash(
-        "git status --short | Select-Object -First 20"
-    )
+    assert HOOK._strict_read_only_bash("git status --short | Select-Object -First 20")
     assert HOOK._strict_read_only_bash(
         "git diff --stat | Select-Object -Skip 2 -Last 20"
     )
@@ -1630,9 +1628,7 @@ def test_read_only_parser_limits_content_and_select_arguments() -> None:
         "Get-Content README.md | Select-Object -First 1_0"
     )
     assert not HOOK._strict_read_only_bash("Get-ChildItem -Recurse")
-    assert not HOOK._strict_read_only_bash(
-        "Get-Content -Path 'README.md','AGENTS.md'"
-    )
+    assert not HOOK._strict_read_only_bash("Get-Content -Path 'README.md','AGENTS.md'")
     assert not HOOK._strict_read_only_bash(
         "Get-Content -LiteralPath 'README.md',,'AGENTS.md'"
     )
