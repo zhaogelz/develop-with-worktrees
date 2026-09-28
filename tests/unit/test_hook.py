@@ -1540,12 +1540,23 @@ def test_read_only_parser_accepts_quoted_search_text_and_limited_pipeline() -> N
     assert HOOK._strict_read_only_bash(
         "rg --no-config -n -A 3 'anchor|scope' README.md"
     )
+    assert HOOK._strict_read_only_bash("git status --short | Select-Object -First 20")
+    assert HOOK._strict_read_only_bash(
+        "git diff --stat | Select-Object -Skip 2 -Last 20"
+    )
+    assert HOOK._strict_read_only_bash(
+        "Get-ChildItem -LiteralPath . -Recurse -File | Select-Object -First 20"
+    )
 
 
 def test_read_only_parser_accepts_common_repository_enumeration() -> None:
     assert HOOK._strict_read_only_bash("Get-Location")
     assert HOOK._strict_read_only_bash("Get-ChildItem -Name")
     assert HOOK._strict_read_only_bash("Get-ChildItem -LiteralPath docs -Name")
+    assert HOOK._strict_read_only_bash("Get-ChildItem -LiteralPath . -Recurse -File")
+    assert HOOK._strict_read_only_bash(
+        "Get-Content -LiteralPath 'README.md','AGENTS.md' -Encoding UTF8"
+    )
     assert HOOK._strict_read_only_bash("git ls-files")
     assert HOOK._strict_read_only_bash("git ls-files --cached --full-name")
     assert HOOK._strict_read_only_bash("git worktree list --porcelain")
@@ -1592,7 +1603,7 @@ def test_read_only_parser_keeps_quoted_pipe_as_search_text() -> None:
     assert HOOK._strict_read_only_bash("rg --no-config -F '|' README.md")
     assert HOOK._strict_read_only_bash("rg --no-config -- '--pre' README.md")
     assert HOOK._strict_read_only_bash("rg --no-config -e '--pre' README.md")
-    assert not HOOK._strict_read_only_bash("git status | Select-Object -First 1")
+    assert HOOK._strict_read_only_bash("git status | Select-Object -First 1")
 
 
 def test_read_only_parser_requires_rg_config_isolation_and_known_options() -> None:
@@ -1617,6 +1628,22 @@ def test_read_only_parser_limits_content_and_select_arguments() -> None:
         "Get-Content README.md | Select-Object -First 1_0"
     )
     assert not HOOK._strict_read_only_bash("Get-ChildItem -Recurse")
+    assert not HOOK._strict_read_only_bash("Get-Content -Path 'README.md','AGENTS.md'")
+    assert not HOOK._strict_read_only_bash(
+        "Get-Content -LiteralPath 'README.md',,'AGENTS.md'"
+    )
+    assert not HOOK._strict_read_only_bash(
+        "git diff --output=patch.txt | Select-Object -First 20"
+    )
+    assert not HOOK._strict_read_only_bash(
+        "git diff --ext-diff | Select-Object -First 20"
+    )
+    assert not HOOK._strict_read_only_bash(
+        "git status | Select-Object -First 20 | Set-Content out.txt"
+    )
+    assert not HOOK._strict_read_only_bash(
+        "Get-ChildItem -LiteralPath . -Recurse -File | Select-Object -First {20}"
+    )
     assert not HOOK._strict_read_only_bash("git ls-files --with-tree=HEAD")
     assert not HOOK._strict_read_only_bash("Get-FileHash -Recurse README.md")
     assert not HOOK._strict_read_only_bash(

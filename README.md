@@ -24,6 +24,11 @@ DWW is the Git lifecycle layer. Your host's task system still decides how work
 is split, scheduled, and discussed. Your project still owns its tests, runtime
 resources, and product decisions.
 
+Within a task you have already authorized, the agent can continue through
+Start, focused checks, exact commits, and eligible local integration. A technical
+`--accept`, `--confirm`, or `--force` argument does not ask you to approve the
+same task again.
+
 Plainly: Finish can mean “waiting for integration.” A change is delivered only
 when its task commit reaches the local base and its resources are released.
 

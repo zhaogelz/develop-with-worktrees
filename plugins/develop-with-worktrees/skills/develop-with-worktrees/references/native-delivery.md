@@ -42,6 +42,8 @@ sources before closing a tail; ordinary task completion does not imply an
 immediate tail. A blocked native Start may internally seal a capacity batch
 only when no fixed slot is free and eligible finished sources are waiting;
 this is not a host-selected tail cause or permission to finish active development.
+When those round facts are verified, the host records and follows the eligible
+tail without asking the user to repeat the task authorization.
 
 ## Integration and repair
 

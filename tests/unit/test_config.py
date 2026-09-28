@@ -17,10 +17,11 @@ from solo_ai.config import (
 )
 from solo_ai.config import (
     _legacy_managed_block,
-    _pre_native_delivery_managed_block,
     _pre_batch_delivery_managed_block,
+    _pre_native_delivery_managed_block,
     _pre_objective_protocol_managed_block,
     _pre_root_output_managed_block,
+    _pre_short_managed_block,
     _pre_simplification_managed_block,
     _pre_refresh_root_context_managed_block,
 )
@@ -117,7 +118,7 @@ def test_previous_candidate_managed_block_upgrades_without_touching_user_text() 
     assert managed_agents_status(existing) == "known-legacy-native-delivery"
     upgraded = render_agents(existing)
     assert managed_agents_status(upgraded) == "current"
-    assert "Ready freezes the exact task head" in upgraded
+    assert "follow the recorded lifecycle owner" in upgraded
     assert upgraded.endswith("\nKeep this.\n")
 
 
@@ -131,7 +132,7 @@ def test_previous_batch_delivery_managed_block_can_be_upgraded() -> None:
     assert managed_agents_status(existing) == "known-legacy-batch-delivery"
     upgraded = render_agents(existing)
     assert managed_agents_status(upgraded) == "current"
-    assert "Ordinary completion does not request immediate integration" in upgraded
+    assert "Follow the installed skill for continuation" in upgraded
     assert upgraded.endswith("\nKeep this.\n")
 
 
@@ -145,7 +146,7 @@ def test_previous_objective_protocol_managed_block_can_be_upgraded() -> None:
     assert managed_agents_status(existing) == "known-legacy-objective-protocol"
     upgraded = render_agents(existing)
     assert managed_agents_status(upgraded) == "current"
-    assert "exact host-to-root locator" in upgraded
+    assert "one root anchor" in upgraded
     assert upgraded.endswith("\nKeep this.\n")
 
 
@@ -226,6 +227,22 @@ def test_user_edited_managed_block_is_not_overwritten() -> None:
         render_agents(edited)
 
 
+def test_current_long_block_upgrades_once_preserving_crlf_and_surroundings() -> None:
+    existing = (
+        "# Existing rules\r\n\r\n"
+        + _pre_short_managed_block().replace("\n", "\r\n")
+        + "\r\nKeep this.\r\n"
+    )
+
+    assert managed_agents_status(existing) == "known-legacy-long-managed-block"
+    upgraded = render_agents(existing)
+    assert managed_agents_status(upgraded) == "current"
+    assert upgraded.startswith("# Existing rules\r\n\r\n")
+    assert upgraded.endswith("\r\nKeep this.\r\n")
+    assert "\n" not in upgraded.replace("\r\n", "")
+    assert render_agents(upgraded) == upgraded
+
+
 def test_repository_managed_block_stays_in_sync_with_the_installer_template() -> None:
     repository_agents = Path(__file__).parents[2] / "AGENTS.md"
 
@@ -270,18 +287,17 @@ def test_rejects_casefold_duplicate_cleanup_paths(git_repo: Path) -> None:
 def test_managed_policy_separates_local_lifecycle_from_explicit_publish() -> None:
     policy = managed_block()
 
-    assert "DWW is local-only" in policy
+    assert "complete local delivery" in policy
     assert (
-        "do not fetch, pull, push, rebase, squash, amend, or rewrite history" in policy
+        "use DWW to fetch, pull, push, deploy, rebase, squash, amend, or rewrite history"
+        in policy
     )
-    assert "one task anchor per task" in policy
-    assert "complete plan" in policy
-    assert "without a content-size limit" in policy
-    assert "without a separate acknowledgement step" in policy
-    assert "round-complete" in policy
-    assert "one short reason" in policy
-    assert "heartbeat, idle time, and task counts never seal a batch" in policy
-    assert "Candidate publication is not delivery" in policy
+    assert "task's one child anchor" in policy
+    assert "one root anchor" in policy
+    assert (
+        "installed skill for continuation, batches, and terminal transitions" in policy
+    )
+    assert "round-complete" not in policy
 
 
 def test_rejects_schema_two_verification_policy(git_repo: Path) -> None:

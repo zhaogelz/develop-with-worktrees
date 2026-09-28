@@ -1098,7 +1098,14 @@ def _safe_get_content(tokens: list[_ReadToken]) -> bool:
                 return False
             value = tokens[index + 1].value
             if lowered in {"-literalpath", "-path"}:
-                if path_seen or value.startswith("-"):
+                if path_seen or not value or value.startswith("-"):
+                    return False
+                if "," in value and (
+                    lowered != "-literalpath"
+                    or not all(
+                        part and not part.startswith("-") for part in value.split(",")
+                    )
+                ):
                     return False
                 path_seen = True
             elif lowered == "-encoding":
@@ -1117,7 +1124,7 @@ def _safe_get_content(tokens: list[_ReadToken]) -> bool:
             continue
         if argument.startswith("-"):
             return False
-        if path_seen:
+        if path_seen or "," in argument:
             return False
         path_seen = True
         index += 1
@@ -1127,7 +1134,7 @@ def _safe_get_content(tokens: list[_ReadToken]) -> bool:
 def _safe_get_child_item(tokens: list[_ReadToken]) -> bool:
     """Allow the small directory-listing subset used for repository inspection."""
     options_with_values = {"-literalpath", "-path"}
-    flags = {"-name", "-file", "-directory"}
+    flags = {"-name", "-file", "-directory", "-recurse"}
     seen: set[str] = set()
     path_seen = False
     index = 1
@@ -1154,7 +1161,7 @@ def _safe_get_child_item(tokens: list[_ReadToken]) -> bool:
             return False
         path_seen = True
         index += 1
-    return True
+    return "-recurse" not in seen or path_seen
 
 
 def _safe_get_file_hash(tokens: list[_ReadToken]) -> bool:
@@ -1297,11 +1304,11 @@ def _strict_read_only_bash(command: str) -> bool:
     separator = pipes[0]
     left = tokens[:separator]
     right = tokens[separator + 1 :]
-    return (
-        bool(left)
-        and _command_name(left[0]) in {"rg", "get-content"}
-        and _safe_read_only_command(left)
-        and _safe_select(right)
+    if not left or not _safe_read_only_command(left) or not _safe_select(right):
+        return False
+    name = _command_name(left[0])
+    return name in {"rg", "get-content", "get-childitem"} or (
+        name == "git" and left[1].value.lower() in {"status", "diff"}
     )
 
 
@@ -1630,7 +1637,7 @@ def _read_only_rejection_reason(command: str) -> str:
         if token.value == "|" and not token.quoted
     ]
     if len(pipes) > 1 or (pipes and not _safe_select(tokens[pipes[0] + 1 :])):
-        return "Bash command uses an unsupported pipeline or query form; use a direct read-only command or Get-Content/rg | Select-Object with numeric line options."
+        return "Bash command uses an unsupported pipeline or query form; use a direct read-only command or a supported query | Select-Object with numeric line options."
     if _command_name(tokens[0]) == "rg" and not any(
         token.value == "--no-config" for token in tokens
     ):

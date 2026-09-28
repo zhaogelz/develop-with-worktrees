@@ -25,6 +25,11 @@ session can leave routing: a managed target still requires its recorded owner.
 An unrelated repository cannot supply authorization for that target. It does not claim
 to sandbox deliberate cross-repository or specialized bypass paths.
 
+The read-only subset includes literal Get-Content path lists, directory recursion
+with an explicit path, and one numeric Select-Object pipeline after supported
+content, listing, status, or diff queries. It still rejects dynamic expressions,
+external ripgrep configuration, output-writing Git options, and shell composition.
+
 `hooks/hooks.json` is the stable trust contract. Ordinary plugin, skill, and
 guard-script changes do not alter it. A first install or intentional definition
 change may require review. When the host reports pending review, explain the
