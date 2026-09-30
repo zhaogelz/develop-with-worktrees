@@ -9,7 +9,7 @@ from typing import Any
 from .cleanup import require_managed_directory_identity
 from .config import load_repo_config
 from .repo import GitRepo
-from .state import FINAL_TASK_STATES, StateStore
+from .state import FINAL_TASK_STATES, LEGACY_STATE_SCHEMA, StateStore
 from .util import (
     SoloAIError,
     atomic_write_json,
@@ -168,6 +168,162 @@ def _released_identity(
     )
 
 
+def _legacy_reclaimed_predecessor(
+    repo: GitRepo,
+    state: dict[str, Any],
+    slot_id: str,
+    slot: dict[str, Any],
+    root: Path,
+    head: str,
+    branch: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """只证明 schema 11 同代保留工位已经正式回收，旧候选指针不能充当前驱。"""
+    generation = slot.get("generation")
+    stale_id = slot.get("released_candidate_task_id")
+    stale = state["tasks"].get(str(stale_id))
+    if (
+        state.get("schema_version") != LEGACY_STATE_SCHEMA
+        or slot.get("released_task_id") is not None
+        or not stale_id
+        or branch is not None
+        or type(generation) is not int
+        or not isinstance(stale, dict)
+        or stale.get("slot_id") != slot_id
+        or stale.get("worktree") != str(root)
+        or type(stale.get("slot_generation")) is not int
+        or stale["slot_generation"] >= generation
+    ):
+        raise SoloAIError("Idle slot has no exact released predecessor")
+    matching = [
+        (task_id, task)
+        for task_id, task in state["tasks"].items()
+        if isinstance(task, dict)
+        and task.get("slot_id") == slot_id
+        and type(task.get("slot_generation")) is int
+        and task.get("slot_generation") == generation
+    ]
+    if len(matching) != 1:
+        raise SoloAIError("Idle slot has no unique reclaimed predecessor")
+    task_id, task = matching[0]
+    abandonment = task.get("abandonment")
+    reclaim = task.get("retained_reclaim")
+    if not isinstance(abandonment, dict) or not isinstance(reclaim, dict):
+        raise SoloAIError("Idle slot has no completed retained reclaim")
+    task_branch = task.get("branch")
+    branch_ref_head = (
+        repo.ref_head(f"refs/heads/{task_branch}")
+        if isinstance(task_branch, str) and task_branch
+        else None
+    )
+    if (
+        task.get("id") != task_id
+        or type(task.get("slot_generation")) is not int
+        or task.get("worktree") != str(root)
+        or task.get("status") != "abandoned"
+        or task.get("active_operation") is not None
+        or task.get("lease") is not None
+        or task.get("retained_disposal")
+        or abandonment.get("schema_version") != 1
+        or abandonment.get("phase") != "completed"
+        or not abandonment.get("completed_at")
+        or abandonment.get("retained_worktree") is not True
+        or abandonment.get("task_id") != task_id
+        or abandonment.get("slot_id") != slot_id
+        or (
+            "slot_generation" in abandonment
+            and (
+                type(abandonment["slot_generation"]) is not int
+                or abandonment["slot_generation"] != generation
+            )
+        )
+        or abandonment.get("worktree") != str(root)
+        or abandonment.get("managed_root") != str(root.parent)
+        or abandonment.get("base_ref") != task.get("base_ref")
+        or not isinstance(task.get("base_ref"), str)
+        or not task["base_ref"]
+        or abandonment.get("branch") != task_branch
+        or reclaim.get("schema_version") != 1
+        or reclaim.get("phase") != "completed"
+        or not reclaim.get("completed_at")
+        or not reclaim.get("transaction_id")
+        or reclaim.get("task_id") != task_id
+        or reclaim.get("slot_id") != slot_id
+        or type(reclaim.get("slot_generation")) is not int
+        or reclaim.get("slot_generation") != generation
+        or reclaim.get("abandonment_transaction_id")
+        != abandonment.get("transaction_id")
+        or not abandonment.get("transaction_id")
+        or reclaim.get("worktree") != str(root)
+        or reclaim.get("branch") != task_branch
+        or reclaim.get("branch_tip") != abandonment.get("branch_tip")
+        or reclaim.get("base_head") != abandonment.get("base_head")
+        or reclaim.get("base_head") != head
+        or not isinstance(task_branch, str)
+        or not task_branch
+        or (
+            branch_ref_head is not None
+            and branch_ref_head != abandonment.get("branch_tip")
+        )
+        or (branch_ref_head is None and reclaim.get("branch_tip") != head)
+    ):
+        raise SoloAIError("Idle slot retained reclaim proof changed")
+    for slot_field, abandonment_field in (
+        ("released_worktree_identity", "worktree_identity"),
+        ("released_managed_root_identity", "managed_root_identity"),
+    ):
+        released = slot.get(slot_field)
+        frozen = abandonment.get(abandonment_field)
+        if not _same_volume_object_fields(released, frozen) or released != frozen:
+            raise SoloAIError("Idle slot retained reclaim directory identity changed")
+    for slot_field, abandonment_field in (
+        ("released_worktree_resolved", "worktree_resolved"),
+        ("released_managed_root_resolved", "managed_root_resolved"),
+    ):
+        released = slot.get(slot_field)
+        if (
+            not isinstance(released, str)
+            or not released
+            or released != abandonment.get(abandonment_field)
+        ):
+            raise SoloAIError("Idle slot retained reclaim resolved path changed")
+    return task, {
+        "task_id": task_id,
+        "branch": task_branch,
+        "base_ref": task["base_ref"],
+        "branch_ref_head": branch_ref_head,
+        "abandonment_transaction_id": abandonment["transaction_id"],
+        "reclaim_transaction_id": reclaim["transaction_id"],
+        "branch_tip": reclaim["branch_tip"],
+        "base_head": head,
+        "released_worktree_identity": slot["released_worktree_identity"],
+        "released_managed_root_identity": slot["released_managed_root_identity"],
+        "released_worktree_resolved": slot["released_worktree_resolved"],
+        "released_managed_root_resolved": slot["released_managed_root_resolved"],
+    }
+
+
+def _check_legacy_reclaim(
+    repo: GitRepo,
+    state: dict[str, Any],
+    slot: dict[str, Any],
+    root: Path,
+    payload: dict[str, Any],
+) -> None:
+    if "legacy_retained_reclaim" not in payload:
+        return
+    _, proof = _legacy_reclaimed_predecessor(
+        repo,
+        state,
+        str(payload["slot"]),
+        slot,
+        root,
+        str(payload["head"]),
+        payload["branch"],
+    )
+    if proof != payload["legacy_retained_reclaim"]:
+        raise SoloAIError("Whole-slot retained reclaim proof changed")
+
+
 def _payload(
     repo: GitRepo, slot_id: str, *, recover_volume: bool = False
 ) -> dict[str, Any]:
@@ -185,8 +341,13 @@ def _payload(
     predecessor_id = slot.get("released_task_id") or slot.get(
         "released_candidate_task_id"
     )
+    legacy_reclaim = None
     if predecessor_id:
         task = store.task(str(predecessor_id))
+        if task.get("slot_generation") != slot.get("generation"):
+            task, legacy_reclaim = _legacy_reclaimed_predecessor(
+                repo, store.read(), slot_id, slot, root, head, branch
+            )
         delivery = (task or {}).get("native_delivery") or {}
         abandonment = (task or {}).get("abandonment") or {}
         preactivation = (task or {}).get("preactivation_release") or {}
@@ -214,6 +375,7 @@ def _payload(
                     task.get("status") == "candidate-published"
                     and publication.get("phase") == "completed"
                 )
+                or legacy_reclaim is not None
             )
         ):
             raise SoloAIError("Idle slot has no exact released predecessor")
@@ -244,6 +406,8 @@ def _payload(
     }
     if recovery is not None:
         payload["volume_recovery"] = recovery
+    if legacy_reclaim is not None:
+        payload["legacy_retained_reclaim"] = legacy_reclaim
     return payload
 
 
@@ -255,10 +419,11 @@ def _stage(payload: dict[str, Any], plan_id: str) -> Path:
 def _check_slot(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> Path:
     if payload.get("slot_status") not in {"idle", "inactive"}:
         raise SoloAIError("Whole-slot plan has an invalid original slot status")
-    _, slot, root = _slot(repo, str(payload["slot"]), plan_id=plan_id)
+    store, slot, root = _slot(repo, str(payload["slot"]), plan_id=plan_id)
     if payload.get("worktree") != str(root):
         raise SoloAIError("Whole-slot plan worktree path changed")
     _check_volume_record(slot, payload)
+    _check_legacy_reclaim(repo, store.read(), slot, root, payload)
     current_base = repo.ref_head(f"refs/heads/{payload['base_ref']}")
     if (
         slot.get("generation") != payload["slot_generation"]
@@ -341,6 +506,9 @@ def _claim(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> None:
             or slot.get("fixed_branch") != payload["fixed_branch"]
         ):
             raise SoloAIError("Slot disposal generation or owner changed")
+        _check_legacy_reclaim(
+            repo, state, slot, Path(str(payload["worktree"])), payload
+        )
         _check_volume_record(slot, payload)
         if (
             slot.get("status") == "disposing"

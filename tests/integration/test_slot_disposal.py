@@ -9,7 +9,12 @@ from conftest import git
 from solo_ai import slot_disposal
 from solo_ai.cli import _prune
 from solo_ai.config import CommandSpec, load_repo_config
-from solo_ai.lifecycle import abandon, initialize, start
+from solo_ai.lifecycle import (
+    abandon,
+    initialize,
+    reclaim_retained_worktree,
+    start,
+)
 from solo_ai.repo import GitRepo
 from solo_ai.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
 from solo_ai.util import (
@@ -108,6 +113,147 @@ def test_dispose_initial_detached_registered_slot_without_predecessor(
     task = start(repo, name="recreate old detached slot")
     assert Path(task["worktree"]) == root
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def _legacy_reclaimed_slot(
+    git_repo: Path, *, ahead_branch: bool = False
+) -> tuple[GitRepo, StateStore, dict[str, object], Path]:
+    repo, store = _repo(git_repo, native=False)
+    earlier = start(repo, name="earlier released slot")
+    abandon(
+        repo,
+        task_id=earlier["id"],
+        lease=earlier["lease"],
+        confirm=earlier["id"],
+    )
+    task = start(repo, name="retained legacy slot")
+    root = Path(task["worktree"])
+    if ahead_branch:
+        (root / "tracked.txt").write_text("branch only\n", encoding="utf-8")
+        git(root, "add", "tracked.txt")
+        git(root, "commit", "-m", "test: retain a branch-only commit")
+    (root / "discard.txt").write_text("approved\n", encoding="utf-8")
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="retain before exact reclaim",
+        retain_worktree=True,
+    )
+    reclaim = reclaim_retained_worktree(repo, task_id=task["id"])
+    reclaim_retained_worktree(repo, task_id=task["id"], confirm=reclaim["confirmation"])
+
+    def keep_old_pointer(state: dict[str, object]) -> None:
+        state["slots"]["01"]["released_candidate_task_id"] = earlier["id"]
+
+    store.mutate(keep_old_pointer)
+    return repo, store, task, root
+
+
+@pytest.mark.parametrize("missing_branch", [False, True])
+def test_dispose_legacy_completed_reclaim_with_stale_candidate_pointer(
+    git_repo: Path, missing_branch: bool
+) -> None:
+    repo, store, task, root = _legacy_reclaimed_slot(git_repo)
+    branch_ref = f"refs/heads/{task['branch']}"
+    branch_tip = repo.ref_head(branch_ref)
+    assert branch_tip
+    if missing_branch:
+        git(git_repo, "update-ref", "-d", branch_ref, branch_tip)
+    old_device, current_device = _old_volume_identity(store, root)
+
+    def move_recorded_volume(state: dict[str, object]) -> None:
+        abandonment = state["tasks"][task["id"]]["abandonment"]
+        abandonment["worktree_identity"]["device"] = old_device
+        abandonment["managed_root_identity"]["device"] = old_device
+
+    store.mutate(move_recorded_volume)
+    plan = _prune(repo, kind="slot", slot="01", dispose=True, recover_volume=True)
+    assert plan["legacy_retained_reclaim"]["task_id"] == task["id"]
+    assert plan["legacy_retained_reclaim"]["branch_ref_head"] == (
+        None if missing_branch else branch_tip
+    )
+    assert plan["volume_recovery"]["to_device"] == current_device
+    assert plan["detached"] is True
+    _execute(repo, plan, recover_volume=True)
+    assert not root.exists()
+    assert store.read()["slots"]["01"]["generation"] == task["slot_generation"]
+    rebuilt = start(repo, name="rebuild reclaimed legacy slot")
+    assert Path(rebuilt["worktree"]) == root
+    abandon(
+        repo,
+        task_id=rebuilt["id"],
+        lease=rebuilt["lease"],
+        confirm=rebuilt["id"],
+    )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "reclaim-incomplete",
+        "identity",
+        "duplicate-generation",
+        "branch-after-plan",
+        "missing-ref-old-tip",
+        "ref-disappears-after-plan",
+        "ref-reappears-after-plan",
+    ),
+)
+def test_dispose_legacy_reclaim_requires_exact_completed_proof(
+    git_repo: Path, drift: str
+) -> None:
+    repo, store, task, root = _legacy_reclaimed_slot(
+        git_repo, ahead_branch=drift == "missing-ref-old-tip"
+    )
+    if drift == "branch-after-plan":
+        plan = _prune(repo, kind="slot", slot="01", dispose=True)
+        git(git_repo, "commit", "--allow-empty", "-m", "test: advance base")
+        git(git_repo, "branch", "-f", task["branch"], "main")
+        with pytest.raises(SoloAIError, match="reclaim proof changed"):
+            _execute(repo, plan)
+    elif drift in {
+        "missing-ref-old-tip",
+        "ref-disappears-after-plan",
+        "ref-reappears-after-plan",
+    }:
+        branch_ref = f"refs/heads/{task['branch']}"
+        tip = repo.ref_head(branch_ref)
+        assert tip
+        if drift == "ref-disappears-after-plan":
+            plan = _prune(repo, kind="slot", slot="01", dispose=True)
+        git(git_repo, "update-ref", "-d", branch_ref, tip)
+        if drift == "missing-ref-old-tip":
+            with pytest.raises(SoloAIError, match="reclaim proof changed"):
+                _prune(repo, kind="slot", slot="01", dispose=True)
+        elif drift == "ref-disappears-after-plan":
+            with pytest.raises(SoloAIError, match="changed after review"):
+                _execute(repo, plan)
+        else:
+            plan = _prune(repo, kind="slot", slot="01", dispose=True)
+            git(git_repo, "update-ref", branch_ref, tip, "0" * len(tip))
+            with pytest.raises(SoloAIError, match="changed after review"):
+                _execute(repo, plan)
+    else:
+
+        def change_proof(state: dict[str, object]) -> None:
+            current = state["tasks"][task["id"]]
+            if drift == "reclaim-incomplete":
+                current["retained_reclaim"]["phase"] = "detached"
+            elif drift == "identity":
+                current["abandonment"]["worktree_identity"]["inode"] += 1
+            else:
+                state["tasks"]["task-duplicate"] = {
+                    **current,
+                    "id": "task-duplicate",
+                }
+
+        store.mutate(change_proof)
+        with pytest.raises(SoloAIError, match="reclaim|predecessor"):
+            _prune(repo, kind="slot", slot="01", dispose=True)
+    assert root.exists()
+    assert store.read()["slots"]["01"]["status"] == "idle"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows 目录句柄复用")

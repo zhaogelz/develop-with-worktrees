@@ -265,6 +265,18 @@ unavailable until the same plan completes. Start recreates the missing worktree
 on demand under its existing checks. Ordinary `prune-slot` retains its
 declared-path behavior.
 
+For schema-11 slots, a completed retained-worktree reclaim can leave an older
+candidate release pointer in the idle slot. Whole-slot disposal accepts that
+history only when exactly one task in the current slot generation has a completed
+retained reclaim. The plan freezes its task and transaction identities, released
+directory identities, recorded task branch and base, branch ref HEAD (including
+its absence), and detached base HEAD; confirmation and recovery recheck them.
+A missing task branch ref is accepted only when its recorded tip equals the
+reclaim base and current detached HEAD, so no separate branch-only tip remains.
+A missing or ambiguous current-generation task, an unfinished reclaim, or any
+changed proof stops disposal. This compatibility does not rewrite the old
+pointer or release record.
+
 On Windows, removal pins original ancestors and conditionally deletes the same
 opened object. Explicit whole-slot disposal uses Windows POSIX disposition on
 that checked handle so a mapped dependency image link can be removed while
