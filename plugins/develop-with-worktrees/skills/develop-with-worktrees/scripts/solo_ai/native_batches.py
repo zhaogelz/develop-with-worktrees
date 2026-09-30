@@ -6,12 +6,21 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import psutil
+
 from . import batch_workspace
 from .candidate_batches import _require_approval, _run_secret_scanner
 from .cleanup import inspect_untracked
 from .config import load_repo_config, load_verification_config
 from .integration import integration_turn
-from .proof import new_validation_attempt_id, read_validation_attempt, validate
+from .proof import (
+    _update_validation_attempt,
+    _update_validation_attempt_profile,
+    finish_validation_attempt,
+    new_validation_attempt_id,
+    read_validation_attempt,
+    validate,
+)
 from .repo import GitRepo
 from .runtime_adapter import (
     activate_batch_runtime,
@@ -20,6 +29,7 @@ from .runtime_adapter import (
 )
 from .safety import SensitiveContentError, require_safe
 from .state import STATE_SCHEMA, StateStore, candidate_admission_lock
+from .validation_queue import queue_ticket_snapshot
 from .util import (
     ActionableSoloAIError,
     SoloAIError,
@@ -450,7 +460,11 @@ def _run_full(
 
 
 def _recover_validation(
-    repo: GitRepo, store: StateStore, batch: dict[str, Any]
+    repo: GitRepo,
+    store: StateStore,
+    batch: dict[str, Any],
+    *,
+    confirm_no_live_validation: bool = False,
 ) -> dict[str, Any]:
     attempt_id = str(batch.get("validation_attempt") or "")
     if not attempt_id:
@@ -464,20 +478,107 @@ def _recover_validation(
     ):
         raise SoloAIError("Native validation attempt changed identity")
     if attempt.get("state") != "completed":
-        raise ActionableSoloAIError(
-            "Native validation attempt is not fully stopped and recorded",
-            code="NATIVE_VALIDATION_ACTIVE",
-            context={"batch_id": batch["id"], "attempt_id": attempt_id},
-            next_action={"kind": "wait_for_validation", "batch_id": batch["id"]},
+        if not confirm_no_live_validation:
+            raise ActionableSoloAIError(
+                "Native validation attempt is not fully stopped and recorded",
+                code="NATIVE_VALIDATION_ACTIVE",
+                context={"batch_id": batch["id"], "attempt_id": attempt_id},
+                next_action={"kind": "wait_for_validation", "batch_id": batch["id"]},
+            )
+        if attempt.get("state") not in {"preparing", "planned"}:
+            raise SoloAIError(
+                "Native validation attempt has an unknown incomplete state"
+            )
+        _require_runtime_workspace(repo, store, batch)
+        if (
+            repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["base_before"]
+            or repo.head(Path(str(batch["worktree"]))) != batch["integration_head"]
+            or not repo.is_clean(Path(str(batch["worktree"])))
+        ):
+            raise SoloAIError(
+                "Native batch target or workspace changed during Full validation"
+            )
+        profiles = attempt.get("profiles")
+        if not isinstance(profiles, list):
+            raise SoloAIError("Native validation attempt has no readable profiles")
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                raise SoloAIError("Native validation attempt has an unreadable profile")
+            ticket = (profile.get("queue") or {}).get("ticket")
+            if ticket and queue_ticket_snapshot(str(ticket)) is not None:
+                raise SoloAIError("Native validation still owns a live queue ticket")
+            command = profile.get("current_command")
+            if command is None:
+                if profile.get("state") == "running":
+                    raise SoloAIError(
+                        "Running validation has no recorded process identity"
+                    )
+                continue
+            process = command.get("process") if isinstance(command, dict) else None
+            if not isinstance(process, dict):
+                raise SoloAIError("Running validation has no recorded process identity")
+            pid, created = process.get("pid"), process.get("create_time")
+            if (
+                not isinstance(pid, int)
+                or pid <= 0
+                or not isinstance(created, (int, float))
+            ):
+                raise SoloAIError("Running validation has no exact process identity")
+            try:
+                current_created = psutil.Process(pid).create_time()
+            except psutil.NoSuchProcess:
+                current_created = None
+            except (psutil.AccessDenied, psutil.Error, OSError) as exc:
+                raise SoloAIError(
+                    "Cannot verify whether native validation is still live"
+                ) from exc
+            if current_created is not None and abs(current_created - created) <= 0.01:
+                raise SoloAIError("Native validation command is still live")
+        result = (
+            "failed"
+            if any(
+                profile.get("state") in {"failed", "blocked", "timed_out"}
+                for profile in profiles
+            )
+            else "interrupted"
         )
+        _update_validation_attempt(
+            repo,
+            attempt_id,
+            interruption_recovery={
+                "recorded_at": utc_timestamp(),
+                "confirmed_no_live_validation": True,
+                "result": result,
+            },
+        )
+        for profile in profiles:
+            if profile.get("state") in {"waiting", "preparing", "running", "pending"}:
+                _update_validation_attempt_profile(
+                    repo,
+                    attempt_id,
+                    str(profile["id"]),
+                    state="interrupted",
+                    error_reason="abandoned_full_attempt",
+                    completed_at=utc_timestamp(),
+                )
+        finish_validation_attempt(
+            repo,
+            attempt_id=attempt_id,
+            result=result,
+            error="Native Full stopped before its attempt could finish",
+        )
+        attempt = read_validation_attempt(repo, attempt_id)
     if attempt.get("result") != "passed":
+        outcome = "interrupted" if attempt.get("result") == "interrupted" else "failed"
         releasing = store.update_batch(
             str(batch["id"]),
             status="runtime_releasing",
-            validation_outcome="failed",
+            validation_outcome=outcome,
             validation_error=str(attempt.get("error") or attempt["result"]),
         )
-        _release_runtime(repo, store, releasing)
+        released = _release_runtime(repo, store, releasing)
+        if outcome == "interrupted":
+            return released
         raise SoloAIError("Native Full did not pass; preserve its failed attempt")
     fingerprint = str(attempt.get("proof") or "")
     proof = read_json(repo.local_dir / "proofs" / f"{fingerprint}.json", {})
@@ -777,7 +878,9 @@ def repair_native_batch(
         )
 
 
-def run_native_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
+def run_native_batch(
+    repo: GitRepo, *, batch_id: str, confirm_no_live_validation: bool = False
+) -> dict[str, Any]:
     """按当前持久阶段恢复；验证失败必须先修复，绝不盲目重跑。"""
 
     store = StateStore(repo)
@@ -797,7 +900,12 @@ def run_native_batch(repo: GitRepo, *, batch_id: str) -> dict[str, Any]:
             )
             batch = _run_full(repo, store, batch, verification)
         if batch["status"] == "validating":
-            batch = _recover_validation(repo, store, batch)
+            batch = _recover_validation(
+                repo,
+                store,
+                batch,
+                confirm_no_live_validation=confirm_no_live_validation,
+            )
         if batch["status"] in {"runtime_releasing", "runtime_release_pending"}:
             batch = _release_runtime(repo, store, batch)
         if batch["status"] == "validation-failed":

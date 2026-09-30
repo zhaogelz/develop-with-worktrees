@@ -812,6 +812,11 @@ def _parser() -> argparse.ArgumentParser:
         help="resume an interrupted sealed generation from recorded Git facts",
     )
     batch_recover.add_argument("--batch", required=True)
+    batch_recover.add_argument(
+        "--confirm-no-live-validation",
+        action="store_true",
+        help="record an incomplete Full only after confirming its processes stopped",
+    )
     batch_repair = batch_sub.add_parser(
         "repair",
         help="apply one exact text patch in an owned native integration workspace",
@@ -2565,7 +2570,13 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             if state["schema_version"] == STATE_SCHEMA:
                 from .native_batches import run_native_batch
 
-                return run_native_batch(repo, batch_id=args.batch)
+                return run_native_batch(
+                    repo,
+                    batch_id=args.batch,
+                    confirm_no_live_validation=args.confirm_no_live_validation,
+                )
+            if args.confirm_no_live_validation:
+                raise SoloAIError("This recovery option requires a native batch")
             return recover_batch(repo, batch_id=args.batch)
         if args.batch_command == "repair":
             if StateStore(repo).read()["schema_version"] != STATE_SCHEMA:

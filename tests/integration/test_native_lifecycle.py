@@ -28,11 +28,17 @@ from solo_ai.native_batches import (
     run_native_batch,
     seal_native_batch,
 )
+from solo_ai.proof import read_validation_attempt, start_validation_attempt
 from solo_ai.repo import GitRepo
 from solo_ai.runtime_adapter import prepare_task_runtime
 from solo_ai.safety import Finding, SensitiveContentError
 from solo_ai.state import STATE_SCHEMA, StateStore
-from solo_ai.util import ActionableSoloAIError, SoloAIError, path_identity
+from solo_ai.util import (
+    ActionableSoloAIError,
+    SoloAIError,
+    path_identity,
+    process_snapshot,
+)
 
 
 def _native_repo(
@@ -50,6 +56,125 @@ def _native_repo(
     store.mutate(lambda state: state.update(schema_version=STATE_SCHEMA))
     store.ensure_slots(load_repo_config(repo))
     return repo, store
+
+
+@pytest.mark.parametrize(
+    ("live_command", "failed_profile"),
+    [(True, False), (False, False), (False, True)],
+)
+def test_native_recover_incomplete_full_requires_stopped_command_and_keeps_failure(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live_command: bool,
+    failed_profile: bool,
+) -> None:
+    repo, store = _native_repo(git_repo)
+    task = start(repo, name="recover interrupted Full")
+    (Path(task["worktree"]) / "feature.txt").write_text("ready\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: interrupted Full source",
+        paths=["feature.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver now"
+    )
+    approve(repo, load_verification_config(repo))
+    base_head = repo.head(git_repo)
+    original_full = native_batches._run_full
+
+    def leave_incomplete(
+        _repo: GitRepo,
+        _store: StateStore,
+        current: dict[str, object],
+        _verification: object,
+    ) -> dict[str, object]:
+        attempt_id = "full-attempt-interrupted-test"
+        start_validation_attempt(
+            repo,
+            attempt_id=attempt_id,
+            level="full",
+            full_scope="integration",
+            task_id=str(current["id"]),
+            owner={"kind": "batch", "id": str(current["id"])},
+        )
+        process = (
+            process_snapshot()
+            if live_command
+            else {"pid": 2_000_000_000, "create_time": 1.0}
+        )
+        profiles: list[dict[str, object]] = []
+        if failed_profile:
+            profiles.append(
+                {
+                    "id": "failed-check",
+                    "state": "failed",
+                    "runs": [{"exit_code": 1, "log": "saved-failure.log"}],
+                }
+            )
+        profiles.append(
+            {
+                "id": "unfinished-check",
+                "state": "running",
+                "queue": {"ticket": "absent-test-ticket"},
+                "current_command": {"process": process},
+                "runs": [],
+            }
+        )
+        native_batches._update_validation_attempt(
+            repo,
+            attempt_id,
+            state="planned",
+            candidate_head=current["integration_head"],
+            base_head=current["base_before"],
+            profiles=profiles,
+        )
+        return store.update_batch(
+            str(current["id"]),
+            status="validating",
+            validation_attempt=attempt_id,
+            validation_attempts=[attempt_id],
+        )
+
+    monkeypatch.setattr(native_batches, "_run_full", leave_incomplete)
+    with pytest.raises(ActionableSoloAIError) as unconfirmed:
+        run_native_batch(repo, batch_id=batch["id"])
+    assert unconfirmed.value.code == "NATIVE_VALIDATION_ACTIVE"
+    if live_command:
+        with pytest.raises(SoloAIError, match="still live"):
+            run_native_batch(
+                repo, batch_id=batch["id"], confirm_no_live_validation=True
+            )
+        assert store.native_batch(batch["id"])["status"] == "validating"
+        assert (
+            read_validation_attempt(repo, "full-attempt-interrupted-test")["state"]
+            == "planned"
+        )
+        return
+
+    monkeypatch.setattr(native_batches, "_run_full", original_full)
+    if failed_profile:
+        with pytest.raises(SoloAIError, match="did not pass"):
+            run_native_batch(
+                repo, batch_id=batch["id"], confirm_no_live_validation=True
+            )
+        recovered = store.native_batch(batch["id"])
+        assert recovered["status"] == "validation-failed"
+    else:
+        recovered = run_native_batch(
+            repo, batch_id=batch["id"], confirm_no_live_validation=True
+        )
+        assert recovered["status"] == "composed"
+    assert repo.head(git_repo) == base_head
+    attempt = read_validation_attempt(repo, "full-attempt-interrupted-test")
+    assert attempt["state"] == "completed"
+    assert attempt["result"] == ("failed" if failed_profile else "interrupted")
+    assert attempt["profiles"][-1]["state"] == "interrupted"
+    if failed_profile:
+        assert attempt["profiles"][0]["runs"][0]["log"] == "saved-failure.log"
 
 
 def test_native_start_defers_adapter_until_runtime_is_used(

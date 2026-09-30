@@ -96,6 +96,16 @@ quiet. An incomplete Full receives a fresh execution identity for non-pure or
 incomplete checks. A complete pure profile can reuse an exact matching proof;
 an unchanged deterministic failure is not blindly rerun.
 
+If a native `batch recover` finds an incomplete Full attempt after the runner
+was interrupted, inspect its recorded process and queue ticket, then use
+`batch recover --batch <id> --confirm-no-live-validation` only when the
+original validation has stopped. Recovery checks the exact recorded process
+creation time, every recorded queue ticket, and the unchanged batch workspace
+before closing the attempt. It preserves completed profile results and logs;
+an already failed profile leaves the batch failed for managed repair, while a
+pure interruption releases runtime and leaves the batch composed for a fresh
+Full on the next `batch recover`. This recovery is not a passing proof.
+
 If Full already passed, recovery of runtime release, promotion, or cleanup
 resumes the recorded batch transaction. It does not rerun Full merely to finish
 that later work. A runtime resource cycle that was successfully released before
