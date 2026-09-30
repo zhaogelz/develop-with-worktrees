@@ -184,6 +184,13 @@ task, branch, and receipts, so “integrated”, “retained for review”, and
 “reusable” remain distinct states.
 A diagnostic blocker report authorizes no deletion.
 
+Confirmed volume cloning has one explicit native recovery entry. It can rebind
+the volume identifier only after unchanged paths, directory file numbers, modes,
+Git registration and current heads are verified under the existing state lock.
+The full before-state and a resumable receipt preserve the transition. It cannot
+approve replaced directories, invent missing task identity, mark work delivered,
+or delete ignored content. Operational details belong to the recovery reference.
+
 ## Delivery and runtime are separate
 
 A task is delivered only when its source commit is an ancestor of the promoted

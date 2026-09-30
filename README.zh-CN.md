@@ -71,4 +71,4 @@ DWW 自身只做本地操作：不会 fetch、pull、push、创建 PR、部署�
 
 - 实施任务时使用已安装的[技能](plugins/develop-with-worktrees/skills/develop-with-worktrees/SKILL.md)，它会按场景路由到一份参考文档。
 - 了解职责边界看[架构说明](docs/architecture.md)；维护本仓库看[开发与文档维护](docs/development.md)。
-- 配置字段看[配置参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)，中断或失败看[恢复参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)。
+- 配置字段看[配置参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)，中断、失败或确认克隆磁盘后的恢复看[恢复参考](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)。

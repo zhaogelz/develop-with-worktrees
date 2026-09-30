@@ -318,6 +318,12 @@ def _parser() -> argparse.ArgumentParser:
         "migration", help="preview or safely enable native task-head delivery"
     )
     migration_sub = migration.add_subparsers(dest="migration_command", required=True)
+    volume_recovery = migration_sub.add_parser(
+        "recover-volume",
+        help="review and rebind unchanged native directories after a volume clone",
+    )
+    volume_recovery.add_argument("--confirm")
+    volume_recovery.add_argument("--confirm-no-live-work", action="store_true")
     migration_preview = migration_sub.add_parser(
         "preview", help="inspect exact legacy blockers without changing state"
     )
@@ -2258,6 +2264,14 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "route":
         return repository_route(repo, session_id=args.session)
     if args.command == "migration":
+        if args.migration_command == "recover-volume":
+            from .volume_recovery import recover_volume
+
+            return recover_volume(
+                repo,
+                confirm=args.confirm,
+                confirm_no_live_work=args.confirm_no_live_work,
+            )
         if args.migration_command == "preview":
             return preview_native_migration(repo, base_ref=args.base)
         if args.migration_command == "adopt-legacy-integration-workspace":

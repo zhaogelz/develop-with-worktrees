@@ -34,6 +34,34 @@ directories remain preserved. This clean recovery does not use `reset --hard`.
 
 ## Root and task continuity
 
+### Volume clone with unchanged directories
+
+For native schema 12, a confirmed disk clone can leave every recorded path and
+directory file number unchanged while the volume identifier changes. Stop host
+work and validation first, then preview:
+
+```text
+dww migration recover-volume
+dww migration recover-volume --confirm <preview-sha256> --confirm-no-live-work
+```
+
+Use the installed runner for these commands. The confirmation binds the full
+state, current directory identities, and Git HEAD/branch facts. Recovery accepts
+only one old-to-new volume transition. Paths, file numbers, modes, registration,
+the common Git directory, clean worktrees, slot generations, and frozen task
+heads must still match. Active operations, queued validation, unfinished batches,
+owned integration workspaces, and ambiguous pre-activation tasks block it.
+This narrow entry requires existing fixed-slot release identities; it does not
+guess missing records or recover moved/recreated directories.
+
+Only live slot records, their current/released task identities, and the idle
+integration workspace are rebound. Task statuses, ownership, leases, commits,
+proofs, historical batches, and ignored files are preserved. The original state
+and an interruption-safe receipt are saved under `solo-ai/volume-recovery/` in
+the Git common directory. Retry the same confirmation after a write interruption;
+changed evidence requires a fresh preview. Recovery is not delivery or cleanup:
+continue the exact existing task under its lifecycle owner afterward.
+
 Start and `bind-root` already return the current complete root. After a real
 continuation, context recovery, root-plan change, or candidate repair, read the
 child anchor and run `anchor refresh-root` once. A stale review record blocks

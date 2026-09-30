@@ -142,4 +142,4 @@ publication.
   this repository.
 - See [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)
   for policy fields, and [recovery](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
-  for an interrupted or failed task.
+  for an interrupted or failed task, including recovery after a confirmed disk clone.
