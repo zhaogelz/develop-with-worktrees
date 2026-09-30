@@ -2917,6 +2917,7 @@ class StateStore:
         expected_branch: str,
         expected_head: str,
         host_origin: dict[str, str],
+        waiting_integrated: bool = False,
     ) -> dict[str, Any]:
         """在已复核现场后，原子轮换隔离任务租约和精确宿主所有者。"""
 
@@ -2930,8 +2931,13 @@ class StateStore:
             task = state["tasks"].get(task_id)
             if not task or self.mode(task) != ISOLATED_MODE:
                 raise SoloAIError("Only isolated tasks can be handed off")
-            if task.get("status") not in {"active", "ready"}:
-                raise SoloAIError("Only active or ready tasks can be handed off")
+            allowed = {"active", "ready"}
+            if waiting_integrated:
+                allowed.add("waiting-integration")
+            if task.get("status") not in allowed:
+                raise SoloAIError(
+                    "Only active, ready, or verified delivered tasks can be handed off"
+                )
             if (
                 task.get("candidate_publication")
                 or task.get("integration")
@@ -2948,11 +2954,29 @@ class StateStore:
                 or task.get("candidate_head") != expected_head
             ):
                 raise SoloAIError("Task branch or HEAD changed before handoff")
+            if task.get("status") == "waiting-integration":
+                delivery = task.get("native_delivery") or {}
+                if (
+                    not waiting_integrated
+                    or delivery.get("ready_head") != expected_head
+                    or delivery.get("batch_id")
+                    or delivery.get("delivery")
+                    or any(
+                        any(
+                            member.get("task_id") == task_id
+                            for member in batch.get("members", [])
+                        )
+                        for batch in state.get("batches", {}).values()
+                    )
+                ):
+                    raise SoloAIError(
+                        "Waiting task is owned by delivery or changed identity"
+                    )
             slot = state["slots"].get(str(task.get("slot_id")))
             if (
                 not slot
                 or slot.get("task_id") != task_id
-                or slot.get("status") not in {"active", "ready"}
+                or slot.get("status") not in allowed
             ):
                 raise SoloAIError("Task lost its managed slot before handoff")
             task.update(

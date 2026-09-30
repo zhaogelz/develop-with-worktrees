@@ -15,6 +15,7 @@ from .util import (
     DirectoryLock,
     SoloAIError,
     atomic_write_json,
+    is_link_or_junction,
     path_identity,
     read_json,
     sha256_text,
@@ -35,6 +36,68 @@ def _queue_snapshot() -> dict[str, Any]:
         "active": state.get("active"),
         "waiting": list(_ticket_root().glob("*.json")),
     }
+
+
+def completed_rebind_for_task(repo: GitRepo, task: dict[str, Any]) -> bool:
+    """确认受管根身份失败的任务确实出现在已完成的卷恢复回执中。"""
+    directory = repo.local_dir / "volume-recovery"
+    if not directory.is_dir() or is_link_or_junction(directory):
+        return False
+    for receipt_path in directory.glob("*.receipt.json"):
+        if is_link_or_junction(receipt_path):
+            continue
+        receipt = read_json(receipt_path, {})
+        digest = receipt_path.name.removesuffix(".receipt.json")
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("status") != "completed"
+            or receipt.get("confirmation") != digest
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            continue
+        backup = directory / f"{digest}.before.json"
+        if (
+            not backup.is_file()
+            or is_link_or_junction(backup)
+            or receipt.get("backup") != str(backup)
+        ):
+            continue
+        before = read_json(backup, {})
+        if (
+            not isinstance(before, dict)
+            or sha256_text(stable_json(before)) != receipt.get("before_sha256")
+            or not isinstance(before.get("tasks"), dict)
+        ):
+            continue
+        previous = before.get("tasks", {}).get(task["id"], {})
+        fields = {"slot_worktree_identity", "slot_managed_root_identity"}
+        changed = {
+            item.get("field")
+            for item in receipt.get("changes", [])
+            if isinstance(item, dict) and item.get("record") == f"tasks.{task['id']}"
+        }
+        if (
+            not isinstance(previous, dict)
+            or previous.get("quarantine_reason")
+            != "Managed root directory object was replaced"
+            or previous.get("slot_generation") != task.get("slot_generation")
+            or previous.get("worktree") != task.get("worktree")
+            or not fields.issubset(changed)
+        ):
+            continue
+        if all(
+            isinstance(previous.get(field), dict)
+            and isinstance(task.get(field), dict)
+            and [previous[field].get("device"), task[field].get("device")]
+            == receipt.get("volume_transition")
+            and {
+                key: value for key, value in previous[field].items() if key != "device"
+            }
+            == {key: value for key, value in task[field].items() if key != "device"}
+            for field in fields
+        ):
+            return True
+    return False
 
 
 def _inspect(

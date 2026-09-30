@@ -272,3 +272,75 @@ def test_cli_preview_and_apply_round_trip(cloned_repo):
         )
     )
     assert applied["changed"]
+
+
+def test_recovered_clone_failure_has_a_formal_empty_task_release(git_repo: Path):
+    from solo_ai.lifecycle import recover
+
+    repo = GitRepo(git_repo)
+    initialize(
+        repo,
+        slots=1,
+        commands=[CommandSpec(("git", "diff", "--check", "main...HEAD"))],
+        accept=True,
+        accept_static_only=False,
+    )
+    store = StateStore(repo)
+    store.mutate(lambda state: state.update(schema_version=STATE_SCHEMA))
+    store.ensure_slots(load_repo_config(repo))
+    predecessor = start(repo, name="prior fixed slot task")
+    abandon(
+        repo,
+        task_id=predecessor["id"],
+        lease=predecessor["lease"],
+        confirm=predecessor["id"],
+    )
+
+    def simulate_clone(state):
+        slot = state["slots"]["01"]
+        for key in ("released_worktree_identity", "released_managed_root_identity"):
+            slot[key]["device"] -= 1
+        for task in state["tasks"].values():
+            for key in (
+                "slot_worktree_identity",
+                "slot_managed_root_identity",
+                "base_worktree_identity",
+            ):
+                task[key]["device"] -= 1
+            abandonment = task.get("abandonment") or {}
+            for key in ("worktree_identity", "managed_root_identity"):
+                if key in abandonment:
+                    abandonment[key]["device"] -= 1
+
+    store.mutate(simulate_clone)
+    with pytest.raises(SoloAIError, match="root directory object was replaced"):
+        start(repo, name="blocked empty task")
+    blocked_id = store.read()["slots"]["01"]["task_id"]
+    assert store.task(blocked_id)["status"] == "quarantined"
+    preview = volume_recovery.recover_volume(repo)
+    applied = volume_recovery.recover_volume(
+        repo, confirm=preview["confirmation"], confirm_no_live_work=True
+    )
+    receipt_path = Path(applied["receipt"])
+    receipt = receipt_path.read_bytes()
+    receipt_path.unlink()
+    with pytest.raises(SoloAIError, match="not an eligible"):
+        recover(
+            repo,
+            task_id=blocked_id,
+            abandon_unactivated=True,
+            confirm=blocked_id,
+            reason="Empty task after verified volume clone",
+        )
+    assert store.task(blocked_id)["status"] == "quarantined"
+    receipt_path.write_bytes(receipt)
+    released = recover(
+        repo,
+        task_id=blocked_id,
+        abandon_unactivated=True,
+        confirm=blocked_id,
+        reason="Empty task after verified volume clone",
+    )
+    assert released["status"] == "abandoned"
+    assert store.read()["slots"]["01"]["status"] == "idle"
+    assert repo.branch(Path(store.task(blocked_id)["worktree"])) is None

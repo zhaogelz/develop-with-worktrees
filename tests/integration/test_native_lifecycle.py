@@ -573,6 +573,114 @@ def test_native_start_accepts_completed_abandonment_predecessor(git_repo: Path) 
     assert repo.head(Path(second["worktree"])) == repo.head(git_repo)
 
 
+def test_waiting_source_already_in_main_can_handoff_then_release_dependencies(
+    git_repo: Path,
+) -> None:
+    from solo_ai.lifecycle import handoff
+
+    repo, store = _native_repo(git_repo, slots=2)
+    original = {"kind": "codex", "thread_id": "original-owner"}
+    recipient = {"kind": "codex", "thread_id": "recovery-owner"}
+    first = start(repo, name="original source", host_origin=original)
+    first_worktree = Path(first["worktree"])
+    (first_worktree / "first.txt").write_text("source\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=first["id"],
+        lease=first["lease"],
+        message="test: original source",
+        paths=["first.txt"],
+    )
+    ready(repo, task_id=first["id"], lease=first["lease"])
+    second = start(repo, name="maintenance containing source", host_origin=original)
+    second_worktree = Path(second["worktree"])
+    git(second_worktree, "merge", "--no-ff", "--no-edit", repo.head(first_worktree))
+    (second_worktree / "second.txt").write_text("maintenance\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=second["id"],
+        lease=second["lease"],
+        message="test: maintenance source",
+        paths=["second.txt"],
+    )
+    finish(repo, task_id=second["id"], lease=second["lease"])
+    confirmation = f"{second['id']}:{second['branch']}:{repo.head(second_worktree)}"
+    with pytest.raises(SoloAIError, match="not in its current base"):
+        handoff(repo, task_id=second["id"], confirm=confirmation, host_origin=recipient)
+    assert store.task(second["id"])["status"] == "waiting-integration"
+    git(git_repo, "merge", "--no-ff", "--no-edit", repo.head(second_worktree))
+    with pytest.raises(SoloAIError, match="referenced by active task"):
+        abandon(
+            repo,
+            task_id=first["id"],
+            lease=first["lease"],
+            confirm=first["id"],
+            reason="source already in main",
+        )
+    transferred = handoff(
+        repo, task_id=second["id"], confirm=confirmation, host_origin=recipient
+    )
+    assert transferred["status"] == "waiting-integration"
+    assert transferred["host_origin"] == recipient
+    assert transferred["lease"] != second["lease"]
+    assert (
+        abandon(
+            repo,
+            task_id=second["id"],
+            lease=transferred["lease"],
+            confirm=second["id"],
+            reason="source already in main",
+        )["status"]
+        == "abandoned"
+    )
+    assert (
+        abandon(
+            repo,
+            task_id=first["id"],
+            lease=first["lease"],
+            confirm=first["id"],
+            reason="source already in main",
+        )["status"]
+        == "abandoned"
+    )
+    assert store.read()["slots"][first["slot_id"]]["status"] == "idle"
+    assert store.read()["slots"][second["slot_id"]]["status"] == "idle"
+
+
+def test_waiting_handoff_rejects_a_native_batch_claim(git_repo: Path) -> None:
+    from solo_ai.lifecycle import handoff
+
+    repo, store = _native_repo(git_repo)
+    owner = {"kind": "codex", "thread_id": "original-owner"}
+    task = start(repo, name="batch claimed source", host_origin=owner)
+    worktree = Path(task["worktree"])
+    (worktree / "source.txt").write_text("source\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: batch source",
+        paths=["source.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    git(git_repo, "merge", "--no-ff", "--no-edit", repo.head(worktree))
+    before = store.task(task["id"])
+    store.mutate(
+        lambda state: state["batches"].update(
+            test_batch={"status": "sealed", "members": [{"task_id": task["id"]}]}
+        )
+    )
+    with pytest.raises(SoloAIError, match="owned by delivery"):
+        handoff(
+            repo,
+            task_id=task["id"],
+            confirm=f"{task['id']}:{task['branch']}:{repo.head(worktree)}",
+            host_origin={"kind": "codex", "thread_id": "recovery-owner"},
+        )
+    assert store.task(task["id"])["host_origin"] == before["host_origin"]
+    assert store.task(task["id"])["lease"] == before["lease"]
+
+
 def test_quarantined_start_preserves_unique_detached_commit(git_repo: Path) -> None:
     repo, store = _native_repo(git_repo)
     worktree = Path(str(store.read()["slots"]["01"]["path"]))

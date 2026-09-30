@@ -13,6 +13,8 @@ from a title, a worktree count, or a quiet log.
 | Start remains `starting` | activation receipt, worktree identity, contamination | retry the same request ID or `recover` after the cause is known | task, slot, anchor, and unexpected files |
 | Start was quarantined before activation because an old idle slot was dirty | task has no branch, anchor, activation, candidate, or ordinary untracked content; each tracked dirty blob equals the current descendant base or an exact blob in its post-baseline first-parent history | `recover` records and resumes the bounded pre-activation release | original scene, exact content fingerprints, accepted commit, slot generation, and ignored/protected content |
 | Start was quarantined before activation because a clean fixed slot was detached | exact task and slot identity, no branch, anchor, activation, Ready, candidate, or delivery; detached HEAD belongs to current target history | `recover --task <id> --abandon-unactivated --confirm <id> --reason <one-line>` ends an unneeded task with an audit reason, then the next Start can restore the idle branch | task remains distinct from any replacement delivery; unknown content and audit slots |
+| Start was quarantined by an old volume identity after a verified clone | completed volume recovery receipt and before-state, same task/slot directory numbers, no branch, anchor, activation, candidate, or delivery | the same exact `recover --abandon-unactivated` entry returns the empty task and records its reason | old state backup, empty task identity, protected content |
+| A frozen native source is already in its current local base, but remains waiting without a batch | exact source HEAD and branch, no delivery claim, live process or validation; review the independent delivery | `handoff` to the current host, then ordinary `abandon` with an audit reason; close dependent sources before their ancestors | original commits, task histories, and abandonment receipts |
 | Candidate is `held` | publication and release receipt | repair or recover the exact release path | candidate ref, task anchor, and base |
 | Older published candidate has no ordinary branch | completed publication, original branch name, exact candidate ref and head | preview `candidate restore-branch --candidate <id>`, then use `--apply` for the exact missing branch | candidate ref and any current worktree; a conflicting branch is never overwritten |
 | Batch is interrupted but not failed | batch phase and live operation | `batch recover` for that recorded generation | batch, base, and validation receipt |
@@ -61,6 +63,9 @@ and an interruption-safe receipt are saved under `solo-ai/volume-recovery/` in
 the Git common directory. Retry the same confirmation after a write interruption;
 changed evidence requires a fresh preview. Recovery is not delivery or cleanup:
 continue the exact existing task under its lifecycle owner afterward.
+After a completed rebind, a root-identity pre-activation failure can use the
+existing empty-task release only when its before-state and receipt identify the
+same task and the current directory still passes ordinary release checks.
 
 Start and `bind-root` already return the current complete root. After a real
 continuation, context recovery, root-plan change, or candidate repair, read the

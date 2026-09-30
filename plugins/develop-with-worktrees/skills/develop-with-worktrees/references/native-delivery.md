@@ -85,6 +85,15 @@ identity checks; delivery receipts must succeed before a slot is idle. A release
 failure retries only its unfinished tail. A cancelled or unknown slot is
 preserved, not reset for another task.
 
+If an externally reviewed native source is already an ancestor of its current
+local base before batch ownership, a stopped `waiting-integration` task may be
+handed to the current host with its exact task, branch, and HEAD confirmation.
+It retains its frozen status and proof. Ordinary `abandon` can then record why
+that source was delivered outside its original batch and return its slot. A
+source referenced by another still active branch remains protected until the
+dependent task is closed. A batch claim, changed HEAD, or live process blocks
+handoff; this does not create a DWW batch delivery receipt.
+
 Project runtime preparation is on demand; see [Runtime Adapter](runtime-adapter.md).
 Pure proof reuse requires its declared inputs, tools, environment, command,
 configuration, and logs to match. Side effects and required outputs need fresh

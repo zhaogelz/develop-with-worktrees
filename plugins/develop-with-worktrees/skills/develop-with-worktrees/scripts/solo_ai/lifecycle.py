@@ -109,6 +109,9 @@ from .state import (
     StateStore,
     candidate_admission_lock,
 )
+from .volume_recovery import (
+    completed_rebind_for_task as _completed_volume_rebind_for_task,
+)
 from .task_context import (
     adopt_legacy_anchor,
     bind_root_reference,
@@ -1714,14 +1717,23 @@ def _preactivation_release_paths(
     return records
 
 
-def _is_clean_fixed_slot_preactivation_failure(task: dict[str, Any]) -> bool:
+def _is_clean_fixed_slot_preactivation_failure(
+    repo: GitRepo, task: dict[str, Any]
+) -> bool:
     """只识别固定分支尚未创建、没有交付内容的领取失败。"""
 
     return (
         not _is_in_place(task)
         and task.get("status") == "quarantined"
-        and task.get("quarantine_reason")
-        == "Fixed slot is not attached to its recorded branch"
+        and (
+            task.get("quarantine_reason")
+            == "Fixed slot is not attached to its recorded branch"
+            or (
+                task.get("quarantine_reason")
+                == "Managed root directory object was replaced"
+                and _completed_volume_rebind_for_task(repo, task)
+            )
+        )
         and not task.get("candidate_head")
         and not task.get("candidate_publication")
         and not task.get("integration")
@@ -1745,7 +1757,7 @@ def _new_preactivation_release(
 ) -> dict[str, Any]:
     clean_fixed_slot = clean_fixed_slot_reason is not None
     if clean_fixed_slot:
-        if not _is_clean_fixed_slot_preactivation_failure(task):
+        if not _is_clean_fixed_slot_preactivation_failure(repo, task):
             raise SoloAIError(
                 "Task is not an eligible fixed-slot pre-activation failure"
             )
@@ -5195,7 +5207,7 @@ def recover(
                 or release.get("reason") != reason.strip()
             ):
                 raise SoloAIError("Unactivated release reason or kind changed")
-        elif not _is_clean_fixed_slot_preactivation_failure(task):
+        elif not _is_clean_fixed_slot_preactivation_failure(repo, task):
             raise SoloAIError(
                 "Task is not an eligible fixed-slot pre-activation failure"
             )
@@ -5607,8 +5619,11 @@ def handoff(
         raise SoloAIError(f"Handoff requires --confirm {expected!r}")
     if StateStore.mode(task) != ISOLATED_MODE:
         raise SoloAIError("Handoff only applies to isolated tasks")
-    if task.get("status") not in {"active", "ready"}:
-        raise SoloAIError("Only active or ready tasks can be handed off")
+    waiting_integrated = task.get("status") == "waiting-integration"
+    if task.get("status") not in {"active", "ready", "waiting-integration"}:
+        raise SoloAIError(
+            "Only active, ready, or verified delivered tasks can be handed off"
+        )
     if (
         task.get("candidate_publication")
         or task.get("integration")
@@ -5631,7 +5646,7 @@ def handoff(
     _assert_handoff_validation_idle(repo, task_id)
     with store.recovery_operation(task_id) as recovery_task:
         operation_id = str(recovery_task["active_operation"]["id"])
-        with maintenance_lock(repo):
+        with maintenance_lock(repo), candidate_admission_lock(repo):
             task = store.task(task_id)
             active = task.get("active_operation") or {}
             if active.get("id") != operation_id or active.get("kind") != "recover":
@@ -5645,12 +5660,22 @@ def handoff(
                 raise SoloAIError("Task identity changed after handoff confirmation")
             _assert_handoff_validation_idle(repo, task_id)
             _assert_handoff_identity(repo, task)
+            if waiting_integrated:
+                current_base = repo.ref_head(f"refs/heads/{task['base_ref']}")
+                if (
+                    task.get("status") != "waiting-integration"
+                    or current_base is None
+                    or not repo.is_ancestor(str(confirmed_head), current_base)
+                    or not repo.is_ancestor(str(task["base_head"]), current_base)
+                ):
+                    raise SoloAIError("Waiting task source is not in its current base")
             return store.handoff_isolated_task(
                 task_id,
                 operation_id=operation_id,
                 expected_branch=str(confirmed_branch),
                 expected_head=str(confirmed_head),
                 host_origin=host_origin,
+                waiting_integrated=waiting_integrated,
             )
 
 
