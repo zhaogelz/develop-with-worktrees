@@ -244,6 +244,10 @@ It accepts only an idle or inactive registered slot with no current owner,
 clean tracked files, and a HEAD already in its recorded target base. The plan
 freezes the slot generation, actual attached or detached Git state, base head,
 directory identities, and every content object. Execution rechecks those facts,
+accepting only a forward move of the recorded target base that still contains
+the frozen slot HEAD; a missing, rewound, or divergent base stops recovery.
+The slot generation, branch/HEAD, directory identities, and content remain exact.
+The operation
 stages the whole root on the same volume, deletes only unchanged objects without
 following links, removes the exact Git worktree registration, and leaves the
 slot number and history in place. An interrupted disposal keeps that slot

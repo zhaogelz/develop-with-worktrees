@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -178,14 +179,21 @@ def _stage(payload: dict[str, Any], plan_id: str) -> Path:
 
 
 def _check_slot(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> Path:
+    if payload.get("slot_status") not in {"idle", "inactive"}:
+        raise SoloAIError("Whole-slot plan has an invalid original slot status")
     _, slot, root = _slot(repo, str(payload["slot"]), plan_id=plan_id)
+    if payload.get("worktree") != str(root):
+        raise SoloAIError("Whole-slot plan worktree path changed")
+    current_base = repo.ref_head(f"refs/heads/{payload['base_ref']}")
     if (
         slot.get("generation") != payload["slot_generation"]
         or slot.get("released_task_id") != payload["released_task_id"]
         or slot.get("released_candidate_task_id")
         != payload["released_candidate_task_id"]
         or slot.get("fixed_branch") != payload["fixed_branch"]
-        or repo.ref_head(f"refs/heads/{payload['base_ref']}") != payload["base_head"]
+        or not current_base
+        or not repo.is_ancestor(str(payload["base_head"]), current_base)
+        or not repo.is_ancestor(str(payload["head"]), current_base)
         or (
             payload["branch"] is not None
             and repo.ref_head(f"refs/heads/{payload['branch']}") != payload["head"]
@@ -210,6 +218,11 @@ def _claim(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> None:
             not slot
             or slot.get("generation") != payload["slot_generation"]
             or slot.get("task_id")
+            or slot.get("path") != payload["worktree"]
+            or slot.get("released_task_id") != payload["released_task_id"]
+            or slot.get("released_candidate_task_id")
+            != payload["released_candidate_task_id"]
+            or slot.get("fixed_branch") != payload["fixed_branch"]
         ):
             raise SoloAIError("Slot disposal generation or owner changed")
         if (
@@ -304,6 +317,8 @@ def dispose_slot(
     repo: GitRepo, *, slot: str, plan_id: str | None, confirm: str | None
 ) -> dict[str, Any]:
     """经确认后整槽暂存、逐对象删除，再注销Git登记。"""
+    if re.fullmatch(r"(?:0[1-9]|[12][0-9]|3[0-2])", slot) is None:
+        raise SoloAIError("Whole-slot disposal requires an exact slot id")
     if plan_id is None and confirm is None:
         payload = _payload(repo, slot)
         digest = sha256_text(stable_json(payload))
@@ -326,6 +341,8 @@ def dispose_slot(
         }
     if not plan_id or not confirm:
         raise SoloAIError("Whole-slot disposal requires both --plan and --confirm")
+    if re.fullmatch(rf"cleanup-slot-{slot}-\d{{14}}-[0-9a-f]{{8}}", plan_id) is None:
+        raise SoloAIError("Whole-slot disposal plan id is not an exact filename")
     plan_path = repo.local_dir / "cleanup-plans" / f"{plan_id}.json"
     plan = read_json(plan_path, {})
     if (
@@ -401,7 +418,15 @@ def dispose_slot(
     }:
         raise SoloAIError("Unsupported whole-slot disposal recovery state")
     if phase == "planned":
-        if _payload(repo, slot) != payload:
+        current = _payload(repo, slot)
+        current_base = str(current["base_head"])
+        if (
+            not repo.is_ancestor(str(payload["base_head"]), current_base)
+            or not repo.is_ancestor(str(payload["head"]), current_base)
+        ):
+            raise SoloAIError("Whole-slot disposal base changed after review")
+        current["base_head"] = payload["base_head"]
+        if current != payload:
             raise SoloAIError(
                 "Whole-slot disposal content or identity changed after review"
             )

@@ -11,7 +11,13 @@ from solo_ai.config import CommandSpec, load_repo_config
 from solo_ai.lifecycle import abandon, initialize, start
 from solo_ai.repo import GitRepo
 from solo_ai.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
-from solo_ai.util import SoloAIError
+from solo_ai.util import (
+    SoloAIError,
+    atomic_write_json,
+    read_json,
+    sha256_text,
+    stable_json,
+)
 
 pytestmark = pytest.mark.dww_fast
 
@@ -97,6 +103,44 @@ def test_dispose_rejects_active_slot_and_new_generation(git_repo: Path) -> None:
     assert store.read()["slots"]["01"]["generation"] > plan["slot_generation"]
 
 
+def test_dispose_rejects_path_traversal_and_forged_worktree(
+    git_repo: Path,
+) -> None:
+    repo, store = _repo(git_repo)
+    root = Path(store.read()["slots"]["01"]["path"])
+    git(git_repo, "worktree", "add", "--detach", str(root), "main")
+    plan = _prune(repo, kind="slot", slot="01", dispose=True)
+    with pytest.raises(SoloAIError, match="exact filename"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            dispose=True,
+            plan_id="../other.json",
+            confirm=str(plan["digest"]),
+        )
+
+    plan_path = repo.local_dir / "cleanup-plans" / f"{plan['plan_id']}.json"
+    saved = read_json(plan_path, {})
+    payload = dict(saved["payload"])
+    payload["worktree"] = str(git_repo)
+    saved["payload"] = payload
+    saved["digest"] = sha256_text(stable_json(payload))
+    saved["status"] = "claiming"
+    atomic_write_json(plan_path, saved)
+    with pytest.raises(SoloAIError, match="generation or owner changed"):
+        _prune(
+            repo,
+            kind="slot",
+            slot="01",
+            dispose=True,
+            plan_id=str(plan["plan_id"]),
+            confirm=str(saved["digest"]),
+        )
+    assert root.exists()
+    assert store.read()["slots"]["01"]["status"] == "idle"
+
+
 def test_dispose_rejects_changed_content_and_replaced_directory(
     git_repo: Path,
 ) -> None:
@@ -173,6 +217,46 @@ def test_dispose_resumes_partial_delete_and_blocks_start(
     _execute(repo, plan)
     assert not root.exists()
     assert store.read()["slots"]["01"]["status"] == "idle"
+
+
+@pytest.mark.parametrize("advance", ["forward", "diverge"])
+def test_dispose_recovery_requires_forward_only_base(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, advance: str
+) -> None:
+    repo, store = _repo(git_repo)
+    root = Path(store.read()["slots"]["01"]["path"])
+    git(git_repo, "worktree", "add", "--detach", str(root), "main")
+    (root / "approved.txt").write_text("remove\n", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01", dispose=True)
+    original = slot_disposal.delete_plain_path_if_unchanged
+    interrupted = False
+
+    def interrupt(path: Path, snapshot: dict[str, object]) -> None:
+        nonlocal interrupted
+        original(path, snapshot)
+        if not interrupted:
+            interrupted = True
+            raise RuntimeError("simulated interruption")
+
+    monkeypatch.setattr(slot_disposal, "delete_plain_path_if_unchanged", interrupt)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        _execute(repo, plan)
+    monkeypatch.setattr(slot_disposal, "delete_plain_path_if_unchanged", original)
+
+    if advance == "forward":
+        (git_repo / "later.txt").write_text("accepted\n", encoding="utf-8")
+        git(git_repo, "add", "later.txt")
+        git(git_repo, "commit", "-m", "test: advance base")
+        result = _execute(repo, plan)
+        assert result["status"] == "disposed"
+        assert store.read()["slots"]["01"]["status"] == "idle"
+    else:
+        tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
+        unrelated = git(git_repo, "commit-tree", tree, "-m", "unrelated").strip()
+        git(git_repo, "update-ref", "refs/heads/main", unrelated)
+        with pytest.raises(SoloAIError, match="base changed"):
+            _execute(repo, plan)
+        assert store.read()["slots"]["01"]["status"] == "disposing"
 
 
 def test_dispose_refuses_replaced_parent_link_before_delete(
