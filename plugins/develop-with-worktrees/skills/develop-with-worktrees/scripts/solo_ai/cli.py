@@ -104,6 +104,7 @@ from .repo import GitRepo
 from .routing import detect_existing_workflows
 from .runtime_adapter import prepare_task_runtime, verify_runtime_effective
 from .state import FINAL_TASK_STATES, STATE_SCHEMA, StateStore
+from .slot_disposal import dispose_slot
 from .status_views import status_view as query_status_view
 from .util import (
     ActionableSoloAIError,
@@ -1237,9 +1238,14 @@ def _parser() -> argparse.ArgumentParser:
         prune.add_argument("--confirm", choices=["PRUNE"], required=True)
     prune_slot = sub.add_parser(
         "prune-slot",
-        help="plan or execute cleanup of declared paths in one empty managed slot",
+        help="plan declared-path cleanup or explicit disposal of one idle slot",
     )
     prune_slot.add_argument("--slot", required=True)
+    prune_slot.add_argument(
+        "--dispose",
+        action="store_true",
+        help="explicitly dispose the reviewed idle slot worktree root",
+    )
     prune_slot.add_argument("--plan", help="plan id returned by a previous prune-slot")
     prune_slot.add_argument(
         "--confirm", help="exact digest returned by a previous prune-slot plan"
@@ -2068,8 +2074,13 @@ def _prune(
     slot: str | None = None,
     plan_id: str | None = None,
     confirm: str | None = None,
+    dispose: bool = False,
 ) -> dict[str, Any]:
     with maintenance_lock(repo):
+        if dispose:
+            if kind != "slot" or not slot:
+                raise SoloAIError("Whole-slot disposal requires an exact slot")
+            return dispose_slot(repo, slot=slot, plan_id=plan_id, confirm=confirm)
         _require_idle(repo)
         if kind in {"proofs", "logs"}:
             targets = [repo.local_dir / kind]
@@ -3046,6 +3057,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             slot=args.slot,
             plan_id=args.plan,
             confirm=args.confirm,
+            dispose=args.dispose,
         )
     if args.command == "deinit":
         return deinit(repo, confirm=args.confirm, message=args.message)

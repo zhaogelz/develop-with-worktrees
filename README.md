@@ -15,6 +15,7 @@ task contract locally, and carries reviewed changes through local integration.
 - Exact-path commits on a fixed slot branch, preserved until delivery.
 - Reused worktrees keep local dependencies; the next task prefers a suitable
   slot that was recently delivered.
+- An explicitly cleared idle slot is rebuilt when a later task needs it.
 - Real Git merges that keep the task commit in local history.
 - One combined validation and protected local promotion per target branch.
 - Fast Start; project runtime preparation runs when the task first needs it.
