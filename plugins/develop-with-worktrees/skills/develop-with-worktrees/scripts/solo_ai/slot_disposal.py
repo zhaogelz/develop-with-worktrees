@@ -432,6 +432,55 @@ def _remaining(
     return observed
 
 
+def _delete_observed_windows(
+    stage: Path,
+    payload: dict[str, Any],
+    observed: dict[str, dict[str, Any]],
+) -> None:
+    """沿冻结目录树持有父目录句柄，每个普通目录只固定一次。"""
+    expected = payload["entries"]
+    children: dict[str, list[str]] = {}
+    for relative in observed:
+        if relative != ".":
+            parent = Path(relative).parent.as_posix()
+            children.setdefault(parent, []).append(relative)
+
+    with pinned_plain_directory(stage.parent, payload["managed_root_identity"]):
+        # 显式进入/退出栈保持父链句柄；目录自身关闭后才条件删除。
+        pending: list[tuple[str, bool]] = [(".", False)]
+        held: list[ExitStack] = []
+        try:
+            while pending:
+                relative, leaving = pending.pop()
+                path = stage if relative == "." else stage / relative
+                snapshot = expected[relative]
+                if leaving:
+                    held.pop().close()
+                    delete_plain_path_if_unchanged(
+                        path, snapshot, posix_disposition=True
+                    )
+                elif snapshot["kind"] == "directory":
+                    current = ExitStack()
+                    current.enter_context(pinned_plain_directory(path, snapshot))
+                    held.append(current)
+                    pending.append((relative, True))
+                    pending.extend(
+                        (child, False)
+                        for child in reversed(sorted(children.get(relative, [])))
+                    )
+                elif snapshot["kind"] == "link":
+                    delete_link_path_if_unchanged(
+                        path, snapshot, posix_disposition=True
+                    )
+                else:
+                    delete_plain_path_if_unchanged(
+                        path, snapshot, posix_disposition=True
+                    )
+        finally:
+            for current in reversed(held):
+                current.close()
+
+
 def dispose_slot(
     repo: GitRepo,
     *,
@@ -615,43 +664,48 @@ def dispose_slot(
             if path_identity(stage) != payload["worktree_identity"]:
                 raise SoloAIError("Whole-slot staging directory was replaced")
             observed = _remaining(stage, expected)
-            for relative in sorted(
-                observed, key=lambda key: (len(Path(key).parts), key), reverse=True
-            ):
-                path = stage if relative == "." else stage / relative
-                snapshot = expected[relative]
-                # 删除目标前固定完整的普通父目录链，避免替换为链接后重定向路径。
-                with ExitStack() as pinned:
-                    pinned.enter_context(
-                        pinned_plain_directory(
-                            stage.parent, payload["managed_root_identity"]
-                        )
-                    )
-                    parent = stage
-                    ancestors = [] if relative == "." else [stage]
-                    for part in Path(relative).parts[:-1]:
-                        parent = parent / part
-                        ancestors.append(parent)
-                    for ancestor in ancestors:
-                        key = (
-                            "."
-                            if ancestor == stage
-                            else ancestor.relative_to(stage).as_posix()
-                        )
-                        frozen = expected.get(key)
-                        if not frozen or frozen["kind"] != "directory":
-                            raise SoloAIError(
-                                "Whole-slot parent was not a frozen directory"
+            if os.name == "nt":
+                _delete_observed_windows(stage, payload, observed)
+            else:
+                for relative in sorted(
+                    observed, key=lambda key: (len(Path(key).parts), key), reverse=True
+                ):
+                    path = stage if relative == "." else stage / relative
+                    snapshot = expected[relative]
+                    # 删除目标前固定完整的普通父目录链，避免替换为链接后重定向路径。
+                    with ExitStack() as pinned:
+                        pinned.enter_context(
+                            pinned_plain_directory(
+                                stage.parent, payload["managed_root_identity"]
                             )
-                        pinned.enter_context(pinned_plain_directory(ancestor, frozen))
-                    if snapshot["kind"] == "link":
-                        delete_link_path_if_unchanged(
-                            path, snapshot, posix_disposition=True
                         )
-                    else:
-                        delete_plain_path_if_unchanged(
-                            path, snapshot, posix_disposition=True
-                        )
+                        parent = stage
+                        ancestors = [] if relative == "." else [stage]
+                        for part in Path(relative).parts[:-1]:
+                            parent = parent / part
+                            ancestors.append(parent)
+                        for ancestor in ancestors:
+                            key = (
+                                "."
+                                if ancestor == stage
+                                else ancestor.relative_to(stage).as_posix()
+                            )
+                            frozen = expected.get(key)
+                            if not frozen or frozen["kind"] != "directory":
+                                raise SoloAIError(
+                                    "Whole-slot parent was not a frozen directory"
+                                )
+                            pinned.enter_context(
+                                pinned_plain_directory(ancestor, frozen)
+                            )
+                        if snapshot["kind"] == "link":
+                            delete_link_path_if_unchanged(
+                                path, snapshot, posix_disposition=True
+                            )
+                        else:
+                            delete_plain_path_if_unchanged(
+                                path, snapshot, posix_disposition=True
+                            )
         if stage.exists() or is_link_or_junction(stage):
             raise SoloAIError("Whole-slot staging directory remains")
         plan["status"] = "unregistering"
