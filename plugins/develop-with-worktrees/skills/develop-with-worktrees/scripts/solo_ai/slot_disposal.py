@@ -167,7 +167,6 @@ def _payload(
     repo: GitRepo, slot_id: str, *, recover_volume: bool = False
 ) -> dict[str, Any]:
     store, slot, root = _slot(repo, slot_id)
-    parent = root.parent
     worktree_identity, parent_identity, recovery = _released_identity(
         slot, root, recover_volume=recover_volume
     )
