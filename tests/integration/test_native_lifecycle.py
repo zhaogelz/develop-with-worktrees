@@ -949,6 +949,81 @@ def test_recover_explicitly_ends_clean_unactivated_fixed_slot_failure(
     assert repo.branch(worktree) == "codex/slot-01"
 
 
+@pytest.mark.parametrize("legacy_stale_predecessor", [False, True])
+def test_preactivation_release_replaces_old_predecessor_and_recovers_after_base_advances(
+    git_repo: Path, legacy_stale_predecessor: bool
+) -> None:
+    repo, store = _native_repo(git_repo)
+    first = start(repo, name="older completed slot task")
+    abandon(repo, task_id=first["id"], lease=first["lease"], confirm=first["id"])
+    worktree = Path(first["worktree"])
+    assert store.read()["slots"]["01"]["released_task_id"] == first["id"]
+    second = store.allocate(
+        load_repo_config(repo),
+        name="unactivated task after an older release",
+        branch="unused-native-branch",
+        base_head=repo.head(git_repo),
+        base_ref="main",
+        base_worktree=git_repo,
+        anchor_contract={
+            "implementation_target": "fixed slot",
+            "scope_boundary": "unactivated task only",
+            "acceptance_criteria": "next Start reuses the released slot",
+        },
+    )
+    store.quarantine(second["id"], "Fixed slot is not attached to its recorded branch")
+    (git_repo / "later.txt").write_text("accepted\n", encoding="utf-8")
+    git(git_repo, "add", "later.txt")
+    git(git_repo, "commit", "-m", "test: advance accepted base")
+    result = recover(
+        repo,
+        task_id=second["id"],
+        abandon_unactivated=True,
+        confirm=second["id"],
+        reason="empty task after an older release",
+    )
+    assert result["status"] == "abandoned"
+    assert store.read()["slots"]["01"]["released_task_id"] == second["id"]
+
+    if legacy_stale_predecessor:
+        store.mutate(
+            lambda state: state["slots"]["01"].update(released_task_id="unrelated-task")
+        )
+        with pytest.raises(SoloAIError, match="slot state changed"):
+            recover(repo, task_id=second["id"])
+        assert store.read()["slots"]["01"]["released_task_id"] == "unrelated-task"
+        store.mutate(
+            lambda state: state["slots"]["01"].update(released_task_id=first["id"])
+        )
+    (git_repo / "after-release.txt").write_text("later\n", encoding="utf-8")
+    git(git_repo, "add", "after-release.txt")
+    git(git_repo, "commit", "-m", "test: advance after empty release")
+    if legacy_stale_predecessor:
+        store.mutate(
+            lambda state: state["slots"]["01"].update(
+                generation=second["slot_generation"] + 1
+            )
+        )
+        drifted_slot = store.read()["slots"]["01"]
+        with pytest.raises(SoloAIError, match="slot generation changed"):
+            recover(repo, task_id=second["id"])
+        assert store.read()["slots"]["01"] == drifted_slot
+        store.mutate(
+            lambda state: state["slots"]["01"].update(
+                generation=second["slot_generation"]
+            )
+        )
+    assert recover(repo, task_id=second["id"]) == result
+    slot = store.read()["slots"]["01"]
+    assert slot["released_task_id"] == second["id"]
+    assert slot["generation"] == second["slot_generation"]
+    next_task = start(repo, name="reuse the exact empty release")
+    assert next_task["slot_predecessor_task_id"] == second["id"]
+    assert next_task["slot_generation"] == second["slot_generation"] + 1
+    assert repo.branch(worktree) == "codex/slot-01"
+    assert repo.head(worktree) == repo.head(git_repo)
+
+
 def test_native_batch_keeps_source_in_real_merge_history(git_repo: Path) -> None:
     repo, store = _native_repo(git_repo)
     task = start(repo, name="merge original task head")

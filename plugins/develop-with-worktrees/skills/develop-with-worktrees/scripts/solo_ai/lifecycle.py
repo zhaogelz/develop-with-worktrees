@@ -1394,7 +1394,7 @@ def _complete_runtime_activation(
 def _native_released_predecessor(
     store: StateStore, task: dict[str, Any], worktree: Path
 ) -> dict[str, Any] | None:
-    """校验固定槽位前驱；普通关闭返回其已完成归还事务。"""
+    """校验固定槽位前驱；已归还的 detached 槽位返回其基线。"""
 
     predecessor_id = task.get("slot_predecessor_task_id")
     if not predecessor_id:
@@ -1402,6 +1402,7 @@ def _native_released_predecessor(
     predecessor = store.task(str(predecessor_id))
     delivery = (predecessor or {}).get("native_delivery") or {}
     abandonment = (predecessor or {}).get("abandonment") or {}
+    preactivation = (predecessor or {}).get("preactivation_release") or {}
     delivered = (
         predecessor is not None
         and predecessor.get("status") == "finished"
@@ -1423,15 +1424,36 @@ def _native_released_predecessor(
         and abandonment.get("base_ref") == task["base_ref"]
         and bool(abandonment.get("base_head"))
     )
+    unactivated = (
+        predecessor is not None
+        and predecessor.get("status") == "abandoned"
+        and predecessor.get("slot_generation") == int(task["slot_generation"]) - 1
+        and isinstance(preactivation, dict)
+        and preactivation.get("recovery_kind")
+        in {"preactivation-fixed-slot-release", "preactivation-dirty-slot-release"}
+        and bool(preactivation.get("transaction_id"))
+        and preactivation.get("phase") == "completed"
+        and preactivation.get("task_id") == predecessor_id
+        and preactivation.get("slot_id") == task["slot_id"]
+        and preactivation.get("slot_generation") == predecessor.get("slot_generation")
+        and preactivation.get("worktree") == str(worktree)
+        and preactivation.get("base_ref") == task["base_ref"]
+        and bool(preactivation.get("release_head"))
+        and not predecessor.get("candidate_head")
+        and not predecessor.get("candidate_publication")
+        and not (delivery or {}).get("delivery")
+    )
     if (
         predecessor is None
-        or not (delivered or abandoned)
+        or not (delivered or abandoned or unactivated)
         or predecessor.get("slot_id") != task["slot_id"]
         or predecessor.get("base_ref") != task["base_ref"]
         or predecessor.get("branch") != task["branch"]
         or predecessor.get("worktree") != str(worktree)
     ):
         raise SoloAIError("Idle fixed slot has no matching released predecessor")
+    if unactivated:
+        return {"base_head": str(preactivation["release_head"])}
     return abandonment if abandoned else None
 
 
@@ -1961,11 +1983,17 @@ def _assert_preactivation_content_unchanged(
 
 
 def _assert_preactivation_release_reset(
-    repo: GitRepo, *, transaction: dict[str, Any], worktree: Path
+    repo: GitRepo,
+    *,
+    transaction: dict[str, Any],
+    worktree: Path,
+    allow_advanced_base: bool = False,
 ) -> None:
-    if (
-        repo.ref_head(f"refs/heads/{transaction['base_ref']}")
-        != transaction["release_head"]
+    current_base = repo.ref_head(f"refs/heads/{transaction['base_ref']}")
+    if current_base != transaction["release_head"] and not (
+        allow_advanced_base
+        and current_base is not None
+        and repo.is_ancestor(str(transaction["release_head"]), current_base)
     ):
         raise SoloAIError("Pre-activation release base head changed during recovery")
     if (
@@ -2027,19 +2055,11 @@ def _resume_preactivation_release(
             "Pre-activation release did not reach a resumable terminal state"
         )
     _assert_preactivation_release_reset(
-        repo, transaction=transaction, worktree=worktree
+        repo, transaction=transaction, worktree=worktree, allow_advanced_base=True
     )
-    slot = store.read()["slots"].get(str(task["slot_id"]))
-    if (
-        slot
-        and slot.get("status") == "release-checking"
-        and slot.get("task_id") == task["id"]
-    ):
-        store.publish_preactivation_release(
-            task["id"], transaction_id=str(transaction["transaction_id"])
-        )
-    elif not (slot and slot.get("status") == "idle" and slot.get("task_id") is None):
-        raise SoloAIError("Pre-activation release slot changed before publication")
+    store.publish_preactivation_release(
+        task["id"], transaction_id=str(transaction["transaction_id"])
+    )
     return _preactivation_release_result(task)
 
 

@@ -229,3 +229,10 @@ candidate, or delivery exists. The detached worktree must be clean and its HEAD
 must be an ancestor of the current descendant base. It records an `abandoned`
 terminal result; a separate replacement delivery does not become this task's
 delivery. The next Start performs the guarded fixed-branch restoration.
+The completed empty release becomes the slot's immediate predecessor, even when
+an older task previously occupied that slot. If an older completed release left
+the slot idle but still pointing to that older predecessor, run
+`recover --task <empty-task-id>` again: it repairs only the same slot generation
+after verifying the original release, worktree identity and clean detached HEAD.
+The base may have advanced along the same history; a changed slot generation,
+diverged base or replaced worktree remains blocked.

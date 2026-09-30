@@ -2517,7 +2517,7 @@ class StateStore:
     def publish_preactivation_release(
         self, task_id: str, *, transaction_id: str
     ) -> dict[str, Any]:
-        """通过终检后才把失败 Start 占用的槽位重新开放。"""
+        """通过终检后开放槽位，并可补齐旧版遗漏的精确前驱。"""
 
         def update(state: dict[str, Any]) -> dict[str, Any]:
             task = state["tasks"].get(task_id)
@@ -2533,18 +2533,41 @@ class StateStore:
             slot = state["slots"].get(str(task.get("slot_id")))
             if (
                 not slot
-                or slot.get("task_id") != task_id
-                or slot.get("status") != "release-checking"
+                or int(slot.get("generation", -1))
+                != int(recovery.get("slot_generation", -2))
+                or slot.get("released_worktree_identity")
+                != recovery.get("worktree_identity")
+                or slot.get("released_managed_root_identity")
+                != recovery.get("managed_root_identity")
+                or slot.get("released_worktree_resolved")
+                != recovery.get("worktree_resolved")
+                or slot.get("released_managed_root_resolved")
+                != recovery.get("managed_root_resolved")
             ):
+                raise SoloAIError("Pre-activation release slot identity changed")
+            if (
+                slot.get("status") == "release-checking"
+                and slot.get("task_id") == task_id
+            ):
+                slot.update(
+                    {
+                        "status": "idle",
+                        "task_id": None,
+                        "last_used": time.time(),
+                        "quarantine_reason": None,
+                        "released_task_id": task_id,
+                    }
+                )
+            elif (
+                slot.get("status") == "idle"
+                and slot.get("task_id") is None
+                and slot.get("released_task_id")
+                in {None, task.get("slot_predecessor_task_id"), task_id}
+            ):
+                # 旧版已发布为 idle 却遗漏 released_task_id；只补同代前驱。
+                slot["released_task_id"] = task_id
+            else:
                 raise SoloAIError("Pre-activation release slot state changed")
-            slot.update(
-                {
-                    "status": "idle",
-                    "task_id": None,
-                    "last_used": time.time(),
-                    "quarantine_reason": None,
-                }
-            )
             return copy.deepcopy(task)
 
         return self.mutate(update)
