@@ -240,6 +240,16 @@ shortcut, not ordinary recovery. `prune-slot` is bounded to a reviewed plan,
 recorded before the first move, and resumes only from that manifest.
 `prune-slot --dispose --slot <id>` first returns a one-time plan and digest;
 execute it with `--dispose --slot <id> --plan <id> --confirm <digest>`.
+For an idle slot whose recorded release identity differs only in the volume
+device number after a verified move, use `prune-slot --dispose --recover-volume
+--slot <id>` for the plan and repeat `--recover-volume` with `--plan` and
+`--confirm`. This option applies to that one slot and requires its recorded
+worktree and managed parent to have complete identities and resolved paths.
+Both objects must retain their exact inode, mode, and resolved path, and show
+the same old-to-current device transition. The plan freezes both identities
+and rechecks them before the first move and during recovery. A changed inode,
+mode, path, or inconsistent transition remains blocked; it does not update
+other slots, task records, or the repository-wide volume recovery state.
 It accepts only an idle or inactive registered slot with no current owner,
 clean tracked files, and a HEAD already in its recorded target base. The plan
 freezes the slot generation, actual attached or detached Git state, base head,
@@ -256,7 +266,10 @@ on demand under its existing checks. Ordinary `prune-slot` retains its
 declared-path behavior.
 
 On Windows, removal pins original ancestors and conditionally deletes the same
-opened object. On all platforms, changed, recreated, protected, ordinary
+opened object. Explicit whole-slot disposal uses Windows POSIX disposition on
+that checked handle so a mapped dependency image link can be removed while
+other hard links and existing image mappings remain available; ordinary
+cleanup keeps its existing busy-object behavior. On all platforms, changed, recreated, protected, ordinary
 untracked, unknown ignored, or reparse content stops cleanup. Non-force `git
 worktree remove` is not a safety boundary for a populated tree.
 

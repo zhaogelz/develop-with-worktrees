@@ -14,6 +14,7 @@ from solo_ai.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
 from solo_ai.util import (
     SoloAIError,
     atomic_write_json,
+    path_identity,
     read_json,
     sha256_text,
     stable_json,
@@ -41,15 +42,34 @@ def _repo(path: Path, *, native: bool = True) -> tuple[GitRepo, StateStore]:
     return repo, store
 
 
-def _execute(repo: GitRepo, plan: dict[str, object]) -> dict[str, object]:
+def _execute(
+    repo: GitRepo, plan: dict[str, object], *, recover_volume: bool = False
+) -> dict[str, object]:
     return _prune(
         repo,
         kind="slot",
         slot="01",
         dispose=True,
+        recover_volume=recover_volume,
         plan_id=str(plan["plan_id"]),
         confirm=str(plan["digest"]),
     )
+
+
+def _old_volume_identity(store: StateStore, root: Path) -> tuple[int, int]:
+    worktree = path_identity(root)
+    parent = path_identity(root.parent)
+    old_device = max(int(worktree["device"]), int(parent["device"])) + 1
+
+    def update(state: dict[str, object]) -> None:
+        slot = state["slots"]["01"]
+        slot["released_worktree_identity"] = {**worktree, "device": old_device}
+        slot["released_managed_root_identity"] = {**parent, "device": old_device}
+        slot["released_worktree_resolved"] = str(root.resolve())
+        slot["released_managed_root_resolved"] = str(root.parent.resolve())
+
+    store.mutate(update)
+    return old_device, int(worktree["device"])
 
 
 @pytest.mark.parametrize("native", [True, False])
@@ -87,6 +107,77 @@ def test_dispose_initial_detached_registered_slot_without_predecessor(
     task = start(repo, name="recreate old detached slot")
     assert Path(task["worktree"]) == root
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_dispose_explicit_volume_only_recovery_then_rebuild(
+    git_repo: Path, native: bool
+) -> None:
+    repo, store = _repo(git_repo, native=native)
+    root = Path(store.read()["slots"]["01"]["path"])
+    git(git_repo, "worktree", "add", "--detach", str(root), "main")
+    old_device, current_device = _old_volume_identity(store, root)
+
+    with pytest.raises(SoloAIError) as caught:
+        _prune(repo, kind="slot", slot="01", dispose=True)
+    assert str(old_device) in str(caught.value)
+    assert str(current_device) in str(caught.value)
+
+    plan = _prune(repo, kind="slot", slot="01", dispose=True, recover_volume=True)
+    recovery = plan["volume_recovery"]
+    assert recovery["from_device"] == old_device
+    assert recovery["to_device"] == current_device
+    with pytest.raises(SoloAIError, match="recovery mode changed"):
+        _execute(repo, plan)
+    _execute(repo, plan, recover_volume=True)
+    slot = store.read()["slots"]["01"]
+    assert slot["released_worktree_identity"] is None
+    assert slot["released_managed_root_identity"] is None
+    assert root.parent.exists()
+    assert not root.exists()
+
+    task = start(repo, name="rebuild after volume migration")
+    assert Path(task["worktree"]) == root
+    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+def test_dispose_volume_only_recovery_rejects_inode_change(git_repo: Path) -> None:
+    repo, store = _repo(git_repo)
+    root = Path(store.read()["slots"]["01"]["path"])
+    git(git_repo, "worktree", "add", "--detach", str(root), "main")
+    _old_volume_identity(store, root)
+    recorded = store.read()["slots"]["01"]["released_worktree_identity"]
+
+    def change_inode(state: dict[str, object]) -> None:
+        state["slots"]["01"]["released_worktree_identity"]["inode"] = (
+            int(recorded["inode"]) + 1
+        )
+
+    store.mutate(change_inode)
+    with pytest.raises(SoloAIError) as caught:
+        _prune(repo, kind="slot", slot="01", dispose=True, recover_volume=True)
+    assert str(int(recorded["inode"]) + 1) in str(caught.value)
+    assert str(path_identity(root)["inode"]) in str(caught.value)
+    assert root.exists()
+
+
+def test_dispose_volume_recovery_rechecks_released_identity_at_claim(
+    git_repo: Path,
+) -> None:
+    repo, store = _repo(git_repo)
+    root = Path(store.read()["slots"]["01"]["path"])
+    git(git_repo, "worktree", "add", "--detach", str(root), "main")
+    _old_volume_identity(store, root)
+    plan = _prune(repo, kind="slot", slot="01", dispose=True, recover_volume=True)
+
+    def change_identity(state: dict[str, object]) -> None:
+        state["slots"]["01"]["released_managed_root_identity"]["device"] += 1
+
+    store.mutate(change_identity)
+    with pytest.raises(SoloAIError, match="replaced|transition|released identity"):
+        _execute(repo, plan, recover_volume=True)
+    assert store.read()["slots"]["01"]["status"] == "idle"
+    assert root.exists()
 
 
 def test_dispose_rejects_active_slot_and_new_generation(git_repo: Path) -> None:
@@ -200,9 +291,11 @@ def test_dispose_resumes_partial_delete_and_blocks_start(
     original = slot_disposal.delete_plain_path_if_unchanged
     fired = False
 
-    def interrupt(path: Path, snapshot: dict[str, object]) -> None:
+    def interrupt(
+        path: Path, snapshot: dict[str, object], *, posix_disposition: bool = False
+    ) -> None:
         nonlocal fired
-        original(path, snapshot)
+        original(path, snapshot, posix_disposition=posix_disposition)
         if not fired:
             fired = True
             raise RuntimeError("simulated interruption")
@@ -231,9 +324,11 @@ def test_dispose_recovery_requires_forward_only_base(
     original = slot_disposal.delete_plain_path_if_unchanged
     interrupted = False
 
-    def interrupt(path: Path, snapshot: dict[str, object]) -> None:
+    def interrupt(
+        path: Path, snapshot: dict[str, object], *, posix_disposition: bool = False
+    ) -> None:
         nonlocal interrupted
-        original(path, snapshot)
+        original(path, snapshot, posix_disposition=posix_disposition)
         if not interrupted:
             interrupted = True
             raise RuntimeError("simulated interruption")
