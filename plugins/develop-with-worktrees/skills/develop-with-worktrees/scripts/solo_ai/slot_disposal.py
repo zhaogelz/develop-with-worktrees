@@ -59,7 +59,9 @@ def _registration(repo: GitRepo, root: Path, branch: str | None, head: str) -> N
         raise SoloAIError("Slot disposal Git registration changed")
 
 
-def _slot(repo: GitRepo, slot_id: str, *, plan_id: str | None = None) -> tuple[StateStore, dict[str, Any], Path]:
+def _slot(
+    repo: GitRepo, slot_id: str, *, plan_id: str | None = None
+) -> tuple[StateStore, dict[str, Any], Path]:
     store = StateStore(repo)
     config = load_repo_config(repo, cwd=repo.policy_path())
     state = store.require_slot_layout(config)
@@ -76,11 +78,15 @@ def _slot(repo: GitRepo, slot_id: str, *, plan_id: str | None = None) -> tuple[S
             for task in state["tasks"].values()
         )
     ):
-        raise SoloAIError("Slot disposal requires the exact idle generation without an active owner")
+        raise SoloAIError(
+            "Slot disposal requires the exact idle generation without an active owner"
+        )
     root = Path(str(slot["path"]))
     expected = store.managed_worktree_root(config) / f"solo-ai-slot-{slot_id}"
     if root != expected or root == repo.root or root == repo.primary_path:
-        raise SoloAIError("Slot disposal cannot change the primary or an unexpected worktree")
+        raise SoloAIError(
+            "Slot disposal cannot change the primary or an unexpected worktree"
+        )
     store.require_slot_ownership(slot_id, root)
     return store, slot, root
 
@@ -104,7 +110,9 @@ def _payload(repo: GitRepo, slot_id: str) -> dict[str, Any]:
     _registration(repo, root, branch, head)
     if repo.git(["status", "--porcelain=v1", "--untracked-files=no"], cwd=root).stdout:
         raise SoloAIError("Tracked changes block whole-slot disposal")
-    predecessor_id = slot.get("released_task_id") or slot.get("released_candidate_task_id")
+    predecessor_id = slot.get("released_task_id") or slot.get(
+        "released_candidate_task_id"
+    )
     if predecessor_id:
         task = store.task(str(predecessor_id))
         delivery = (task or {}).get("native_delivery") or {}
@@ -117,10 +125,23 @@ def _payload(repo: GitRepo, slot_id: str) -> dict[str, Any]:
             or task.get("slot_generation") != slot.get("generation")
             or task.get("worktree") != str(root)
             or not (
-                (task.get("status") == "finished" and isinstance(delivery.get("delivery"), dict))
-                or (task.get("status") == "abandoned" and abandonment.get("phase") == "completed" and not abandonment.get("retained_worktree"))
-                or (task.get("status") == "abandoned" and preactivation.get("phase") == "completed")
-                or (task.get("status") == "candidate-published" and publication.get("phase") == "completed")
+                (
+                    task.get("status") == "finished"
+                    and isinstance(delivery.get("delivery"), dict)
+                )
+                or (
+                    task.get("status") == "abandoned"
+                    and abandonment.get("phase") == "completed"
+                    and not abandonment.get("retained_worktree")
+                )
+                or (
+                    task.get("status") == "abandoned"
+                    and preactivation.get("phase") == "completed"
+                )
+                or (
+                    task.get("status") == "candidate-published"
+                    and publication.get("phase") == "completed"
+                )
             )
         ):
             raise SoloAIError("Idle slot has no exact released predecessor")
@@ -161,10 +182,14 @@ def _check_slot(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> Path:
     if (
         slot.get("generation") != payload["slot_generation"]
         or slot.get("released_task_id") != payload["released_task_id"]
-        or slot.get("released_candidate_task_id") != payload["released_candidate_task_id"]
+        or slot.get("released_candidate_task_id")
+        != payload["released_candidate_task_id"]
         or slot.get("fixed_branch") != payload["fixed_branch"]
         or repo.ref_head(f"refs/heads/{payload['base_ref']}") != payload["base_head"]
-        or (payload["branch"] is not None and repo.ref_head(f"refs/heads/{payload['branch']}") != payload["head"])
+        or (
+            payload["branch"] is not None
+            and repo.ref_head(f"refs/heads/{payload['branch']}") != payload["head"]
+        )
     ):
         raise SoloAIError("Slot disposal generation, branch, or base changed")
     require_managed_directory_identity(
@@ -181,9 +206,16 @@ def _claim(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> None:
 
     def update(state: dict[str, Any]) -> None:
         slot = state["slots"].get(str(payload["slot"]))
-        if not slot or slot.get("generation") != payload["slot_generation"] or slot.get("task_id"):
+        if (
+            not slot
+            or slot.get("generation") != payload["slot_generation"]
+            or slot.get("task_id")
+        ):
             raise SoloAIError("Slot disposal generation or owner changed")
-        if slot.get("status") == "disposing" and slot.get("disposal_plan_id") == plan_id:
+        if (
+            slot.get("status") == "disposing"
+            and slot.get("disposal_plan_id") == plan_id
+        ):
             return
         if slot.get("status") != payload["slot_status"] or slot.get("disposal_plan_id"):
             raise SoloAIError("Slot disposal claim changed")
@@ -198,7 +230,11 @@ def _release(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> None:
 
     def update(state: dict[str, Any]) -> None:
         slot = state["slots"].get(str(payload["slot"]))
-        if not slot or slot.get("generation") != payload["slot_generation"] or slot.get("task_id"):
+        if (
+            not slot
+            or slot.get("generation") != payload["slot_generation"]
+            or slot.get("task_id")
+        ):
             raise SoloAIError("Completed disposal slot changed")
         if slot.get("status") != "disposing" or slot.get("disposal_plan_id") != plan_id:
             raise SoloAIError("Completed disposal claim changed")
@@ -254,7 +290,9 @@ def _cancel_before_move(
     atomic_write_json(plan_path, plan)
 
 
-def _remaining(stage: Path, expected: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _remaining(
+    stage: Path, expected: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
     observed = _entries(stage)
     for relative, snapshot in observed.items():
         if relative not in expected or snapshot != expected[relative]:
@@ -270,17 +308,36 @@ def dispose_slot(
         payload = _payload(repo, slot)
         digest = sha256_text(stable_json(payload))
         plan_id = new_id(f"cleanup-slot-{slot}")
-        plan = {"schema_version": 2, "id": plan_id, "digest": digest, "payload": payload, "status": "planned", "created_at": utc_timestamp()}
+        plan = {
+            "schema_version": 2,
+            "id": plan_id,
+            "digest": digest,
+            "payload": payload,
+            "status": "planned",
+            "created_at": utc_timestamp(),
+        }
         atomic_write_json(repo.local_dir / "cleanup-plans" / f"{plan_id}.json", plan)
-        return {"status": "planned", "plan_id": plan_id, "digest": digest, **payload,
-                "next": f"prune-slot --dispose --slot {slot} --plan {plan_id} --confirm {digest}"}
+        return {
+            "status": "planned",
+            "plan_id": plan_id,
+            "digest": digest,
+            **payload,
+            "next": f"prune-slot --dispose --slot {slot} --plan {plan_id} --confirm {digest}",
+        }
     if not plan_id or not confirm:
         raise SoloAIError("Whole-slot disposal requires both --plan and --confirm")
     plan_path = repo.local_dir / "cleanup-plans" / f"{plan_id}.json"
     plan = read_json(plan_path, {})
-    if plan.get("schema_version") != 2 or plan.get("payload", {}).get("slot") != slot or plan.get("payload", {}).get("mode") != "dispose":
+    if (
+        plan.get("schema_version") != 2
+        or plan.get("payload", {}).get("slot") != slot
+        or plan.get("payload", {}).get("mode") != "dispose"
+    ):
         raise SoloAIError("Unknown whole-slot disposal plan")
-    if plan.get("digest") != confirm or sha256_text(stable_json(plan["payload"])) != confirm:
+    if (
+        plan.get("digest") != confirm
+        or sha256_text(stable_json(plan["payload"])) != confirm
+    ):
         raise SoloAIError("Whole-slot disposal confirmation changed")
     payload = plan["payload"]
     phase = str(plan.get("status"))
@@ -290,7 +347,10 @@ def dispose_slot(
         raise SoloAIError("Whole-slot disposal plan was cancelled; generate a new plan")
     if phase == "cancelling":
         state_slot = StateStore(repo).read()["slots"].get(slot) or {}
-        if state_slot.get("status") == "disposing" and state_slot.get("disposal_plan_id") == plan_id:
+        if (
+            state_slot.get("status") == "disposing"
+            and state_slot.get("disposal_plan_id") == plan_id
+        ):
             _cancel_before_move(repo, plan=plan, plan_path=plan_path)
         elif (
             state_slot.get("generation") == payload["slot_generation"]
@@ -306,24 +366,45 @@ def dispose_slot(
         raise SoloAIError("Whole-slot disposal plan was cancelled; generate a new plan")
     if phase == "completed":
         state_slot = StateStore(repo).read()["slots"].get(slot) or {}
-        if state_slot.get("status") == "disposing" and state_slot.get("disposal_plan_id") == plan_id:
+        if (
+            state_slot.get("status") == "disposing"
+            and state_slot.get("disposal_plan_id") == plan_id
+        ):
             _check_slot(repo, payload, plan_id)
             if (
-                root.exists() or is_link_or_junction(root)
-                or stage.exists() or is_link_or_junction(stage)
+                root.exists()
+                or is_link_or_junction(root)
+                or stage.exists()
+                or is_link_or_junction(stage)
                 or any(item.path == root for item in repo.worktrees())
             ):
-                raise SoloAIError("Completed disposal path or Git registration reappeared")
+                raise SoloAIError(
+                    "Completed disposal path or Git registration reappeared"
+                )
             _release(repo, payload, plan_id)
-            return {"status": "disposed", "slot": slot, "plan_id": plan_id,
-                    "removed": str(root), "git_unregistered": True,
-                    "slot_generation": payload["slot_generation"]}
+            return {
+                "status": "disposed",
+                "slot": slot,
+                "plan_id": plan_id,
+                "removed": str(root),
+                "git_unregistered": True,
+                "slot_generation": payload["slot_generation"],
+            }
         raise SoloAIError("Whole-slot disposal plan was already completed")
-    if phase not in {"planned", "claiming", "renaming", "staged", "deleting", "unregistering"}:
+    if phase not in {
+        "planned",
+        "claiming",
+        "renaming",
+        "staged",
+        "deleting",
+        "unregistering",
+    }:
         raise SoloAIError("Unsupported whole-slot disposal recovery state")
     if phase == "planned":
         if _payload(repo, slot) != payload:
-            raise SoloAIError("Whole-slot disposal content or identity changed after review")
+            raise SoloAIError(
+                "Whole-slot disposal content or identity changed after review"
+            )
         if stage.exists() or is_link_or_junction(stage):
             raise SoloAIError("Whole-slot disposal staging path already exists")
         plan["status"] = "claiming"
@@ -350,7 +431,9 @@ def dispose_slot(
                 unchanged = False
             if not unchanged:
                 _cancel_before_move(repo, plan=plan, plan_path=plan_path)
-                raise SoloAIError("Whole-slot content changed before staging; plan cancelled")
+                raise SoloAIError(
+                    "Whole-slot content changed before staging; plan cancelled"
+                )
             with pinned_plain_directory(root.parent, payload["managed_root_identity"]):
                 if stage.exists() or is_link_or_junction(stage):
                     raise SoloAIError("Whole-slot staging path appeared")
@@ -379,7 +462,9 @@ def dispose_slot(
             if path_identity(stage) != payload["worktree_identity"]:
                 raise SoloAIError("Whole-slot staging directory was replaced")
             observed = _remaining(stage, expected)
-            for relative in sorted(observed, key=lambda key: (len(Path(key).parts), key), reverse=True):
+            for relative in sorted(
+                observed, key=lambda key: (len(Path(key).parts), key), reverse=True
+            ):
                 path = stage if relative == "." else stage / relative
                 snapshot = expected[relative]
                 # 删除目标前固定完整的普通父目录链，避免替换为链接后重定向路径。
@@ -395,10 +480,16 @@ def dispose_slot(
                         parent = parent / part
                         ancestors.append(parent)
                     for ancestor in ancestors:
-                        key = "." if ancestor == stage else ancestor.relative_to(stage).as_posix()
+                        key = (
+                            "."
+                            if ancestor == stage
+                            else ancestor.relative_to(stage).as_posix()
+                        )
                         frozen = expected.get(key)
                         if not frozen or frozen["kind"] != "directory":
-                            raise SoloAIError("Whole-slot parent was not a frozen directory")
+                            raise SoloAIError(
+                                "Whole-slot parent was not a frozen directory"
+                            )
                         pinned.enter_context(pinned_plain_directory(ancestor, frozen))
                     if snapshot["kind"] == "link":
                         delete_link_path_if_unchanged(path, snapshot)
@@ -411,7 +502,12 @@ def dispose_slot(
         phase = "unregistering"
     if phase == "unregistering":
         _check_slot(repo, payload, plan_id)
-        if root.exists() or is_link_or_junction(root) or stage.exists() or is_link_or_junction(stage):
+        if (
+            root.exists()
+            or is_link_or_junction(root)
+            or stage.exists()
+            or is_link_or_junction(stage)
+        ):
             raise SoloAIError("Whole-slot path reappeared before Git removal")
         matches = [item for item in repo.worktrees() if item.path == root]
         if matches:
@@ -423,5 +519,11 @@ def dispose_slot(
         plan["completed_at"] = utc_timestamp()
         atomic_write_json(plan_path, plan)
     _release(repo, payload, plan_id)
-    return {"status": "disposed", "slot": slot, "plan_id": plan_id,
-            "removed": str(root), "git_unregistered": True, "slot_generation": payload["slot_generation"]}
+    return {
+        "status": "disposed",
+        "slot": slot,
+        "plan_id": plan_id,
+        "removed": str(root),
+        "git_unregistered": True,
+        "slot_generation": payload["slot_generation"],
+    }

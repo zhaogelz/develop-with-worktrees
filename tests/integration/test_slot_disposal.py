@@ -47,9 +47,7 @@ def _execute(repo: GitRepo, plan: dict[str, object]) -> dict[str, object]:
 
 
 @pytest.mark.parametrize("native", [True, False])
-def test_dispose_idle_slot_then_start_and_abandon(
-    git_repo: Path, native: bool
-) -> None:
+def test_dispose_idle_slot_then_start_and_abandon(git_repo: Path, native: bool) -> None:
     repo, store = _repo(git_repo, native=native)
     first = start(repo, name="first slot user")
     root = Path(first["worktree"])
@@ -67,9 +65,7 @@ def test_dispose_idle_slot_then_start_and_abandon(
     second = start(repo, name="rebuild disposed slot")
     assert Path(second["worktree"]) == root
     assert repo.head(root) == repo.head(git_repo)
-    abandon(
-        repo, task_id=second["id"], lease=second["lease"], confirm=second["id"]
-    )
+    abandon(repo, task_id=second["id"], lease=second["lease"], confirm=second["id"])
     assert store.read()["slots"]["01"]["status"] == "idle"
 
 
@@ -116,7 +112,7 @@ def test_dispose_rejects_changed_content_and_replaced_directory(
     other = root.with_name("saved-original")
     root.rename(other)
     root.mkdir()
-    with pytest.raises(SoloAIError, match="identity|registered|worktree"):
+    with pytest.raises(SoloAIError, match="identity|registration|worktree"):
         _execute(repo, plan)
     assert other.exists()
     assert root.exists()
