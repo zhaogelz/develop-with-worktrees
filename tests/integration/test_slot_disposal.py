@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,43 @@ def test_dispose_initial_detached_registered_slot_without_predecessor(
     task = start(repo, name="recreate old detached slot")
     assert Path(task["worktree"]) == root
     abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 目录句柄复用")
+def test_dispose_windows_preserves_late_content_with_shared_parent_pin(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _repo(git_repo)
+    root = Path(store.read()["slots"]["01"]["path"])
+    git(git_repo, "worktree", "add", "--detach", str(root), "main")
+    nested = root / "nested"
+    nested.mkdir()
+    for index in range(20):
+        (nested / f"approved-{index:02d}.txt").write_text("remove\n", encoding="utf-8")
+    plan = _prune(repo, kind="slot", slot="01", dispose=True)
+    stage = root.parent / f".{root.name}.dww-dispose-{plan['plan_id']}"
+    original_remaining = slot_disposal._remaining
+    original_pin = slot_disposal.pinned_plain_directory
+    pinned: list[Path] = []
+
+    def add_late_content(
+        path: Path, expected: dict[str, dict[str, object]]
+    ) -> dict[str, dict[str, object]]:
+        observed = original_remaining(path, expected)
+        (stage / "nested" / "late.txt").write_text("preserve\n", encoding="utf-8")
+        return observed
+
+    def record_pin(path: Path, snapshot: dict[str, object]) -> object:
+        pinned.append(path)
+        return original_pin(path, snapshot)
+
+    monkeypatch.setattr(slot_disposal, "_remaining", add_late_content)
+    monkeypatch.setattr(slot_disposal, "pinned_plain_directory", record_pin)
+    with pytest.raises(SoloAIError):
+        _execute(repo, plan)
+    assert (stage / "nested" / "late.txt").read_text(encoding="utf-8") == "preserve\n"
+    assert pinned.count(stage / "nested") == 1
+    assert store.read()["slots"]["01"]["status"] == "disposing"
 
 
 @pytest.mark.parametrize("native", [True, False])
