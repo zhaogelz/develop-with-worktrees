@@ -123,9 +123,7 @@ def test_dispose_explicit_volume_only_recovery_then_rebuild(
     assert str(old_device) in str(caught.value)
     assert str(current_device) in str(caught.value)
 
-    plan = _prune(
-        repo, kind="slot", slot="01", dispose=True, recover_volume=True
-    )
+    plan = _prune(repo, kind="slot", slot="01", dispose=True, recover_volume=True)
     recovery = plan["volume_recovery"]
     assert recovery["from_device"] == old_device
     assert recovery["to_device"] == current_device
@@ -170,9 +168,7 @@ def test_dispose_volume_recovery_rechecks_released_identity_at_claim(
     root = Path(store.read()["slots"]["01"]["path"])
     git(git_repo, "worktree", "add", "--detach", str(root), "main")
     _old_volume_identity(store, root)
-    plan = _prune(
-        repo, kind="slot", slot="01", dispose=True, recover_volume=True
-    )
+    plan = _prune(repo, kind="slot", slot="01", dispose=True, recover_volume=True)
 
     def change_identity(state: dict[str, object]) -> None:
         state["slots"]["01"]["released_managed_root_identity"]["device"] += 1

@@ -99,8 +99,7 @@ def _same_volume_object_fields(recorded: Any, current: Any) -> bool:
         and isinstance(current, dict)
         and set(recorded) == set(current)
         and all(
-            type(recorded.get(field)) is int
-            and type(current.get(field)) is int
+            type(recorded.get(field)) is int and type(current.get(field)) is int
             for field in ("device", "inode", "mode")
         )
         and recorded["inode"] == current["inode"]
@@ -143,7 +142,9 @@ def _released_identity(
         and resolved_worktree == str(root.resolve())
         and resolved_parent == str(parent.resolve())
     ):
-        raise SoloAIError("Volume-only slot disposal requires complete released identities")
+        raise SoloAIError(
+            "Volume-only slot disposal requires complete released identities"
+        )
     transition = (recorded_parent["device"], current_parent["device"])
     if transition != (recorded_worktree["device"], current_worktree["device"]):
         raise SoloAIError(
@@ -153,14 +154,18 @@ def _released_identity(
         )
     if transition[0] == transition[1]:
         raise SoloAIError("Volume-only slot disposal requires a changed device")
-    return current_worktree, current_parent, {
-        "released_worktree_identity": recorded_worktree,
-        "released_managed_root_identity": recorded_parent,
-        "released_worktree_resolved": resolved_worktree,
-        "released_managed_root_resolved": resolved_parent,
-        "from_device": transition[0],
-        "to_device": transition[1],
-    }
+    return (
+        current_worktree,
+        current_parent,
+        {
+            "released_worktree_identity": recorded_worktree,
+            "released_managed_root_identity": recorded_parent,
+            "released_worktree_resolved": resolved_worktree,
+            "released_managed_root_resolved": resolved_parent,
+            "from_device": transition[0],
+            "to_device": transition[1],
+        },
+    )
 
 
 def _payload(
@@ -302,9 +307,11 @@ def _check_volume_record(slot: dict[str, Any], payload: dict[str, Any]) -> None:
         and isinstance(old_parent, dict)
         and isinstance(current_worktree, dict)
         and isinstance(current_parent, dict)
-        and recovery.get("from_device") == old_worktree.get("device")
+        and recovery.get("from_device")
+        == old_worktree.get("device")
         == old_parent.get("device")
-        and recovery.get("to_device") == current_worktree.get("device")
+        and recovery.get("to_device")
+        == current_worktree.get("device")
         == current_parent.get("device")
         and recovery["from_device"] != recovery["to_device"]
         and all(

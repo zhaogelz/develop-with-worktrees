@@ -1085,9 +1085,7 @@ def _mark_windows_handle_for_deletion(
         information_class = 4  # FileDispositionInfo
         buffer = ctypes.byref(disposition)
         size = ctypes.sizeof(disposition)
-    if not kernel32.SetFileInformationByHandle(
-        handle, information_class, buffer, size
-    ):
+    if not kernel32.SetFileInformationByHandle(handle, information_class, buffer, size):
         code = ctypes.get_last_error()
         raise SoloAIError(
             f"Cleanup object could not be conditionally deleted: {path} (WinError {code})"

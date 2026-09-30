@@ -545,9 +545,7 @@ def test_conditional_posix_delete_removes_loaded_image_hardlink_only(
     os.link(original, approved_link)
     expected = util.snapshot_plain_path(approved_link)
 
-    util.delete_plain_path_if_unchanged(
-        approved_link, expected, posix_disposition=True
-    )
+    util.delete_plain_path_if_unchanged(approved_link, expected, posix_disposition=True)
 
     assert not approved_link.exists()
     assert original.exists()
