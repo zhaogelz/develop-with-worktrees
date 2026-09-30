@@ -420,10 +420,9 @@ def dispose_slot(
     if phase == "planned":
         current = _payload(repo, slot)
         current_base = str(current["base_head"])
-        if (
-            not repo.is_ancestor(str(payload["base_head"]), current_base)
-            or not repo.is_ancestor(str(payload["head"]), current_base)
-        ):
+        if not repo.is_ancestor(
+            str(payload["base_head"]), current_base
+        ) or not repo.is_ancestor(str(payload["head"]), current_base):
             raise SoloAIError("Whole-slot disposal base changed after review")
         current["base_head"] = payload["base_head"]
         if current != payload:
