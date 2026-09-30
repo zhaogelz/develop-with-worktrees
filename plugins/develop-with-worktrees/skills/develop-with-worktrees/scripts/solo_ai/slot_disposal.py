@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 import re
 from contextlib import ExitStack
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .cleanup import require_managed_directory_identity
 from .config import load_repo_config
 from .repo import GitRepo
-from .state import FINAL_TASK_STATES, LEGACY_STATE_SCHEMA, StateStore
+from .state import FINAL_TASK_STATES, LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
 from .util import (
     SoloAIError,
     atomic_write_json,
@@ -177,12 +178,12 @@ def _legacy_reclaimed_predecessor(
     head: str,
     branch: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """只证明 schema 11 同代保留工位已经正式回收，旧候选指针不能充当前驱。"""
+    """只证明旧任务的同代保留工位已经正式回收，旧候选指针不能充当前驱。"""
     generation = slot.get("generation")
     stale_id = slot.get("released_candidate_task_id")
     stale = state["tasks"].get(str(stale_id))
     if (
-        state.get("schema_version") != LEGACY_STATE_SCHEMA
+        state.get("schema_version") not in {LEGACY_STATE_SCHEMA, STATE_SCHEMA}
         or slot.get("released_task_id") is not None
         or not stale_id
         or branch is not None
@@ -286,7 +287,7 @@ def _legacy_reclaimed_predecessor(
             or released != abandonment.get(abandonment_field)
         ):
             raise SoloAIError("Idle slot retained reclaim resolved path changed")
-    return task, {
+    proof = {
         "task_id": task_id,
         "branch": task_branch,
         "base_ref": task["base_ref"],
@@ -300,6 +301,64 @@ def _legacy_reclaimed_predecessor(
         "released_worktree_resolved": slot["released_worktree_resolved"],
         "released_managed_root_resolved": slot["released_managed_root_resolved"],
     }
+    if state["schema_version"] == STATE_SCHEMA:
+        migration = state.get("native_migration")
+        if not isinstance(migration, dict):
+            raise SoloAIError("Idle slot has no verified retained migration")
+        retained = migration.get("retained_slot_ids")
+        ordinary = migration.get("slot_ids")
+        stamps = (
+            task.get("created_at"),
+            abandonment.get("completed_at"),
+            migration.get("enabled_at"),
+        )
+        try:
+            created, abandoned, enabled = (
+                datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ") for value in stamps
+            )
+        except (TypeError, ValueError) as exc:
+            raise SoloAIError("Idle slot retained migration dates changed") from exc
+        if (
+            type(migration.get("schema_version")) is not int
+            or migration["schema_version"] != 1
+            or not isinstance(retained, list)
+            or not isinstance(ordinary, list)
+            or any(not isinstance(item, str) for item in retained + ordinary)
+            or retained.count(slot_id) != 1
+            or slot_id in ordinary
+            or task.get("native_delivery") is not None
+            or not created <= abandoned <= enabled
+            or not isinstance(migration.get("base_ref"), str)
+            or not migration["base_ref"]
+            or not isinstance(migration.get("base_head"), str)
+            or not migration["base_head"]
+        ):
+            raise SoloAIError("Idle slot has no verified retained migration")
+        historical_head = repo.ref_head(f"refs/heads/{task['base_ref']}")
+        effective_ref = task["base_ref"]
+        if historical_head is None:
+            effective_ref = repo.default_branch()
+            effective_head = repo.ref_head(f"refs/heads/{effective_ref}")
+            if (
+                effective_ref != migration["base_ref"]
+                or not effective_head
+                or not repo.is_ancestor(migration["base_head"], effective_head)
+            ):
+                raise SoloAIError("Idle slot migrated target base changed")
+            # 缺失的历史 ref 必须持续缺失；目标 HEAD 的正常快进由 _check_slot 核验。
+            proof["historical_base_ref_head"] = None
+        proof["effective_base_ref"] = effective_ref
+        proof["native_migration"] = {
+            "schema_version": migration["schema_version"],
+            "enabled_at": migration["enabled_at"],
+            "base_ref": migration["base_ref"],
+            "base_head": migration["base_head"],
+            "slot_ids": ordinary,
+            "retained_slot_ids": retained,
+            "task_created_at": task["created_at"],
+            "abandonment_completed_at": abandonment["completed_at"],
+        }
+    return task, proof
 
 
 def _check_legacy_reclaim(
@@ -379,7 +438,11 @@ def _payload(
             )
         ):
             raise SoloAIError("Idle slot has no exact released predecessor")
-        base_ref = str(task["base_ref"])
+        base_ref = (
+            str(legacy_reclaim.get("effective_base_ref", task["base_ref"]))
+            if legacy_reclaim is not None
+            else str(task["base_ref"])
+        )
     else:
         # 迁移前的空闲槽可能没有前驱指针；只接受已登记且 HEAD 在当前默认基线内的现场。
         base_ref = repo.default_branch()

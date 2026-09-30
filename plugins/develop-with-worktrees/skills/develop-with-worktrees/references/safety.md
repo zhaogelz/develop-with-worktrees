@@ -277,6 +277,18 @@ A missing or ambiguous current-generation task, an unfinished reclaim, or any
 changed proof stops disposal. This compatibility does not rewrite the old
 pointer or release record.
 
+The same narrow proof also covers a schema-11 retained slot that was explicitly
+listed in a completed schema-12 native migration and reclaimed afterward. Its
+task and retained abandonment must predate migration and have no native delivery.
+If that task's historical target branch has since been deleted, disposal uses
+the current local default target only when it is the recorded migration target
+and contains both the migration base and detached slot HEAD. The plan freezes
+the missing historical ref, migration provenance, selected target name and
+target HEAD. Confirmation and recovery reject a recreated historical ref,
+changed migration proof, missing or divergent target, or a target that no
+longer contains the frozen HEAD; a normal forward target advance remains valid.
+No historical task, release pointer, or ref is rewritten.
+
 On Windows, removal pins original ancestors and conditionally deletes the same
 opened object. Explicit whole-slot disposal uses Windows POSIX disposition on
 that checked handle so a mapped dependency image link can be removed while

@@ -15,6 +15,7 @@ from solo_ai.lifecycle import (
     reclaim_retained_worktree,
     start,
 )
+from solo_ai.native_migration import enable_native_migration
 from solo_ai.repo import GitRepo
 from solo_ai.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
 from solo_ai.util import (
@@ -252,6 +253,161 @@ def test_dispose_legacy_reclaim_requires_exact_completed_proof(
         store.mutate(change_proof)
         with pytest.raises(SoloAIError, match="reclaim|predecessor"):
             _prune(repo, kind="slot", slot="01", dispose=True)
+    assert root.exists()
+    assert store.read()["slots"]["01"]["status"] == "idle"
+
+
+def _migrated_reclaimed_slot(
+    git_repo: Path, *, historical_ahead: bool = False
+) -> tuple[GitRepo, StateStore, dict[str, object], Path]:
+    repo, store = _repo(git_repo, native=False)
+    earlier = start(repo, name="earlier legacy user")
+    abandon(
+        repo,
+        task_id=earlier["id"],
+        lease=earlier["lease"],
+        confirm=earlier["id"],
+    )
+    historical = "release/old-target"
+    historical_ref = f"refs/heads/{historical}"
+    if historical_ahead:
+        tree = git(git_repo, "rev-parse", "main^{tree}")
+        parent = git(git_repo, "rev-parse", "main")
+        tip = git(
+            git_repo,
+            "commit-tree",
+            tree,
+            "-p",
+            parent,
+            "-m",
+            "test: old target only",
+        )
+        git(git_repo, "update-ref", historical_ref, tip)
+    else:
+        git(git_repo, "branch", historical, "main")
+    git(git_repo, "checkout", historical)
+    task = start(repo, name="retained before migration", base=historical)
+    root = Path(task["worktree"])
+    abandon(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        confirm=task["id"],
+        reason="retain through migration",
+        retain_worktree=True,
+    )
+    git(git_repo, "checkout", "main")
+    migration = enable_native_migration(
+        repo, base_ref="main", confirm=f"main:{repo.head(git_repo)}"
+    )
+    assert migration["status"] == "enabled"
+    assert migration["migration"]["retained_slot_ids"] == ["01"]
+    assert "01" not in migration["migration"]["slot_ids"]
+    reclaim = reclaim_retained_worktree(repo, task_id=task["id"])
+    reclaim_retained_worktree(repo, task_id=task["id"], confirm=reclaim["confirmation"])
+
+    def keep_old_pointer(state: dict[str, object]) -> None:
+        state["slots"]["01"]["released_candidate_task_id"] = earlier["id"]
+
+    store.mutate(keep_old_pointer)
+    task_ref = f"refs/heads/{task['branch']}"
+    git(git_repo, "update-ref", "-d", task_ref, repo.ref_head(task_ref))
+    git(git_repo, "update-ref", "-d", historical_ref, repo.ref_head(historical_ref))
+    return repo, store, task, root
+
+
+@pytest.mark.parametrize("advance_target", [False, True])
+def test_dispose_migrated_retained_reclaim_with_removed_historical_base(
+    git_repo: Path, advance_target: bool
+) -> None:
+    repo, store, task, root = _migrated_reclaimed_slot(git_repo)
+    plan = _prune(repo, kind="slot", slot="01", dispose=True)
+    proof = plan["legacy_retained_reclaim"]
+    assert proof["task_id"] == task["id"]
+    assert proof["historical_base_ref_head"] is None
+    assert proof["effective_base_ref"] == "main"
+    assert proof["native_migration"]["retained_slot_ids"] == ["01"]
+    assert plan["base_ref"] == "main"
+    if advance_target:
+        git(git_repo, "commit", "--allow-empty", "-m", "test: advance target")
+    _execute(repo, plan)
+    assert not root.exists()
+    rebuilt = start(repo, name="rebuild migrated reclaimed slot")
+    assert Path(rebuilt["worktree"]) == root
+    abandon(
+        repo,
+        task_id=rebuilt["id"],
+        lease=rebuilt["lease"],
+        confirm=rebuilt["id"],
+    )
+    assert store.read()["slots"]["01"]["status"] == "idle"
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "no-migration",
+        "not-retained",
+        "native-task",
+        "migration-after-plan",
+        "historical-ref-appears",
+        "historical-ref-diverges",
+        "target-disappears",
+        "target-diverges",
+        "head-not-in-target",
+    ),
+)
+def test_dispose_migrated_retained_reclaim_requires_exact_target_and_provenance(
+    git_repo: Path, drift: str
+) -> None:
+    repo, store, task, root = _migrated_reclaimed_slot(
+        git_repo, historical_ahead=drift == "head-not-in-target"
+    )
+    if drift in {"no-migration", "not-retained", "native-task"}:
+
+        def change_provenance(state: dict[str, object]) -> None:
+            if drift == "no-migration":
+                state["native_migration"] = None
+            elif drift == "not-retained":
+                state["native_migration"]["retained_slot_ids"] = []
+            else:
+                state["tasks"][task["id"]]["native_delivery"] = {}
+
+        store.mutate(change_provenance)
+        with pytest.raises(SoloAIError, match="migration"):
+            _prune(repo, kind="slot", slot="01", dispose=True)
+    elif drift == "head-not-in-target":
+        with pytest.raises(SoloAIError, match="recorded base"):
+            _prune(repo, kind="slot", slot="01", dispose=True)
+    elif drift == "migration-after-plan":
+        plan = _prune(repo, kind="slot", slot="01", dispose=True)
+
+        def change_migration(state: dict[str, object]) -> None:
+            state["native_migration"]["enabled_at"] = "2099-01-01T00:00:00Z"
+
+        store.mutate(change_migration)
+        with pytest.raises(SoloAIError, match="changed after review"):
+            _execute(repo, plan)
+    else:
+        old_ref = f"refs/heads/{task['base_ref']}"
+        if drift == "historical-ref-diverges":
+            git(git_repo, "branch", task["base_ref"], "main")
+        plan = _prune(repo, kind="slot", slot="01", dispose=True)
+        if drift == "historical-ref-appears":
+            git(git_repo, "branch", task["base_ref"], "main")
+        elif drift == "target-disappears":
+            git(git_repo, "update-ref", "-d", "refs/heads/main")
+        else:
+            tree = git(git_repo, "rev-parse", "main^{tree}")
+            unrelated = git(
+                git_repo, "commit-tree", tree, "-m", "test: unrelated target"
+            )
+            changed_ref = (
+                old_ref if drift == "historical-ref-diverges" else "refs/heads/main"
+            )
+            git(git_repo, "update-ref", changed_ref, unrelated)
+        with pytest.raises(SoloAIError, match="base|migration|changed"):
+            _execute(repo, plan)
     assert root.exists()
     assert store.read()["slots"]["01"]["status"] == "idle"
 
