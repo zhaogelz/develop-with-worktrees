@@ -25,6 +25,10 @@ For a registered idle slot left detached with no fixed branch, Start may recreat
 that branch only after checking its recorded directory identity, any released
 predecessor, clean worktree, unknown content, and detached HEAD ancestry in the
 selected target. Any mismatch remains quarantined with its files preserved.
+An explicitly disposed idle slot keeps its number and history but has no worktree
+directory or Git registration. Start uses its existing missing-slot path to
+create the worktree when that slot is next selected; a disposal still in progress
+keeps the slot unavailable.
 
 When a separately reviewed commit already exists in the same local Git object
 database, `merge-source --task <id> --lease <lease> --source <full-sha>` records

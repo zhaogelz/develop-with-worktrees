@@ -231,12 +231,29 @@ and [recovery](recovery.md) for proof and interruption rules.
 | `batch retire` | a failed dedicated batch needs its exact detached workspace removed | candidate refs, history, original directory and Git identity |
 | `batch retire --fast` | explicitly approved old failed dedicated batch whose candidates are superseded or withdrawn | the same identity/link/protected-content checks; only regenerable dependency hashes are skipped |
 | `prune-slot` | reviewed one-time plan names exact top-level owned paths | task generation, staging manifest, changed/late/protected/link content |
+| `prune-slot --dispose` | an explicit plan freezes one registered idle slot root and its full inventory | active or new generations, moved base/HEAD, replaced paths, changed or late content, link targets |
 
 A reusable workspace is returned, not physically cleaned. Dedicated retirement
 uses a persisted intent and exact removal receipt. Fast retirement stages the
 same directory on the same volume and never follows links; it is a maintenance
 shortcut, not ordinary recovery. `prune-slot` is bounded to a reviewed plan,
 recorded before the first move, and resumes only from that manifest.
+`prune-slot --dispose --slot <id>` first returns a one-time plan and digest;
+execute it with `--dispose --slot <id> --plan <id> --confirm <digest>`.
+It accepts only an idle or inactive registered slot with no current owner,
+clean tracked files, and a HEAD already in its recorded target base. The plan
+freezes the slot generation, actual attached or detached Git state, base head,
+directory identities, and every content object. Execution rechecks those facts,
+accepting only a forward move of the recorded target base that still contains
+the frozen slot HEAD; a missing, rewound, or divergent base stops recovery.
+The slot generation, branch/HEAD, directory identities, and content remain exact.
+The operation
+stages the whole root on the same volume, deletes only unchanged objects without
+following links, removes the exact Git worktree registration, and leaves the
+slot number and history in place. An interrupted disposal keeps that slot
+unavailable until the same plan completes. Start recreates the missing worktree
+on demand under its existing checks. Ordinary `prune-slot` retains its
+declared-path behavior.
 
 On Windows, removal pins original ancestors and conditionally deletes the same
 opened object. On all platforms, changed, recreated, protected, ordinary
