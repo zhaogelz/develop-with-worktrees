@@ -1039,7 +1039,9 @@ def snapshot_link_path(path: Path) -> dict[str, Any]:
         ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
 
 
-def delete_link_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None:
+def delete_link_path_if_unchanged(
+    path: Path, expected: dict[str, Any], *, posix_disposition: bool = False
+) -> None:
     """只删除已核准的链接对象；Windows 使用同一对象句柄条件删除。"""
     if expected.get("kind") != "link":
         raise SoloAIError("Dependency link deletion requires a link snapshot")
@@ -1055,26 +1057,46 @@ def delete_link_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None:
     try:
         if _windows_link_snapshot(handle, mode=int(expected["mode"])) != expected:
             raise SoloAIError(f"Dependency link changed before deletion: {path}")
-        _mark_windows_handle_for_deletion(wintypes.HANDLE(handle))
+        _mark_windows_handle_for_deletion(
+            wintypes.HANDLE(handle), path=path, posix_disposition=posix_disposition
+        )
     finally:
         ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
 
 
-def _mark_windows_handle_for_deletion(handle: int) -> None:
+def _mark_windows_handle_for_deletion(
+    handle: int, *, path: Path, posix_disposition: bool = False
+) -> None:
     import ctypes
     from ctypes import wintypes
 
     class FileDispositionInfo(ctypes.Structure):
         _fields_ = [("DeleteFile", wintypes.BOOL)]
 
-    disposition = FileDispositionInfo(True)
-    if not ctypes.windll.kernel32.SetFileInformationByHandle(
-        handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if posix_disposition:
+        # 显式整槽处置才允许POSIX命名空间删除；仍在已核对的同一对象句柄上操作。
+        flags = wintypes.DWORD(0x00000001 | 0x00000002 | 0x00000010)
+        information_class = 21  # FileDispositionInfoEx
+        buffer = ctypes.byref(flags)
+        size = ctypes.sizeof(flags)
+    else:
+        disposition = FileDispositionInfo(True)
+        information_class = 4  # FileDispositionInfo
+        buffer = ctypes.byref(disposition)
+        size = ctypes.sizeof(disposition)
+    if not kernel32.SetFileInformationByHandle(
+        handle, information_class, buffer, size
     ):
-        raise SoloAIError("Cleanup object could not be conditionally deleted")
+        code = ctypes.get_last_error()
+        raise SoloAIError(
+            f"Cleanup object could not be conditionally deleted: {path} (WinError {code})"
+        )
 
 
-def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None:
+def delete_plain_path_if_unchanged(
+    path: Path, expected: dict[str, Any], *, posix_disposition: bool = False
+) -> None:
     """在 Windows 用已打开对象句柄条件删除，避免路径校验后的替换竞态。"""
     if os.name != "nt":
         snapshot = (
@@ -1154,7 +1176,11 @@ def delete_plain_path_if_unchanged(path: Path, expected: dict[str, Any]) -> None
             raise SoloAIError(f"Cleanup content changed before deletion: {path}")
 
         raw_handle = msvcrt.get_osfhandle(fd)
-        _mark_windows_handle_for_deletion(wintypes.HANDLE(raw_handle))
+        _mark_windows_handle_for_deletion(
+            wintypes.HANDLE(raw_handle),
+            path=path,
+            posix_disposition=posix_disposition,
+        )
     finally:
         if fd is not None:
             os.close(fd)

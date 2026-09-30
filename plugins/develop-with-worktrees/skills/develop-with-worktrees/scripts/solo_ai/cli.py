@@ -1246,6 +1246,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="explicitly dispose the reviewed idle slot worktree root",
     )
+    prune_slot.add_argument(
+        "--recover-volume",
+        action="store_true",
+        help="for --dispose only, review an exact device-only slot identity change",
+    )
     prune_slot.add_argument("--plan", help="plan id returned by a previous prune-slot")
     prune_slot.add_argument(
         "--confirm", help="exact digest returned by a previous prune-slot plan"
@@ -2075,12 +2080,21 @@ def _prune(
     plan_id: str | None = None,
     confirm: str | None = None,
     dispose: bool = False,
+    recover_volume: bool = False,
 ) -> dict[str, Any]:
     with maintenance_lock(repo):
+        if recover_volume and not dispose:
+            raise SoloAIError("--recover-volume requires --dispose")
         if dispose:
             if kind != "slot" or not slot:
                 raise SoloAIError("Whole-slot disposal requires an exact slot")
-            return dispose_slot(repo, slot=slot, plan_id=plan_id, confirm=confirm)
+            return dispose_slot(
+                repo,
+                slot=slot,
+                plan_id=plan_id,
+                confirm=confirm,
+                recover_volume=recover_volume,
+            )
         _require_idle(repo)
         if kind in {"proofs", "logs"}:
             targets = [repo.local_dir / kind]
@@ -3058,6 +3072,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             plan_id=args.plan,
             confirm=args.confirm,
             dispose=args.dispose,
+            recover_volume=args.recover_volume,
         )
     if args.command == "deinit":
         return deinit(repo, confirm=args.confirm, message=args.message)

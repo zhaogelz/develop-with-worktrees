@@ -92,17 +92,84 @@ def _slot(
     return store, slot, root
 
 
-def _payload(repo: GitRepo, slot_id: str) -> dict[str, Any]:
+def _same_volume_object_fields(recorded: Any, current: Any) -> bool:
+    """目录身份字段须为精确整数，inode 与 mode 不容许漂移。"""
+    return (
+        isinstance(recorded, dict)
+        and isinstance(current, dict)
+        and set(recorded) == set(current)
+        and all(
+            type(recorded.get(field)) is int
+            and type(current.get(field)) is int
+            for field in ("device", "inode", "mode")
+        )
+        and recorded["inode"] == current["inode"]
+        and recorded["mode"] == current["mode"]
+    )
+
+
+def _released_identity(
+    slot: dict[str, Any], root: Path, *, recover_volume: bool
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    parent = root.parent
+    require_managed_directory_identity(root, managed_root=parent)
+    current_worktree = path_identity(root)
+    current_parent = path_identity(parent)
+    recorded_worktree = slot.get("released_worktree_identity")
+    recorded_parent = slot.get("released_managed_root_identity")
+    resolved_worktree = slot.get("released_worktree_resolved")
+    resolved_parent = slot.get("released_managed_root_resolved")
+    if resolved_worktree and resolved_worktree != str(root.resolve()):
+        raise SoloAIError("Released slot worktree resolved path changed")
+    if resolved_parent and resolved_parent != str(parent.resolve()):
+        raise SoloAIError("Released managed root resolved path changed")
+    for label, recorded, current in (
+        ("Managed root directory", recorded_parent, current_parent),
+        ("Managed worktree directory", recorded_worktree, current_worktree),
+    ):
+        if recorded is not None:
+            if not _same_volume_object_fields(recorded, current) or (
+                recorded["device"] != current["device"] and not recover_volume
+            ):
+                raise SoloAIError(
+                    f"{label} object was replaced: expected={recorded!r}; "
+                    f"observed={current!r}"
+                )
+    if not recover_volume:
+        return current_worktree, current_parent, None
+    if not (
+        isinstance(recorded_worktree, dict)
+        and isinstance(recorded_parent, dict)
+        and resolved_worktree == str(root.resolve())
+        and resolved_parent == str(parent.resolve())
+    ):
+        raise SoloAIError("Volume-only slot disposal requires complete released identities")
+    transition = (recorded_parent["device"], current_parent["device"])
+    if transition != (recorded_worktree["device"], current_worktree["device"]):
+        raise SoloAIError(
+            "Released slot and managed root disagree on volume transition: "
+            f"worktree expected={recorded_worktree!r}, observed={current_worktree!r}; "
+            f"parent expected={recorded_parent!r}, observed={current_parent!r}"
+        )
+    if transition[0] == transition[1]:
+        raise SoloAIError("Volume-only slot disposal requires a changed device")
+    return current_worktree, current_parent, {
+        "released_worktree_identity": recorded_worktree,
+        "released_managed_root_identity": recorded_parent,
+        "released_worktree_resolved": resolved_worktree,
+        "released_managed_root_resolved": resolved_parent,
+        "from_device": transition[0],
+        "to_device": transition[1],
+    }
+
+
+def _payload(
+    repo: GitRepo, slot_id: str, *, recover_volume: bool = False
+) -> dict[str, Any]:
     store, slot, root = _slot(repo, slot_id)
     parent = root.parent
-    require_managed_directory_identity(parent, managed_root=parent)
-    require_managed_directory_identity(
-        root,
-        managed_root=parent,
-        expected_identity=slot.get("released_worktree_identity"),
-        expected_root_identity=slot.get("released_managed_root_identity"),
-        expected_resolved=slot.get("released_worktree_resolved"),
-        expected_root_resolved=slot.get("released_managed_root_resolved"),
+    worktree_identity, parent_identity, recovery = _released_identity(
+        slot, root, recover_volume=recover_volume
     )
     head = repo.head(root)
     branch = repo.branch(root)
@@ -153,7 +220,7 @@ def _payload(repo: GitRepo, slot_id: str) -> dict[str, Any]:
     base_head = repo.ref_head(f"refs/heads/{base_ref}")
     if not base_head or not repo.is_ancestor(head, base_head):
         raise SoloAIError("Idle slot HEAD is not in its recorded base")
-    return {
+    payload = {
         "mode": "dispose",
         "slot": slot_id,
         "slot_status": slot["status"],
@@ -162,8 +229,8 @@ def _payload(repo: GitRepo, slot_id: str) -> dict[str, Any]:
         "released_candidate_task_id": slot.get("released_candidate_task_id"),
         "fixed_branch": slot.get("fixed_branch"),
         "worktree": str(root),
-        "worktree_identity": path_identity(root),
-        "managed_root_identity": path_identity(parent),
+        "worktree_identity": worktree_identity,
+        "managed_root_identity": parent_identity,
         "branch": branch,
         "detached": branch is None,
         "head": head,
@@ -171,6 +238,9 @@ def _payload(repo: GitRepo, slot_id: str) -> dict[str, Any]:
         "base_head": base_head,
         "entries": _entries(root),
     }
+    if recovery is not None:
+        payload["volume_recovery"] = recovery
+    return payload
 
 
 def _stage(payload: dict[str, Any], plan_id: str) -> Path:
@@ -184,6 +254,7 @@ def _check_slot(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> Path:
     _, slot, root = _slot(repo, str(payload["slot"]), plan_id=plan_id)
     if payload.get("worktree") != str(root):
         raise SoloAIError("Whole-slot plan worktree path changed")
+    _check_volume_record(slot, payload)
     current_base = repo.ref_head(f"refs/heads/{payload['base_ref']}")
     if (
         slot.get("generation") != payload["slot_generation"]
@@ -209,6 +280,45 @@ def _check_slot(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> Path:
     return root
 
 
+def _check_volume_record(slot: dict[str, Any], payload: dict[str, Any]) -> None:
+    recovery = payload.get("volume_recovery")
+    if recovery is None:
+        return
+    if not isinstance(recovery, dict):
+        raise SoloAIError("Whole-slot volume recovery record changed")
+    for field in (
+        "released_worktree_identity",
+        "released_managed_root_identity",
+        "released_worktree_resolved",
+        "released_managed_root_resolved",
+    ):
+        if slot.get(field) != recovery.get(field):
+            raise SoloAIError(f"Whole-slot released identity changed: {field}")
+    old_worktree = recovery["released_worktree_identity"]
+    old_parent = recovery["released_managed_root_identity"]
+    current_worktree = payload["worktree_identity"]
+    current_parent = payload["managed_root_identity"]
+    if not (
+        isinstance(old_worktree, dict)
+        and isinstance(old_parent, dict)
+        and isinstance(current_worktree, dict)
+        and isinstance(current_parent, dict)
+        and recovery.get("from_device") == old_worktree.get("device")
+        == old_parent.get("device")
+        and recovery.get("to_device") == current_worktree.get("device")
+        == current_parent.get("device")
+        and recovery["from_device"] != recovery["to_device"]
+        and all(
+            _same_volume_object_fields(old, current)
+            for old, current in (
+                (old_worktree, current_worktree),
+                (old_parent, current_parent),
+            )
+        )
+    ):
+        raise SoloAIError("Whole-slot volume-only identity proof changed")
+
+
 def _claim(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> None:
     store = StateStore(repo)
 
@@ -225,6 +335,7 @@ def _claim(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> None:
             or slot.get("fixed_branch") != payload["fixed_branch"]
         ):
             raise SoloAIError("Slot disposal generation or owner changed")
+        _check_volume_record(slot, payload)
         if (
             slot.get("status") == "disposing"
             and slot.get("disposal_plan_id") == plan_id
@@ -255,6 +366,8 @@ def _release(repo: GitRepo, payload: dict[str, Any], plan_id: str) -> None:
         slot["disposal_plan_id"] = None
         slot["released_worktree_identity"] = None
         slot["released_worktree_resolved"] = None
+        slot["released_managed_root_identity"] = None
+        slot["released_managed_root_resolved"] = None
 
     store.mutate(update)
 
@@ -314,13 +427,18 @@ def _remaining(
 
 
 def dispose_slot(
-    repo: GitRepo, *, slot: str, plan_id: str | None, confirm: str | None
+    repo: GitRepo,
+    *,
+    slot: str,
+    plan_id: str | None,
+    confirm: str | None,
+    recover_volume: bool = False,
 ) -> dict[str, Any]:
     """经确认后整槽暂存、逐对象删除，再注销Git登记。"""
     if re.fullmatch(r"(?:0[1-9]|[12][0-9]|3[0-2])", slot) is None:
         raise SoloAIError("Whole-slot disposal requires an exact slot id")
     if plan_id is None and confirm is None:
-        payload = _payload(repo, slot)
+        payload = _payload(repo, slot, recover_volume=recover_volume)
         digest = sha256_text(stable_json(payload))
         plan_id = new_id(f"cleanup-slot-{slot}")
         plan = {
@@ -337,7 +455,10 @@ def dispose_slot(
             "plan_id": plan_id,
             "digest": digest,
             **payload,
-            "next": f"prune-slot --dispose --slot {slot} --plan {plan_id} --confirm {digest}",
+            "next": (
+                f"prune-slot --dispose {'--recover-volume ' if recover_volume else ''}"
+                f"--slot {slot} --plan {plan_id} --confirm {digest}"
+            ),
         }
     if not plan_id or not confirm:
         raise SoloAIError("Whole-slot disposal requires both --plan and --confirm")
@@ -357,6 +478,8 @@ def dispose_slot(
     ):
         raise SoloAIError("Whole-slot disposal confirmation changed")
     payload = plan["payload"]
+    if bool(payload.get("volume_recovery")) != recover_volume:
+        raise SoloAIError("Whole-slot volume recovery mode changed from its plan")
     phase = str(plan.get("status"))
     root = Path(str(payload["worktree"]))
     stage = _stage(payload, plan_id)
@@ -418,7 +541,7 @@ def dispose_slot(
     }:
         raise SoloAIError("Unsupported whole-slot disposal recovery state")
     if phase == "planned":
-        current = _payload(repo, slot)
+        current = _payload(repo, slot, recover_volume=recover_volume)
         current_base = str(current["base_head"])
         if not repo.is_ancestor(
             str(payload["base_head"]), current_base
@@ -516,9 +639,13 @@ def dispose_slot(
                             )
                         pinned.enter_context(pinned_plain_directory(ancestor, frozen))
                     if snapshot["kind"] == "link":
-                        delete_link_path_if_unchanged(path, snapshot)
+                        delete_link_path_if_unchanged(
+                            path, snapshot, posix_disposition=True
+                        )
                     else:
-                        delete_plain_path_if_unchanged(path, snapshot)
+                        delete_plain_path_if_unchanged(
+                            path, snapshot, posix_disposition=True
+                        )
         if stage.exists() or is_link_or_junction(stage):
             raise SoloAIError("Whole-slot staging directory remains")
         plan["status"] = "unregistering"

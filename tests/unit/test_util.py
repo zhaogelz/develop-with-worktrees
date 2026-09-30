@@ -1,6 +1,7 @@
 import errno
 import json
 import os
+import re
 import signal
 import socket
 import stat
@@ -529,6 +530,47 @@ def test_conditional_delete_accepts_same_windows_file_identity(tmp_path: Path) -
     util.delete_plain_path_if_unchanged(path, expected)
 
     assert not path.exists()
+
+
+@pytest.mark.dww_fast
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 已加载映像删除语义")
+def test_conditional_posix_delete_removes_loaded_image_hardlink_only(
+    tmp_path: Path,
+) -> None:
+    import psutil
+    import psutil._psutil_windows as loaded_image
+
+    original = Path(loaded_image.__file__)
+    approved_link = tmp_path / "approved-image.pyd"
+    os.link(original, approved_link)
+    expected = util.snapshot_plain_path(approved_link)
+
+    util.delete_plain_path_if_unchanged(
+        approved_link, expected, posix_disposition=True
+    )
+
+    assert not approved_link.exists()
+    assert original.exists()
+    assert psutil.pids()
+
+
+@pytest.mark.dww_fast
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 条件删除错误诊断")
+def test_conditional_delete_reports_path_and_winerror_for_readonly_file(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "readonly.txt"
+    path.write_text("preserve", encoding="utf-8")
+    path.chmod(stat.S_IREAD)
+    try:
+        expected = util.snapshot_plain_path(path)
+        with pytest.raises(SoloAIError) as caught:
+            util.delete_plain_path_if_unchanged(path, expected)
+        assert str(path) in str(caught.value)
+        assert re.search(r"WinError [1-9]\d*", str(caught.value))
+        assert path.read_text(encoding="utf-8") == "preserve"
+    finally:
+        path.chmod(stat.S_IWRITE)
 
 
 def test_unix_process_group_stops_with_term_before_waiting(
