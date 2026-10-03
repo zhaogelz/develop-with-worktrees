@@ -56,6 +56,14 @@ owned integration workspaces, and ambiguous pre-activation tasks block it.
 This narrow entry requires existing fixed-slot release identities; it does not
 guess missing records or recover moved/recreated directories.
 
+An absent, unregistered idle slot with no owner or disposal in progress and
+cleared release identities is preserved as never created or formally disposed.
+A missing slot that still has recorded directory identities remains blocked.
+A clean pre-activation native task may retain its exact fixed branch only when
+its released predecessor was delivered, its branch and HEAD still match that
+source, and both source and delivery belong to the recorded base history.
+After rebinding, ordinary `recover --task <id>` resumes that same task.
+
 Only live slot records, their current/released task identities, and the idle
 integration workspace are rebound. Task statuses, ownership, leases, commits,
 proofs, historical batches, and ignored files are preserved. The original state
