@@ -100,6 +100,44 @@ def completed_rebind_for_task(repo: GitRepo, task: dict[str, Any]) -> bool:
     return False
 
 
+def _preactivation_branch_matches(
+    repo: GitRepo,
+    state: dict[str, Any],
+    slot: dict[str, Any],
+    task: dict[str, Any],
+    path: Path,
+) -> bool:
+    """只接受原 detached 分支或精确归还的已交付固定分支。"""
+    branch = repo.branch(path)
+    branch_head = repo.ref_head(f"refs/heads/{task['branch']}")
+    if branch is None:
+        return branch_head is None
+    predecessor_id = task.get("slot_predecessor_task_id")
+    predecessor = state["tasks"].get(predecessor_id) or {}
+    delivery = (predecessor.get("native_delivery") or {}).get("delivery") or {}
+    head = repo.head(path)
+    return bool(
+        task.get("native_delivery")
+        and branch == task["branch"] == slot.get("fixed_branch")
+        and predecessor_id == slot.get("released_task_id")
+        and predecessor.get("status") == "finished"
+        and predecessor.get("slot_generation") == task["slot_generation"] - 1
+        and all(
+            predecessor.get(key) == task.get(key)
+            for key in (
+                "slot_id",
+                "worktree",
+                "branch",
+                "base_ref",
+            )
+        )
+        and head == branch_head == predecessor.get("candidate_head")
+        and delivery.get("integration_head")
+        and repo.is_ancestor(head, task["base_head"])
+        and repo.is_ancestor(delivery["integration_head"], task["base_head"])
+    )
+
+
 def _inspect(
     repo: GitRepo, state: dict[str, Any]
 ) -> tuple[dict[str, Any], list[tuple[dict[str, Any], str, dict[str, Any]]]]:
@@ -172,6 +210,36 @@ def _inspect(
         path = Path(slot["path"]).absolute()
         if path.parent != root:
             raise SoloAIError("Slot escaped the configured managed root")
+        require_managed_directory_identity(path, managed_root=root)
+        # 从未创建或正式清理的空闲槽位没有待重绑目录，保留其历史与空状态。
+        if (
+            not path.exists()
+            and path not in registered
+            and (
+                slot.get("status") in {"idle", "inactive"}
+                and slot.get("task_id") is None
+                and slot.get("disposal_plan_id") is None
+                and all(
+                    slot.get(key) is None
+                    for key in (
+                        "released_worktree_identity",
+                        "released_worktree_resolved",
+                        "released_managed_root_identity",
+                        "released_managed_root_resolved",
+                    )
+                )
+            )
+        ):
+            predecessor_id = slot.get("released_task_id")
+            predecessor = state["tasks"].get(predecessor_id)
+            if predecessor_id and (
+                not predecessor
+                or predecessor.get("status") not in FINAL_TASK_STATES
+                or Path(predecessor["worktree"]).absolute() != path
+            ):
+                raise SoloAIError("Absent idle slot has no terminal predecessor")
+            facts[str(path)] = {"absent_idle_slot": True}
+            continue
         workspace(path)
         label = f"slots.{slot_id}"
         identity(
@@ -234,8 +302,10 @@ def _inspect(
                     task.get("status") != "quarantined"
                     or task.get("quarantine_reason")
                     != "Managed root directory object was replaced"
-                    or repo.branch(path) is not None
-                    or repo.ref_head(f"refs/heads/{task['branch']}") is not None
+                    or not _preactivation_branch_matches(repo, state, slot, task, path)
+                    or task.get("candidate_publication")
+                    or task.get("integration")
+                    or task.get("abandonment")
                     or task.get("runtime_activation")
                     or (repo.local_dir / "task-anchors" / f"{task_id}.md").exists()
                     or not repo.is_ancestor(repo.head(path), task["base_head"])
