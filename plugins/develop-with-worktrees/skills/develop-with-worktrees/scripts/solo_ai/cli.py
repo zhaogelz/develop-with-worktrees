@@ -814,6 +814,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     batch_recover.add_argument("--batch", required=True)
     batch_recover.add_argument(
+        "--external-failure-evidence",
+        type=Path,
+        help="reviewed local evidence of an external execution failure and its actual recovery",
+    )
+    batch_recover.add_argument(
+        "--confirm-recovered",
+        help="exact BATCH_ID:FAILED_ATTEMPT_ID:INTEGRATION_HEAD",
+    )
+    batch_recover.add_argument(
         "--confirm-no-live-validation",
         action="store_true",
         help="record an incomplete Full only after confirming its processes stopped",
@@ -2599,6 +2608,16 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                     repo,
                     batch_id=args.batch,
                     confirm_no_live_validation=args.confirm_no_live_validation,
+                    external_failure_evidence=getattr(
+                        args, "external_failure_evidence", None
+                    ),
+                    confirm_recovered=getattr(args, "confirm_recovered", None),
+                )
+            if getattr(args, "external_failure_evidence", None) or getattr(
+                args, "confirm_recovered", None
+            ):
+                raise SoloAIError(
+                    "External failure recovery requires a native task batch"
                 )
             if args.confirm_no_live_validation:
                 raise SoloAIError("This recovery option requires a native batch")

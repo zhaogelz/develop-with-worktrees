@@ -124,11 +124,32 @@ resumes the recorded batch transaction. It does not rerun Full merely to finish
 that later work. A runtime resource cycle that was successfully released before
 a new validation attempt must be activated again; see [Runtime Adapter](runtime-adapter.md).
 
-`batch recover` is only for an interrupted nonfailed transaction. A failed
+Without explicit external recovery evidence, `batch recover` only resumes an
+interrupted nonfailed transaction. A failed
 generation preserves the base and exact evidence. A reviewed successor with the
 same candidates requires the explicit failed predecessor and an actually changed
 external blocker; it cannot be created to repeat an unchanged deterministic
 failure.
+
+A stopped native batch whose only failures are non-ordinary execution exits in
+profiles with external state may resume after the external fault has actually
+been repaired. Review the failure log and the real recovery check, then use:
+
+```text
+dww batch recover --batch <id> --confirm-no-live-validation --external-failure-evidence <local-json> --confirm-recovered <id>:<failed-attempt>:<integration-head>
+```
+
+The UTF-8 JSON file must stay inside the invoking repository and contain
+`schema_version: 1`, `batch_id`, `validation_attempt`, `integration_head`,
+`base_before`, and nonempty `failure_observation` and `recovery_observation`
+strings. Record the observed fault and completed recovery without credentials or
+private payloads. This is a reviewed attribution, not automatic proof of the
+fault's cause. The entry checks the stopped attempt, exact unchanged source and
+base, clean owned workspace, absent queue tickets, and passed runtime release.
+Ordinary assertion failures, pure checks, timeouts, unfinished commands and
+identity drift remain blocked. It snapshots the evidence, preserves the original
+failed attempt and starts a new Full; it never marks failure as success. Repeating
+the same request resumes that transaction and does not duplicate a completed Full.
 
 ## Repair decisions
 
