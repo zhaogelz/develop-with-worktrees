@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -878,14 +879,150 @@ def repair_native_batch(
         )
 
 
+def _recover_external_failure(
+    repo: GitRepo,
+    store: StateStore,
+    batch: dict[str, Any],
+    *,
+    evidence_file: Path,
+    confirmation: str | None,
+    confirm_no_live_validation: bool,
+) -> dict[str, Any]:
+    """已核实的外部故障恢复只开启新 Full，不将失败证明改为通过。"""
+    if not confirm_no_live_validation:
+        raise SoloAIError("External recovery requires confirmed stopped validation")
+    path = ensure_within(evidence_file, repo.root)
+    if evidence_file.is_symlink() or not path.is_file():
+        raise SoloAIError("External recovery requires one regular local evidence file")
+    try:
+        text = path.read_text(encoding="utf-8")
+        evidence = json.loads(text)
+    except (OSError, ValueError) as exc:
+        raise SoloAIError("External recovery evidence is unreadable") from exc
+    if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
+        raise SoloAIError("External recovery evidence has an unsupported format")
+    attempt_id = str(evidence.get("validation_attempt") or "")
+    head = str(evidence.get("integration_head") or "")
+    if confirmation != f"{batch['id']}:{attempt_id}:{head}":
+        raise SoloAIError("External recovery confirmation changed the exact attempt")
+    digest = sha256_text(text)
+    records = batch.get("external_recovery_records", [])
+    if batch["status"] != "validation-failed":
+        if records and records[-1].get("evidence_sha256") == digest:
+            return batch
+        raise SoloAIError("External recovery requires its stopped failed Full")
+    batch_workspace.require_owner(repo, store, batch)
+    attempt = read_validation_attempt(repo, attempt_id)
+    if (
+        evidence.get("batch_id") != batch["id"]
+        or attempt_id != batch.get("validation_attempt")
+        or head != batch["integration_head"]
+        or evidence.get("base_before") != batch["base_before"]
+        or attempt.get("task_id") != batch["id"]
+        or attempt.get("owner") != {"kind": "batch", "id": batch["id"]}
+        or attempt.get("candidate_head") != head
+        or attempt.get("base_head") != batch["base_before"]
+        or attempt.get("state") != "completed"
+        or attempt.get("result") != "failed"
+    ):
+        raise SoloAIError("External recovery lost its exact failed attempt identity")
+    worktree = Path(str(batch["worktree"]))
+    if (
+        repo.ref_head(f"refs/heads/{batch['base_ref']}") != batch["base_before"]
+        or repo.head(worktree) != head
+        or not repo.is_clean(worktree)
+    ):
+        raise SoloAIError("External recovery target or workspace changed")
+    require_exact_passed_batch_release(repo, receipt=batch.get("runtime_release") or {})
+    for name in ("failure_observation", "recovery_observation"):
+        value = evidence.get(name)
+        if not isinstance(value, str) or not value.strip() or len(value) > 4096:
+            raise SoloAIError(
+                "External recovery requires failure and recovery observations"
+            )
+    profiles = attempt.get("profiles")
+    if not isinstance(profiles, list) or not all(isinstance(p, dict) for p in profiles):
+        raise SoloAIError("External recovery has unreadable validation profiles")
+    configured = {
+        p.profile_id: p for p in load_verification_config(repo, cwd=worktree).profiles
+    }
+    failures = []
+    for profile in profiles:
+        ticket = (profile.get("queue") or {}).get("ticket")
+        if ticket and queue_ticket_snapshot(str(ticket)) is not None:
+            raise SoloAIError("External recovery still owns a live queue ticket")
+        if profile.get("current_command") or profile.get("state") in {
+            "running",
+            "waiting",
+        }:
+            raise SoloAIError("External recovery still has an unfinished command")
+        if profile.get("state") in {"failed", "blocked", "timed_out"}:
+            policy = configured.get(profile.get("id"))
+            if (
+                profile.get("state") != "failed"
+                or not str(profile.get("error_reason", "")).startswith(
+                    "non_assertion_exit:"
+                )
+                or policy is None
+                or policy.external_state == "none"
+            ):
+                raise SoloAIError(
+                    "External recovery cannot retry an ordinary or pure failure"
+                )
+            failures.append(profile["id"])
+    if not failures:
+        raise SoloAIError(
+            "External recovery has no recorded external execution failure"
+        )
+    snapshot = (
+        repo.local_dir / "external-failure-recoveries" / f"{batch['id']}-{digest}.json"
+    )
+    atomic_write_text(snapshot, text)
+    record = {
+        "validation_attempt": attempt_id,
+        "integration_head": head,
+        "base_before": batch["base_before"],
+        "failed_profiles": failures,
+        "evidence_file": str(snapshot),
+        "evidence_sha256": digest,
+        "recorded_at": utc_timestamp(),
+    }
+    return store.update_batch(
+        str(batch["id"]),
+        status="composed",
+        proof=None,
+        validation_error=None,
+        validation_outcome=None,
+        external_recovery_records=[*records, record],
+    )
+
+
 def run_native_batch(
-    repo: GitRepo, *, batch_id: str, confirm_no_live_validation: bool = False
+    repo: GitRepo,
+    *,
+    batch_id: str,
+    confirm_no_live_validation: bool = False,
+    external_failure_evidence: Path | None = None,
+    confirm_recovered: str | None = None,
 ) -> dict[str, Any]:
     """按当前持久阶段恢复；验证失败必须先修复，绝不盲目重跑。"""
 
     store = StateStore(repo)
     with integration_turn(repo, batch_id):
         batch = store.native_batch(batch_id)
+        if external_failure_evidence is not None:
+            batch = _recover_external_failure(
+                repo,
+                store,
+                batch,
+                evidence_file=external_failure_evidence,
+                confirmation=confirm_recovered,
+                confirm_no_live_validation=confirm_no_live_validation,
+            )
+        elif confirm_recovered is not None:
+            raise SoloAIError(
+                "External recovery confirmation requires its evidence file"
+            )
         if batch["status"] in {"sealed", "composing"}:
             batch = _compose(repo, store, batch)
         if batch["status"] in {"conflicted", "repairing"}:

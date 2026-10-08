@@ -24,6 +24,8 @@ task contract locally, and carries reviewed changes through local integration.
   stays unchanged until a batch succeeds.
 - Independent checks continue after ordinary failures by default, so one
   validation attempt can report related failures together.
+- When an external connection fault interrupts validation, verified recovery can
+  start a fresh validation while preserving the failed attempt and exact source.
 
 DWW is the Git lifecycle layer. Your host's task system still decides how work
 is split, scheduled, and discussed. Your project still owns its tests, runtime

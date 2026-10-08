@@ -4,6 +4,7 @@ import difflib
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -1608,6 +1609,181 @@ def test_native_full_repair_uses_new_head_and_keeps_failed_attempt(
     assert completed["integration_head"] == repair_head
     assert repo.head(git_repo) == repair_head
     assert repo.is_ancestor(source, repo.head(git_repo))
+
+
+def _external_failure_scene(path: Path) -> tuple[GitRepo, StateStore, dict, Path, Path]:
+    marker = path / ".git" / "external-connection-ready"
+    marker.write_text("ready", encoding="utf-8")
+    command = CommandSpec(
+        (
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; import sys; sys.exit(0 if Path({str(marker)!r}).exists() else 2)",
+        )
+    )
+    repo, store = _native_repo(path, commands=[command])
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name="external connection recovery")
+    (Path(task["worktree"]) / "feature.txt").write_text("ready\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: reviewed source",
+        paths=["feature.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver"
+    )
+    marker.unlink()
+    with pytest.raises(SoloAIError):
+        run_native_batch(repo, batch_id=batch["id"])
+    failed = store.native_batch(batch["id"])
+    evidence = repo.local_dir / "external-recovery.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "batch_id": failed["id"],
+                "validation_attempt": failed["validation_attempt"],
+                "integration_head": failed["integration_head"],
+                "base_before": failed["base_before"],
+                "failure_observation": "连接已断开，实际探测失败。",
+                "recovery_observation": "正式维护入口恢复连接，实际探测通过。",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return repo, store, failed, evidence, marker
+
+
+def test_native_external_recovery_requires_evidence_and_runs_new_full(
+    git_repo: Path,
+) -> None:
+    repo, store, failed, evidence, marker = _external_failure_scene(git_repo)
+    with pytest.raises(SoloAIError, match="unchanged inputs"):
+        run_native_batch(repo, batch_id=failed["id"])
+    marker.write_text("restored", encoding="utf-8")
+    confirmation = (
+        f"{failed['id']}:{failed['validation_attempt']}:{failed['integration_head']}"
+    )
+    completed = cli_module._dispatch(
+        cli_module._parser().parse_args(
+            [
+                "--repo",
+                str(git_repo),
+                "batch",
+                "recover",
+                "--batch",
+                failed["id"],
+                "--confirm-no-live-validation",
+                "--external-failure-evidence",
+                str(evidence),
+                "--confirm-recovered",
+                confirmation,
+            ]
+        )
+    )
+    assert completed["status"] == "completed"
+    assert completed["integration_head"] == failed["integration_head"]
+    assert len(completed["validation_attempts"]) == 2
+    assert (
+        read_validation_attempt(repo, failed["validation_attempt"])["result"]
+        == "failed"
+    )
+    assert (
+        completed["external_recovery_records"][0]["validation_attempt"]
+        == failed["validation_attempt"]
+    )
+    assert repo.head(git_repo) == failed["integration_head"]
+    repeated = run_native_batch(
+        repo,
+        batch_id=failed["id"],
+        confirm_no_live_validation=True,
+        external_failure_evidence=evidence,
+        confirm_recovered=confirmation,
+    )
+    assert repeated["validation_attempts"] == completed["validation_attempts"]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "confirmation",
+        "live",
+        "observation",
+        "head",
+        "ordinary",
+        "queue",
+        "release",
+        "pure",
+        "unfinished",
+    ],
+)
+def test_native_external_recovery_rejects_unproven_or_changed_scene(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid: str,
+) -> None:
+    repo, store, failed, evidence, marker = _external_failure_scene(git_repo)
+    marker.write_text("restored", encoding="utf-8")
+    confirmation = (
+        f"{failed['id']}:{failed['validation_attempt']}:{failed['integration_head']}"
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    if invalid == "observation":
+        payload["recovery_observation"] = ""
+    elif invalid == "head":
+        payload["integration_head"] = "0" * 40
+    elif invalid == "ordinary":
+        attempt = read_validation_attempt(repo, failed["validation_attempt"])
+        profiles = attempt["profiles"]
+        for profile in profiles:
+            if profile["state"] == "failed":
+                profile["error_reason"] = "ordinary_failure:1"
+        native_batches._update_validation_attempt(
+            repo, failed["validation_attempt"], profiles=profiles
+        )
+    elif invalid == "queue":
+        monkeypatch.setattr(
+            native_batches, "queue_ticket_snapshot", lambda *_: {"state": "running"}
+        )
+    elif invalid == "release":
+        store.update_batch(failed["id"], runtime_release=None)
+    elif invalid == "pure":
+        policy = load_verification_config(repo, cwd=Path(failed["worktree"]))
+        monkeypatch.setattr(
+            native_batches,
+            "load_verification_config",
+            lambda *a, **kw: replace(
+                policy,
+                profiles=tuple(
+                    replace(p, external_state="none") for p in policy.profiles
+                ),
+            ),
+        )
+    elif invalid == "unfinished":
+        attempt = read_validation_attempt(repo, failed["validation_attempt"])
+        profiles = attempt["profiles"]
+        profiles[0]["current_command"] = {"process": process_snapshot()}
+        native_batches._update_validation_attempt(
+            repo, failed["validation_attempt"], profiles=profiles
+        )
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SoloAIError):
+        run_native_batch(
+            repo,
+            batch_id=failed["id"],
+            confirm_no_live_validation=invalid != "live",
+            external_failure_evidence=evidence,
+            confirm_recovered="wrong" if invalid == "confirmation" else confirmation,
+        )
+    assert store.native_batch(failed["id"])["status"] == "validation-failed"
+    assert store.native_batch(failed["id"])["validation_attempts"] == [
+        failed["validation_attempt"]
+    ]
+    assert repo.head(git_repo) == failed["base_before"]
 
 
 def test_native_sensitive_preflight_records_failure_then_repairs_exact_policy(
