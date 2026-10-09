@@ -4643,6 +4643,34 @@ def _apply_delivery_intent_result(
     return candidate_result
 
 
+def _native_finish_result(
+    store: StateStore, task_id: str, batch: dict[str, Any]
+) -> dict[str, Any]:
+    # 从原回执投影交付结果，不创建第二套状态。
+    task = store.task(task_id)
+    delivered = task["status"] == "finished"
+    return {
+        **task,
+        "outcome": "delivered" if delivered else "integrating",
+        "delivered": delivered,
+        "batch_id": batch["id"],
+        "batch_status": batch["status"],
+        "integrated_head": batch.get("integration_head") if delivered else None,
+    }
+
+
+def _require_native_finish_batch(task: dict[str, Any], batch: dict[str, Any]) -> None:
+    delivery = task.get("native_delivery") or {}
+    if batch.get("base_ref") != task.get("base_ref") or not any(
+        member.get("task_id") == task["id"]
+        and member.get("ready_head") == delivery.get("ready_head")
+        and member.get("slot_generation") == task.get("slot_generation")
+        and member.get("branch") == task.get("branch")
+        for member in batch.get("tasks", [])
+    ):
+        raise SoloAIError("Native Finish task does not match its recorded batch")
+
+
 def _finish_native(
     repo: GitRepo,
     *,
@@ -4657,6 +4685,46 @@ def _finish_native(
 
     task_id = str(task["id"])
     tail_request = _normalize_finish_delivery_intent(cause=cause, reason=reason)
+    delivery = task.get("native_delivery") or {}
+    batch_id = delivery.get("batch_id")
+    if batch_id:
+        batch = store.native_batch(str(batch_id))
+        _require_native_finish_batch(task, batch)
+        if tail_request is not None and tail_request != delivery.get("tail_request"):
+            raise SoloAIError("Native Finish tail intent changed")
+        if task["status"] == "finished":
+            # 终态已清除 lease；这里只读历史回执，不接触已分配给新任务的工位。
+            receipt = delivery.get("delivery") or {}
+            head = receipt.get("integration_head")
+            target = repo.ref_head(f"refs/heads/{task['base_ref']}")
+            if (
+                batch.get("status") != "completed"
+                or receipt.get("batch_id") != batch_id
+                or not head
+                or head != batch.get("integration_head")
+                or not receipt.get("release_receipt")
+                or not target
+                or not repo.is_ancestor(str(head), target)
+            ):
+                raise SoloAIError("Native Finish delivery receipt is not verified")
+            return _native_finish_result(store, task_id, batch)
+        with store.operation(task_id, lease, "finish") as owned:
+            require_anchor(repo, owned, require_verified_origin=True)
+            _require_current_structured_root_review(repo, owned, store=store)
+            _require_native_finish_batch(owned, batch)
+            if owned.get("status") not in {
+                "integrating",
+                "delivered-pending-release",
+            }:
+                raise SoloAIError("Native Finish cannot resume this task state")
+            if owned["status"] == "integrating":
+                _assert_exact_candidate(
+                    repo, owned, candidate_head=str(delivery["ready_head"])
+                )
+        from .native_batches import run_native_batch
+
+        batch = run_native_batch(repo, batch_id=str(batch_id))
+        return _native_finish_result(store, task_id, batch)
     if task["status"] == "active":
         ready(repo, task_id=task_id, lease=lease, session_id=session_id)
     with maintenance_lock(repo), candidate_admission_lock(repo):
@@ -4683,19 +4751,14 @@ def _finish_native(
     from .native_batches import reconcile_native_batches
 
     batch = reconcile_native_batches(repo, base_ref=str(waiting["base_ref"]))
-    if batch is not None:
-        delivered = store.task(task_id)
-        return {
-            **delivered,
-            "outcome": "delivered"
-            if delivered["status"] == "finished"
-            else "integrating",
-            "delivered": delivered["status"] == "finished",
-            "batch_id": batch["id"],
-            "batch_status": batch["status"],
-        }
+    current = store.task(task_id)
+    if (
+        batch is not None
+        and (current.get("native_delivery") or {}).get("batch_id") == batch["id"]
+    ):
+        return _native_finish_result(store, task_id, batch)
     return {
-        **waiting,
+        **current,
         "outcome": "waiting_integration",
         "delivered": False,
         "waiting": {

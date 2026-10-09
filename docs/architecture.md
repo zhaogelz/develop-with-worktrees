@@ -39,7 +39,10 @@ coordinator.
 
 For an individual or small team, the default surface is deliberately narrow:
 route the repository, work in the returned isolated worktree, commit reviewed
-paths, freeze the task head, and follow its local delivery or recovery. The
+paths, and call native Finish to freeze and follow eligible local delivery.
+Finish continues its assigned batch from existing recovery stages; a completed
+task returns its verified receipt read-only without touching a reused slot.
+There is no separate daily delivery command or new lifecycle state. The
 invariants below make that short path safe; they are not optional complexity.
 
 Some capabilities remain available only for a specific boundary. A delegated

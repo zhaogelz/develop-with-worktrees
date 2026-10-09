@@ -46,6 +46,16 @@ head. `finish --task <id> --lease <lease>` releases any configured task runtime,
 then records that frozen head as waiting for integration; it does not release
 the slot or claim delivery.
 
+For ordinary native development, call `finish` after the exact-path commit;
+it invokes Ready for an active task. Do not require a separate Ready call merely
+to reach Finish. Repeating Finish resumes the same assigned batch through its
+existing recovery stages. It does not confirm that interrupted validation has
+stopped or rerun an unchanged failed check. A finished task returns its verified
+historical delivery receipt read-only, even when its old slot has a new owner.
+Full success followed by a release or promotion interruption resumes those
+remaining stages without another Full. Other recovery evidence still uses
+[Recovery](recovery.md).
+
 An exact full group freezes automatically. An explicit smaller tail needs a concrete
 `round-complete`, `user`, `deploy`, or `dependency` cause and one-line reason.
 Use `round-complete` only after the agreed round really ends and the exact

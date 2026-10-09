@@ -135,6 +135,7 @@ A required build is a separate integration Full profile:
 ```toml
 [[profiles]]
 id = "required-build"
+depends_on = ["pure-unit"]
 level = "full"
 full_scope = "integration"
 paths = ["**"]
@@ -145,6 +146,15 @@ resource_class = "heavy"
 environment = []
 commands = [["npm", "run", "build"]]
 ```
+
+The two examples belong in the same verification file, with `pure-unit`
+first. A unit failure blocks `required-build` before it starts. Keep independent
+quick checks independent so their ordinary failures can be collected in one pass.
+The project must include the assertions that can catch known source or contract
+errors before a build or browser run; a prerequisite passing does not prove the
+runtime behavior. Split a project command only when that gives a useful early
+failure or an independently recoverable result. DWW does not infer business
+coverage, skip required checks, or create a second check selector.
 
 ## Safe adoption
 

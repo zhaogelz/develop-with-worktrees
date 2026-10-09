@@ -6,141 +6,88 @@ description: "Use for a Git-repository change that needs safe local routing, iso
 # Develop with Worktrees
 
 DWW owns local Git routing, task identity, worktrees, anchors, exact commits,
-task heads, integration, recovery, and cleanup. The host owns task scheduling
-and messages. Run this skill's absolute `scripts/dww.py` path:
-
-When an agent creates a task in a saved local project, follow the user's Local
-preference before the host creation call: explicitly select that project's saved
-local directory, then let DWW `start` allocate the coding worktree. Use a host
-worktree when the user explicitly requests one. The host owns that choice;
-installing DWW alone does not change it or make every repository managed.
+integration, recovery, and cleanup. The host owns scheduling and messages;
+the project owns check selection and runtime resources. Run the installed
+skill's absolute `scripts/dww.py` path:
 
 ```text
 uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
 ```
 
-## Before modifying
+## Ordinary work
 
-Use host route context or this read-only fallback:
+1. Route before editing. Use host route context or `--json route`.
+   For `managed`, run `start` and edit only its returned worktree.
+   `defer` uses the project's workflow without DWW state; `delegated` uses its
+   approved adapter. Other modes and first-use choices follow
+   [Lifecycle](references/lifecycle.md).
+2. Keep the task's one anchor current when scope or material progress changes.
+   Run focused project checks and `commit` only reviewed exact paths.
+3. For native tasks (state schema 12), use `finish` directly after committing.
+   It performs Ready, releases task runtime, and follows an eligible batch
+   through combined Full, promotion, and slot return. Explicit `ready` is only
+   needed when a separately frozen head is useful. See
+   [Native delivery](references/native-delivery.md) for exact arguments.
 
-```text
-uv run --script <DWW> --repo <repository-or-worktree> --json route
-```
+A full compatible group freezes automatically. A smaller tail needs a recorded
+`round-complete`, `user`, `deploy`, or `dependency` cause and one-line reason.
+Verify that the agreed round and its target lane have no active producer before
+using `round-complete`. Ordinary completion, idle time, task counts, and Hooks
+do not establish that cause. Waiting is a valid result, not delivery.
 
-- `managed`: DWW owns the local lifecycle.
-- `defer`: the repository's mature workflow owns it; write no DWW state.
-- `delegated`: use only the tracked, locally approved adapter.
-- `disabled` or `current-task`: follow the recorded local mode.
-- `ask`: ask the one first-modification question in [lifecycle](references/lifecycle.md).
+Repeat native `finish` to continue its already assigned batch. A completed task
+returns its verified historical receipt without touching a reused slot.
+If a check failed, inspect and repair first; repeating unchanged failed input
+does not run another long validation. Schema-11 repositories keep their recorded
+legacy flow until guarded migration; read [Lifecycle](references/lifecycle.md).
 
-For a managed task, run `start` before editing, use only its returned worktree,
-keep its one task anchor current when the contract or material progress changes,
-and commit only reviewed exact paths. Do not bypass failed gates, discard unknown
-content, or use DWW to fetch, pull, push, deploy, rebase, squash, amend, or
-rewrite history.
+## Continue within the authorization
 
-Within the user's already authorized task scope, create or refresh anchors,
-run focused checks, commit exact paths, and follow eligible local integration
-without asking again. Technical `--accept`, `--confirm`, and `--force`
-arguments verify an exact operation, not a new user decision. Preserve and
-report affected unknown base content while continuing unrelated read-only or
-isolated work.
+Within the user's authorized scope, update context, inspect related code and old
+assertions, collect independent failures, repair them together, and continue
+focused checks and eligible delivery. Do not ask again for those ordinary steps.
+Technical `--accept`, `--confirm`, and `--force` arguments verify an exact
+operation; they are not a new user decision.
 
-When a review or check finds a failure, continue examining related code, old
-assertions, and independent checks within the agreed scope. Group the findings,
-repair the authorized problem set, then run focused checks and the required
-managed Full. A failed prerequisite blocks its dependents; runtime, timeout,
-cleanup, identity, or input errors stop the attempt. Do not rerun a long check
-on the same unchanged candidate after a deterministic failure. A repaired
-candidate needs a new validation attempt and cannot inherit the old proof.
+A failed prerequisite blocks its dependents. Runtime, timeout, cleanup, identity,
+or input errors stop the attempt. A repaired candidate needs a new attempt;
+matching pure profile evidence may be reused under
+[Verification reuse](references/verification-reuse.md). A failed gate must be
+fixed, not waived. Required outputs and runtime effects need fresh evidence.
 
-A confirmed complete plan needs one root anchor before its first child. The root
-retains the full plan; each child retains its execution slice. With an exact host
-task identity, create the root with its stable request ID and derived acceptance
-index; later Start inherits that one root automatically. Start or `bind-root`
-returns it once. After continuation, context recovery, root change, or candidate
-repair, refresh it before a gate when stale. Read [Task governance](references/task-governance.md)
-before using root, host association, reindex, or close commands.
+Preserve unknown content and other tasks' work. Continue unrelated read-only or
+isolated work while resolving a blocked operation. Use the managed `batch repair`
+entry for a frozen integration repair; never edit its workspace directly.
+DWW performs no fetch, pull, push, deploy, rebase, squash, amend, or history rewrite.
 
-When a Codex workspace sandbox reports Git metadata access or Git's "dubious
-ownership" error, keep the ownership check and sandbox protection. Re-run the
-same DWW lifecycle command through the host's reviewed escalation; do not add a
-global `safe.directory` exception or loosen filesystem ACLs. See the Windows
-and Codex sandbox note in [Lifecycle](references/lifecycle.md).
+## Context and host boundaries
 
-## Finish and follow delivery
+A confirmed complete plan has one root anchor before its first child; each child
+keeps only its execution slice. Read
+[Task governance](references/task-governance.md) for creation, host association,
+continuation, acceptance, and close. Refresh stale root context after actual
+continuation, recovery, root change, or candidate repair; do not add a duplicate
+refresh after Start.
 
-For state schema 12, Ready freezes the exact task branch, slot generation,
-worktree, and source commit. Finish releases any configured task runtime before
-recording the head as waiting for integration. The slot stays owned until batch
-validation, batch runtime release, exact promotion into the target branch, and
-worktree/slot return succeed. The ordinary Git branch stays attached throughout.
+When creating a saved-project task, honor the user's Local or Worktree choice
+before the host call, then route that checkout. Start stays light; project runtime
+preparation runs on demand. The skill does not create a second task scheduler.
 
-A full compatible group freezes automatically. An explicit smaller tail needs a recorded
-`round-complete`, `user`, `deploy`, or `dependency` cause and one-line
-reason. Idle time, Hooks, and task counts are not causes. Use
-`round-complete` only after the agreed round is actually over and that lane
-has no active producer, and `user` only for an explicit request to integrate now.
-Check the exact target lane before closing a tail; a source task's Finish alone
-does not end a parallel round. Start's separate internal capacity path is
-described in [Native delivery](references/native-delivery.md).
+Use `status --compact` for a read-only view. Report active work, waiting, failed
+checks, local delivery, installation, and host loading as separate observed facts.
+Only local promotion and resource return establish delivery. Ask for Hook trust
+only when the host reports a first-install or changed-definition review.
+For sandbox Git metadata or dubious-ownership errors, retry the same command
+through reviewed escalation; keep the ownership and filesystem protections.
 
-One batch per target branch merges the original task commits, runs the selected
-combined checks on the exact merged head, releases configured batch runtime,
-and promotes only if the target still matches its frozen base. It then returns
-the integration worktree and task slots. Follow the exact batch through recovery
-and release; Finish alone is not delivery. Shared integration repairs use the
-owned `batch repair` entry and a new validation attempt. Do not edit a frozen task
-or integration worktree outside its managed entry.
+## Read details only for the current case
 
-For a new managed repository, Start performs light Git and identity checks.
-Project Runtime Adapter preparation runs at first use, such as
-`runtime prepare` or `dev start`. See [native delivery](references/native-delivery.md)
-for commands, migration, and recovery boundaries.
-
-Schema-11 repositories retain their candidate-first policy and legacy
-recovery until `migration preview` is clear and `migration enable` succeeds.
-The old flow is documented in [Lifecycle](references/lifecycle.md); do not
-reinterpret a legacy candidate as a native task head.
-
-When a focused formatting check fails, ask the project's formatter for a diff
-against the changed paths, apply it, and rerun that focused check.
-
-Use `status --compact` for an exact read-only view. The host owns task
-splitting, waiting, and messages, and follows every frozen batch through local
-delivery or a recorded failure.
-
-## User-facing status
-
-Report in the user's language. State whether work is active, Ready, waiting for
-local integration, delivered to the local base, installed, or verified by the
-current host. Finish and a frozen source head are not delivery. If installation
-or host verification is unconfirmed, say so.
-
-Ask for Hook trust only when the host explicitly reports a first-install or
-changed-definition review. A version change, one denial, or an identity error
-does not itself justify repeated trust or a new session. Do not expose leases,
-raw state records, or logs unless the user asks for diagnostic detail.
-
-Describe waiting or a failed batch from its recorded base, owner, attempt, and
-next action. Do not infer a tail cause from counts, UI state, or quiet time.
-
-## Read one reference for the active scenario
-
-| Scenario | Read first |
+| Case | Reference |
 | --- | --- |
-| New fixed-slot Start, Ready, Finish, batch repair, or migration | [Native delivery](references/native-delivery.md) |
-| Legacy candidate, status, or tail recovery | [Lifecycle](references/lifecycle.md) |
-| Complete plan, root/child anchor, continuation, handoff, or close | [Task governance](references/task-governance.md) |
-| Policy fields, defaults, compatibility, approval, or capacity | [Configuration](references/configuration.md) |
-| Check selection, proof reuse, artifacts, or runtime effectiveness | [Verification reuse](references/verification-reuse.md) |
-| `starting`, `held`, interrupted, failed, repair, or promotion recovery | [Recovery](references/recovery.md) |
-| Project Runtime Adapter fields, cycles, or receipts | [Runtime Adapter](references/runtime-adapter.md) |
-| Host task source, coordinator, or repair notifications | [Host handoffs](references/host-handoffs.md) |
-| Hooks, unknown content, identity checks, cleanup, or remote boundary | [Safety](references/safety.md) |
-| Mature-workflow adapter declaration and approval | [Delegated adapters](references/delegated-adapters.md) |
-| Mature-workflow adoption and rollback | [Delegated migration](references/delegated-migration.md) |
-| Delegated supervisor or platform process boundary | [Delegated internals](references/delegated-internals.md) |
-
-Read only the active reference and a directly linked prerequisite. Do not replace
-a confirmed root plan with a summary or create a second task scheduler.
+| Native Finish, tail, batch repair, or migration | [Native delivery](references/native-delivery.md) |
+| Held, interrupted, failed, or release recovery | [Recovery](references/recovery.md) |
+| Policy and capacity | [Configuration](references/configuration.md) |
+| Hooks, unknown content, cleanup, or remote boundaries | [Safety](references/safety.md) |
+| Runtime preparation and receipts | [Runtime Adapter](references/runtime-adapter.md) |
+| Host association and repair messages | [Host handoffs](references/host-handoffs.md) |
+| Mature workflow adoption | [Delegated adapters](references/delegated-adapters.md), then its directly needed migration or internals reference |

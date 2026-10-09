@@ -78,12 +78,16 @@ that choice.
 1. The host routes the repository and starts a managed change in a fixed
    isolated worktree.
 2. The agent edits there, runs focused checks, and commits exact reviewed paths.
-3. Ready freezes the task commit. Finish queues it for local integration while
-   its branch and worktree stay assigned to that task.
-4. A full group integrates automatically. A smaller group needs a recorded
-   round, user, deployment, or dependency reason. DWW merges the actual task
-   commits, validates the combination, advances the local base, then releases
-   the slots.
+3. For a native task, call Finish after committing. It freezes the source and
+   follows eligible combined validation, local promotion, and slot return. Full
+   groups integrate automatically; smaller groups need a recorded round, user,
+   deployment, or dependency reason.
+
+Continue the same task's Finish after waiting or interruption. It follows the
+assigned batch; failed checks need repair first. A post-validation release or
+promotion interruption does not rerun the completed Full. Repeating a completed
+task reads its original receipt without touching a slot reused by another task.
+Legacy repositories keep their recorded flow.
 
 The host follows the batch through integration or recovery. It still owns task
 splitting, waiting, and messages. Finish alone does not claim delivery or

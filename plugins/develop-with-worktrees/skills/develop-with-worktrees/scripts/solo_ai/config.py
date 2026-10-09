@@ -984,6 +984,10 @@ def render_verification_config(
         f"schema_version = {VERIFICATION_SCHEMA}",
         f"static_only = {'true' if static_only else 'false'}",
         "",
+        "# Put reviewed quick checks before their dependent integration profiles.",
+        '# Declare depends_on = ["quick-profile-id"] on each corresponding heavy check.',
+        "# Discovery cannot infer project coverage; keep its commands conservative.",
+        "",
     ]
     if commands:
         lines.extend(
