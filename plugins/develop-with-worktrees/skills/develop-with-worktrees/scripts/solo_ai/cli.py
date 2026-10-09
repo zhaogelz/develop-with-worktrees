@@ -3322,6 +3322,24 @@ def _human(
             return f"{summary}\n\nRoot anchor (complete plan):\n{root_content.rstrip()}"
         return summary
     if command == "finish":
+        if result.get("native_delivery"):
+            if result.get("delivered"):
+                return (
+                    f"Changes integrated into {result['base_ref']} at "
+                    f"{result['integrated_head']} by batch {result['batch_id']}; "
+                    "task runtime and slot released."
+                )
+            if result.get("batch_id"):
+                return (
+                    f"Local delivery is not yet complete: batch {result['batch_id']} "
+                    f"is {result['batch_status']}. Continue Finish for this task; "
+                    "a failed check requires repair before retrying."
+                )
+            return (
+                f"Change saved; waiting for local integration into {result['base_ref']}. "
+                "Finish already froze the source and released task runtime. "
+                "A smaller batch needs a recorded round completion or explicit delivery cause."
+            )
         if result.get("outcome") == "batch_integrated":
             summary = (
                 "Changes integrated into the current local base: "

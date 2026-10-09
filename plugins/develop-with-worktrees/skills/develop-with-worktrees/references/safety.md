@@ -323,3 +323,12 @@ DWW provides lifecycle safety, not an operating-system sandbox. A specialized
 path may bypass a Hook, and a project Adapter may deliberately escape the process
 boundary described by its contract. Those limits must stay visible rather than
 being presented as successful containment.
+
+## Sensitive scan interpretation
+
+The built-in scan reports paths and rule IDs without secret values. In JavaScript
+and TypeScript, a password input attribute with a narrowly recognized boolean
+value (negation or comparison with the input type) is not a credential assignment.
+String credentials and unknown expressions remain findings. Every assignment on
+a compressed line is examined, and independent key signatures still apply; an
+allowed input attribute never exempts the whole file or line.

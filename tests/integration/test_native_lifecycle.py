@@ -1958,3 +1958,133 @@ def test_native_merge_conflict_repair_preserves_both_source_parents(
     assert completed["status"] == "completed"
     assert all(repo.is_ancestor(source, repo.head(git_repo)) for source in sources)
     assert CandidateBatchStore(repo).read()["candidates"] == {}
+
+
+@pytest.mark.parametrize("stage", ["_promote", "_release_runtime"])
+def test_finish_continues_its_batch_without_repeating_full_or_touching_reused_slot(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    repo, store = _native_repo(git_repo)
+    task = start(repo, name="one-call delivery")
+    worktree = Path(task["worktree"])
+    (worktree / "feature.txt").write_text("deliver\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: delivery source",
+        paths=["feature.txt"],
+    )
+    approve(repo, load_verification_config(repo))
+    original_full = native_batches._run_full
+    full_calls = []
+
+    def count_full(*args, **kwargs):
+        full_calls.append(1)
+        return original_full(*args, **kwargs)
+
+    original_stage = getattr(native_batches, stage)
+
+    def interrupted(*args, **kwargs):
+        raise SoloAIError("simulated post-Full interruption")
+
+    monkeypatch.setattr(native_batches, "_run_full", count_full)
+    monkeypatch.setattr(native_batches, stage, interrupted)
+    with pytest.raises(SoloAIError, match="post-Full interruption"):
+        finish(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            cause="round-complete",
+            reason="the agreed round ended",
+        )
+    recorded = store.task(task["id"])["native_delivery"]
+    batch_id = recorded["batch_id"]
+    attempt = store.native_batch(batch_id)["validation_attempt"]
+    with pytest.raises(SoloAIError, match="lease"):
+        finish(repo, task_id=task["id"], lease="stale-test-lease")
+    unexpected = worktree / "unexpected.txt"
+    unexpected.write_text("preserve unexpected input", encoding="utf-8")
+    with pytest.raises(SoloAIError):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    assert unexpected.read_text(encoding="utf-8") == "preserve unexpected input"
+    assert len(full_calls) == 1
+    unexpected.unlink()
+    monkeypatch.setattr(native_batches, stage, original_stage)
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert result["delivered"] is True
+    assert result["batch_id"] == batch_id
+    assert store.native_batch(batch_id)["validation_attempt"] == attempt
+    assert len(full_calls) == 1
+    assert "task runtime and slot released" in cli_module._human("finish", result)
+
+    following = start(repo, name="another task reuses the slot")
+    unknown = Path(following["worktree"]) / "unknown.txt"
+    unknown.write_text("preserve another task\n", encoding="utf-8")
+    before = store.task(following["id"])
+    repeated = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert repeated["integrated_head"] == result["integrated_head"]
+    assert len(full_calls) == 1
+    assert store.task(following["id"]) == before
+    assert unknown.read_text(encoding="utf-8") == "preserve another task\n"
+
+
+def test_finish_keeps_failed_full_and_does_not_repeat_unchanged_checks(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _native_repo(
+        git_repo, commands=[CommandSpec((sys.executable, "-c", "raise SystemExit(1)"))]
+    )
+    task = start(repo, name="failed delivery")
+    (Path(task["worktree"]) / "feature.txt").write_text("failure\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: failed source",
+        paths=["feature.txt"],
+    )
+    approve(repo, load_verification_config(repo))
+    original_full = native_batches._run_full
+    calls = []
+
+    def count_full(*args, **kwargs):
+        calls.append(1)
+        return original_full(*args, **kwargs)
+
+    monkeypatch.setattr(native_batches, "_run_full", count_full)
+    base = repo.head(git_repo)
+    with pytest.raises(SoloAIError, match="failed|did not pass"):
+        finish(
+            repo,
+            task_id=task["id"],
+            lease=task["lease"],
+            cause="round-complete",
+            reason="the agreed round ended",
+        )
+    batch_id = store.task(task["id"])["native_delivery"]["batch_id"]
+    attempt = store.native_batch(batch_id)["validation_attempt"]
+    with pytest.raises(SoloAIError, match="unchanged inputs will not be rerun"):
+        finish(repo, task_id=task["id"], lease=task["lease"])
+    assert len(calls) == 1
+    assert repo.head(git_repo) == base
+    assert store.native_batch(batch_id)["validation_attempt"] == attempt
+
+
+def test_finish_default_waiting_output_does_not_claim_delivery(git_repo: Path) -> None:
+    repo, store = _native_repo(git_repo)
+    task = start(repo, name="wait for the round")
+    (Path(task["worktree"]) / "feature.txt").write_text("waiting\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: waiting source",
+        paths=["feature.txt"],
+    )
+    base = repo.head(git_repo)
+    result = finish(repo, task_id=task["id"], lease=task["lease"])
+    assert result["delivered"] is False
+    assert store.read()["batches"] == {}
+    assert repo.head(git_repo) == base
+    assert "waiting for local integration" in cli_module._human("finish", result)

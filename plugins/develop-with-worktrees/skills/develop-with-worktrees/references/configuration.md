@@ -121,8 +121,9 @@ The tracked configuration schema is 2. Verification policy is schema 3; schema
 2 verification files are intentionally unsupported. Fresh local task state uses
 schema 12. Existing schema-11 task state stays on its recorded candidate flow
 until guarded `migration preview` and `migration enable` succeed. The separate
-legacy candidate-pool schema is 6. These numbers refer to distinct objects and
-must not be substituted for one another.
+legacy candidate-pool schema is 6 and reads
+schemas 1 through 5 before the next write upgrades them to 6. These numbers
+refer to distinct objects and must not be substituted for one another.
 
 Initialization writes schema 12 only for a new, state-free adoption with a
 clean target. A dirty target keeps the legacy lifecycle for its pending

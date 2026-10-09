@@ -683,6 +683,7 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
         "delegated-migration.md",
         "host-handoffs.md",
         "lifecycle.md",
+        "native-delivery.md",
         "recovery.md",
         "runtime-adapter.md",
         "safety.md",

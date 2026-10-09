@@ -51,10 +51,29 @@ _CONTENT_RULES = (
     (
         "assigned-secret",
         re.compile(
-            r"(?i)\b(password|passwd|token|secret|api[_-]?key)\b\s*[:=]\s*[^\s$<{][^\s]*"
+            r"(?i)\b(password|passwd|token|secret|api[_-]?key)\b\s*[:=]\s*[^\s$<{]"
         ),
     ),
 )
+
+
+_JS_IDENTIFIER = r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"
+_JS_PASSWORD_BOOLEAN = re.compile(
+    r"password\s*:\s*(?:"
+    rf"!{{1,2}}\s*(?:[01]|{_JS_IDENTIFIER})"
+    rf"|(?:'password'|\"password\")\s*={{2,3}}\s*{_JS_IDENTIFIER}"
+    rf"|{_JS_IDENTIFIER}\s*={{2,3}}\s*(?:'password'|\"password\")"
+    r")\s*(?=[,}\)])"
+)
+
+
+def _assigned_secret(text: str, path: str, pattern: re.Pattern[str]) -> bool:
+    # 只识别可证明为布尔值的 JS 输入属性；同一压缩行上的其他赋值仍逐个扫描。
+    javascript = Path(path).suffix.casefold() in {".js", ".jsx", ".ts", ".tsx"}
+    return any(
+        not (javascript and _JS_PASSWORD_BOOLEAN.match(text, match.start()))
+        for match in pattern.finditer(text)
+    )
 
 
 def _allowed(path: str, allowlist: tuple[str, ...]) -> bool:
@@ -102,7 +121,12 @@ def scan(
         if line.startswith("+") and not line.startswith("+++"):
             if not _allowed(current_path, allowlist):
                 for rule, pattern in _CONTENT_RULES:
-                    if pattern.search(line[1:]):
+                    found = (
+                        _assigned_secret(line[1:], current_path, pattern)
+                        if rule == "assigned-secret"
+                        else pattern.search(line[1:])
+                    )
+                    if found:
                         findings.append(
                             Finding(current_path, current_line or None, rule)
                         )
