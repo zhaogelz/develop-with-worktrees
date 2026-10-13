@@ -1888,6 +1888,136 @@ def test_native_sensitive_preflight_records_failure_then_repairs_exact_policy(
     assert repo.head(git_repo) == completed["integration_head"]
 
 
+def test_native_preflight_repair_after_full_repair_keeps_exact_failed_history(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, store = _native_repo(
+        git_repo,
+        commands=[CommandSpec(("git", "grep", "-q", "pass", "--", "repair.txt"))],
+    )
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name="recover preflight after stopped Full repair")
+    (Path(task["worktree"]) / "repair.txt").write_text("fail\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: source needs Full repair",
+        paths=["repair.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver repaired source"
+    )
+    with pytest.raises(SoloAIError):
+        run_native_batch(repo, batch_id=batch["id"])
+    failed = store.native_batch(batch["id"])
+    failed_attempt = failed["validation_attempt"]
+    patch = git_repo.parent / "full-repair.patch"
+    patch.write_text(
+        "diff --git a/repair.txt b/repair.txt\n"
+        "--- a/repair.txt\n+++ b/repair.txt\n@@ -1 +1 @@\n-fail\n+pass\n",
+        encoding="utf-8",
+    )
+    repaired = repair_native_batch(
+        repo,
+        batch_id=batch["id"],
+        expected_head=failed["integration_head"],
+        patch_file=patch,
+        paths=["repair.txt"],
+        message="test: repair stopped Full",
+        reason="replace the failing value",
+    )
+    worktree = Path(repaired["worktree"])
+    original = (worktree / ".solo-ai/config.toml").read_text(encoding="utf-8")
+    updated = original.replace(
+        "sensitive_allowlist = []", 'sensitive_allowlist = ["repair.txt"]'
+    )
+    assert updated != original
+    policy_patch = git_repo.parent / "reviewed-policy.patch"
+    policy_patch.write_text(
+        "diff --git a/.solo-ai/config.toml b/.solo-ai/config.toml\n"
+        + "".join(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile="a/.solo-ai/config.toml",
+                tofile="b/.solo-ai/config.toml",
+            )
+        ),
+        encoding="utf-8",
+    )
+    real_scan = native_batches.require_safe
+
+    def scan_reviewed_policy(*args: object, **kwargs: object) -> None:
+        if (
+            "repair.txt"
+            not in load_repo_config(
+                repo, cwd=Path(str(kwargs["cwd"]))
+            ).sensitive_allowlist
+        ):
+            raise SensitiveContentError([Finding("repair.txt", 1, "assigned-secret")])
+        real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(native_batches, "require_safe", scan_reviewed_policy)
+    with pytest.raises(SensitiveContentError):
+        run_native_batch(repo, batch_id=batch["id"])
+    preflight = store.native_batch(batch["id"])
+    assert preflight["status"] == "preflight-failed"
+    assert preflight["validation_attempts"] == [failed_attempt]
+    real_read = native_batches.read_validation_attempt
+    historical = real_read(repo, failed_attempt)
+
+    def repair_policy() -> dict:
+        return repair_native_batch(
+            repo,
+            batch_id=batch["id"],
+            expected_head=preflight["integration_head"],
+            patch_file=policy_patch,
+            paths=[".solo-ai/config.toml"],
+            message="test: allow reviewed generated value",
+            reason="review confirmed a generated false positive",
+        )
+
+    for change in (
+        {"state": "planned"},
+        {"result": "passed"},
+        {"candidate_head": preflight["integration_head"]},
+        {"task_id": "another-batch"},
+        {"owner": {"kind": "task", "id": batch["id"]}},
+        {"base_head": preflight["integration_head"]},
+    ):
+        with monkeypatch.context() as guard:
+            guard.setattr(
+                native_batches,
+                "read_validation_attempt",
+                lambda *_: historical | change,
+            )
+            with pytest.raises(SoloAIError, match="exact policy path"):
+                repair_policy()
+    for field in ("validation_attempts", "repair_records"):
+        store.update_batch(batch["id"], **{field: []})
+        with pytest.raises(SoloAIError, match="exact policy path"):
+            repair_policy()
+        store.update_batch(batch["id"], **{field: preflight[field]})
+    (worktree / "repair.txt").write_text("drift\n", encoding="utf-8")
+    with pytest.raises(SoloAIError, match="clean workspace"):
+        repair_policy()
+    (worktree / "repair.txt").write_text("pass\n", encoding="utf-8")
+    restored = repair_policy()
+    assert restored["status"] == "composed"
+    assert (
+        restored["repair_records"][-1]["preflight_failure"]
+        == preflight["preflight_failure"]
+    )
+    assert real_read(repo, failed_attempt) == historical
+    completed = run_native_batch(repo, batch_id=batch["id"])
+    assert completed["status"] == "completed"
+    assert completed["validation_attempts"][0] == failed_attempt
+    assert len(completed["validation_attempts"]) == 2
+    assert completed["integration_head"] == repo.head(git_repo)
+
+
 def test_native_merge_conflict_repair_preserves_both_source_parents(
     git_repo: Path,
 ) -> None:
