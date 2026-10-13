@@ -683,6 +683,33 @@ def _release(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[st
     return store.native_batch(str(batch["id"]))
 
 
+def _preflight_has_only_historical_full(repo: GitRepo, batch: dict[str, Any]) -> bool:
+    """预检只允许无 Full 或已由本批精确修复的停止失败，保留历史证据。"""
+    attempt_id = batch.get("validation_attempt")
+    if not attempt_id:
+        return True
+    if attempt_id not in batch.get("validation_attempts", []):
+        return False
+    attempt = read_validation_attempt(repo, str(attempt_id))
+    if (
+        attempt.get("state") != "completed"
+        or attempt.get("result") != "failed"
+        or attempt.get("task_id") != batch["id"]
+        or attempt.get("owner") != {"kind": "batch", "id": batch["id"]}
+        or attempt.get("base_head") != batch["base_before"]
+        or attempt.get("candidate_head") == batch["integration_head"]
+    ):
+        return False
+    return any(
+        record.get("previous_status") == "validation-failed"
+        and record.get("validation_attempt") == attempt_id
+        and record.get("previous_head") == attempt.get("candidate_head")
+        and bool(record.get("repair_head"))
+        and repo.is_ancestor(str(record["repair_head"]), batch["integration_head"])
+        for record in batch.get("repair_records", [])
+    )
+
+
 def repair_native_batch(
     repo: GitRepo,
     *,
@@ -751,7 +778,7 @@ def repair_native_batch(
                     failure.get("head") != expected_head
                     or failure.get("base_before") != batch["base_before"]
                     or not failure.get("findings")
-                    or batch.get("validation_attempt")
+                    or not _preflight_has_only_historical_full(repo, batch)
                     or not repo.is_clean(worktree)
                     or requested != {".solo-ai/config.toml"}
                 ):
