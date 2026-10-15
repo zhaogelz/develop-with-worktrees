@@ -132,6 +132,9 @@ Completed pure checks may be reused only when their declared inputs,
 environment, tool facts, and logs still match; required build output and mutable
 runtime effects are run again.
 
+If a delivered slot cannot be returned, its error lists the blocking paths,
+why they are protected or unverifiable, and how to continue while preserving them.
+
 DWW itself is local-only: it does not fetch, pull, push, open pull requests,
 deploy, rebase, squash, amend, or rewrite history. An explicitly requested
 remote publish is a separate operation from a clean integrated base.

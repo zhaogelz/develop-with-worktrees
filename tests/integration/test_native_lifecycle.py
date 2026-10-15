@@ -6,6 +6,7 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import git
@@ -1363,8 +1364,15 @@ def test_native_promoted_release_failure_retries_only_cleanup(
         return original_release(*args, **kwargs)
 
     monkeypatch.setattr(native_batches, "_release", block_first_release)
-    with pytest.raises(ActionableSoloAIError, match="preserve it"):
+    with pytest.raises(ActionableSoloAIError, match="preserve it") as raised:
         run_native_batch(repo, batch_id=batch["id"])
+    assert raised.value.code == "NATIVE_RELEASE_PENDING"
+    assert raised.value.context["worktree"] == str(worktree.resolve())
+    assert raised.value.context["blockers"] == [
+        {"path": "unknown.txt", "reason": "untracked"}
+    ]
+    assert "preserve me" not in str(raised.value)
+    assert "retry this task's finish" in raised.value.next_action["instructions"]
     promoted = store.native_batch(batch["id"])
     assert promoted["status"] == "promoted"
     assert store.task(task["id"])["status"] == "delivered-pending-release"
@@ -1379,6 +1387,155 @@ def test_native_promoted_release_failure_retries_only_cleanup(
     assert completed["validation_attempt"] == attempt
     assert completed["proof"] == proof
     assert repo.head(git_repo) == promoted_head
+
+
+def test_native_release_reports_artifacts_and_link_without_following_or_deleting(
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, store = _native_repo(git_repo)
+    task = start(repo, name="diagnose protected artifacts")
+    worktree = Path(task["worktree"])
+    (worktree / "delivery.txt").write_text("delivered\n", encoding="utf-8")
+    with (worktree / ".gitignore").open("a", encoding="utf-8") as stream:
+        stream.write("\nmystery/\n")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: release diagnostics",
+        paths=["delivery.txt", ".gitignore"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver diagnostics test"
+    )
+    approve(repo, load_verification_config(repo))
+    original_release = native_batches._release
+    external = git_repo.parent / "link-target"
+    external.mkdir()
+    (external / "outside.txt").write_text("outside content stays", encoding="utf-8")
+    artifacts = (
+        ".tmp/run/test.db",
+        ".tmp/run/uploads/sample.pdf",
+        ".tmp/run/.env",
+        "mystery/unknown.bin",
+    )
+    marker = "do-not-print-test-content"
+
+    def inject(*args: object, **kwargs: object) -> dict[str, object]:
+        for relative in artifacts:
+            path = worktree / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(marker, encoding="utf-8")
+        # 显式测试真实链接；权限不足只跳过该链接创建，不伪造通过。
+        try:
+            (worktree / ".tmp/run/current").symlink_to(
+                external, target_is_directory=True
+            )
+        except OSError as exc:
+            pytest.skip(f"real symlink unavailable: {exc}")
+        return original_release(*args, **kwargs)
+
+    monkeypatch.setattr(native_batches, "_release", inject)
+    with pytest.raises(ActionableSoloAIError) as raised:
+        run_native_batch(repo, batch_id=batch["id"])
+    error = raised.value
+    assert error.code == "NATIVE_RELEASE_PENDING"
+    assert {item["path"]: item["reason"] for item in error.context["blockers"]} == {
+        ".tmp/run/test.db": "database",
+        ".tmp/run/uploads/sample.pdf": "uploads_or_storage",
+        ".tmp/run/.env": "configuration",
+        "mystery/unknown.bin": "unknown_ignored",
+        ".tmp/run/current": "link",
+    }
+    assert marker not in str(error)
+    assert marker not in json.dumps(error.context)
+    assert str(external) not in str(error)
+    assert "outside.txt" not in str(error)
+    assert (external / "outside.txt").read_text(
+        encoding="utf-8"
+    ) == "outside content stays"
+    assert all(
+        (worktree / relative).read_text(encoding="utf-8") == marker
+        for relative in artifacts
+    )
+    assert (worktree / ".tmp/run/current").is_symlink()
+    promoted = store.native_batch(batch["id"])
+    assert promoted["status"] == "promoted"
+    assert store.task(task["id"])["status"] == "delivered-pending-release"
+    # 按已确认身份保留本测试自己的产物，再恢复同一个已通过 Full 的批次。
+    retained = git_repo.parent / "retained-artifacts"
+    retained.mkdir()
+    (worktree / ".tmp/run").rename(retained / "run")
+    (worktree / "mystery").rename(retained / "mystery")
+    monkeypatch.setattr(native_batches, "_release", original_release)
+    completed = run_native_batch(repo, batch_id=batch["id"])
+    assert completed["status"] == "completed"
+    assert completed["validation_attempt"] == promoted["validation_attempt"]
+    assert completed["proof"] == promoted["proof"]
+    assert (retained / "run/current").is_symlink()
+
+
+@pytest.mark.parametrize(
+    "blocker", ["branch_mismatch", "head_mismatch", "tracked_changes"]
+)
+def test_native_release_identity_and_tracked_changes_still_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocker: str,
+) -> None:
+    worktree = tmp_path / "slot"
+    worktree.mkdir()
+    (worktree / "delivery.txt").write_text("private test bytes", encoding="utf-8")
+    repo = SimpleNamespace(
+        ref_head=lambda _ref: "promoted",
+        is_ancestor=lambda _source, _target: True,
+        branch=lambda _cwd: "changed"
+        if blocker == "branch_mismatch"
+        else "codex/slot-01",
+        head=lambda _cwd: "changed" if blocker == "head_mismatch" else "source",
+        is_clean=lambda _cwd: blocker != "tracked_changes",
+        changed_paths=lambda _cwd: ["delivery.txt"],
+    )
+    store = SimpleNamespace(
+        task=lambda _id: {
+            "worktree": str(worktree),
+            "status": "delivered-pending-release",
+        },
+        complete_native_delivery=lambda *_args, **_kwargs: pytest.fail(
+            "blocked slot must not be released"
+        ),
+    )
+    monkeypatch.setattr(
+        native_batches,
+        "inspect_untracked",
+        lambda *_args, **_kwargs: {
+            key: []
+            for key in ("keep", "protected", "ordinary", "retained", "unknown_ignored")
+        },
+    )
+    batch = {
+        "id": "batch-native-test",
+        "base_ref": "main",
+        "integration_head": "promoted",
+        "worktree_released_at": "already returned",
+        "tasks": [
+            {"task_id": "task-test", "branch": "codex/slot-01", "ready_head": "source"}
+        ],
+    }
+    with pytest.raises(ActionableSoloAIError) as raised:
+        native_batches._release(repo, store, batch)
+    assert raised.value.context["blockers"] == [
+        {
+            "path": "delivery.txt" if blocker == "tracked_changes" else ".",
+            "reason": blocker,
+        }
+    ]
+    assert "private test bytes" not in str(raised.value)
+    assert (worktree / "delivery.txt").read_text(
+        encoding="utf-8"
+    ) == "private test bytes"
 
 
 def test_native_start_uses_real_capacity_pressure_to_deliver_two_ready_tasks(
