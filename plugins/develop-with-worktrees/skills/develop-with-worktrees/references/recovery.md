@@ -24,8 +24,11 @@ from a title, a worktree count, or a quiet log.
 | Promotion blocked | sealed base/head and worktree identity | remove the external blocker, then recover | integration worktree and base |
 | Unknown/protected/replaced content | path identity and inventory | stop and preserve the scene | all affected content |
 
-`status --compact --task <task-id>` and `status --compact --batch <batch-id>`
-are read-only snapshots. Add history only when investigating terminal records.
+Use `status --compact` for the current-work summary. Native task-head batches
+use `batch status --batch <batch-id>` for their exact persisted phase; legacy
+candidate snapshots use `status --compact --task <task-id>` or
+`status --compact --batch <batch-id>`. Add history only when investigating
+terminal records.
 
 After native promotion, `NATIVE_RELEASE_PENDING` identifies the worktree and
 each blocking relative path. Human output explains the reason and next step;
@@ -37,6 +40,23 @@ Preserve the scene, reconcile identity through DWW, and retain only verified
 task-owned artifacts through the project's existing artifact policy. Then retry
 that task's `finish`; recovery keeps the promoted result and passed Full.
 This diagnostic grants no deletion or cleanup permission.
+
+For example, `context.blockers` may contain:
+
+```json
+[
+  {"path": ".tmp/regression/current", "reason": "link"},
+  {"path": ".tmp/regression/uploads/sample.pdf", "reason": "uploads_or_storage"},
+  {"path": ".tmp/regression/test.db", "reason": "database"}
+]
+```
+
+Inspect the recorded batch and the reported paths. Use the project's existing
+artifact lifecycle to retain verified task-owned artifacts outside the slot and
+verify the retained result. Reconcile branch or HEAD drift through DWW before cleanup.
+Retry `finish --task <task-id> --lease <current-lease>` after the blockers are
+resolved. Completion requires the exact task delivery and slot-return receipt;
+the target commit alone does not establish that the slot was returned.
 
 Resuming a clean pre-activation Start verifies the owned slot generation and the
 same released predecessor as ordinary Start before changing Git. A missing branch

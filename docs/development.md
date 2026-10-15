@@ -61,6 +61,32 @@ An isolated test `CODEX_HOME` may exercise installation tests, but it cannot
 stand in for the production user or bypass a production Hook, cache, config, or
 trust decision. Never hand-edit those stores to manufacture a passing result.
 
+### Local maintenance installation
+
+For an already configured local maintenance marketplace, invoke the installed
+`maintain-dww-plugin.ps1` entry with `-Mode Install`, the source repository,
+the complete current `main` commit, and the desktop host's bundled Codex CLI:
+
+```powershell
+& '<installed-plugin>/maintain-dww-plugin.ps1' -Mode Install `
+  -SourceRepo '<source-repository>' -SourceCommit '<40-character-main-commit>' `
+  -CodexPath '<desktop-host-codex.exe>'
+```
+
+The entry exports that exact plugin tree and uses the official cachebuster
+helper to create a new package version. It checks the existing local marketplace
+identity, retains the previous package until installation succeeds, and reads
+back the installed version through the CLI. Ordinary updates use the established
+marketplace; first-time migration remains a separate procedure. This local
+maintenance path does not publish the official remote distribution.
+
+After installation, compare the package files with the frozen source, allowing
+only the manifest's generated cachebuster to differ. Confirm the intended plugin
+is enabled, and distinguish the CLI installation receipt from actual host loading:
+use a new session to load the new skill and guard. Complete Hook trust only when
+the host reports a definition awaiting review. Recovery before source delivery
+uses the packaged [recovery reference](../plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md).
+
 ## Checks
 
 Run the smallest useful check while developing, then the checks selected by the
