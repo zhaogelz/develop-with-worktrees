@@ -11,7 +11,7 @@ import psutil
 
 from . import batch_workspace
 from .candidate_batches import _require_approval, _run_secret_scanner
-from .cleanup import inspect_untracked
+from .cleanup import CleanupPolicy, inspect_untracked
 from .config import load_repo_config, load_verification_config
 from .integration import integration_turn
 from .proof import (
@@ -638,6 +638,91 @@ def _promote(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[st
     )
 
 
+def _release_pending_error(
+    *,
+    batch: dict[str, Any],
+    task_id: str,
+    worktree: Path,
+    inventory: dict[str, list[str]],
+    diagnostics: list[dict[str, str]] | None = None,
+    identity_reasons: tuple[str, ...] = (),
+    changed_paths: list[str] | None = None,
+) -> ActionableSoloAIError:
+    """只投影阻塞路径与分类，不读取内容、链接目标或凭据。"""
+    blockers = [{"path": ".", "reason": reason} for reason in identity_reasons]
+    blockers.extend(
+        {"path": item["path"], "reason": item["kind"]} for item in diagnostics or []
+    )
+    policy = CleanupPolicy()
+    for category in ("keep", "protected", "unknown_ignored", "ordinary"):
+        for path in inventory[category]:
+            reason = {
+                "keep": "configuration",
+                "unknown_ignored": "unknown_ignored",
+                "ordinary": "untracked",
+            }.get(category, "protected_data")
+            if category == "protected":
+                if Path(path).suffix.casefold() in policy.protected_file_suffixes:
+                    reason = "database"
+                elif any(
+                    part.casefold() in policy.protected_directory_names
+                    for part in Path(path).parts
+                ):
+                    reason = "uploads_or_storage"
+            blockers.append({"path": path, "reason": reason})
+    untracked = {path for paths in inventory.values() for path in paths}
+    blockers.extend(
+        {"path": path, "reason": "tracked_changes"}
+        for path in changed_paths or []
+        if path not in untracked
+    )
+    blockers = [
+        {"path": path, "reason": reason}
+        for path, reason in sorted(
+            {(item["path"], item["reason"]) for item in blockers}
+        )
+    ]
+    instructions = (
+        "Preserve the listed content. Verify slot identity before changing files; "
+        "move only confirmed task-owned artifacts to the project's existing retention location. "
+        "Do not follow links or delete unknown content. After resolving the blockers, "
+        "retry this task's finish; the promoted result and passed Full are retained."
+    )
+    descriptions = {
+        "branch_mismatch": "slot branch differs from the delivered source; reconcile identity through DWW",
+        "head_mismatch": "slot HEAD differs from the delivered source; reconcile identity through DWW",
+        "tracked_changes": "tracked file changed after delivery; preserve and review with its task owner",
+        "configuration": "configuration is protected; retain it outside the slot through project policy",
+        "database": "database file is protected; retain it outside the slot through project policy",
+        "uploads_or_storage": "upload or storage data is protected; retain it outside the slot through project policy",
+        "protected_data": "project data is protected; retain it outside the slot through project policy",
+        "unknown_ignored": "ignored content has unknown ownership; preserve and identify its owner",
+        "untracked": "untracked content has unknown ownership; preserve and identify its owner",
+        "link": "link or junction blocks safe inspection; preserve the link without following its target",
+        "permission": "path cannot be inspected with current permissions; preserve and use host-reviewed access",
+        "inspection": "safe inspection failed; preserve the scene and inspect before retrying",
+    }
+    details = "\n".join(
+        f"- {item['path']}: {descriptions[item['reason']]}" for item in blockers
+    )
+    return ActionableSoloAIError(
+        "Delivered fixed slot contains unknown or changed content; preserve it\n"
+        f"Worktree: {worktree}\n{details}\n{instructions}",
+        code="NATIVE_RELEASE_PENDING",
+        context={
+            "batch_id": batch["id"],
+            "task_id": task_id,
+            "worktree": str(worktree),
+            "blockers": blockers,
+        },
+        next_action={
+            "kind": "inspect_native_slot",
+            "task_id": task_id,
+            "instructions": instructions,
+        },
+    )
+
+
 def _release(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[str, Any]:
     if not batch.get("worktree_released_at"):
         batch = batch_workspace.return_workspace(repo, store, batch)
@@ -650,20 +735,62 @@ def _release(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[st
         if task["status"] == "finished":
             continue
         worktree = Path(str(task["worktree"])).resolve()
-        inventory = inspect_untracked(repo, cwd=worktree, expand_dependencies=False)
+        try:
+            inventory = inspect_untracked(repo, cwd=worktree, expand_dependencies=False)
+        except (OSError, SoloAIError) as exc:
+            # 严格检查仍先拒绝；已有只读诊断库存仅用于补充错误，不授予清理权限。
+            diagnostics: list[dict[str, str]] = []
+            try:
+                inventory = inspect_untracked(
+                    repo,
+                    cwd=worktree,
+                    expand_dependencies=False,
+                    diagnostics=diagnostics,
+                )
+            except (OSError, SoloAIError):
+                inventory = {
+                    key: []
+                    for key in (
+                        "keep",
+                        "protected",
+                        "ordinary",
+                        "retained",
+                        "unknown_ignored",
+                    )
+                }
+                diagnostics = [{"path": ".", "kind": "inspection"}]
+            raise _release_pending_error(
+                batch=batch,
+                task_id=task_id,
+                worktree=worktree,
+                inventory=inventory,
+                diagnostics=diagnostics,
+            ) from exc
+        branch_matches = repo.branch(worktree) == member["branch"]
+        head_matches = repo.head(worktree) == member["ready_head"]
+        clean = repo.is_clean(worktree)
         if (
-            repo.branch(worktree) != member["branch"]
-            or repo.head(worktree) != member["ready_head"]
-            or not repo.is_clean(worktree)
+            not branch_matches
+            or not head_matches
+            or not clean
             or inventory["keep"]
             or inventory["protected"]
             or inventory["unknown_ignored"]
         ):
-            raise ActionableSoloAIError(
-                "Delivered fixed slot contains unknown or changed content; preserve it",
-                code="NATIVE_RELEASE_PENDING",
-                context={"batch_id": batch["id"], "task_id": task_id},
-                next_action={"kind": "inspect_native_slot", "task_id": task_id},
+            raise _release_pending_error(
+                batch=batch,
+                task_id=task_id,
+                worktree=worktree,
+                inventory=inventory,
+                identity_reasons=tuple(
+                    reason
+                    for reason, matches in (
+                        ("branch_mismatch", branch_matches),
+                        ("head_mismatch", head_matches),
+                    )
+                    if not matches
+                ),
+                changed_paths=repo.changed_paths(worktree) if not clean else [],
             )
         store.complete_native_delivery(
             task_id,

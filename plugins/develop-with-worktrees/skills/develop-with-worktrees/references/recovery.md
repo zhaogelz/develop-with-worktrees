@@ -27,6 +27,17 @@ from a title, a worktree count, or a quiet log.
 `status --compact --task <task-id>` and `status --compact --batch <batch-id>`
 are read-only snapshots. Add history only when investigating terminal records.
 
+After native promotion, `NATIVE_RELEASE_PENDING` identifies the worktree and
+each blocking relative path. Human output explains the reason and next step;
+JSON adds `context.blockers` with `path` and `reason`, and instructions in
+`next_action`. Reasons distinguish branch/HEAD drift, tracked changes,
+configuration, databases, uploads/storage, unknown content, links, and failed
+inspection. It never prints file contents or follows a blocked link target.
+Preserve the scene, reconcile identity through DWW, and retain only verified
+task-owned artifacts through the project's existing artifact policy. Then retry
+that task's `finish`; recovery keeps the promoted result and passed Full.
+This diagnostic grants no deletion or cleanup permission.
+
 Resuming a clean pre-activation Start verifies the owned slot generation and the
 same released predecessor as ordinary Start before changing Git. A missing branch
 is created only from a detached HEAD already in the recorded base history; an
