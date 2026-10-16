@@ -1,70 +1,161 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=1080, height=1920">
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js" integrity="sha384-sG0Hv1tP1lZCk9KQmrIbY/XNwi+OY84GQqhMscbnsoBFqAz8KNCil1kvfL3Hbbk2" crossorigin="anonymous"></script>
-    <style>
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-      }
-      html,
-      body {
-        width: 1080px;
-        height: 1920px;
-        overflow: hidden;
-        background: #000;
-      }
-      #root {
-        position: relative;
-        width: 1080px;
-        height: 1920px;
-        overflow: hidden;
-        background: #071321;
-      }
-      .scene {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-      }
-    </style>
-  </head>
-  <body>
-    <div data-hf-id="hf-5ve3" id="root" data-composition-id="main" data-start="0" data-duration="36" data-width="1080" data-height="1920">
-      <div data-hf-id="hf-mcxd" id="el-01-not-by-luck" class="scene" data-composition-id="01-not-by-luck" data-composition-src="compositions/frames/01-not-by-luck.html" data-start="0" data-duration="5.4" data-track-index="0"></div>
-
-      <div data-hf-id="hf-e5he" id="el-02-the-mess" class="scene" data-composition-id="02-the-mess" data-composition-src="compositions/frames/02-the-mess.html" data-start="5" data-duration="6.4" data-track-index="1"></div>
-
-      <div data-hf-id="hf-j1ss" id="el-03-own-workspace" class="scene" data-composition-id="03-own-workspace" data-composition-src="compositions/frames/03-own-workspace.html" data-start="11" data-duration="6.5" data-track-index="0"></div>
-
-      <div data-hf-id="hf-xftz" id="el-04-the-loop" class="scene" data-composition-id="04-the-loop" data-composition-src="compositions/frames/04-the-loop.html" data-start="17" data-duration="7.5" data-track-index="1"></div>
-
-      <div data-hf-id="hf-7fdb" id="el-05-conflict-guard" class="scene" data-composition-id="05-conflict-guard" data-composition-src="compositions/frames/05-conflict-guard.html" data-start="24" data-duration="7.5" data-track-index="0"></div>
-
-      <div data-hf-id="hf-twv9" id="el-05-public-beta" class="scene" data-composition-id="05-public-beta" data-composition-src="compositions/frames/05-public-beta.html" data-start="31" data-duration="5" data-track-index="1"></div>
-
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1080, height=1920">
+  <title>DWW：分开做，一起检查，再合回去</title>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js" integrity="sha384-sG0Hv1tP1lZCk9KQmrIbY/XNwi+OY84GQqhMscbnsoBFqAz8KNCil1kvfL3Hbbk2" crossorigin="anonymous"></script>
+  <style>
+@font-face { font-family: "Noto Serif SC"; src: url("assets/fonts/NotoSerifSC-400.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1080px; height: 1920px; overflow: hidden; background: #102436; }
+#root { position: relative; width: 1080px; height: 1920px; overflow: hidden; color: #F4F7FA; background: #102436; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+.brand-header { position: absolute; top: 140px; left: 86px; right: 86px; display: flex; align-items: center; justify-content: space-between; font-size: 32px; color: #B6C7D6; }
+.brand-header strong { color: #F4F7FA; font-size: 42px; letter-spacing: -1px; }
+.scene { position: absolute; inset: 0; width: 1080px; height: 1920px; }
+.stage { padding: 264px 86px 0; width: 100%; height: 100%; }
+.scene-label { color: #87BFFF; font-size: 36px; margin-bottom: 24px; }
+h1 { font-family: "Noto Serif SC", serif; font-weight: 400; font-size: 88px; line-height: 1.28; letter-spacing: -3px; }
+.subtitle { margin-top: 32px; color: #B6C7D6; font-size: 36px; line-height: 1.6; }
+.visual { margin-top: 70px; min-height: 560px; }
+.note { margin-top: 48px; font-size: 38px; line-height: 1.55; color: #F4F7FA; }
+.timeline-footer { position: absolute; top: 1568px; left: 86px; right: 86px; }
+.timeline-label { display: flex; justify-content: space-between; color: #B6C7D6; font-size: 30px; margin-bottom: 24px; }
+.progress-track { height: 5px; background: #30495E; overflow: hidden; }
+.progress { width: 100%; height: 100%; background: #87BFFF; transform-origin: left center; }
+.task-id { display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 66px; height: 66px; border-radius: 50%; background: #87BFFF; color: #102436; font-size: 36px; font-weight: 700; }
+.pile { position: relative; height: 560px; padding-top: 12px; }
+.paper { position: relative; display: flex; align-items: center; gap: 30px; width: 830px; padding: 32px; min-height: 132px; border: 2px solid #61798E; background: #1A354B; font-size: 44px; }
+.paper-a { transform: rotate(-3deg); }
+.paper-b { margin-top: -8px; margin-left: 40px; transform: rotate(2deg); }
+.paper-c { margin-top: -8px; transform: rotate(-1deg); }
+.tag { margin-left: auto; color: #B6C7D6; font-size: 34px; }
+.question { margin-top: 46px; padding-left: 32px; color: #FFB2A8; font-size: 49px; }
+.project, .base-safe { display: flex; align-items: center; justify-content: center; gap: 22px; padding: 26px; border: 2px solid #61798E; font-size: 42px; background: #1A354B; }
+.project-dot { width: 18px; height: 18px; flex-shrink: 0; border-radius: 50%; background: #87BFFF; }
+.fork { height: 46px; display: flex; justify-content: space-around; }
+.fork i { display: block; width: 2px; height: 100%; background: #61798E; }
+.work-row { display: flex; gap: 30px; align-items: center; min-height: 136px; padding: 24px 28px; background: #1A354B; margin-bottom: 18px; border-left: 5px solid #87BFFF; }
+.work-row strong, .kept strong { display: block; font-size: 42px; font-weight: 500; }
+.detail { display: block; margin-top: 10px; color: #B6C7D6; font-size: 34px; line-height: 1.35; }
+.task-state { color: #A6E3BE; margin-left: auto; font-size: 34px; white-space: nowrap; }
+.memory { padding: 22px 0; margin-top: 28px; display: flex; flex-direction: column; gap: 16px; font-size: 34px; color: #B6C7D6; }
+.memory strong { color: #F4F7FA; font-size: 42px; font-weight: 400; }
+.merge-inputs { display: flex; gap: 18px; }
+.merge-inputs span { flex: 1; text-align: center; padding: 28px 10px; color: #102436; background: #87BFFF; font-size: 36px; }
+.merge-line { height: 68px; width: 2px; background: #87BFFF; margin: 0 auto; }
+.check-panel { background: #1A354B; border: 2px solid #61798E; padding: 38px; }
+.check-panel > strong { display: block; font-size: 44px; font-weight: 500; margin-bottom: 34px; }
+.check-row { display: flex; justify-content: space-between; margin-top: 26px; font-size: 38px; }
+.check-mark { color: #A6E3BE; }
+.result { margin-top: 36px; padding: 28px; text-align: center; background: #A6E3BE; color: #102436; font-size: 44px; }
+.conflict-panel { display: flex; flex-direction: column; align-items: center; gap: 22px; border: 2px solid #FFB2A8; background: #3B3037; padding: 32px; color: #FFB2A8; }
+.pause-symbol { font-size: 70px; line-height: 1; }
+.conflict-panel strong { font-size: 48px; font-weight: 500; }
+.conflict-panel > span:last-child { font-size: 36px; }
+.kept { display: flex; align-items: center; gap: 28px; margin-top: 32px; padding: 28px 10px; }
+.small-check { font-size: 46px; color: #A6E3BE; }
+.base-safe { color: #A6E3BE; margin-top: 32px; }
+.base-safe .project-dot { background: #A6E3BE; }
+.brand-lockup { display: flex; flex-direction: column; gap: 20px; }
+.brand-large { font-size: 138px; letter-spacing: -8px; line-height: 1.1; color: #87BFFF; font-weight: 700; }
+.brand-name { font-size: 42px; }
+.brand-desc { color: #B6C7D6; font-size: 36px; }
+.cta { background: #87BFFF; color: #102436; padding: 30px; text-align: center; font-size: 44px; font-weight: 600; margin-top: 46px; }
+.repo-link { color: #B6C7D6; font-family: Consolas, monospace; font-size: 34px; line-height: 1.4; margin-top: 28px; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="main" data-start="0" data-duration="36" data-width="1080" data-height="1920">
+  <header class="brand-header"><strong>DWW</strong><span>Codex 插件 / 流程示意</span></header>
+  <section id="scene-problem" class="scene clip" data-start="0" data-duration="5" data-track-index="0">
+    <div class="stage">
+      <div class="scene-label">1 / 一起开工</div>
+      <h1>AI 越开越多，<br>收尾全靠你？</h1>
+      <p class="subtitle">页面、接口、文档，同时在改。</p>
+      <div class="visual"><div class="pile"><div class="paper paper-a"><span class="task-id">A</span><span>改登录页</span><span class="tag">写好了</span></div><div class="paper paper-b"><span class="task-id">B</span><span>修接口</span><span class="tag">也写好了</span></div><div class="paper paper-c"><span class="task-id">C</span><span>补文档</span><span class="tag">完成了</span></div><div class="question">合起来，还能跑吗？</div></div></div>
+      <p class="note">最后那一堆改动，又得你来理。</p>
     </div>
-
-    <script>
-      window.__timelines = window.__timelines || {};
-      window.__timelines["main"] = gsap.timeline({ paused: true });
-      // ── frame transitions (injected by transitions.mjs) ──
-      (function () { var tl = window.__timelines["main"];
-        tl.to("#el-01-not-by-luck", { scale: 2.5, opacity: 0, filter: "blur(8px)", duration: 0.4, ease: "power3.in" }, 5);
-        tl.fromTo("#el-02-the-mess", { scale: 0.5, opacity: 0, filter: "blur(8px)" }, { scale: 1, opacity: 1, filter: "blur(0px)", duration: 0.4, ease: "power3.out" }, 5);
-        tl.to("#el-02-the-mess", { scaleX: 0, transformOrigin: "left center", duration: 0.4, ease: "power3.inOut" }, 11);
-        tl.fromTo("#el-03-own-workspace", { scaleX: 0, transformOrigin: "right center", opacity: 1 }, { scaleX: 1, transformOrigin: "right center", duration: 0.4, ease: "power3.inOut" }, 11);
-        tl.to("#el-03-own-workspace", { x: -1080, duration: 0.5, ease: "power3.inOut" }, 17);
-        tl.fromTo("#el-04-the-loop", { x: 1080, opacity: 1 }, { x: 0, duration: 0.5, ease: "power3.inOut" }, 17);
-        tl.to("#el-04-the-loop", { opacity: 0, duration: 0.5, ease: "power2.inOut" }, 24);
-        tl.fromTo("#el-05-conflict-guard", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power2.inOut" }, 24);
-        tl.to("#el-05-conflict-guard", { opacity: 0, duration: 0.5, ease: "power2.inOut" }, 31);
-        tl.fromTo("#el-05-public-beta", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power2.inOut" }, 31);
-        tl.to({}, { duration: 36 }, 0); // full-span anchor — main.duration() == composition total (Studio master duration)
-      })();
-    </script>
-  </body>
+  </section>
+  <section id="scene-separate" class="scene clip" data-start="5" data-duration="6" data-track-index="0">
+    <div class="stage">
+      <div class="scene-label">2 / 分开修改</div>
+      <h1>给每个任务，<br>一张自己的桌子。</h1>
+      <p class="subtitle">DWW 自动准备独立工作目录。</p>
+      <div class="visual"><div class="project"><span class="project-dot"></span>同一个项目</div><div class="fork" aria-hidden="true"><i></i><i></i><i></i></div><div class="work-row row-a"><span class="task-id">A</span><div><strong>改登录页</strong><span class="detail">自己的目录</span></div><span class="task-state">独立修改</span></div><div class="work-row row-b"><span class="task-id">B</span><div><strong>修接口</strong><span class="detail">自己的目录</span></div><span class="task-state">独立修改</span></div><div class="work-row row-c"><span class="task-id">C</span><div><strong>补文档</strong><span class="detail">自己的目录</span></div><span class="task-state">独立修改</span></div></div>
+      <p class="note">各改各的文件，互不覆盖。</p>
+    </div>
+  </section>
+  <section id="scene-continuity" class="scene clip" data-start="11" data-duration="6" data-track-index="0">
+    <div class="stage">
+      <div class="scene-label">3 / 继续做事</div>
+      <h1>各做各的。<br>进度也接得上。</h1>
+      <p class="subtitle">换回这条任务时，有记录可接着做。</p>
+      <div class="visual"><div class="work-row row-a"><span class="task-id">A</span><div><strong>改登录页</strong><span class="detail">手机号登录</span></div><span class="task-state">已提交</span></div><div class="work-row row-b"><span class="task-id">B</span><div><strong>修接口</strong><span class="detail">处理登录超时</span></div><span class="task-state">检查中</span></div><div class="work-row row-c"><span class="task-id">C</span><div><strong>补文档</strong><span class="detail">补上使用说明</span></div><span class="task-state">已提交</span></div><div class="memory"><span>本地任务记录</span><strong>要做什么 · 做到了哪</strong></div></div>
+      <p class="note">中断之后，目标和进度还在。</p>
+    </div>
+  </section>
+  <section id="scene-combine" class="scene clip" data-start="17" data-duration="7" data-track-index="0">
+    <div class="stage">
+      <div class="scene-label">4 / 一起检查</div>
+      <h1>写完先别急。<br>放一起，跑一遍。</h1>
+      <p class="subtitle">按你的项目配置检查组合后的改动。</p>
+      <div class="visual"><div class="merge-inputs"><span>A 登录页</span><span>B 接口</span><span>C 文档</span></div><div class="merge-line" aria-hidden="true"></div><div class="check-panel"><strong>这批改动，一起检查</strong><div class="check-row check-a"><span>合并改动</span><span class="check-mark">通过</span></div><div class="check-row check-b"><span>运行项目检查</span><span class="check-mark">通过</span></div></div><div class="result">合回本地分支</div></div>
+      <p class="note">通过检查，再进入主项目。</p>
+    </div>
+  </section>
+  <section id="scene-pause" class="scene clip" data-start="24" data-duration="7" data-track-index="0">
+    <div class="stage">
+      <div class="scene-label">5 / 遇到问题</div>
+      <h1>有冲突，<br>就停在合入前。</h1>
+      <p class="subtitle">合并冲突或检查失败，先保留现场。</p>
+      <div class="visual"><div class="conflict-panel"><span class="pause-symbol" aria-hidden="true">Ⅱ</span><strong>登录页存在冲突</strong><span>本次合入已暂停</span></div><div class="kept"><span class="small-check" aria-hidden="true">✓</span><div><strong>两边的修改，都留着</strong><span class="detail">修好后再继续</span></div></div><div class="base-safe"><span class="project-dot"></span>主项目保持原样</div></div>
+      <p class="note">停下来解决，不把问题带进主线。</p>
+    </div>
+  </section>
+  <section id="scene-install" class="scene clip" data-start="31" data-duration="5" data-track-index="0">
+    <div class="stage">
+      <div class="scene-label">6 / 开始使用</div>
+      <h1>你管想法。<br>让改动有序落地。</h1>
+      <p class="subtitle">分开做，一起检查，再合回去。</p>
+      <div class="visual"><div class="brand-lockup"><span class="brand-large">DWW</span><span class="brand-name">Develop with Worktrees</span><span class="brand-desc">Codex 本地 Git 插件</span></div><div class="cta">在 Codex 安装 DWW</div><div class="repo-link">github.com/zhaogelz/<br>develop-with-worktrees</div></div>
+      <p class="note">打开仓库，查看安装步骤。</p>
+    </div>
+  </section>
+  <footer class="timeline-footer"><div class="timeline-label"><span>分开做，一起检查，再合回去。</span><span>36 秒</span></div><div class="progress-track"><div class="progress"></div></div></footer>
+</div>
+<script>
+  const timeline = gsap.timeline({ paused: true });
+  timeline.fromTo(".progress", { scaleX: 0 }, { scaleX: 1, duration: 36, ease: "none" }, 0);
+  timeline.fromTo("#scene-problem .stage", { autoAlpha: 0, y: 22 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: "power2.out" }, 0);
+  timeline.fromTo("#scene-separate .stage", { autoAlpha: 0, y: 22 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: "power2.out" }, 5);
+  timeline.fromTo("#scene-continuity .stage", { autoAlpha: 0, y: 22 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: "power2.out" }, 11);
+  timeline.fromTo("#scene-combine .stage", { autoAlpha: 0, y: 22 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: "power2.out" }, 17);
+  timeline.fromTo("#scene-pause .stage", { autoAlpha: 0, y: 22 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: "power2.out" }, 24);
+  timeline.fromTo("#scene-install .stage", { autoAlpha: 0, y: 22 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: "power2.out" }, 31);
+  timeline.fromTo(".paper-a", { x: -110, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "power3.out" }, 0.6);
+  timeline.fromTo(".paper-b", { x: 110, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "power3.out" }, 1.15);
+  timeline.fromTo(".paper-c", { x: -110, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "power3.out" }, 1.7);
+  timeline.fromTo(".question", { opacity: 0 }, { opacity: 1, duration: 0.35 }, 2.7);
+  timeline.fromTo("#scene-separate .project", { scale: 0.94, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.45, ease: "power2.out" }, 5.6);
+  timeline.fromTo("#scene-separate .work-row", { x: -70, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, stagger: 0.6, ease: "power3.out" }, 6.2);
+  timeline.fromTo("#scene-separate .note", { opacity: 0 }, { opacity: 1, duration: 0.35 }, 9);
+  timeline.fromTo("#scene-continuity .work-row", { x: 30, opacity: 0 }, { x: 0, opacity: 1, duration: 0.45, stagger: 0.5, ease: "power2.out" }, 11.6);
+  timeline.fromTo(".memory", { y: 24, opacity: 0 }, { y: 0, opacity: 1, duration: 0.5, ease: "power2.out" }, 14);
+  timeline.fromTo(".merge-inputs span", { y: -40, opacity: 0 }, { y: 0, opacity: 1, duration: 0.45, stagger: 0.3, ease: "power2.out" }, 17.6);
+  timeline.fromTo(".check-panel", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 19);
+  timeline.fromTo(".check-a .check-mark", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 19.7);
+  timeline.fromTo(".check-b .check-mark", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 20.6);
+  timeline.fromTo(".result", { y: -20, opacity: 0 }, { y: 0, opacity: 1, duration: 0.5, ease: "power3.out" }, 21.6);
+  timeline.fromTo(".conflict-panel", { scale: 0.96, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.4, ease: "power2.out" }, 24.6);
+  timeline.fromTo(".kept", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 26);
+  timeline.fromTo(".base-safe", { y: 25, opacity: 0 }, { y: 0, opacity: 1, duration: 0.45, ease: "power2.out" }, 27.5);
+  timeline.fromTo("#scene-pause .note", { opacity: 0 }, { opacity: 1, duration: 0.35 }, 28.4);
+  timeline.fromTo(".brand-lockup", { opacity: 0, y: 25 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 31.4);
+  timeline.fromTo(".cta", { opacity: 0, scale: 0.96 }, { opacity: 1, scale: 1, duration: 0.45, ease: "power3.out" }, 32);
+  timeline.fromTo(".repo-link", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 32.5);
+  window.__timelines = window.__timelines || {};
+  window.__timelines.main = timeline;
+</script>
+</body>
 </html>

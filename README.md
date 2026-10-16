@@ -1,155 +1,63 @@
 # Develop with Worktrees
 
-When several AI tasks change one Git repository, they can overwrite each
-other, commit from the wrong directory, or leave a result unverified. Develop
-with Worktrees (DWW) gives each modifying task its own worktree, records the
-task contract locally, and carries reviewed changes through local integration.
+## More AI tasks. Less cleaning up after them.
 
-## What you get
+You ask one AI to build a page and another to fix an API. Both finish, but both touched the same files. Now you have to untangle what changed, what to keep, and whether it still works together.
 
-- An isolated worktree for every managed modifying task.
-- A local task anchor that preserves the objective, scope, baseline, and
-  acceptance criteria across continuation or handoff.
-- One confirmed plan kept at its root, so related work can resume from the same
-  objective instead of asking you to copy it into every task.
-- Exact-path commits on a fixed slot branch, preserved until delivery.
-- Reused worktrees keep local dependencies; the next task prefers a suitable
-  slot that was recently delivered.
-- An explicitly cleared idle slot is rebuilt when a later task needs it.
-- Real Git merges that keep the task commit in local history.
-- One combined validation and protected local promotion per target branch.
-- Fast Start; project runtime preparation runs when the task first needs it.
-- One local approval can cover the commands of the next unchanged step, without repeating approval for unrelated checks.
-- A recoverable record when merging or validation fails; the base branch
-  stays unchanged until a batch succeeds.
-- Independent checks continue after ordinary failures by default, so one
-  validation attempt can report related failures together.
-- When an external connection fault interrupts validation, verified recovery can
-  start a fresh validation while preserving the failed attempt and exact source.
+Develop with Worktrees (DWW) is a Codex plugin that **gives each modifying task its own working directory, checks the combined changes, and merges them back into your local branch when they pass.**
 
-DWW is the Git lifecycle layer. Your host's task system still decides how work
-is split, scheduled, and discussed. Your project still owns its tests, runtime
-resources, and product decisions.
+[中文](README.zh-CN.md) · [Install](#install) · [See it in 36 seconds](#see-it-in-36-seconds) · [How to use it](#once-its-installed)
 
-Within a task you have already authorized, the agent can continue through
-Start, focused checks, exact commits, and eligible local integration. A technical
-`--accept`, `--confirm`, or `--force` argument does not ask you to approve the
-same task again.
+## A few things you can stop juggling
 
-Plainly: Finish can mean “waiting for integration.” A change is delivered only
-when its task commit reaches the local base and its resources are released.
+| The hassle | How DWW helps |
+| --- | --- |
+| Two AI tasks overwrite files while working | Each task edits in its own directory, away from the others' working files |
+| Each task works alone, but the combined result breaks | A batch is merged and checked using your project's configuration before your local branch moves |
+| A chat stops and you have to explain the task again | Local task notes keep the objective, scope, and progress available for continuation |
+| A merge or check fails and you worry about losing work | Changes and failure details stay available for repair; the base stays unchanged until integration succeeds |
+
+Use it when you run several Codex chats, build a feature alongside a bug fix, or work in a small team sharing a repository. It works for a single task, too.
+
+## See it in 36 seconds
+
+[![DWW promo: work separately, check together, then merge back](videos/develop-with-worktrees-promo/assets/overview.svg)](videos/develop-with-worktrees-promo/README.md)
+
+One project, three tasks. See how they work separately, get checked together, and stop when something needs fixing. [Open the video project to preview the full animation](videos/develop-with-worktrees-promo/README.md). The video uses Chinese on-screen text.
 
 ## Install
+
+You need Codex with plugin support, Git, and [uv](https://docs.astral.sh/uv/) to run the Python tools. The current public version is `0.5.0-beta.7`.
 
 ```text
 codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
-After installing or updating, let the current host load the installed skill
-before using it. Review a Hook only when that host explicitly reports a new or
-changed definition awaiting review. Handle an error by its reported cause; a
-version change or one denial is not a reason to repeatedly restart or trust.
-DWW cannot inspect or change host trust storage. The source version is
-`0.5.0-beta.7`; a plugin cache build may append a `+codex.<build>` suffix.
+After installation, let Codex load the plugin skill. Review a new or changed Hook definition if the host prompts you to do so.
 
-For a confirmed local DWW marketplace, normal maintenance refreshes only this
-plugin from its existing local source. A first move from an older local source
-is a separate, verified maintenance action; it is not a routine task step.
-If DWW itself blocks an upgrade, the [recovery path](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
-can install a fully validated recovery version before normal integration completes.
-In native state, normal source tasks Finish and wait in their assigned worktrees
-until local integration and slot return succeed. Legacy candidate publication
-returns its source worktree. When a plugin release is needed, the coordinator
-starts a separate short-lived maintenance task instead of retaining a development
-worktree for publishing.
+## Once it's installed
 
-## Default flow
+1. Open your Git project in Codex and ask for a change as usual, such as “Add phone-number login to the sign-in page.”
+2. On first use, choose a separate directory for each task when prompted. Repositories with an existing workflow keep that workflow first.
+3. The AI edits and checks its isolated copy, then commits only the reviewed files. You can assign another task in a separate chat.
+4. The AI follows local integration: eligible changes are checked together, then merged into the local branch recorded when the task started.
 
-A brand-new empty Git repository is supported: after you accept isolated mode,
-DWW creates an empty first commit on your chosen branch. It will not include
-existing files or staged changes automatically.
+You describe the goal, Codex moves the task forward, and DWW manages how the changes enter and leave the repository. You don't have to create, switch, and reclaim working directories by hand each time.
 
-For an existing repository, DWW starts from the attached branch of the worktree
-you route (including a linked worktree) and delivers back to that recorded
-target. An old remote default or local default-branch preference does not change
-that choice.
+## A few things to know
 
-1. The host routes the repository and starts a managed change in a fixed
-   isolated worktree.
-2. The agent edits there, runs focused checks, and commits exact reviewed paths.
-3. For a native task, call Finish after committing. It freezes the source and
-   follows eligible combined validation, local promotion, and slot return. Full
-   groups integrate automatically; smaller groups need a recorded round, user,
-   deployment, or dependency reason.
+- **Finished editing and merged are separate states.** Changes may be waiting for batch integration. Use the actual local merge result to judge delivery. See the [delivery flow](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/native-delivery.md) for the conditions.
+- Separate directories prevent tasks from overwriting each other's working files. Merge conflicts can still happen. DWW stops and preserves the work so the AI can repair it within scope; product choices come back to you.
+- Your project decides which checks run. DWW runs them and keeps their results; their coverage still depends on your project.
+- DWW manages local Git work. Remote pushes, pull requests, and deployment are separate actions. Codex or another host still handles task planning and AI coordination.
 
-Continue the same task's Finish after waiting or interruption. It follows the
-assigned batch; failed checks need repair first. A post-validation release or
-promotion interruption does not rerun the completed Full. Repeating a completed
-task reads its original receipt without touching a slot reused by another task.
-Legacy repositories keep their recorded flow.
+## Find a detail when you need it
 
-The host follows the batch through integration or recovery. It still owns task
-splitting, waiting, and messages. Finish alone does not claim delivery or
-verify an installed plugin.
-
-If formatting fails, ask the formatter for a diff on the reviewed changed paths,
-apply it, and rerun the focused check before continuing. A formatting error alone
-should not start a combined batch.
-
-## Only when needed
-
-- If the repository already has a mature workflow, let it keep ownership. An
-  exact locally approved [adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/delegated-adapters.md)
-  is a maintainer option, not a default setup step.
-- Existing DWW repositories keep their recorded lifecycle until
-  `migration preview --base <branch>` reports no blockers and
-  `migration enable --base <branch> --confirm <branch>:<head>` succeeds.
-  This does not install a plugin or change another repository.
-- If an interrupted task, conflict, or combined check needs attention, follow
-  the recorded [recovery](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
-  path instead of guessing or cleaning the worktree.
-- If a reviewed test worktree was deliberately retained, use the returned
-  checklist in `reclaim-retained`; it never treats “task ended” as permission to
-  erase unknown work.
-  If it returns blockers, read the report first: work already integrated or
-  confirmed to have a copy needs no duplicate backup, while unknown content
-  remains preserved.
-- Projects with their own external runtime resources can configure a Runtime
-  [Adapter](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/runtime-adapter.md).
-  Most personal and small-team repositories do not need one.
-
-## Boundaries that keep work safe
-
-When the host loads and trusts the Hook, native patches started outside Git also
-check ownership of the target worktree; another session gains no write permission
-by starting elsewhere.
-
-DWW preserves unknown or protected working-tree content and does not infer a
-batch cause from UI state, hooks, or elapsed time. A conflict or failed combined
-check leaves the base branch unchanged and provides a recorded recovery route.
-Completed pure checks may be reused only when their declared inputs,
-environment, tool facts, and logs still match; required build output and mutable
-runtime effects are run again.
-
-If a delivered slot cannot be returned, its error lists the blocking paths,
-why they are protected or unverifiable, and how to continue while preserving them.
-
-DWW itself is local-only: it does not fetch, pull, push, open pull requests,
-deploy, rebase, squash, amend, or rewrite history. An explicitly requested
-remote publish is a separate operation from a clean integrated base.
-If the two histories have diverged, an exact local source can enter a managed
-task through `merge-source` for a reviewed, history-preserving merge before
-publication.
-
-## Find the right detail
-
-- Use the installed [skill](plugins/develop-with-worktrees/skills/develop-with-worktrees/SKILL.md)
-  for a managed task and its scenario-specific references.
-- Read the [Chinese guide](README.zh-CN.md) for the same user flow in Chinese.
-- Read [architecture](docs/architecture.md) for responsibility and design
-  boundaries, or [development maintenance](docs/development.md) when changing
-  this repository.
-- See [configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md)
-  for policy fields, and [recovery](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md)
-  for an interrupted or failed task, including recovery after a confirmed disk clone.
+| You want to… | Start here |
+| --- | --- |
+| Follow the complete task workflow | [Plugin skill](plugins/develop-with-worktrees/skills/develop-with-worktrees/SKILL.md) |
+| Configure checks and batches | [Configuration](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/configuration.md) |
+| Resume interrupted or failed work | [Recovery guide](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/recovery.md) |
+| Understand the design or contribute | [Architecture](docs/architecture.md) / [Development guide](docs/development.md) |
+| See what changed between versions | [Changelog](CHANGELOG.md) |
