@@ -40,7 +40,16 @@ npm run dev -- --port 3017
 npm run render -- --quality high --fps 30 --output renders/develop-with-worktrees-promo-36s.mp4
 ```
 
-导出后用 FFprobe 核对时长、分辨率和帧率。工程文件、检查截图和 MP4 是不同产物；仓库首页封面链接到本工程，尚未导出的 MP4 不作为可播放视频展示。
+导出后检查成片，以下命令都在本目录执行：
+
+```text
+ffprobe -v error -show_entries stream=codec_type,codec_name,width,height,avg_frame_rate,nb_frames,duration -of json renders/develop-with-worktrees-promo-36s.mp4
+ffmpeg -v error -xerror -i renders/develop-with-worktrees-promo-36s.mp4 -f null -
+```
+
+预期只有一条 H.264 视频流：1080×1920、`30/1` FPS、1080 帧、36 秒，无音轨；第二条命令应完整解码通过。再播放一遍，检查六幕文字、转场和片尾安装入口。
+
+工程文件、检查截图和 MP4 是不同产物。MP4 保存在本地导出目录，仓库首页封面链接到本工程；有可公开播放的成片地址后，再更新首页的视频入口。
 
 ## 维护检查
 
