@@ -15,7 +15,7 @@ timeout_seconds = 300
 resource_class = "normal"
 level = "development"
 commands = [
-  ["npm", "--prefix", "videos/develop-with-worktrees-promo", "run", "check", "--", "--snapshots", "--at", "3.8,9.8,15.8,22.8,29.8,34.8"],
+  ["uv", "run", "python", "videos/develop-with-worktrees-promo/scripts/check.py", "--snapshots", "--at", "3.8,9.8,15.8,22.8,29.8,34.8"],
 ]
 
 # 覆盖所有跟踪路径的真实静态检查。它既阻止未知路径静默通过，也为
