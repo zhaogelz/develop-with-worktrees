@@ -13,7 +13,7 @@ input_closure = "declared"
 timeout_seconds = 1800
 resource_class = "normal"
 level = "development"
-commands = [["uv", "run", "python", "C:/Users/li153/.codex/visualizations/2026/10/16/01a1437a-29d8-7a63-9f71-d883d79f0c4a/approved-promo-export.py"]]
+commands = [["uv", "run", "python", "C:/Users/li153/.codex/visualizations/2026/10/16/01a1437a-29d8-7a63-9f71-d883d79f0c4a/approved-promo-export.py", "--script-sha256", "295e1af66f2cba44f73d267b8b1ecce70dcc6bb08045a92cd569f08f928ba9c9"]]
 
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
 # 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
