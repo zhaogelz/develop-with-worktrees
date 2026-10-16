@@ -47,6 +47,9 @@ def check_font_coverage(project: Path) -> int:
 
 
 def main() -> int:
+    # 让 Windows 管道日志与仓库的 UTF-8 读取约定一致。
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     project = Path(__file__).resolve().parents[1]
     try:
         count = check_font_coverage(project)
