@@ -11,7 +11,7 @@
 在本目录运行：
 
 ```text
-npm run check
+uv run python scripts/check.py
 npm run dev -- --port 3017
 ```
 
@@ -44,12 +44,12 @@ npm run render -- --quality high --fps 30 --output renders/develop-with-worktree
 
 ## 维护检查
 
-HTML、素材或时间线变化后运行 `npm run check`。仓库也登记了仅匹配视频路径的 development 检查，可通过 DWW 的受管验证入口运行。
+HTML、素材或时间线变化后运行 `uv run python scripts/check.py`：先检查本地字体是否覆盖全部画面文字，再运行 `npm run check`。仓库也登记了仅匹配视频路径的 development 检查，可通过 DWW 的受管验证入口运行。
 
 带截图与指定取帧的检查：
 
 ```text
-npm run check -- --snapshots --at 3.8,9.8,15.8,22.8,29.8,34.8
+uv run python scripts/check.py --snapshots --at 3.8,9.8,15.8,22.8,29.8,34.8
 ```
 
 不要跳过实际画面核对。具体工作规则见 [AGENTS.md](AGENTS.md)。
