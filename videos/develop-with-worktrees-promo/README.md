@@ -17,7 +17,7 @@ npm run dev -- --port 3017
 
 检查通过后，在终端返回的本地 Studio 地址打开工程并播放。建议先看完整 36 秒，再拖到 22.8 秒和 29.8 秒，确认“检查通过后合回”与“冲突时暂停”两种情况。
 
-本机需要 Node.js 22+、Chrome、FFmpeg 与 FFprobe。CLI 固定在 `package.json` 指定版本，方便复现。
+本机需要 Node.js 22+、Chrome、FFmpeg 与 FFprobe。CLI 已从 0.7.94 更新到 0.8.163，并在 `package.json` 中固定版本，方便复现。
 
 ## 文件怎么找
 
@@ -28,6 +28,7 @@ npm run dev -- --port 3017
 | [STORYBOARD.md](STORYBOARD.md) | 六幕时序与取帧位置 |
 | [index.html](index.html) | 全部可编辑画面、文字和时间线 |
 | [index.motion.json](index.motion.json) | 关键先后顺序与出现时间检查 |
+| [scripts/check.py](scripts/check.py) | 仓库验证入口，兼容 Windows npm.cmd |
 | [PUBLISH.md](PUBLISH.md) | 小红书与 B 站发布文案 |
 | [字体说明](assets/fonts/README.md) | 字体来源与许可 |
 
