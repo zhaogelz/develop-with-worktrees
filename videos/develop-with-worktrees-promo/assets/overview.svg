@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">多个 AI 同时开工，少一点互相收拾残局。</title>
+  <desc id="desc">DWW 给任务独立目录，把组合后的改动检查通过，再合回本地分支。36 秒视频工程入口。</desc>
+  <rect width="1280" height="640" rx="24" fill="#102436"/>
+  <g font-family="Microsoft YaHei, PingFang SC, sans-serif">
+    <text x="72" y="90" fill="#87BFFF" font-size="30" font-weight="700">DWW / Develop with Worktrees</text>
+    <text x="72" y="185" fill="#F4F7FA" font-size="58" font-weight="600">多个 AI 同时开工，</text>
+    <text x="72" y="262" fill="#F4F7FA" font-size="58" font-weight="600">少一点互相收拾残局。</text>
+    <g fill="#1A354B" stroke="#61798E" stroke-width="2">
+      <rect x="72" y="330" width="330" height="120" rx="12"/>
+      <rect x="475" y="330" width="330" height="120" rx="12"/>
+      <rect x="878" y="330" width="330" height="120" rx="12"/>
+    </g>
+    <path d="M416 390h44m-12-12 12 12-12 12M819 390h44m-12-12 12 12-12 12" fill="none" stroke="#87BFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <g fill="#F4F7FA" font-size="34" text-anchor="middle">
+      <text x="237" y="403">分开做</text>
+      <text x="640" y="403">一起检查</text>
+      <text x="1043" y="403">再合回去</text>
+    </g>
+    <text x="72" y="551" fill="#B6C7D6" font-size="28">Codex 插件 / 本地 Git 流程</text>
+    <rect x="871" y="505" width="337" height="64" rx="32" fill="#87BFFF"/>
+    <path d="M902 524v26l21-13z" fill="#102436"/>
+    <text x="944" y="547" fill="#102436" font-size="27">36 秒看懂 · 工程预览</text>
+  </g>
+</svg>

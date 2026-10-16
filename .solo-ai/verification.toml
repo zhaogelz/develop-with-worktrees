@@ -1,6 +1,23 @@
 schema_version = 3
 static_only = false
 
+# 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
+# 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
+[[profiles]]
+id = "promo-video-development"
+paths = ["videos/develop-with-worktrees-promo/**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["videos/develop-with-worktrees-promo/**"]
+environment = ["PATH", "PROCESSOR_ARCHITECTURE"]
+input_closure = "declared"
+timeout_seconds = 300
+resource_class = "normal"
+level = "development"
+commands = [
+  ["uv", "run", "python", "videos/develop-with-worktrees-promo/scripts/check.py", "--snapshots", "--at", "3.8,9.8,22.8,29.8,34.8"],
+]
+
 # 覆盖所有跟踪路径的真实静态检查。它既阻止未知路径静默通过，也为
 # 输入闭包不变的纯检查提供可复用的证明。
 [[profiles]]

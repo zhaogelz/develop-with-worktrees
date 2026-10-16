@@ -1,0 +1,10 @@
+{
+  "duration": 36,
+  "assertions": [
+    { "kind": "appearsBy", "selector": "#scene-problem h1", "bySec": 0.6 },
+    { "kind": "appearsBy", "selector": "#scene-combine .result", "bySec": 22.2 },
+    { "kind": "appearsBy", "selector": "#scene-pause .base-safe", "bySec": 28.1 },
+    { "kind": "appearsBy", "selector": "#scene-install .repo-link", "bySec": 33.1 },
+    { "kind": "before", "a": ".check-b .check-mark", "b": ".result" }
+  ]
+}
