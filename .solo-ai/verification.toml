@@ -1,6 +1,22 @@
 schema_version = 3
 static_only = false
 
+# 本轮活锁误回收的临时确定性复现，交付前移除。
+[[profiles]]
+id = "ci-live-lock-reproduction"
+paths = ["**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["**"]
+input_closure = "complete"
+timeout_seconds = 300
+resource_class = "normal"
+level = "development"
+commands = [
+  ["uv", "run", "pytest", "-q", "tests/unit/test_util.py", "-k", "directory_lock", "--tb=short"],
+  ["uv", "run", "pytest", "-q", "tests/integration/test_lifecycle.py::test_choose_current_task_serializes_parallel_child_delegation", "tests/integration/test_lifecycle.py::test_choose_current_task_is_session_bound_and_delegates_only_by_code", "--tb=short"],
+]
+
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
 # 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
 [[profiles]]

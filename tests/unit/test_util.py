@@ -375,6 +375,71 @@ def test_directory_lock_rejects_live_owner(tmp_path: Path) -> None:
             pass
 
 
+@pytest.mark.dww_fast
+@pytest.mark.parametrize(
+    "observation", ["owner-disappeared", "metadata-changed", "process-unreadable"]
+)
+def test_directory_lock_preserves_live_or_unverifiable_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, observation: str
+) -> None:
+    path = tmp_path / "lock"
+    with DirectoryLock(path):
+        owner_path = util.filesystem_path(path / "owner.json")
+        original_owner = owner_path.read_bytes()
+        original_read = util.read_json
+
+        def observed_owner(target: Path, default: object) -> object:
+            payload = original_read(target, default)
+            if target == owner_path:
+                if observation == "owner-disappeared":
+                    # 旧目录刚释放时读不到文件，但同路径的新锁已归另一位所有者。
+                    return {}
+                if observation == "metadata-changed":
+                    return {**payload, "cwd": str(tmp_path / "changed-cwd")}
+            return payload
+
+        monkeypatch.setattr(util, "read_json", observed_owner)
+        if observation == "process-unreadable":
+
+            def denied_process(pid: int) -> None:
+                raise util.psutil.AccessDenied(pid)
+
+            monkeypatch.setattr(util.psutil, "Process", denied_process)
+        with (
+            pytest.raises(SoloAIError, match="Operation is already active"),
+            DirectoryLock(path),
+        ):
+            raise AssertionError("live or unverified lock owner was displaced")
+        assert owner_path.read_bytes() == original_owner
+
+
+@pytest.mark.dww_fast
+@pytest.mark.parametrize("owner_state", ["exited", "pid-reused"])
+def test_directory_lock_still_reclaims_proven_stale_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_state: str
+) -> None:
+    path = tmp_path / "lock"
+    access_path = util.filesystem_path(path)
+    access_path.mkdir()
+    owner = util.process_snapshot()
+    if owner_state == "pid-reused":
+        owner["create_time"] -= 100
+    else:
+        owner["pid"] = 987654321
+        original_process = util.psutil.Process
+
+        def process_with_exited_owner(pid: int):
+            if pid == owner["pid"]:
+                raise util.psutil.NoSuchProcess(pid)
+            return original_process(pid)
+
+        monkeypatch.setattr(util.psutil, "Process", process_with_exited_owner)
+    util.atomic_write_json(access_path / "owner.json", owner)
+    with DirectoryLock(path):
+        assert util.process_matches(util.read_json(access_path / "owner.json", {}))
+    assert not access_path.exists()
+
+
 def test_directory_lock_normalizes_nonempty_destination_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
