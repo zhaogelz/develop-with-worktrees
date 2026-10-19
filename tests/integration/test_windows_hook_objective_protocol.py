@@ -50,6 +50,9 @@ def test_windows_hook_command_enforces_and_clears_root_recovery_marker(
     """用 hooks.json 的 commandWindows 复现新会话关键链路，避免只测 Python 函数。"""
 
     monkeypatch.setenv("PYTHONIOENCODING", stdio_encoding)
+    unicode_repo = git_repo.with_name("中文项目")
+    git_repo.rename(unicode_repo)
+    git_repo = unicode_repo
     repo = GitRepo(git_repo)
     initialized = initialize(
         repo,
