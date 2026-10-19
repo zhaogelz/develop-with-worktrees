@@ -1,21 +1,6 @@
 schema_version = 3
 static_only = false
 
-# 本轮 Windows CI 的临时聚焦验证，交付前恢复原配置。
-[[profiles]]
-id = "ci-windows-reproduction"
-paths = ["**"]
-cross_task_reuse = false
-external_state = "unknown"
-input_paths = ["**"]
-input_closure = "complete"
-timeout_seconds = 300
-resource_class = "normal"
-level = "development"
-commands = [
-  ["uv", "run", "pytest", "-q", "tests/integration/test_windows_hook_objective_protocol.py", "tests/unit/test_dependency_cleanup.py::test_open_link_cannot_be_replaced_before_handle_deletion", "tests/unit/test_dependency_cleanup.py::test_cleanup_holds_ancestors_and_file_against_rename", "tests/unit/test_util.py::test_conditional_posix_delete_removes_loaded_image_hardlink_only", "--tb=short"],
-]
-
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
 # 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
 [[profiles]]
