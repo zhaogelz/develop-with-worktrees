@@ -537,19 +537,31 @@ def test_conditional_delete_accepts_same_windows_file_identity(tmp_path: Path) -
 def test_conditional_posix_delete_removes_loaded_image_hardlink_only(
     tmp_path: Path,
 ) -> None:
+    import ctypes
+    import shutil
+
     import psutil
     import psutil._psutil_windows as loaded_image
 
-    original = Path(loaded_image.__file__)
+    # CI 的解释器与 tmp_path 可能位于不同卷；在夹具内加载真实映像，
+    # 使硬链接与已加载对象同卷，同时保留实际映像删除语义。
+    original = tmp_path / "loaded-image.pyd"
+    shutil.copy2(loaded_image.__file__, original)
+    image = ctypes.WinDLL(str(original))
     approved_link = tmp_path / "approved-image.pyd"
-    os.link(original, approved_link)
-    expected = util.snapshot_plain_path(approved_link)
+    try:
+        os.link(original, approved_link)
+        expected = util.snapshot_plain_path(approved_link)
 
-    util.delete_plain_path_if_unchanged(approved_link, expected, posix_disposition=True)
+        util.delete_plain_path_if_unchanged(
+            approved_link, expected, posix_disposition=True
+        )
 
-    assert not approved_link.exists()
-    assert original.exists()
-    assert psutil.pids()
+        assert not approved_link.exists()
+        assert original.exists()
+        assert psutil.pids()
+    finally:
+        assert ctypes.windll.kernel32.FreeLibrary(ctypes.c_void_p(image._handle))
 
 
 @pytest.mark.dww_fast

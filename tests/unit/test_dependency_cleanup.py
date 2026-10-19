@@ -388,10 +388,10 @@ def test_open_link_cannot_be_replaced_before_handle_deletion(
     expected = snapshot_link_path(link)
     original = util._mark_windows_handle_for_deletion
 
-    def attempt_replacement(handle):
+    def attempt_replacement(handle, **kwargs):
         with pytest.raises(PermissionError):
             link.rename(tmp_path / "moved-link")
-        return original(handle)
+        return original(handle, **kwargs)
 
     monkeypatch.setattr(util, "_mark_windows_handle_for_deletion", attempt_replacement)
     delete_link_path_if_unchanged(link, expected)
@@ -608,14 +608,14 @@ def test_cleanup_holds_ancestors_and_file_against_rename(
     mark = util._mark_windows_handle_for_deletion
     checked = False
 
-    def check_then_mark(handle):
+    def check_then_mark(handle, **kwargs):
         nonlocal checked
         if not checked:
             checked = True
             for path in (git_repo, root, file.parent, file):
                 with pytest.raises(PermissionError):
                     path.rename(path.with_name(path.name + "-moved"))
-        return mark(handle)
+        return mark(handle, **kwargs)
 
     monkeypatch.setattr(util, "_mark_windows_handle_for_deletion", check_then_mark)
     cleanup.remove_recreatable_ignored(repo, cwd=git_repo)
