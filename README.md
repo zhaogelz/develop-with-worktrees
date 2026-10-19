@@ -21,7 +21,7 @@ Use it when you run several Codex chats, build a feature alongside a bug fix, or
 
 ## See it in 36 seconds
 
-[![Watch the DWW promo: work separately, check together, then merge back](videos/develop-with-worktrees-promo/assets/overview.svg)](https://cdn.jsdelivr.net/gh/zhaogelz/develop-with-worktrees@2fbcd39b6dd9513bad7696303b4875954caad1b5/docs/media/develop-with-worktrees-promo-36s.mp4)
+[![Watch the DWW promo: work separately, check together, then merge back](https://raw.githubusercontent.com/zhaogelz/develop-with-worktrees/c192f33d510e4dce713616497d93eae91753b47e/videos/develop-with-worktrees-promo/assets/overview.svg)](https://cdn.jsdelivr.net/gh/zhaogelz/develop-with-worktrees@2fbcd39b6dd9513bad7696303b4875954caad1b5/docs/media/develop-with-worktrees-promo-36s.mp4)
 
 Click the cover to watch the 36-second video: one project, three tasks, working separately and getting checked together. Chinese on-screen text, no narration. [Download MP4](https://github.com/zhaogelz/develop-with-worktrees/raw/2fbcd39b6dd9513bad7696303b4875954caad1b5/docs/media/develop-with-worktrees-promo-36s.mp4) · [Video source](videos/develop-with-worktrees-promo/README.md).
 
