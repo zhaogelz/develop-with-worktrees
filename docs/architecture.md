@@ -64,6 +64,10 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
 - A managed task receives one isolated worktree and one local task anchor before
   it becomes writable. Identity uncertainty, dirty unexpected content, or a
   moved reference preserves the scene instead of adopting or deleting it.
+- Directory locks preserve exclusion when owner information is missing or
+  unreadable. Reclamation needs a confirmed non-live owner or a later process
+  creation time proving PID reuse. Working-directory and command-line changes
+  do not prove that a lock owner exited.
 - Initialization adopts the attached local branch of the invoked worktree,
   including a linked worktree. Its policy commit, managed slot root, pending
   bootstrap, task base, and local promotion remain bound to that recorded branch
