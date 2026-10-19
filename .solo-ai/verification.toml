@@ -13,7 +13,7 @@ timeout_seconds = 300
 resource_class = "normal"
 level = "development"
 commands = [
-  ["uv", "run", "--python", "3.12", "pytest", "-q", "tests/unit/test_delegated.py::test_opcode_trace_interrupts_before_attribute_store", "--tb=short"],
+  ["uv", "run", "--isolated", "--python", "3.12", "pytest", "-q", "tests/unit/test_delegated.py::test_opcode_trace_interrupts_before_attribute_store", "--tb=short", "--showlocals"],
 ]
 
 [[profiles]]
@@ -27,7 +27,7 @@ timeout_seconds = 300
 resource_class = "normal"
 level = "development"
 commands = [
-  ["uv", "run", "--python", "3.15", "pytest", "-q", "tests/unit/test_delegated.py::test_opcode_trace_interrupts_before_attribute_store", "--tb=short"],
+  ["uv", "run", "--isolated", "--python", "3.15", "pytest", "-q", "tests/unit/test_delegated.py::test_opcode_trace_interrupts_before_attribute_store", "--tb=short", "--showlocals"],
 ]
 
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。

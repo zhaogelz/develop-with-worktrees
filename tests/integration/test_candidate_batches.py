@@ -1227,6 +1227,8 @@ def test_compact_status_projects_only_the_linked_validation_attempt(
     assert validation["profiles"] == [
         {
             "id": "fast",
+            "depends_on": [],
+            "continue_on_failure": False,
             "state": "unknown",
             "reused": False,
             "execution_reason": "no_matching_successful_proof",
@@ -2435,7 +2437,11 @@ def test_later_batch_promotion_recovery_keeps_source_and_execution_bases_distinc
     monkeypatch.setattr(batch_module, "_promote", denied)
     with pytest.raises(batch_module.BatchPromotionPending):
         seal_batch(repo, candidate_ids=[later["candidate_id"]])
-    blocked = CandidateBatchStore(repo).summary()["batches"][-1]
+    blocked = next(
+        batch
+        for batch in CandidateBatchStore(repo).summary()["batches"]
+        if batch["candidate_ids"] == [later["candidate_id"]]
+    )
     assert blocked["status"] == "promotion_blocked"
     assert blocked["base_before"] == completed_first["integrated_head"]
     assert blocked["candidates"][0]["base_head"] == old_source_base

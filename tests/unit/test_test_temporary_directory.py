@@ -12,6 +12,7 @@ from conftest import (
     _TEST_ROOT,
     _configure_pytest_temp_root,
     _default_pytest_temp_root,
+    _is_usable_pytest_temp_root,
     _is_within,
     _managed_worktree_root,
     _pytest_machine_state_root,
@@ -137,14 +138,14 @@ def test_configure_uses_fallback_without_changing_a_safe_explicit_basetemp(
 
 
 def test_configure_uses_short_direct_basetemp_for_the_primary_fallback(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import conftest
 
-    fallback = _pytest_fallback_temp_root()
+    fallback = tmp_path / "not-created-yet"
     monkeypatch.delenv("PYTEST_DEBUG_TEMPROOT", raising=False)
+    monkeypatch.setattr(conftest, "_pytest_fallback_temp_root", lambda: fallback)
     monkeypatch.setattr(conftest, "_default_pytest_temp_root", lambda: fallback)
-    monkeypatch.setattr(conftest, "_is_usable_pytest_temp_root", lambda root: True)
 
     first = _configure_pytest_temp_root(None)
     second = _configure_pytest_temp_root(None)
@@ -162,6 +163,21 @@ def test_configure_uses_short_direct_basetemp_for_the_primary_fallback(
         if second is not None:
             shutil.rmtree(second, ignore_errors=True)
     assert os.environ.get("PYTEST_DEBUG_TEMPROOT") is None
+
+
+@pytest.mark.parametrize("error", [OSError(), ImportError("pwd unavailable")])
+def test_temp_root_uses_unknown_user_when_account_lookup_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: Exception
+) -> None:
+    import conftest
+
+    def unavailable():
+        raise error
+
+    monkeypatch.setattr(conftest.getpass, "getuser", unavailable)
+
+    assert _is_usable_pytest_temp_root(tmp_path)
+    assert (tmp_path / "pytest-of-unknown").is_dir()
 
 
 def test_parallel_pytest_fallbacks_keep_each_process_temporary_files(
