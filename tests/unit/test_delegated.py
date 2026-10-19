@@ -75,6 +75,7 @@ def test_opcode_trace_interrupts_before_attribute_store() -> None:
         if frame.f_code is allocate_then_store.__code__:
             observed.append((event, frame.f_lasti))
             if event == "call":
+                frame.f_trace = interrupt_store
                 frame.f_trace_opcodes = True
             elif event == "opcode" and instructions.get(frame.f_lasti) == "STORE_ATTR":
                 raise KeyboardInterrupt("before attribute store")
@@ -2887,6 +2888,7 @@ def test_posix_channel_factory_return_before_store_closes_both_endpoints(
     def interrupt_store(frame: object, event: str, _arg: object) -> object:
         if getattr(frame, "f_code", None) is allocate_then_store.__code__:
             if event == "call":
+                frame.f_trace = interrupt_store  # type: ignore[attr-defined]
                 frame.f_trace_opcodes = True  # type: ignore[attr-defined]
             elif event == "opcode" and opcodes.get(frame.f_lasti) == "STORE_ATTR":  # type: ignore[attr-defined]
                 raise KeyboardInterrupt("synthetic channel STORE_ATTR interruption")
@@ -2905,7 +2907,7 @@ def test_posix_channel_factory_return_before_store_closes_both_endpoints(
                 KeyboardInterrupt, match="synthetic channel STORE_ATTR interruption"
             ):
                 allocate_then_store()
-        assert sys.gettrace() is sentinel_trace
+        assert sys.gettrace() is previous_trace is sentinel_trace
     finally:
         sys.settrace(test_runner_trace)
     assert sys.gettrace() is test_runner_trace
@@ -2992,6 +2994,7 @@ def test_temporary_file_return_before_payload_store_closes_descriptor(
             is delegated._prepare_posix_launch_resources.__code__
         ):
             if event == "call":
+                frame.f_trace = interrupt_store  # type: ignore[attr-defined]
                 frame.f_trace_opcodes = True  # type: ignore[attr-defined]
             elif event == "opcode":
                 instruction = instructions.get(frame.f_lasti)  # type: ignore[attr-defined]
