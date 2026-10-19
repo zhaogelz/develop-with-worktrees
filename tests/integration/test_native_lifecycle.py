@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1538,8 +1539,11 @@ def test_native_release_identity_and_tracked_changes_still_block(
     ) == "private test bytes"
 
 
+@pytest.mark.parametrize(
+    "same_second", [True, False], ids=["same-second", "distinct-seconds"]
+)
 def test_native_start_uses_real_capacity_pressure_to_deliver_two_ready_tasks(
-    git_repo: Path,
+    git_repo: Path, same_second: bool
 ) -> None:
     repo, store = _native_repo(git_repo, slots=10)
     approve(repo, load_verification_config(repo))
@@ -1566,9 +1570,14 @@ def test_native_start_uses_real_capacity_pressure_to_deliver_two_ready_tasks(
             == "waiting-integration"
         )
     ready_at = store.task(ready_tasks[0]["id"])["native_delivery"]["ready_at"]
-    for task in ready_tasks:
+    first_ready = datetime.fromisoformat(ready_at.replace("Z", "+00:00"))
+    for index, task in enumerate(ready_tasks):
         delivery = dict(store.task(task["id"])["native_delivery"])
-        delivery["ready_at"] = ready_at
+        offset = 0 if same_second else index
+        ready_time = first_ready + timedelta(seconds=offset)
+        delivery["ready_at"] = ready_time.isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
         store.update_task(task["id"], native_delivery=delivery)
     producers = [start(repo, name=f"producer {index}") for index in range(8)]
     assert len(store.read()["batches"]) == 0
@@ -1581,8 +1590,10 @@ def test_native_start_uses_real_capacity_pressure_to_deliver_two_ready_tasks(
     assert batch["status"] == "completed"
     assert batch["tail_request"]["cause"] == "capacity"
     assert batch["capacity_request_id"] == "capacity-next"
+    # 同秒按 ID 决胜；时间不同时按先就绪者在前，不能受 ID 顺序干扰。
+    expected_tasks = ready_tasks[::-1] if same_second else ready_tasks
     assert [member["task_id"] for member in batch["tasks"]] == [
-        task["id"] for task in ready_tasks
+        task["id"] for task in expected_tasks
     ]
     assert all(repo.is_ancestor(source, repo.head(git_repo)) for source in sources)
     assert all(store.task(task["id"])["status"] == "active" for task in producers)
