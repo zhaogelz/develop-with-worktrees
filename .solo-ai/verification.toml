@@ -31,6 +31,21 @@ commands = [
 ]
 
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
+[[profiles]]
+id = "ci-original-failures"
+paths = ["**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["**"]
+input_closure = "complete"
+timeout_seconds = 300
+resource_class = "normal"
+level = "development"
+commands = [
+  ["uv", "run", "pytest", "-q", "tests/integration/test_candidate_batches.py::test_compact_status_projects_only_the_linked_validation_attempt", "tests/integration/test_candidate_batches.py::test_later_batch_promotion_recovery_keeps_source_and_execution_bases_distinct", "tests/integration/test_cli.py::test_full_cli_lifecycle_runs_through_uv_script", "tests/integration/test_lifecycle.py::test_schema_two_task_state_is_read_upgraded_before_isolated_finish", "tests/integration/test_lifecycle.py::test_schema_eight_batched_task_keeps_ready_gate_during_upgrade", "tests/integration/test_lifecycle.py::test_schema_three_ready_task_already_in_main_recovers_without_second_merge", "tests/unit/test_test_temporary_directory.py", "tests/unit/test_validation_queue.py", "tests/unit/test_hook.py::test_hook_allows_only_owned_task_targets_inside_codex_home", "tests/unit/test_hook.py::test_hook_denies_codex_home_task_when_registered_identity_drifts", "tests/unit/test_hook.py::test_hook_keeps_codex_home_git_content_and_nested_repositories_protected"],
+]
+
+# 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
 # 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
 [[profiles]]
 id = "promo-video-development"
