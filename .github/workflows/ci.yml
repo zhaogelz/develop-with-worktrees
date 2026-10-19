@@ -20,5 +20,5 @@ jobs:
       - run: uv sync --dev
       - run: uv run pytest -vv -o faulthandler_timeout=30
       - run: uv run python -m compileall -q plugins/develop-with-worktrees/skills/develop-with-worktrees/scripts plugins/develop-with-worktrees/hooks
-      - run: uvx ruff check .
-      - run: uvx ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
