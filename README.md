@@ -27,10 +27,10 @@ Click the cover to watch the 36-second video: one project, three tasks, working 
 
 ## Install
 
-You need Codex with plugin support, Git, and [uv](https://docs.astral.sh/uv/) to run the Python tools. The current public version is `0.5.0-beta.7`.
+You need Codex with plugin support, Git, and [uv](https://docs.astral.sh/uv/) to run the Python tools. The current public version is `0.5.0-beta.8`.
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.7
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.8
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
