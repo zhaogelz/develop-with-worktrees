@@ -678,8 +678,25 @@ class DirectoryLock:
             }:
                 return not access_path.exists()
             raise
-        if owner and process_matches(owner):
+        if not owner:
+            # 交接期间可能刚读到缺失文件；不能因此删除同路径上刚取得的新锁。
+            return not access_path.exists()
+        if not isinstance(owner, dict) or not isinstance(owner.get("pid"), int):
             return False
+        pid = owner["pid"]
+        if pid > 0:
+            try:
+                created = psutil.Process(pid).create_time()
+                expected = float(owner["create_time"])
+            except psutil.NoSuchProcess:
+                pass
+            except (psutil.Error, OSError, KeyError, TypeError, ValueError):
+                # 不能观测不等于已退出；工作目录、命令行也不是锁存活依据。
+                return False
+            else:
+                # 仅启动时间明确较新的同 PID 进程，才能证明原所有者已被替换。
+                if not (0 < expected < created - 0.01):
+                    return False
         try:
             shutil.rmtree(access_path)
             return True
