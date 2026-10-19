@@ -41,11 +41,13 @@ def _run_windows_hook(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="commandWindows only runs on Windows")
+@pytest.mark.parametrize("stdio_encoding", ["utf-8", "cp1252"])
 def test_windows_hook_command_enforces_and_clears_root_recovery_marker(
-    git_repo: Path,
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, stdio_encoding: str,
 ) -> None:
     """用 hooks.json 的 commandWindows 复现新会话关键链路，避免只测 Python 函数。"""
 
+    monkeypatch.setenv("PYTHONIOENCODING", stdio_encoding)
     repo = GitRepo(git_repo)
     initialized = initialize(
         repo,
