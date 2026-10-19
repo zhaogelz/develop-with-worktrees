@@ -37,6 +37,42 @@ def assert_posix_descriptors_closed(descriptors: list[int]) -> None:
         assert raised.value.errno == errno.EBADF
 
 
+def test_opcode_trace_interrupts_before_attribute_store() -> None:
+    """先验证故障注入确实命中 STORE_ATTR，再信任资源回收断言。"""
+
+    class Holder:
+        value = None
+
+    holder = Holder()
+
+    def allocate_then_store() -> None:
+        holder.value = object()
+
+    instructions = {
+        instruction.offset: instruction.opname
+        for instruction in dis.get_instructions(allocate_then_store)
+    }
+    observed: list[tuple[str, int]] = []
+
+    def interrupt_store(frame, event, _arg):
+        if frame.f_code is allocate_then_store.__code__:
+            observed.append((event, frame.f_lasti))
+            if event == "call":
+                frame.f_trace_opcodes = True
+            elif event == "opcode" and instructions.get(frame.f_lasti) == "STORE_ATTR":
+                raise KeyboardInterrupt("before attribute store")
+        return interrupt_store
+
+    previous_trace = sys.gettrace()
+    sys.settrace(interrupt_store)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="before attribute store"):
+            allocate_then_store()
+    finally:
+        sys.settrace(previous_trace)
+    assert holder.value is None, (instructions, observed)
+
+
 def declare_adapter(root: Path, *, max_parallel: int = 4) -> None:
     declare_delegated_adapter(
         root,
