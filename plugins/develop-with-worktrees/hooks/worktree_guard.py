@@ -2100,6 +2100,13 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def main() -> int:
+    # Hook 的 JSON 协议固定使用 UTF-8，不继承 Windows 的本地代码页。
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError, ValueError):
+            # 测试或嵌入宿主可能提供没有 reconfigure 的文本流。
+            continue
     payload: dict[str, Any] = {}
     try:
         raw = json.load(sys.stdin)
