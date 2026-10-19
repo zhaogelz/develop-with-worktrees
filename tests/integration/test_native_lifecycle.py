@@ -1544,6 +1544,8 @@ def test_native_start_uses_real_capacity_pressure_to_deliver_two_ready_tasks(
     repo, store = _native_repo(git_repo, slots=10)
     approve(repo, load_verification_config(repo))
     ready_tasks = [start(repo, name=f"ready source {index}") for index in (1, 2)]
+    # 固定与 ID 排序相反的就绪顺序，消除随机后缀对复现的影响。
+    ready_tasks.sort(key=lambda task: task["id"], reverse=True)
     sources = []
     for index, task in enumerate(ready_tasks, start=1):
         filename = f"capacity-{index}.txt"
@@ -1563,6 +1565,11 @@ def test_native_start_uses_real_capacity_pressure_to_deliver_two_ready_tasks(
             finish(repo, task_id=task["id"], lease=task["lease"])["status"]
             == "waiting-integration"
         )
+    ready_at = store.task(ready_tasks[0]["id"])["native_delivery"]["ready_at"]
+    for task in ready_tasks:
+        delivery = dict(store.task(task["id"])["native_delivery"])
+        delivery["ready_at"] = ready_at
+        store.update_task(task["id"], native_delivery=delivery)
     producers = [start(repo, name=f"producer {index}") for index in range(8)]
     assert len(store.read()["batches"]) == 0
 

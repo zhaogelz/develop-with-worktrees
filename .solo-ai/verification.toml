@@ -1,6 +1,21 @@
 schema_version = 3
 static_only = false
 
+# 本轮同秒就绪任务排序的临时复现，交付前移除。
+[[profiles]]
+id = "ci-capacity-order-reproduction"
+paths = ["**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["**"]
+input_closure = "complete"
+timeout_seconds = 300
+resource_class = "normal"
+level = "development"
+commands = [
+  ["uv", "run", "pytest", "-q", "tests/integration/test_native_lifecycle.py::test_native_start_uses_real_capacity_pressure_to_deliver_two_ready_tasks", "--tb=short"],
+]
+
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
 # 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
 [[profiles]]
