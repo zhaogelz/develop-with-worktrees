@@ -701,6 +701,8 @@ else:
     codex.write_text(
         f'@"{sys.executable}" "%~dp0fake-codex.py" %*\r\n', encoding="utf-8"
     )
+    # 注入不可用的 tar，发布仍应从精确提交成功打包并保留旧文件。
+    (tmp_path / "tar.cmd").write_text("@exit /b 37\r\n", encoding="utf-8")
     env = {
         **os.environ,
         "PATH": _fake_uv_for_self_contained_helpers(tmp_path),

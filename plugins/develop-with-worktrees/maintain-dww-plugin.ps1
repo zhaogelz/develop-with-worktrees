@@ -188,7 +188,6 @@ if ($cliVersion.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($cliVersion.Outp
 
 $git = (Get-Command git -ErrorAction Stop).Source
 $uv = (Get-Command uv -ErrorAction Stop).Source
-$tar = (Get-Command tar -ErrorAction Stop).Source
 $create = Join-Path $PluginCreatorRoot 'scripts\create_basic_plugin.py'
 $cachebuster = Join-Path $PluginCreatorRoot 'scripts\update_plugin_cachebuster.py'
 $validate = Join-Path $PluginCreatorRoot 'scripts\validate_plugin.py'
@@ -329,9 +328,10 @@ if ($resumingInstall -and -not $activeMatches) {
 if (-not $activeMatches) {
     New-Item -ItemType Directory -Path (Join-Path $stage 'plugins') -Force | Out-Null
     Invoke-Required 'create_basic_plugin.py' $uv @('run', '--script', $create, $PluginName, '--path', (Join-Path $stage 'plugins'))
-    $archive = Join-Path $stage 'source.tar'
-    Invoke-Required 'git archive' $git @('-C', $SourceRepo, 'archive', '--format=tar', "--output=$archive", $resolved, '--', "plugins/$PluginName")
-    Invoke-Required 'tar extract' $tar @('-xf', $archive, '-C', $stage)
+    # 使用 PowerShell 自带的 ZIP 解压，避免 Windows tar 原生进程崩溃中断发布。
+    $archive = Join-Path $stage 'source.zip'
+    Invoke-Required 'git archive' $git @('-C', $SourceRepo, 'archive', '--format=zip', "--output=$archive", $resolved, '--', "plugins/$PluginName")
+    Expand-Archive -LiteralPath $archive -DestinationPath $stage -Force
     Invoke-Required 'update_plugin_cachebuster.py' $uv @('run', '--script', $cachebuster, $stagePlugin)
     Invoke-Required 'validate_plugin.py' $uv @('run', '--with', 'pyyaml', '--script', $validate, $stagePlugin)
     $manifest = Get-Content -LiteralPath (Join-Path $stagePlugin '.codex-plugin\plugin.json') -Raw -Encoding utf8 | ConvertFrom-Json
