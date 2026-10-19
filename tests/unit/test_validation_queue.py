@@ -15,6 +15,14 @@ import pytest
 import solo_ai.validation_queue as queue
 
 
+@pytest.fixture(autouse=True)
+def isolated_machine_state(monkeypatch, tmp_path) -> None:
+    """每例隔离两个平台入口，子进程继承同一队列根。"""
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+
 def test_auto_capacity_uses_stable_physical_machine_dimensions(
     monkeypatch, tmp_path
 ) -> None:

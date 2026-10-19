@@ -1761,7 +1761,8 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
     published = call_json(
         "finish", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
     )
-    assert published["outcome"] == "candidate_published"
+    assert published["outcome"] == "waiting_integration"
+    assert published["id"] == task["id"]
     unexplained_tail = subprocess.run(
         [
             "uv",
@@ -1773,8 +1774,8 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
             "--json",
             "batch",
             "seal",
-            "--candidate",
-            published["candidate_id"],
+            "--task",
+            task["id"],
         ],
         text=True,
         encoding="utf-8",
@@ -1784,12 +1785,14 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
         timeout=90,
     )
     assert unexplained_tail.returncode == 2
-    assert "requires both cause and one-line reason" in unexplained_tail.stdout
+    assert (
+        "Native tail requires an explicit cause and reason" in unexplained_tail.stdout
+    )
     tail = call_json(
         "batch",
         "seal",
-        "--candidate",
-        published["candidate_id"],
+        "--task",
+        task["id"],
         "--cause",
         "round-complete",
         "--reason",

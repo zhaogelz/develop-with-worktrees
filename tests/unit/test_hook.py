@@ -959,6 +959,8 @@ def test_hook_allows_only_owned_task_targets_inside_codex_home(
     project = codex_home / "project"
     project.mkdir(parents=True)
     git(project, "init")
+    git(project, "config", "user.name", "Test User")
+    git(project, "config", "user.email", "test@example.invalid")
     (project / "README.md").write_text("fixture\n", encoding="utf-8")
     git(project, "add", "README.md")
     git(project, "commit", "-m", "test: create project inside codex home")
@@ -1029,6 +1031,8 @@ def test_hook_denies_codex_home_task_when_registered_identity_drifts(
     project = codex_home / "project"
     project.mkdir(parents=True)
     git(project, "init")
+    git(project, "config", "user.name", "Test User")
+    git(project, "config", "user.email", "test@example.invalid")
     (project / "README.md").write_text("fixture\n", encoding="utf-8")
     git(project, "add", "README.md")
     git(project, "commit", "-m", "test: create project inside codex home")
@@ -1234,6 +1238,8 @@ def test_hook_keeps_codex_home_git_content_and_nested_repositories_protected(
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     git(codex_home, "init")
+    git(codex_home, "config", "user.name", "Test User")
+    git(codex_home, "config", "user.email", "test@example.invalid")
     session = "current-session"
     artifact = codex_home / "visualizations" / "2026" / "09" / "18" / session
     artifact.mkdir(parents=True)

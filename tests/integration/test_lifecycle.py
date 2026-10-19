@@ -66,7 +66,7 @@ from solo_ai.lifecycle import (
     warm_slot,
 )
 from solo_ai.repo import GitRepo
-from solo_ai.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
+from solo_ai.state import LEGACY_STATE_SCHEMA, StateStore
 from solo_ai.status_views import status_view
 from solo_ai.util import (
     ActionableSoloAIError,
@@ -2164,7 +2164,7 @@ def test_schema_two_task_state_is_read_upgraded_before_isolated_finish(
     assert StateStore(repo).task(task["id"])["mode"] == "isolated"
     ready(repo, task_id=task["id"], lease=task["lease"])
     finish(repo, task_id=task["id"], lease=task["lease"])
-    assert read_json(state_path, {})["schema_version"] == STATE_SCHEMA
+    assert read_json(state_path, {})["schema_version"] == LEGACY_STATE_SCHEMA
 
 
 def test_schema_eight_batched_task_keeps_ready_gate_during_upgrade(
@@ -2193,7 +2193,7 @@ def test_schema_eight_batched_task_keeps_ready_gate_during_upgrade(
 
     assert restored["integration_policy"]["candidate_validation"] == "ready"
     store.mutate(lambda current: current)
-    assert read_json(store.path, {})["schema_version"] == STATE_SCHEMA
+    assert read_json(store.path, {})["schema_version"] == LEGACY_STATE_SCHEMA
 
 
 def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
@@ -2221,7 +2221,7 @@ def test_schema_three_ready_task_already_in_main_recovers_without_second_merge(
     assert repo.head(git_repo) == candidate
     assert finished["status"] == "finished"
     assert finished["integration"]["transaction_id"].startswith("legacy-")
-    assert read_json(state_path, {})["schema_version"] == STATE_SCHEMA
+    assert read_json(state_path, {})["schema_version"] == LEGACY_STATE_SCHEMA
     upgraded = read_json(state_path, {})
     assert upgraded["pending_operation_outcomes"] == {}
     assert isinstance(upgraded["slots"][task["slot_id"]]["generation"], int)

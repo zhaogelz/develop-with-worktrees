@@ -79,10 +79,12 @@ def _pytest_machine_state_root() -> Path:
 
 
 def _configure_pytest_machine_state() -> None:
-    """隔离 Windows 机器级验证队列，避免测试写入用户 AppData。"""
+    """隔离各平台机器级验证队列，避免测试写入用户运行状态。"""
 
     if os.name == "nt":
         os.environ["LOCALAPPDATA"] = str(_pytest_machine_state_root())
+    else:
+        os.environ["XDG_STATE_HOME"] = str(_pytest_machine_state_root())
 
 
 def _is_usable_pytest_temp_root(root: Path) -> bool:
@@ -90,7 +92,7 @@ def _is_usable_pytest_temp_root(root: Path) -> bool:
 
     try:
         user = getpass.getuser() or "unknown"
-    except OSError:
+    except (OSError, ImportError):
         user = "unknown"
     pytest_root = root / f"pytest-of-{user}"
     try:
