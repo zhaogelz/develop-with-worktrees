@@ -1,6 +1,23 @@
 schema_version = 3
 static_only = false
 
+# 本轮 CI 工具版本漂移的临时复现，交付前移除。
+[[profiles]]
+id = "ci-ruff-drift"
+paths = ["**"]
+cross_task_reuse = false
+external_state = "unknown"
+input_paths = ["**"]
+input_closure = "complete"
+timeout_seconds = 120
+resource_class = "normal"
+level = "development"
+commands = [
+  ["uvx", "--refresh", "ruff", "--version"],
+  ["uv", "run", "ruff", "--version"],
+  ["uvx", "--refresh", "ruff", "format", "--diff", "tests/integration/test_native_lifecycle.py"],
+]
+
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
 # 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
 [[profiles]]
