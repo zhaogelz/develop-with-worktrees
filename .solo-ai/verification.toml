@@ -1,50 +1,6 @@
 schema_version = 3
 static_only = false
 
-# 本轮 CI 排障的临时复现入口，提交前移除。
-[[profiles]]
-id = "ci-repair-reproduction"
-paths = ["**"]
-cross_task_reuse = false
-external_state = "unknown"
-input_paths = ["**"]
-input_closure = "complete"
-timeout_seconds = 300
-resource_class = "normal"
-level = "development"
-commands = [
-  ["uv", "run", "--isolated", "--python", "3.12", "pytest", "-q", "tests/unit/test_delegated.py::test_opcode_trace_interrupts_before_attribute_store", "--tb=short", "--showlocals"],
-]
-
-[[profiles]]
-id = "ci-trace-315-reproduction"
-paths = ["**"]
-cross_task_reuse = false
-external_state = "unknown"
-input_paths = ["**"]
-input_closure = "complete"
-timeout_seconds = 300
-resource_class = "normal"
-level = "development"
-commands = [
-  ["uv", "run", "--isolated", "--python", "3.15", "pytest", "-q", "tests/unit/test_delegated.py::test_opcode_trace_interrupts_before_attribute_store", "--tb=short", "--showlocals"],
-]
-
-# 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
-[[profiles]]
-id = "ci-original-failures"
-paths = ["**"]
-cross_task_reuse = false
-external_state = "unknown"
-input_paths = ["**"]
-input_closure = "complete"
-timeout_seconds = 300
-resource_class = "normal"
-level = "development"
-commands = [
-  ["uv", "run", "pytest", "-q", "tests/integration/test_cli.py::test_full_cli_lifecycle_runs_through_uv_script"],
-]
-
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
 # 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
 [[profiles]]
