@@ -6,6 +6,8 @@
 
 ![宣传片概览](assets/overview.svg)
 
+[播放 36 秒成片](https://cdn.jsdelivr.net/gh/zhaogelz/develop-with-worktrees@2fbcd39b6dd9513bad7696303b4875954caad1b5/docs/media/develop-with-worktrees-promo-36s.mp4) · [下载 MP4](https://github.com/zhaogelz/develop-with-worktrees/raw/2fbcd39b6dd9513bad7696303b4875954caad1b5/docs/media/develop-with-worktrees-promo-36s.mp4)
+
 ## 本地预览
 
 在本目录运行：
@@ -49,7 +51,7 @@ ffmpeg -v error -xerror -i renders/develop-with-worktrees-promo-36s.mp4 -f null 
 
 预期只有一条 H.264 视频流：1080×1920、`30/1` FPS、1080 帧、36 秒，无音轨；第二条命令应完整解码通过。再播放一遍，检查六幕文字、转场和片尾安装入口。
 
-工程文件、检查截图和 MP4 是不同产物。MP4 保存在本地导出目录，仓库首页封面链接到本工程；有可公开播放的成片地址后，再更新首页的视频入口。
+工程文件、检查截图和 MP4 是不同产物。本次确认版成片归档在 [docs/media/](../../docs/media/develop-with-worktrees-promo-36s.mp4)，中英文首页封面指向同一份固定版本的公开成片。以后重做画面时，先确认预览、导出并检查，再更新归档和播放入口。
 
 ## 维护检查
 

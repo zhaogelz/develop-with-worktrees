@@ -21,9 +21,9 @@ Develop with Worktrees（DWW）是一个 Codex 插件：**给每个修改任务�
 
 ## 36 秒看懂
 
-[![DWW 宣传片：分开做，一起检查，再合回去](videos/develop-with-worktrees-promo/assets/overview.svg)](videos/develop-with-worktrees-promo/README.md)
+[![点击播放 DWW 宣传片：分开做，一起检查，再合回去](videos/develop-with-worktrees-promo/assets/overview.svg)](https://cdn.jsdelivr.net/gh/zhaogelz/develop-with-worktrees@2fbcd39b6dd9513bad7696303b4875954caad1b5/docs/media/develop-with-worktrees-promo-36s.mp4)
 
-一个项目，三个任务。看它们如何分开修改、一起检查，以及发现问题后如何停下来。[打开视频工程，预览完整动效](videos/develop-with-worktrees-promo/README.md)。
+点击封面播放 36 秒成片（中文、无配音）。一个项目，三个任务：分开修改、一起检查，遇到问题停在合入前。[下载 MP4](https://github.com/zhaogelz/develop-with-worktrees/raw/2fbcd39b6dd9513bad7696303b4875954caad1b5/docs/media/develop-with-worktrees-promo-36s.mp4) · [视频工程](videos/develop-with-worktrees-promo/README.md)。
 
 ## 安装
 

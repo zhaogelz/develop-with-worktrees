@@ -1,6 +1,6 @@
 # 发布文案
 
-36 秒竖版，无配音。先用本地预览审片，再导出 MP4；本工程不自动发布。
+36 秒竖版，无配音。[查看已确认的成片](https://cdn.jsdelivr.net/gh/zhaogelz/develop-with-worktrees@2fbcd39b6dd9513bad7696303b4875954caad1b5/docs/media/develop-with-worktrees-promo-36s.mp4)。本工程不自动发布到社交平台。
 
 ## 小红书
 
@@ -47,4 +47,4 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 - 确认 MP4 时长 36 秒、1080×1920、30 FPS，片尾地址留足停读时间。
 - 手机上确认中文清楚，平台按钮不会盖住正文。
 - 上传前再次核对 README 中的公开版本与安装命令。
-- 渲染、上传和发布是独立步骤；本轮只交付源工程与预览。
+- 渲染、上传和发布是独立步骤，逐项核对实际结果。
