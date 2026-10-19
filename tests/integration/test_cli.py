@@ -1762,7 +1762,7 @@ def test_full_cli_lifecycle_runs_through_uv_script(git_repo: Path) -> None:
         "finish", "--task", task["id"], "--lease", task["lease"], repo_path=worktree
     )
     assert published["outcome"] == "waiting_integration"
-    assert published["task_id"] == task["id"]
+    assert published["id"] == task["id"]
     unexplained_tail = subprocess.run(
         [
             "uv",

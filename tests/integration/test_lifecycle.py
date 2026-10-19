@@ -66,7 +66,7 @@ from solo_ai.lifecycle import (
     warm_slot,
 )
 from solo_ai.repo import GitRepo
-from solo_ai.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, StateStore
+from solo_ai.state import LEGACY_STATE_SCHEMA, StateStore
 from solo_ai.status_views import status_view
 from solo_ai.util import (
     ActionableSoloAIError,

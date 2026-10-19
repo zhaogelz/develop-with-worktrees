@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,22 @@ def assert_posix_descriptors_closed(descriptors: list[int]) -> None:
         with pytest.raises(OSError) as raised:
             os.fstat(descriptor)
         assert raised.value.errno == errno.EBADF
+
+
+@contextmanager
+def opcode_tracing(trace):
+    """先在活动帧启用 opcode，再安装跟踪器，并恢复原跟踪状态。"""
+
+    frame = sys._getframe()
+    previous_opcodes = frame.f_trace_opcodes
+    previous_trace = sys.gettrace()
+    frame.f_trace_opcodes = True
+    try:
+        sys.settrace(trace)
+        yield
+    finally:
+        sys.settrace(previous_trace)
+        frame.f_trace_opcodes = previous_opcodes
 
 
 def test_opcode_trace_interrupts_before_attribute_store() -> None:
@@ -64,12 +81,10 @@ def test_opcode_trace_interrupts_before_attribute_store() -> None:
         return interrupt_store
 
     previous_trace = sys.gettrace()
-    sys.settrace(interrupt_store)
-    try:
+    with opcode_tracing(interrupt_store):
         with pytest.raises(KeyboardInterrupt, match="before attribute store"):
             allocate_then_store()
-    finally:
-        sys.settrace(previous_trace)
+    assert sys.gettrace() is previous_trace
     assert holder.value is None, (instructions, observed)
 
 
@@ -2885,14 +2900,11 @@ def test_posix_channel_factory_return_before_store_closes_both_endpoints(
     sys.settrace(sentinel_trace)
     try:
         previous_trace = sys.gettrace()
-        sys.settrace(interrupt_store)
-        try:
+        with opcode_tracing(interrupt_store):
             with pytest.raises(
                 KeyboardInterrupt, match="synthetic channel STORE_ATTR interruption"
             ):
                 allocate_then_store()
-        finally:
-            sys.settrace(previous_trace)
         assert sys.gettrace() is sentinel_trace
     finally:
         sys.settrace(test_runner_trace)
@@ -2994,8 +3006,7 @@ def test_temporary_file_return_before_payload_store_closes_descriptor(
     monkeypatch.setattr(delegated, "_create_cloexec_pipe", capture_channel)
     monkeypatch.setattr(delegated.tempfile, "TemporaryFile", capture_temporary_file)
     previous_trace = sys.gettrace()
-    sys.settrace(interrupt_store)
-    try:
+    with opcode_tracing(interrupt_store):
         with pytest.raises(
             KeyboardInterrupt, match="synthetic payload STORE_ATTR interruption"
         ):
@@ -3005,8 +3016,6 @@ def test_temporary_file_return_before_payload_store_closes_descriptor(
                 root=tmp_path,
                 environment={},
             )
-    finally:
-        sys.settrace(previous_trace)
     assert sys.gettrace() is previous_trace
     delegated._stop_posix_adapter_process_group(process)
     gc.collect()
@@ -3109,6 +3118,8 @@ def test_posix_stop_retries_after_control_was_delivered_then_interrupted(
 
     try:
         os.kill(process.pid, signal.SIGSTOP)
+        stopped_pid, stopped_status = os.waitpid(process.pid, os.WUNTRACED)
+        assert stopped_pid == process.pid and os.WIFSTOPPED(stopped_status)
         with pytest.raises(BaseException) as raised:
             delegated._stop_posix_supervisor(process.ownership)
         assert exception_tree_contains(
