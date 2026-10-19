@@ -1,22 +1,6 @@
 schema_version = 3
 static_only = false
 
-[[profiles]]
-id = "release-beta8-development"
-paths = ["**"]
-cross_task_reuse = false
-external_state = "unknown"
-input_paths = ["**"]
-environment = ["PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432"]
-input_closure = "complete"
-timeout_seconds = 180
-resource_class = "normal"
-level = "development"
-commands = [
-  ["uv", "lock", "--check", "--offline"],
-  ["uv", "run", "pytest", "-q", "tests/integration/test_cli.py::test_release_version_contract_matches_manifest_metadata_and_cli", "tests/integration/test_cli.py::test_plugin_manifest_matches_current_codex_component_contract", "tests/integration/test_cli.py::test_hook_definition_remains_the_stable_trust_contract", "tests/integration/test_cli.py::test_user_facing_docs_describe_only_the_current_contract"],
-]
-
 # 视频有独立的 HTML 时间线与浏览器审计，只在改到视频时执行。
 # 不把渲染或发布纳入日常验证；快照用于人工核对手机可读性。
 [[profiles]]
