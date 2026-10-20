@@ -49,6 +49,7 @@ You describe the goal, Codex moves the task forward, and DWW manages how the cha
 
 - **Finished editing and merged are separate states.** Changes may be waiting for batch integration. Use the actual local merge result to judge delivery. See the [delivery flow](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/native-delivery.md) for the conditions.
 - Separate directories prevent tasks from overwriting each other's working files. Merge conflicts can still happen. DWW stops and preserves the work so the AI can repair it within scope; product choices come back to you.
+- Existing ignored data and dependencies can stay in place. DWW stops when incoming files would overwrite local content or traverse a local directory link.
 - Your project decides which checks run. DWW runs them and keeps their results; their coverage still depends on your project.
 - DWW manages local Git work. Remote pushes, pull requests, and deployment are separate actions. Codex or another host still handles task planning and AI coordination.
 

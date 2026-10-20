@@ -73,6 +73,12 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   bootstrap, task base, and local promotion remain bound to that recorded branch
   and worktree identity; remote defaults and legacy default-branch preferences
   are only compatibility queries, never an override for a recorded target.
+- In a repository with commits, unrelated ignored local content may remain during
+  adoption and delivery. Every fast-forward preflights its changed paths for
+  unknown content and directory links, then uses Git's no-overwrite-ignore guard.
+  Bootstrap persists its original target before promotion so a collision retains
+  the policy worktree for ordinary recovery. This adds no path allowlist, cleanup
+  authority, or relaxation of source cleanliness and exact target identity.
 - The optional Hook may allow an `apply_patch` target in either a current host
   session's verified `CODEX_HOME/visualizations/YYYY/MM/DD/<session>` artifact
   root or one registered active task worktree. A task worktree beneath

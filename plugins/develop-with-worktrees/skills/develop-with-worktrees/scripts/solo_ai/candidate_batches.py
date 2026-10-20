@@ -2726,7 +2726,7 @@ def _promote(
             "Batch base worktree is not clean and exact; no promotion was attempted"
         )
     try:
-        repo.git(["merge", "--ff-only", integration_head], cwd=base_worktree)
+        repo.fast_forward(integration_head, cwd=base_worktree)
     except SoloAIError as exc:
         # Git 命令错误已脱敏；保留底层原因，便于审查并恢复晋升现场。
         detail = str(exc).strip()

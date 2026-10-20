@@ -49,6 +49,7 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 
 - **“写完了”与“已合入”是两件事。** 改动可能在等同批集成；以实际合入本地分支的结果为准。具体条件见[交付流程](plugins/develop-with-worktrees/skills/develop-with-worktrees/references/native-delivery.md)。
 - 隔离目录能避免工作中的文件互相覆盖，合并时仍可能出现冲突。DWW 会停下并保留现场，AI 再按任务范围处理；涉及产品取舍时由你决定。
+- 已忽略的本地数据和依赖可以原地保留；合入文件会覆盖本地内容或穿过目录链接时，DWW 会停下并保留现场。
 - 检查运行什么，由你的项目配置决定。DWW 帮你执行和保留结果，检查能发现多少问题仍取决于项目本身。
 - DWW 管本地 Git 流程；推送远端、创建 PR 和部署需要另外安排。任务怎么拆、AI 怎么协作，仍由 Codex 等宿主负责。
 

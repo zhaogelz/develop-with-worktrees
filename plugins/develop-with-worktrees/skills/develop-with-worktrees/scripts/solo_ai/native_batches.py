@@ -625,7 +625,7 @@ def _promote(repo: GitRepo, store: StateStore, batch: dict[str, Any]) -> dict[st
     ):
         raise SoloAIError("Native target worktree changed before promotion")
     if current == batch["base_before"]:
-        repo.git(["merge", "--ff-only", integration_head], cwd=target)
+        repo.fast_forward(integration_head, cwd=target)
         if repo.head(target) != integration_head:
             raise SoloAIError("Native promotion did not reach the validated HEAD")
     elif current is None or not repo.is_ancestor(integration_head, current):

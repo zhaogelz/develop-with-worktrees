@@ -21,6 +21,7 @@ from a title, a worktree count, or a quiet log.
 | Composition conflict | failed batch and attributed candidate | prepare the exact candidate repair | retained candidates and conflict worktree |
 | Stale prepared task merge | task ID, `MERGE_HEAD`, recorded base, and current branch head | preserve the resolved files and inspect the recorded candidate repair path after the active batch | task worktree and conflict resolution; never complete the stale merge |
 | Validation failed | selected profile, log, and inputs | change inputs or make an evidence-based attribution | failed generation and base |
+| Bootstrap promotion has a local path collision | original target, bootstrap record, and reported path | preserve local content; after its owner resolves the obstruction, Start if no task exists, then continue that task's Finish | policy worktree, original target binding, and local content |
 | Promotion blocked | sealed base/head and worktree identity | remove the external blocker, then recover | integration worktree and base |
 | Unknown/protected/replaced content | path identity and inventory | stop and preserve the scene | all affected content |
 

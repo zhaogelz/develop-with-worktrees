@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +72,64 @@ class GitRepo:
             check=check,
             env=env,
             timeout=timeout,
+        )
+
+    def fast_forward(self, ref: str, *, cwd: Path) -> CommandResult:
+        """只更新提交涉及的路径；预检未知内容与目录链接，再由 Git 拒绝覆盖。"""
+        incoming = self.git(
+            ["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=cwd
+        ).stdout.strip()
+        changed = self.git(
+            ["diff", "--no-renames", "--name-only", "-z", "HEAD", incoming, "--"],
+            cwd=cwd,
+        ).stdout.split("\0")
+        tracked = {
+            os.path.normcase(item)
+            for item in self.git(["ls-files", "-z"], cwd=cwd).stdout.split("\0")
+            if item
+        }
+        for relative in filter(None, changed):
+            parts = Path(relative).parts
+            for length in range(1, len(parts) + 1):
+                prefix = Path(*parts[:length])
+                path = cwd / prefix
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    break
+                except OSError as exc:
+                    raise SoloAIError(
+                        f"Cannot inspect fast-forward path: {prefix.as_posix()}"
+                    ) from exc
+                known = os.path.normcase(prefix.as_posix()) in tracked
+                leaf = length == len(parts)
+                linked = stat.S_ISLNK(info.st_mode) or bool(
+                    getattr(info, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                )
+                # Git 可替换末端的已跟踪符号链接；目录联接不能成为写入通道。
+                if linked and not (leaf and known and stat.S_ISLNK(info.st_mode)):
+                    raise SoloAIError(
+                        f"Fast-forward would traverse or replace a local link: {prefix.as_posix()}"
+                    )
+                if not known and not stat.S_ISDIR(info.st_mode):
+                    raise SoloAIError(
+                        f"Fast-forward would overwrite local content: {prefix.as_posix()}"
+                    )
+                if not stat.S_ISDIR(info.st_mode):
+                    break
+                if leaf and not known:
+                    # 不传排除规则，检查被替换目录内全部未知文件，包括忽略内容。
+                    unknown = self.git(
+                        ["ls-files", "--others", "-z", "--", f":(literal){relative}"],
+                        cwd=cwd,
+                    ).stdout
+                    if unknown:
+                        raise SoloAIError(
+                            f"Fast-forward would overwrite local content: {relative}"
+                        )
+        return self.git(
+            ["merge", "--ff-only", "--no-overwrite-ignore", incoming], cwd=cwd
         )
 
     def worktrees(self) -> list[WorktreeInfo]:

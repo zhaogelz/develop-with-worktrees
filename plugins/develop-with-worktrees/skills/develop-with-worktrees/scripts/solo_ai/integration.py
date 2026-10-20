@@ -542,10 +542,7 @@ def resume_prepared(
             raise SoloAIError(
                 "Recorded base worktree is not ready for exact integration"
             )
-        repo.git(
-            ["merge", "--ff-only", str(transaction["candidate_head"])],
-            cwd=base_worktree,
-        )
+        repo.fast_forward(str(transaction["candidate_head"]), cwd=base_worktree)
         base_head = _base_head(repo, transaction)
         if not repo.is_ancestor(str(transaction["candidate_head"]), base_head):
             raise SoloAIError("Exact candidate was not integrated")
