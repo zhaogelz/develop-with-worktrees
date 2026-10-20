@@ -530,13 +530,9 @@ def _needs_empty_baseline(repo: GitRepo, target: Path) -> bool:
 
 
 def _target_is_clean(repo: GitRepo, target: Path) -> bool:
-    """策略写入前同时保留暂存、未暂存、未跟踪与忽略的用户内容。"""
+    """源码须干净；无关忽略内容原地保留，路径冲突由禁止覆盖的合入检查。"""
 
-    ignored = set(repo.ignored_untracked(target, directories=True))
-    # `.worktrees/` 是 DWW 在该目标下创建并登记的受管槽位根；它不会代表
-    # 用户脏内容。其余忽略内容仍必须保留并阻断 bootstrap 合入。
-    ignored.discard(".worktrees/")
-    return repo.is_clean(target) and not ignored
+    return repo.is_clean(target)
 
 
 def _create_empty_baseline(repo: GitRepo, target: Path) -> None:
@@ -757,6 +753,7 @@ def initialize(
             repo.git(
                 [
                     "add",
+                    "--force",
                     "--",
                     ".solo-ai/config.toml",
                     ".solo-ai/verification.toml",
@@ -789,6 +786,9 @@ def initialize(
             "bootstrap_head": repo.head(worktree),
             "created_at": utc_timestamp(),
         }
+        # 先保存原目标与策略提交；Git 拒绝路径冲突时仍可走原 bootstrap 流程。
+        atomic_write_json(repo.local_dir / "bootstrap.json", bootstrap)
+        promotion_error: SoloAIError | None = None
         if clean_target:
             repo.require_checked_out_branch_target(
                 target,
@@ -796,12 +796,16 @@ def initialize(
                 expected_head=target_head,
                 expected_identity=target_identity,
             )
-            repo.git(["merge", "--ff-only", branch], cwd=target)
-            repo.git(["worktree", "remove", str(worktree)], cwd=target)
-            repo.git(["branch", "-d", branch], cwd=target)
-        else:
-            atomic_write_json(repo.local_dir / "bootstrap.json", bootstrap)
-        policy = repo.policy_path()
+            try:
+                repo.fast_forward(branch, cwd=target)
+            except SoloAIError as exc:
+                promotion_error = exc
+                clean_target = False
+            else:
+                repo.git(["worktree", "remove", str(worktree)], cwd=target)
+                repo.git(["branch", "-d", branch], cwd=target)
+                (repo.local_dir / "bootstrap.json").unlink()
+        policy = target if clean_target else worktree
         verification = load_verification_config(repo, cwd=policy)
         approval = approve(repo, verification, cwd=policy)
         store = StateStore(repo)
@@ -813,6 +817,11 @@ def initialize(
             store.mutate(lambda state: state.update(schema_version=STATE_SCHEMA))
         # 待合入的 bootstrap 仍由旧事务交付，排空后再显式迁移。
         store.ensure_slots(load_repo_config(repo, cwd=policy))
+        if promotion_error is not None:
+            raise SoloAIError(
+                f"Bootstrap promotion failed; its worktree at {worktree} and "
+                f"record are preserved for recovery. Cause: {promotion_error}"
+            ) from promotion_error
         return {
             "decision": "adopted" if clean_target else "pending-primary-clean",
             "slots": slots,
@@ -1296,7 +1305,7 @@ def _resolve_start_base(
     bootstrap = _bootstrap(repo)
     if explicit_base:
         base_ref = explicit_base
-    elif bootstrap.get("branch") and not (repo.root / ".solo-ai").exists():
+    elif bootstrap.get("branch") and repo.policy_path() != repo.root:
         # 脏主工作树的首次采用尚未合入策略时，唯一可验证的基线是 bootstrap。
         base_ref = str(bootstrap["branch"])
     else:
@@ -1571,7 +1580,7 @@ def _resume_quarantined_start(
             raise SoloAIError(
                 "Quarantined fixed slot branch is not in its recorded base history"
             )
-        repo.git(["merge", "--ff-only", str(task["base_head"])], cwd=worktree)
+        repo.fast_forward(str(task["base_head"]), cwd=worktree)
         branch_head = repo.head(worktree)
 
     if not repo.is_clean(worktree) or repo.head(worktree) != branch_head:
@@ -2627,7 +2636,7 @@ def _activate_native_slot(
             "Fixed slot HEAD is not an ancestor of the selected target; preserve it"
         )
     if old_head != base_head:
-        repo.git(["merge", "--ff-only", base_head], cwd=worktree)
+        repo.fast_forward(base_head, cwd=worktree)
     if repo.head(worktree) != base_head or repo.branch(worktree) != branch:
         raise SoloAIError("Fixed slot did not reach its selected base exactly")
     worktree_identity = path_identity(worktree)
@@ -3530,7 +3539,7 @@ def _integrate_pending_bootstrap(repo: GitRepo) -> dict[str, Any] | None:
         raise SoloAIError(
             "Recorded bootstrap target worktree must be clean before integration"
         )
-    repo.git(["merge", "--ff-only", branch], cwd=target)
+    repo.fast_forward(branch, cwd=target)
     result = {
         "bootstrap_branch": branch,
         "base_ref": target_ref,
@@ -6324,7 +6333,7 @@ def _deinit_locked(repo: GitRepo, *, confirm: str, message: str) -> dict[str, An
             raise SoloAIError(
                 "Current policy worktree changed before deinitialization merge"
             )
-        repo.git(["merge", "--ff-only", branch], cwd=primary)
+        repo.fast_forward(branch, cwd=primary)
         policy_integrated = True
     except Exception as exc:
         restoration_failures = _restore_removed_slots(

@@ -4304,7 +4304,7 @@ def test_dirty_linked_worktree_bootstrap_records_and_rechecks_its_target(
     assert not (git_repo / "release.txt").exists()
 
 
-def test_ignored_content_keeps_linked_bootstrap_isolated(
+def test_ignored_content_is_preserved_during_linked_bootstrap(
     git_repo: Path, tmp_path: Path
 ) -> None:
     linked = tmp_path / "release-worktree"
@@ -4320,9 +4320,9 @@ def test_ignored_content_keeps_linked_bootstrap_isolated(
         repo, slots=1, commands=[VERIFY], accept=True, accept_static_only=False
     )
 
-    assert result["decision"] == "pending-primary-clean"
+    assert result["decision"] == "adopted"
     assert ignored.read_text(encoding="utf-8") == "keep\n"
-    assert not (linked / ".solo-ai").exists()
+    assert (linked / ".solo-ai" / "config.toml").is_file()
 
 
 def test_pending_bootstrap_rejects_a_replaced_target_before_merging(

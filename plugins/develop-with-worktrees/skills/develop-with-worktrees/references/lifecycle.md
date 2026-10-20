@@ -78,6 +78,23 @@ reported cause and retry: a baseline already created before a later bootstrap
 failure is reused. A recorded pending bootstrap still uses the normal recovery
 path; it is not overwritten.
 
+### Existing repositories and pending bootstrap
+
+In a repository that already has commits, unrelated ignored data, dependencies,
+and caches may remain in place. Tracked edits, staged changes, and ordinary
+untracked files still require the pending-bootstrap path.
+
+Before any fast-forward, DWW checks the actual changed paths for unknown files,
+directory replacement conflicts, and directory links, then uses Git's
+`--no-overwrite-ignore` protection. It does not classify safe content by project
+directory names or move local data to make a target clean.
+
+Bootstrap saves its original target and policy worktree before promotion. A
+collision reports failure and retains that record and worktree. After the content
+owner resolves the reported obstruction, continue with Start if no task exists,
+then the existing task's Finish. Existing schema-1 and schema-2 records use the
+same checks; target branch, HEAD, or directory identity drift still stops recovery.
+
 For a dirty target, bootstrap records the target branch, worktree identity, and
 starting commit before keeping user content out of its policy commit. Finish
 rechecks those recorded facts and cleanliness before merging, so it cannot send
