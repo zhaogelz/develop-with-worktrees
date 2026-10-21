@@ -1232,6 +1232,7 @@ def test_compact_status_projects_only_the_linked_validation_attempt(
             "state": "unknown",
             "reused": False,
             "execution_reason": "no_matching_successful_proof",
+            "proof_wait": None,
             "execution_details": None,
             "error_reason": "queue_ticket_not_confirmed",
             "queue": {"resource_class": "normal"},
