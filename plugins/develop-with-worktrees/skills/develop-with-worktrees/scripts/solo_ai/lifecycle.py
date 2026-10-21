@@ -4740,6 +4740,9 @@ def _finish_native(
             and item.get("status")
             in {"starting", "active", "ready", "waiting-integration"}
         )
+        eligible |= frozenset(
+            member["task_id"] for member in store.native_batch(str(batch_id))["tasks"]
+        )
         batch = run_native_batch(repo, batch_id=str(batch_id))
         if batch["status"] == "completed":
             reconcile_native_batches(

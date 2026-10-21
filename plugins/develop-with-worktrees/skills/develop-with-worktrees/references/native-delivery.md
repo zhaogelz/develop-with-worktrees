@@ -55,7 +55,9 @@ historical delivery receipt read-only, even when its old slot has a new owner.
 Finish also follows later eligible batches from the same target's tasks present
 when delivery begins. It stops when no captured group qualifies or a batch fails;
 it does not wait for active producers, adopt new arrivals, or invent a tail cause.
-Every batch still freezes and validates its own combined head. The result belongs
+A recorded tail cause stays available within that captured round even when its
+source task was delivered in an earlier full batch. Every batch still freezes
+and validates its own combined head. The result belongs
 to the requested task even when later batches complete. If a later batch fails,
 the error lists the batches already delivered and the pending batch. A completed
 task remains a read-only historical query; it does not start unrelated delivery.
@@ -91,8 +93,9 @@ states. `batch reconcile` with `--force`, a supported `--cause`, `--reason`,
 and `--base` closes an eligible tail. For a small, clearly shared integration
 script fix, `batch repair` takes the exact batch, expected head, patch file,
 paths, commit message, and reason. It commits the patch in the owned
-integration workspace after the prior validation processes stop, starts a new
-attempt, and keeps the failed attempt. Semantic
+integration workspace after the prior validation processes stop and batch runtime
+is released. This includes a completed timeout with exact stopped-process
+evidence. `batch recover` then starts a new attempt and keeps the failed attempt. Semantic
 source changes return to the task owner. Do not edit the integration worktree
 directly or retry an unchanged failed input in a loop.
 

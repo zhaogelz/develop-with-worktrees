@@ -33,6 +33,9 @@ def test_finish_drains_existing_ready_branches_without_inventing_tail(
 ) -> None:
     """同一调用处理三加二分支；没有尾批意图时只交付满批。"""
     repo, store, tasks = _prepared_tasks(git_repo, 5)
+    # 同秒 Ready 按任务 ID 排序；携带尾批意图的最后调用者必定进入首批。
+    tasks.sort(key=lambda task: task["id"], reverse=True)
+    monkeypatch.setattr("solo_ai.state.utc_timestamp", lambda: "2026-10-21T00:00:00Z")
     with monkeypatch.context() as staged:
         staged.setattr(native_batches, "reconcile_native_batches", lambda *a, **k: None)
         for task in tasks[:-1]:
@@ -59,7 +62,7 @@ def test_finish_drains_existing_ready_branches_without_inventing_tail(
     assert len(validations) == (2 if tail else 1)
     assert [len(batch["tasks"]) for batch in batches] == ([3, 2] if tail else [3])
     assert all(batch["status"] == "completed" for batch in batches)
-    assert result["delivered"] is tail
+    assert result["delivered"] is True
     assert sum(store.task(task["id"])["status"] == "finished" for task in tasks) == (
         5 if tail else 3
     )
@@ -77,7 +80,14 @@ def test_finish_drains_existing_ready_branches_without_inventing_tail(
         assert again["delivered"] is True
         assert len(validations) == 2
     else:
-        assert result["waiting"]["reason"] == "tail_intent_required"
+        pending = next(
+            task
+            for task in tasks
+            if store.task(task["id"])["status"] == "waiting-integration"
+        )
+        waiting = finish(repo, task_id=pending["id"], lease=pending["lease"])
+        assert waiting["waiting"]["reason"] == "tail_intent_required"
+        assert len(validations) == 1
 
 
 def test_finish_draining_stops_at_failed_batch_and_preserves_later_sources(
@@ -104,8 +114,12 @@ def test_finish_draining_stops_at_failed_batch_and_preserves_later_sources(
         )
     assert repo.head(git_repo) == base
     assert len(store.read()["batches"]) == 1
+    batch = next(iter(store.read()["batches"].values()))
+    members = {member["task_id"] for member in batch["tasks"]}
+    pending = [task for task in tasks if task["id"] not in members]
+    assert len(pending) == 2
     assert all(
-        store.task(task["id"])["status"] == "waiting-integration" for task in tasks[3:]
+        store.task(task["id"])["status"] == "waiting-integration" for task in pending
     )
 
 
@@ -192,8 +206,11 @@ def test_second_batch_failure_reports_completed_batch_without_losing_sources(
                 repo,
                 task_id=task["id"],
                 lease=task["lease"],
-                cause="round-complete",
-                reason="round finished",
+                **(
+                    {"cause": "round-complete", "reason": "round finished"}
+                    if task["id"] == tasks[0]["id"]
+                    else {}
+                ),
             )
     original = native_batches.validate
     calls = []
@@ -295,3 +312,28 @@ def test_drain_excludes_tasks_created_after_delivery_started(
     assert len(arrivals) == 1
     assert store.task(arrivals[0]["id"])["status"] == "waiting-integration"
     assert not (git_repo / "later.txt").exists()
+
+
+def test_explicit_tail_cause_is_not_hidden_by_completed_round_intent(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已有 round 意图暂不准入时，当前 user 意图仍应交付剩余批次。"""
+    repo, store, tasks = _prepared_tasks(git_repo, 6)
+    tasks.sort(key=lambda task: task["id"])
+    monkeypatch.setattr("solo_ai.state.utc_timestamp", lambda: "2026-10-21T00:00:00Z")
+    with monkeypatch.context() as staged:
+        staged.setattr(native_batches, "reconcile_native_batches", lambda *a, **k: None)
+        for index, task in enumerate(tasks[:5]):
+            intent = (
+                {"cause": "round-complete", "reason": "round requested"}
+                if index == 0
+                else {"cause": "user", "reason": "deliver the waiting changes now"}
+                if index == 4
+                else {}
+            )
+            finish(repo, task_id=task["id"], lease=task["lease"], **intent)
+    result = native_batches.reconcile_native_batches(repo, base_ref="main")
+    assert len(result["completed_batches"]) == 2
+    assert result["tail_request"]["cause"] == "user"
+    assert all(store.task(task["id"])["status"] == "finished" for task in tasks[:5])
+    assert store.task(tasks[5]["id"])["status"] == "active"
