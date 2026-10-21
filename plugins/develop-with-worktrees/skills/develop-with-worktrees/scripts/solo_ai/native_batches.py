@@ -1266,6 +1266,11 @@ def _reconcile_native_batch(
         size = load_repo_config(repo).integration.batch_size
         selected = waiting[:size]
         if len(selected) < size:
+            active_producers = any(
+                task.get("base_ref") == base_ref
+                and task.get("status") in {"starting", "active"}
+                for task in state["tasks"].values()
+            )
             if cause is None:
                 requests = [
                     (task.get("native_delivery") or {}).get("tail_request")
@@ -1274,17 +1279,22 @@ def _reconcile_native_batch(
                     and task.get("status") in {"waiting-integration", "finished"}
                 ]
                 requested = next(
-                    (item for item in requests if isinstance(item, dict)), None
+                    (
+                        item
+                        for item in requests
+                        if isinstance(item, dict)
+                        and (
+                            item.get("cause") != "round-complete"
+                            or not active_producers
+                        )
+                    ),
+                    None,
                 )
                 if requested is None:
                     return None
                 cause = str(requested.get("cause") or "")
                 reason = str(requested.get("reason") or "")
-            if cause == "round-complete" and any(
-                task.get("base_ref") == base_ref
-                and task.get("status") in {"starting", "active"}
-                for task in state["tasks"].values()
-            ):
+            if cause == "round-complete" and active_producers:
                 return None
         batch = _seal_native_batch_locked(
             repo,

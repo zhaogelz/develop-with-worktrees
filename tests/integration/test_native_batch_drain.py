@@ -312,3 +312,28 @@ def test_drain_excludes_tasks_created_after_delivery_started(
     assert len(arrivals) == 1
     assert store.task(arrivals[0]["id"])["status"] == "waiting-integration"
     assert not (git_repo / "later.txt").exists()
+
+
+def test_explicit_tail_cause_is_not_hidden_by_completed_round_intent(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已有 round 意图暂不准入时，当前 user 意图仍应交付剩余批次。"""
+    repo, store, tasks = _prepared_tasks(git_repo, 6)
+    tasks.sort(key=lambda task: task["id"])
+    monkeypatch.setattr("solo_ai.state.utc_timestamp", lambda: "2026-10-21T00:00:00Z")
+    with monkeypatch.context() as staged:
+        staged.setattr(native_batches, "reconcile_native_batches", lambda *a, **k: None)
+        for index, task in enumerate(tasks[:5]):
+            intent = (
+                {"cause": "round-complete", "reason": "round requested"}
+                if index == 0
+                else {"cause": "user", "reason": "deliver the waiting changes now"}
+                if index == 4
+                else {}
+            )
+            finish(repo, task_id=task["id"], lease=task["lease"], **intent)
+    result = native_batches.reconcile_native_batches(repo, base_ref="main")
+    assert len(result["completed_batches"]) == 2
+    assert result["tail_request"]["cause"] == "user"
+    assert all(store.task(task["id"])["status"] == "finished" for task in tasks[:5])
+    assert store.task(tasks[5]["id"])["status"] == "active"
