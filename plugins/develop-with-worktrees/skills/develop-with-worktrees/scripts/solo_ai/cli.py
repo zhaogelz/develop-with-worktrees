@@ -3335,10 +3335,25 @@ def _human(
                     f"is {result['batch_status']}. Continue Finish for this task; "
                     "a failed check requires repair before retrying."
                 )
+            waiting = result.get("waiting") or {}
+            reason = waiting.get("reason")
+            if reason == "prior_batch_pending":
+                next_step = (
+                    f"Prior batch {waiting['batch_id']} is {waiting['batch_status']}; "
+                    "continue that recorded batch."
+                )
+            elif reason == "active_producers":
+                next_step = (
+                    "Active producers: "
+                    + ", ".join(waiting.get("task_ids", []))
+                    + ". Continue those tasks; full batches still deliver automatically."
+                )
+            else:
+                next_step = "A smaller batch needs a recorded round completion or explicit delivery cause."
             return (
                 f"Change saved; waiting for local integration into {result['base_ref']}. "
                 "Finish already froze the source and released task runtime. "
-                "A smaller batch needs a recorded round completion or explicit delivery cause."
+                + next_step
             )
         if result.get("outcome") == "batch_integrated":
             summary = (

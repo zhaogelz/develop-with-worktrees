@@ -88,7 +88,7 @@ def test_complete_full_profile_excludes_the_explicit_stress_layer() -> None:
 
 
 def test_integration_full_keeps_the_fast_refactor_safety_boundaries() -> None:
-    """本轮没有缩小 Full；新增的查询和恢复边界必须实际经过候选门禁。"""
+    """组合边界继续验证，必需 Ready 已覆盖的用例不重复执行。"""
 
     with (_REPOSITORY_ROOT / ".solo-ai" / "verification.toml").open("rb") as handle:
         primary = tomllib.load(handle)
@@ -98,6 +98,11 @@ def test_integration_full_keeps_the_fast_refactor_safety_boundaries() -> None:
         if profile["id"] == "dww-batch-integration"
     )
     command = integration["commands"][0]
+    assert "dww-fast-ready" in integration["depends_on"]
+    assert "tests/unit/test_hook.py" not in command
+    assert not any(
+        "tests/unit/test_native_migration.py" in c for c in integration["commands"]
+    )
 
     assert integration["full_scope"] == "integration"
     assert (

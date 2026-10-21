@@ -52,6 +52,18 @@ to reach Finish. Repeating Finish resumes the same assigned batch through its
 existing recovery stages. It does not confirm that interrupted validation has
 stopped or rerun an unchanged failed check. A finished task returns its verified
 historical delivery receipt read-only, even when its old slot has a new owner.
+Finish also follows later eligible batches from the same target's tasks present
+when delivery begins. It stops when no captured group qualifies or a batch fails;
+it does not wait for active producers, adopt new arrivals, or invent a tail cause.
+A recorded tail cause stays available within that captured round even when its
+source task was delivered in an earlier full batch. Every batch still freezes
+and validates its own combined head. The result belongs
+to the requested task even when later batches complete. If a later batch fails,
+the error lists the batches already delivered and the pending batch. A completed
+task remains a read-only historical query; it does not start unrelated delivery.
+Waiting results distinguish a prior pending batch, active producers, and a tail
+that needs a concrete delivery cause.
+
 Full success followed by a release or promotion interruption resumes those
 remaining stages without another Full. Other recovery evidence still uses
 [Recovery](recovery.md).

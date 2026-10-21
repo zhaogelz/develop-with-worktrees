@@ -336,6 +336,14 @@ def _inherited_claim(
     }
 
 
+def inherited_validation_claim() -> dict[str, Any] | None:
+    """只读识别已持有的父容量；实际申请时再核对资源等级。"""
+    state = read_json(_queue_state_path(), _default_queue_state())
+    if state.get("schema_version") != QUEUE_SCHEMA:
+        raise SoloAIError("Unsupported machine validation queue schema")
+    return _inherited_claim(state, resource_class="normal")
+
+
 def queue_status() -> dict[str, Any]:
     """读取全机队列，不会占用任何仓库的生命周期锁。"""
     with DirectoryLock(_queue_lock(), wait=True):

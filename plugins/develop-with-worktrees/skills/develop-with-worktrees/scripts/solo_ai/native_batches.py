@@ -60,97 +60,109 @@ def seal_native_batch(
     if not task_ids or len(set(task_ids)) != len(task_ids):
         raise SoloAIError("Native batch requires unique task ids")
     with maintenance_lock(repo), candidate_admission_lock(repo):
-        store = StateStore(repo)
-        state = store.read()
-        if state["schema_version"] != STATE_SCHEMA:
-            raise SoloAIError("Native task delivery has not been enabled")
-        config = load_repo_config(repo)
-        if len(task_ids) > config.integration.batch_size:
-            raise SoloAIError("Native batch exceeds configured size")
-        capacity_cause = cause == "capacity" and bool(capacity_request_id)
-        if len(task_ids) < config.integration.batch_size:
-            if (
-                not (cause in _TAIL_CAUSES or capacity_cause)
-                or not reason
-                or "\n" in reason
-            ):
-                raise SoloAIError("Native tail requires an explicit cause and reason")
-        elif cause is not None and cause not in _TAIL_CAUSES and not capacity_cause:
-            raise SoloAIError("Unsupported native batch cause")
-        if cause == "capacity":
-            if not capacity_cause or any(
-                slot.get("status") == "idle" and int(slot["id"]) <= config.slots
-                for slot in state["slots"].values()
-            ):
-                raise SoloAIError(
-                    "Capacity tail requires a blocked Start and no free slot"
-                )
-        tasks = []
-        for task_id in task_ids:
-            task = state["tasks"].get(task_id)
-            if (
-                not isinstance(task, dict)
-                or task.get("status") != "waiting-integration"
-            ):
-                raise SoloAIError("Native batch member is not waiting for integration")
-            tasks.append(task)
-        target = str(tasks[0]["base_ref"])
-        if any(task.get("base_ref") != target for task in tasks):
-            raise SoloAIError("Native batch cannot mix target branches")
-        if cause == "round-complete" and any(
-            task.get("base_ref") == target
-            and task.get("status") in {"starting", "active"}
-            for task in state["tasks"].values()
+        return _seal_native_batch_locked(
+            repo,
+            task_ids=task_ids,
+            cause=cause,
+            reason=reason,
+            capacity_request_id=capacity_request_id,
+        )
+
+
+def _seal_native_batch_locked(
+    repo: GitRepo,
+    *,
+    task_ids: list[str],
+    cause: str | None,
+    reason: str | None,
+    capacity_request_id: str | None,
+) -> dict[str, Any]:
+    """调用者已持有维护和准入锁，选择与封批共享同一临界区。"""
+    store = StateStore(repo)
+    state = store.read()
+    if state["schema_version"] != STATE_SCHEMA:
+        raise SoloAIError("Native task delivery has not been enabled")
+    config = load_repo_config(repo)
+    if len(task_ids) > config.integration.batch_size:
+        raise SoloAIError("Native batch exceeds configured size")
+    capacity_cause = cause == "capacity" and bool(capacity_request_id)
+    if len(task_ids) < config.integration.batch_size:
+        if (
+            not (cause in _TAIL_CAUSES or capacity_cause)
+            or not reason
+            or "\n" in reason
         ):
-            raise SoloAIError("Round still has active development producers")
-        base_head = repo.ref_head(f"refs/heads/{target}")
-        if base_head is None:
-            raise SoloAIError("Native batch target branch disappeared")
-        members: list[dict[str, Any]] = []
-        for task in tasks:
-            source = str((task.get("native_delivery") or {}).get("ready_head") or "")
-            worktree = Path(str(task["worktree"])).resolve()
-            if (
-                not source
-                or repo.branch(worktree) != task.get("branch")
-                or repo.head(worktree) != source
-                or repo.ref_head(f"refs/heads/{task['branch']}") != source
-                or not repo.is_clean(worktree)
-                or not repo.is_ancestor(str(task["base_head"]), base_head)
-            ):
-                raise SoloAIError("Native batch member moved after Ready")
-            members.append(
-                {
-                    "task_id": str(task["id"]),
-                    "slot_id": str(task["slot_id"]),
-                    "slot_generation": task["slot_generation"],
-                    "branch": str(task["branch"]),
-                    "ready_head": source,
-                    "source_base": str(task["base_head"]),
-                }
-            )
-        batch_id = f"batch-native-{uuid.uuid4().hex[:16]}"
-        worktree = store.managed_worktree_root(config) / "solo-ai-integration"
-        batch = {
-            "id": batch_id,
-            "schema_version": 1,
-            "status": "sealed",
-            "base_ref": target,
-            "base_before": base_head,
-            "base_head": base_head,
-            "integration_head": base_head,
-            "worktree": str(worktree.absolute()),
-            "worktree_mode": "reusable",
-            "runtime_cycle": 0,
-            "tasks": members,
-            "applied_task_ids": [],
-            "merge_records": [],
-            "merge_intent": None,
-            "tail_request": {"cause": cause, "reason": reason} if cause else None,
-            "capacity_request_id": capacity_request_id if capacity_cause else None,
-            "created_at": utc_timestamp(),
-        }
-        return store.seal_native_batch(batch)
+            raise SoloAIError("Native tail requires an explicit cause and reason")
+    elif cause is not None and cause not in _TAIL_CAUSES and not capacity_cause:
+        raise SoloAIError("Unsupported native batch cause")
+    if cause == "capacity":
+        if not capacity_cause or any(
+            slot.get("status") == "idle" and int(slot["id"]) <= config.slots
+            for slot in state["slots"].values()
+        ):
+            raise SoloAIError("Capacity tail requires a blocked Start and no free slot")
+    tasks = []
+    for task_id in task_ids:
+        task = state["tasks"].get(task_id)
+        if not isinstance(task, dict) or task.get("status") != "waiting-integration":
+            raise SoloAIError("Native batch member is not waiting for integration")
+        tasks.append(task)
+    target = str(tasks[0]["base_ref"])
+    if any(task.get("base_ref") != target for task in tasks):
+        raise SoloAIError("Native batch cannot mix target branches")
+    if cause == "round-complete" and any(
+        task.get("base_ref") == target and task.get("status") in {"starting", "active"}
+        for task in state["tasks"].values()
+    ):
+        raise SoloAIError("Round still has active development producers")
+    base_head = repo.ref_head(f"refs/heads/{target}")
+    if base_head is None:
+        raise SoloAIError("Native batch target branch disappeared")
+    members: list[dict[str, Any]] = []
+    for task in tasks:
+        source = str((task.get("native_delivery") or {}).get("ready_head") or "")
+        worktree = Path(str(task["worktree"])).resolve()
+        if (
+            not source
+            or repo.branch(worktree) != task.get("branch")
+            or repo.head(worktree) != source
+            or repo.ref_head(f"refs/heads/{task['branch']}") != source
+            or not repo.is_clean(worktree)
+            or not repo.is_ancestor(str(task["base_head"]), base_head)
+        ):
+            raise SoloAIError("Native batch member moved after Ready")
+        members.append(
+            {
+                "task_id": str(task["id"]),
+                "slot_id": str(task["slot_id"]),
+                "slot_generation": task["slot_generation"],
+                "branch": str(task["branch"]),
+                "ready_head": source,
+                "source_base": str(task["base_head"]),
+            }
+        )
+    batch_id = f"batch-native-{uuid.uuid4().hex[:16]}"
+    worktree = store.managed_worktree_root(config) / "solo-ai-integration"
+    batch = {
+        "id": batch_id,
+        "schema_version": 1,
+        "status": "sealed",
+        "base_ref": target,
+        "base_before": base_head,
+        "base_head": base_head,
+        "integration_head": base_head,
+        "worktree": str(worktree.absolute()),
+        "worktree_mode": "reusable",
+        "runtime_cycle": 0,
+        "tasks": members,
+        "applied_task_ids": [],
+        "merge_records": [],
+        "merge_intent": None,
+        "tail_request": {"cause": cause, "reason": reason} if cause else None,
+        "capacity_request_id": capacity_request_id if capacity_cause else None,
+        "created_at": utc_timestamp(),
+    }
+    return store.seal_native_batch(batch)
 
 
 def _verify_member(repo: GitRepo, store: StateStore, member: dict[str, Any]) -> None:
@@ -1212,6 +1224,78 @@ def run_native_batch(
         return batch
 
 
+def _reconcile_native_batch(
+    repo: GitRepo,
+    *,
+    base_ref: str,
+    cause: str | None = None,
+    reason: str | None = None,
+    capacity_request_id: str | None = None,
+    eligible_task_ids: frozenset[str],
+) -> dict[str, Any] | None:
+    """只从本次调用开始时已有的任务中推导一批。"""
+
+    from .lifecycle import maintenance_lock
+
+    with maintenance_lock(repo, wait=True), candidate_admission_lock(repo):
+        store = StateStore(repo)
+        state = store.read()
+        if state["schema_version"] != STATE_SCHEMA:
+            raise SoloAIError("Native task delivery has not been enabled")
+        if any(
+            batch.get("base_ref") == base_ref
+            and batch.get("status") not in {"completed", "withdrawn", "cancelled"}
+            for batch in state.get("batches", {}).values()
+        ):
+            return None
+        waiting = sorted(
+            (
+                task
+                for task in state["tasks"].values()
+                if task.get("status") == "waiting-integration"
+                and task.get("base_ref") == base_ref
+                and task["id"] in eligible_task_ids
+            ),
+            key=lambda item: (
+                str((item.get("native_delivery") or {}).get("ready_at") or ""),
+                str(item["id"]),
+            ),
+        )
+        if not waiting:
+            return None
+        size = load_repo_config(repo).integration.batch_size
+        selected = waiting[:size]
+        if len(selected) < size:
+            if cause is None:
+                requests = [
+                    (task.get("native_delivery") or {}).get("tail_request")
+                    for task in state["tasks"].values()
+                    if task["id"] in eligible_task_ids
+                    and task.get("status") in {"waiting-integration", "finished"}
+                ]
+                requested = next(
+                    (item for item in requests if isinstance(item, dict)), None
+                )
+                if requested is None:
+                    return None
+                cause = str(requested.get("cause") or "")
+                reason = str(requested.get("reason") or "")
+            if cause == "round-complete" and any(
+                task.get("base_ref") == base_ref
+                and task.get("status") in {"starting", "active"}
+                for task in state["tasks"].values()
+            ):
+                return None
+        batch = _seal_native_batch_locked(
+            repo,
+            task_ids=[str(task["id"]) for task in selected],
+            cause=cause,
+            reason=reason,
+            capacity_request_id=capacity_request_id,
+        )
+    return run_native_batch(repo, batch_id=str(batch["id"]))
+
+
 def reconcile_native_batches(
     repo: GitRepo,
     *,
@@ -1219,59 +1303,111 @@ def reconcile_native_batches(
     cause: str | None = None,
     reason: str | None = None,
     capacity_request_id: str | None = None,
+    eligible_task_ids: frozenset[str] | None = None,
+    completed_batch_ids: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
-    """从现有等待任务推导一批；满批或已记录的有因尾批才封。"""
-
-    store = StateStore(repo)
-    state = store.read()
-    if state["schema_version"] != STATE_SCHEMA:
-        raise SoloAIError("Native task delivery has not been enabled")
-    if any(
-        batch.get("base_ref") == base_ref
-        and batch.get("status") not in {"completed", "withdrawn", "cancelled"}
-        for batch in state.get("batches", {}).values()
-    ):
-        return None
-    waiting = sorted(
-        (
-            task
-            for task in state["tasks"].values()
-            if task.get("status") == "waiting-integration"
-            and task.get("base_ref") == base_ref
-        ),
-        key=lambda item: (
-            str((item.get("native_delivery") or {}).get("ready_at") or ""),
-            str(item["id"]),
-        ),
-    )
-    if not waiting:
-        return None
-    size = load_repo_config(repo).integration.batch_size
-    selected = waiting[:size]
-    if len(selected) < size:
-        if cause is None:
-            requests = [
-                (task.get("native_delivery") or {}).get("tail_request")
-                for task in selected
-            ]
-            requested = next(
-                (item for item in requests if isinstance(item, dict)), None
+    """连续交付本次已有且准入的批次；新任务留给后续调用。"""
+    if eligible_task_ids is None:
+        eligible_task_ids = frozenset(
+            task["id"]
+            for task in StateStore(repo).read()["tasks"].values()
+            if task.get("base_ref") == base_ref
+            and task.get("native_delivery")
+            and task.get("status")
+            in {"starting", "active", "ready", "waiting-integration"}
+        )
+    remaining = eligible_task_ids
+    completed = list(completed_batch_ids)
+    last = None
+    while remaining:
+        try:
+            batch = _reconcile_native_batch(
+                repo,
+                base_ref=base_ref,
+                cause=cause,
+                reason=reason,
+                capacity_request_id=capacity_request_id,
+                eligible_task_ids=eligible_task_ids,
             )
-            if requested is None:
-                return None
-            cause = str(requested.get("cause") or "")
-            reason = str(requested.get("reason") or "")
-        if cause == "round-complete" and any(
-            task.get("base_ref") == base_ref
-            and task.get("status") in {"starting", "active"}
-            for task in state["tasks"].values()
-        ):
-            return None
-    batch = seal_native_batch(
-        repo,
-        task_ids=[str(task["id"]) for task in selected],
-        cause=cause,
-        reason=reason,
-        capacity_request_id=capacity_request_id,
+        except Exception as error:
+            if not completed:
+                raise
+            pending = next(
+                (
+                    item
+                    for item in StateStore(repo).read().get("batches", {}).values()
+                    if item.get("base_ref") == base_ref
+                    and item.get("status")
+                    not in {"completed", "cancelled", "withdrawn"}
+                ),
+                None,
+            )
+            context = {
+                "completed_batches": completed,
+                "base_ref": base_ref,
+                "pending_batch_id": pending["id"] if pending else None,
+            }
+            if isinstance(error, ActionableSoloAIError):
+                error.context.update(context)
+                raise
+            raise ActionableSoloAIError(
+                str(error),
+                code="NATIVE_DELIVERY_BLOCKED",
+                context=context,
+                next_action={
+                    "kind": "inspect_batch_failure",
+                    "batch_id": context["pending_batch_id"],
+                },
+            ) from error
+        if batch is None:
+            break
+        last = batch
+        if batch["status"] != "completed":
+            break
+        members = frozenset(member["task_id"] for member in batch["tasks"])
+        if not members or not members <= remaining:
+            raise SoloAIError("Native delivery advanced outside its captured tasks")
+        completed.append(batch["id"])
+        remaining = remaining - members
+        # 容量准入只授权腾出工位；后续仍须满批或自己的持久化尾批意图。
+        if cause == "capacity":
+            cause = reason = capacity_request_id = None
+    return {**last, "completed_batches": completed} if last else None
+
+
+def native_waiting_reason(repo: GitRepo, *, task: dict[str, Any]) -> dict[str, Any]:
+    """从现有任务和批次投影等待原因，不新增协调状态。"""
+    state = StateStore(repo).read()
+    target = task["base_ref"]
+    pending = next(
+        (
+            batch
+            for batch in state.get("batches", {}).values()
+            if batch.get("base_ref") == target
+            and batch.get("status") not in {"completed", "withdrawn", "cancelled"}
+        ),
+        None,
     )
-    return run_native_batch(repo, batch_id=str(batch["id"]))
+    if pending:
+        return {
+            "reason": "prior_batch_pending",
+            "batch_id": pending["id"],
+            "batch_status": pending["status"],
+            "next_action": "continue the recorded prior batch",
+        }
+    producers = sorted(
+        item["id"]
+        for item in state["tasks"].values()
+        if item.get("base_ref") == target
+        and item.get("status") in {"starting", "active"}
+    )
+    if producers:
+        return {
+            "reason": "active_producers",
+            "task_ids": producers,
+            "next_action": "continue the existing producers; full batches still deliver automatically",
+        }
+    return {
+        "reason": "tail_intent_required",
+        "next_action": "finish with the verified round-complete, user, deploy or dependency cause",
+    }
