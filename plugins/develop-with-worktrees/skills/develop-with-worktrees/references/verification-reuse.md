@@ -58,6 +58,17 @@ network responses, clocks, and mutable services are not made pure by declaring
 `input_paths = ["**"]`. If they affect the command and cannot be represented,
 leave external state non-pure or closure incomplete.
 
+Concurrent requests for the same pure, complete profile coordinate through the
+existing repository lock mechanism. A waiter takes no machine validation capacity
+while waiting, then rechecks inputs and the saved result. A matching success is
+reused; a matching deterministic failure remains a failure. Profiles with
+different inputs do not share this lock.
+A subprocess already inheriting its parent's validation capacity executes without
+waiting on an independent profile lock, avoiding a parent/child capacity deadlock.
+An independent waiter rechecks proof after acquiring capacity as well. Recursive
+requests for a profile locked by the same call or its parent fail explicitly.
+This is coordination around the existing proof store, not a second proof cache.
+
 Build output consumed later, database preparation, authentication, browser flows,
 and other runtime effects use `external_state = "unknown"`. A fresh Full runs
 them again. A build cache may speed execution, but DWW never substitutes an old
@@ -107,7 +118,7 @@ admission.
 
 `dww status --task <id>` 和 `--batch <id>` 只读取对象关联的最新尝试回执，不会清理
 队列、重放恢复或扫描全部证明历史。回执写有 `waiting` 或 `running` 时，状态视图还会
-只读取对应队列票据或命令进程快照来确认它仍活着；确认不了便显示 `unknown`，而不把旧
+只读取对应队列票据、证明锁持有者与等待者，或命令进程快照来确认它仍活着；确认不了便显示 `unknown`，而不把旧
 回执误报成仍在排队或执行。`reused`、`failed`、`timed_out` 与 `interrupted` 继续来自
 该回执，不能从缺失日志推断为仍在运行。
 

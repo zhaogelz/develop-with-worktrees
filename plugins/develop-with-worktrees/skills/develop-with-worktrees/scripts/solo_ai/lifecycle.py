@@ -488,9 +488,9 @@ def _init_lock(repo: GitRepo) -> DirectoryLock:
     return DirectoryLock(repo.local_dir / "locks" / "initialize.lock")
 
 
-def maintenance_lock(repo: GitRepo) -> DirectoryLock:
+def maintenance_lock(repo: GitRepo, *, wait: bool = False) -> DirectoryLock:
     """串行化会修改空闲槽位或清理本地状态的维护操作。"""
-    return DirectoryLock(repo.common_dir / "solo-ai-maintenance.lock")
+    return DirectoryLock(repo.common_dir / "solo-ai-maintenance.lock", wait=wait)
 
 
 def _require_no_lifecycle_lock(repo: GitRepo) -> None:
@@ -4730,9 +4730,24 @@ def _finish_native(
                 _assert_exact_candidate(
                     repo, owned, candidate_head=str(delivery["ready_head"])
                 )
-        from .native_batches import run_native_batch
+        from .native_batches import reconcile_native_batches, run_native_batch
 
+        eligible = frozenset(
+            item["id"]
+            for item in store.read()["tasks"].values()
+            if item.get("base_ref") == task["base_ref"]
+            and item.get("native_delivery")
+            and item.get("status")
+            in {"starting", "active", "ready", "waiting-integration"}
+        )
         batch = run_native_batch(repo, batch_id=str(batch_id))
+        if batch["status"] == "completed":
+            reconcile_native_batches(
+                repo,
+                base_ref=str(task["base_ref"]),
+                eligible_task_ids=eligible,
+                completed_batch_ids=(str(batch["id"]),),
+            )
         return _native_finish_result(store, task_id, batch)
     if task["status"] == "active":
         ready(repo, task_id=task_id, lease=lease, session_id=session_id)
@@ -4757,24 +4772,23 @@ def _finish_native(
             waiting = store.mark_native_waiting(
                 task_id, head=head, tail_request=tail_request
             )
-    from .native_batches import reconcile_native_batches
+    from .native_batches import native_waiting_reason, reconcile_native_batches
 
-    batch = reconcile_native_batches(repo, base_ref=str(waiting["base_ref"]))
+    reconcile_native_batches(repo, base_ref=str(waiting["base_ref"]))
     current = store.task(task_id)
-    if (
-        batch is not None
-        and (current.get("native_delivery") or {}).get("batch_id") == batch["id"]
-    ):
+    current_batch = (current.get("native_delivery") or {}).get("batch_id")
+    if current_batch:
+        batch = store.native_batch(str(current_batch))
+        _require_native_finish_batch(current, batch)
         return _native_finish_result(store, task_id, batch)
     return {
         **current,
         "outcome": "waiting_integration",
         "delivered": False,
         "waiting": {
-            "reason": "awaiting_native_batch",
+            **native_waiting_reason(repo, task=current),
             "base_ref": waiting["base_ref"],
             "ready_head": head,
-            "next_action": "seal or reconcile the exact native task-head batch",
         },
     }
 

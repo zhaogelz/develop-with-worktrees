@@ -623,7 +623,7 @@ def test_release_version_contract_matches_manifest_metadata_and_cli(
     pyproject = tomllib.loads(
         (repository_root / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert payload["version"] == "0.5.0-beta.9"
+    assert payload["version"] == "0.5.0-beta.10"
     plugin_version = payload["plugin_version"]
     assert plugin_version == manifest["version"]
     if plugin_version != payload["version"]:
@@ -2001,3 +2001,39 @@ def test_anchor_cli_roundtrip_through_uv_script(git_repo: Path) -> None:
         "the anchor roundtrip fixture has completed",
         repo_path=worktree,
     )
+
+
+@pytest.mark.dww_fast
+@pytest.mark.parametrize(
+    ("waiting", "expected"),
+    [
+        (
+            {
+                "reason": "prior_batch_pending",
+                "batch_id": "batch-prior",
+                "batch_status": "validation-failed",
+            },
+            "Prior batch batch-prior is validation-failed",
+        ),
+        (
+            {"reason": "active_producers", "task_ids": ["task-a", "task-b"]},
+            "Active producers: task-a, task-b",
+        ),
+        (
+            {"reason": "tail_intent_required"},
+            "recorded round completion or explicit delivery cause",
+        ),
+    ],
+)
+def test_native_finish_human_output_explains_observed_wait(waiting, expected) -> None:
+    output = _human(
+        "finish",
+        {
+            "native_delivery": {"ready_head": "source"},
+            "base_ref": "main",
+            "waiting": waiting,
+        },
+    )
+    assert expected in output
+    if waiting["reason"] != "tail_intent_required":
+        assert "smaller batch needs" not in output

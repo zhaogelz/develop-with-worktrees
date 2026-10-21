@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 from .candidate_batches import (
@@ -19,7 +20,7 @@ from .proof import read_validation_attempt
 from .repo import GitRepo
 from .root_context import show_root_anchor
 from .state import FINAL_TASK_STATES, StateStore
-from .util import ActionableSoloAIError, process_matches
+from .util import ActionableSoloAIError, SoloAIError, process_matches, read_json
 from .validation_queue import queue_ticket_snapshot
 
 
@@ -377,7 +378,7 @@ def _validation_projection(
     if not attempt:
         return {"id": attempt_id, "state": "not_recorded"}
     profiles = [
-        _validation_profile_projection(profile)
+        _validation_profile_projection(profile, repo=repo)
         for profile in attempt.get("profiles", [])
     ]
     state = attempt.get("state")
@@ -406,13 +407,37 @@ def _validation_projection(
     }
 
 
-def _validation_profile_projection(profile: dict[str, Any]) -> dict[str, Any]:
+def _validation_profile_projection(
+    profile: dict[str, Any], *, repo: GitRepo
+) -> dict[str, Any]:
     state = profile.get("state")
     error_reason = profile.get("error_reason")
     queue = copy.deepcopy(profile.get("queue"))
     current_command = profile.get("current_command")
     projected_command: dict[str, Any] | None = None
-    if state == "waiting":
+    proof_wait = profile.get("proof_wait")
+    if state == "waiting" and isinstance(proof_wait, dict):
+        fingerprint = proof_wait.get("fingerprint")
+        owner = {}
+        if isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            try:
+                owner = read_json(
+                    repo.local_dir
+                    / "locks"
+                    / f"profile-{fingerprint}.lock"
+                    / "owner.json",
+                    {},
+                )
+            except (SoloAIError, OSError):
+                owner = {}
+        if (
+            not isinstance(owner, dict)
+            or not process_matches(owner)
+            or not process_matches(proof_wait.get("waiter", {}))
+        ):
+            state = "unknown"
+            error_reason = "profile_lock_owner_not_confirmed"
+    elif state == "waiting":
         ticket = queue.get("ticket") if isinstance(queue, dict) else None
         observation = queue_ticket_snapshot(ticket) if isinstance(ticket, str) else None
         if observation and observation.get("state") == "waiting":
@@ -445,6 +470,7 @@ def _validation_profile_projection(profile: dict[str, Any]) -> dict[str, Any]:
         "state": state,
         "reused": profile.get("reused"),
         "execution_reason": profile.get("execution_reason"),
+        "proof_wait": copy.deepcopy(proof_wait),
         "execution_details": copy.deepcopy(profile.get("decision")),
         "error_reason": error_reason,
         "queue": queue,
