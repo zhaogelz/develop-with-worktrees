@@ -5,7 +5,11 @@ import fnmatch
 import os
 import platform
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+import psutil
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +23,11 @@ from .config import (
 from .repo import GitRepo
 from .util import (
     ActionableSoloAIError,
+    DirectoryLock,
     SoloAIError,
     atomic_write_json,
     new_id,
+    process_snapshot,
     read_json,
     redact_text,
     run,
@@ -34,6 +40,7 @@ from .util import (
 from .validation_queue import (
     claim_validation_slot,
     inherited_claim_environment,
+    inherited_validation_claim,
     record_profile_duration,
 )
 
@@ -46,6 +53,9 @@ LOCKFILES = (
     "go.sum",
 )
 PROOF_SCHEMA = 3
+_HELD_PROFILE_LOCKS: ContextVar[frozenset[str]] = ContextVar(
+    "dww_profile_locks", default=frozenset()
+)
 VALIDATION_ATTEMPT_SCHEMA = 1
 PROFILE_HISTORY_SCHEMA = 1
 # 审批计划和验证收据的演进速度不同：前者描述可执行的策略，后者绑定现场证据。
@@ -1484,27 +1494,68 @@ def profile_selection_reason(
     return {"matched_files": matched, "path_patterns": list(profile.paths)}
 
 
-def _run_profile(
+@contextmanager
+def _profile_execution_lock(
+    repo: GitRepo,
+    *,
+    profile: VerificationProfile,
+    fingerprint: str,
+    attempt_id: str,
+) -> Iterator[None]:
+    """相同纯输入只执行一次；等证明时不占机器验证容量。"""
+    if profile.external_state != "none" or profile.input_closure != "complete":
+        yield
+        return
+    path = repo.local_dir / "locks" / f"profile-{fingerprint}.lock"
+    key = os.path.normcase(str(path.resolve()))
+    held = _HELD_PROFILE_LOCKS.get()
+    if key in held:
+        raise SoloAIError(
+            "Recursive validation of the same pure profile would deadlock"
+        )
+    owner = read_json(path / "owner.json", {})
+    if isinstance(owner, dict):
+        for parent in psutil.Process().parents():
+            if parent.pid == owner.get("pid") and parent.create_time() == owner.get(
+                "create_time"
+            ):
+                raise SoloAIError(
+                    "Validation cannot wait for the same profile held by its parent"
+                )
+    # 已占用父验证容量的子进程不能等待独立执行者的证明锁；后者可能正等父容量。
+    # 子进程照常验证；独立执行者拿到容量后再次检查新证明，避免重复执行。
+    if inherited_validation_claim() is not None:
+        yield
+        return
+    _update_validation_attempt_profile(
+        repo,
+        attempt_id,
+        profile.profile_id,
+        state="waiting",
+        proof_wait={"fingerprint": fingerprint, "waiter": process_snapshot()},
+    )
+    with DirectoryLock(path, wait=True):
+        previous_context = _HELD_PROFILE_LOCKS.set(held | {key})
+        try:
+            _update_validation_attempt_profile(
+                repo, attempt_id, profile.profile_id, proof_wait=None
+            )
+            yield
+        finally:
+            _HELD_PROFILE_LOCKS.reset(previous_context)
+
+
+def _available_profile_result(
     repo: GitRepo,
     *,
     cwd: Path,
     profile: VerificationProfile,
-    inputs: dict[str, Any],
     fingerprint: str,
-    task_id: str | None,
-    base: str,
-    expected_base_head: str | None,
     expected_candidate_head: str | None,
-    validation_environment: dict[str, str],
-    check_inputs: Callable[[], None],
     attempt_id: str,
-) -> dict[str, Any]:
+    decision: dict[str, Any],
+) -> dict[str, Any] | None:
     proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
-
-    check_inputs()
-    decision = profile_execution_decision(
-        repo, profile=profile, inputs=inputs, fingerprint=fingerprint
-    )
     if decision["action"] == "reuse":
         existing = read_json(proof_path, {})
         _require_expected_candidate_head(
@@ -1548,6 +1599,41 @@ def _run_profile(
         raise SoloAIError(
             "Stored validation proof identity changed; inspect or prune proofs"
         )
+    return None
+
+
+def _run_profile(
+    repo: GitRepo,
+    *,
+    cwd: Path,
+    profile: VerificationProfile,
+    inputs: dict[str, Any],
+    fingerprint: str,
+    task_id: str | None,
+    base: str,
+    expected_base_head: str | None,
+    expected_candidate_head: str | None,
+    validation_environment: dict[str, str],
+    check_inputs: Callable[[], None],
+    attempt_id: str,
+) -> dict[str, Any]:
+    proof_path = repo.local_dir / "profile-proofs" / f"{fingerprint}.json"
+
+    check_inputs()
+    decision = profile_execution_decision(
+        repo, profile=profile, inputs=inputs, fingerprint=fingerprint
+    )
+    available = _available_profile_result(
+        repo,
+        cwd=cwd,
+        profile=profile,
+        fingerprint=fingerprint,
+        expected_candidate_head=expected_candidate_head,
+        attempt_id=attempt_id,
+        decision=decision,
+    )
+    if available is not None:
+        return available
     _update_validation_attempt_profile(
         repo,
         attempt_id,
@@ -1574,6 +1660,20 @@ def _run_profile(
                 "wait_seconds": queue_claim.get("wait_seconds"),
             },
         )
+        check_inputs()
+        available = _available_profile_result(
+            repo,
+            cwd=cwd,
+            profile=profile,
+            fingerprint=fingerprint,
+            expected_candidate_head=expected_candidate_head,
+            attempt_id=attempt_id,
+            decision=profile_execution_decision(
+                repo, profile=profile, inputs=inputs, fingerprint=fingerprint
+            ),
+        )
+        if available is not None:
+            return available
         for index, command in enumerate(profile.commands, 1):
             _require_expected_candidate_head(
                 repo, cwd=cwd, expected_candidate_head=expected_candidate_head
@@ -1997,22 +2097,28 @@ def validate(
                 )
 
             try:
-                result = _run_profile(
+                with _profile_execution_lock(
                     repo,
-                    cwd=cwd,
                     profile=profile,
-                    inputs=profile_inputs,
                     fingerprint=profile_fingerprint,
-                    task_id=task_id,
-                    base=base,
-                    expected_base_head=expected_base_head,
-                    expected_candidate_head=expected_candidate_head,
-                    validation_environment=_profile_validation_environment(
-                        profile, validation_environment
-                    ),
-                    check_inputs=check_inputs,
                     attempt_id=attempt_id,
-                )
+                ):
+                    result = _run_profile(
+                        repo,
+                        cwd=cwd,
+                        profile=profile,
+                        inputs=profile_inputs,
+                        fingerprint=profile_fingerprint,
+                        task_id=task_id,
+                        base=base,
+                        expected_base_head=expected_base_head,
+                        expected_candidate_head=expected_candidate_head,
+                        validation_environment=_profile_validation_environment(
+                            profile, validation_environment
+                        ),
+                        check_inputs=check_inputs,
+                        attempt_id=attempt_id,
+                    )
             except ProfileAssertionFailed:
                 if not profile.continue_on_failure:
                     raise

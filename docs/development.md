@@ -89,6 +89,13 @@ uses the packaged [recovery reference](../plugins/develop-with-worktrees/skills/
 
 ## Checks
 
+Ready remains a required dependency of integration Full. Do not repeat entire
+Ready modules or exact Ready cases in the integration command; reserve that
+command for additional combination and recovery behavior. The CI matrix runs
+on main pushes and pull requests, with a manual entry for a fixed development
+ref. Adding a release tag to an already checked main commit does not run a
+second identical matrix.
+
 Run the smallest useful check while developing, then the checks selected by the
 task lifecycle. These direct commands are useful for documentation and package
 maintenance:

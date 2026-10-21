@@ -25,7 +25,8 @@ uv run --script <DWW> --repo <repository-or-worktree> <subcommand>
    Run focused project checks and `commit` only reviewed exact paths.
 3. For native tasks (state schema 12), use `finish` directly after committing.
    It performs Ready, releases task runtime, and follows an eligible batch
-   through combined Full, promotion, and slot return. Explicit `ready` is only
+   through combined Full, promotion, and slot return, then continues other
+   eligible batches from tasks already present when delivery began. Explicit `ready` is only
    needed when a separately frozen head is useful. See
    [Native delivery](references/native-delivery.md) for exact arguments.
 

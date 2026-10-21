@@ -132,7 +132,10 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   cause and reason. One owned integration workspace per target merges the
   original task heads with Git merge commits, runs Full on the exact combined
   head, then promotes only if the target still matches its frozen base. The
-  original task commits remain ancestors of the delivered target.
+  original task commits remain ancestors of the delivered target. One Finish
+  continues eligible batches among the same target's tasks captured when delivery
+  begins, stopping at an ineligible tail or failure. New arrivals wait for a later
+  invocation; batch size, tail admission, and per-composition Full remain intact.
 - Independent ordinary check failures may be collected; failed prerequisites
   block their dependents. Repair of an owned integration workspace creates a
   traceable commit and a new validation attempt after the prior processes stop.
@@ -163,7 +166,10 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   separate decisions reported by the host.
 - A passed pure proof is reusable only under matching declared inputs,
   environment, tools, and logs. Runtime effects and required artifacts are not
-  replaced by a prior success report.
+  replaced by a prior success report. Concurrent identical pure checks coordinate
+  through an existing repository directory lock and recheck proof after waiting.
+  Legitimately inherited validation capacity never waits on that lock, preventing
+  lock inversion with an independent validator waiting for the parent's capacity.
 - A composition conflict, validation failure, and promotion block remain
   distinct. Deterministic recovery uses recorded identities; it never changes
   the base by guessing a merge or retrying an unchanged failure blindly.

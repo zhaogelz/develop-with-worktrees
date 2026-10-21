@@ -27,10 +27,10 @@ Click the cover to watch the 36-second video: one project, three tasks, working 
 
 ## Install
 
-You need Codex with plugin support, Git, and [uv](https://docs.astral.sh/uv/) to run the Python tools. The current public version is `0.5.0-beta.9`.
+You need Codex with plugin support, Git, and [uv](https://docs.astral.sh/uv/) to run the Python tools. The current public version is `0.5.0-beta.10`.
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.9
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.10
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
@@ -41,7 +41,7 @@ After installation, let Codex load the plugin skill. Review a new or changed Hoo
 1. Open your Git project in Codex and ask for a change as usual, such as “Add phone-number login to the sign-in page.”
 2. On first use, choose a separate directory for each task when prompted. Repositories with an existing workflow keep that workflow first.
 3. The AI edits and checks its isolated copy, then commits only the reviewed files. You can assign another task in a separate chat.
-4. The AI follows local integration: eligible changes are checked together, then merged into the local branch recorded when the task started.
+4. The AI follows local integration: eligible changes are checked together, then merged into the local branch recorded when the task started. It continues with other eligible batches already in the round.
 
 You describe the goal, Codex moves the task forward, and DWW manages how the changes enter and leave the repository. You don't have to create, switch, and reclaim working directories by hand each time.
 

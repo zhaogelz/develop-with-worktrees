@@ -27,10 +27,10 @@ Develop with Worktrees（DWW）是一个 Codex 插件：**给每个修改任务�
 
 ## 安装
 
-需要可安装插件的 Codex、Git，以及可运行 Python 工具的 [uv](https://docs.astral.sh/uv/)。当前公开版本为 `0.5.0-beta.9`。
+需要可安装插件的 Codex、Git，以及可运行 Python 工具的 [uv](https://docs.astral.sh/uv/)。当前公开版本为 `0.5.0-beta.10`。
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.9
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.10
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
@@ -41,7 +41,7 @@ codex plugin add develop-with-worktrees@develop-with-worktrees
 1. 在 Codex 中打开你的 Git 项目，照常说要做什么，例如“帮我给登录页加上手机号登录”。
 2. 首次使用时，按提示选择“每个任务使用独立目录”。已有工作流程的仓库会先沿用原流程。
 3. AI 在独立目录中修改、检查，只提交这次审查过的文件；你可以在另一条聊天里继续安排别的任务。
-4. AI 跟进本地合入：符合条件的一批改动会一起检查，通过后进入启动任务时记录的本地分支。
+4. AI 跟进本地合入：符合条件的一批改动会一起检查，通过后进入启动任务时记录的本地分支；本轮还有符合条件的批次时，继续处理。
 
 你负责说清目标，Codex 负责推进任务，DWW 负责管理这些改动怎么进出仓库。你不用每次手工创建、切换和回收工作目录。
 
