@@ -89,14 +89,14 @@ environment = [
   "LC_CTYPE", "TERM", "NO_COLOR",
 ]
 input_closure = "complete"
-# Windows 上完整 fast 层在受管并发负载下曾到 600 秒仍在正常推进；
-# 2026-09-24 在 900 秒仍有测试输出且被受管终止；保留明确上限，
-# 按实际机器负载容纳整套 fast 层。
+# Windows 上 fast 层的总时长曾超过 1500 秒；按既有测试目录拆成两条
+# 命令，保留全部用例和每条命令的停止上限。
 timeout_seconds = 1500
 resource_class = "normal"
 level = "ready"
 commands = [
-  ["uv", "run", "pytest", "-m", "dww_fast", "-q", "--durations=20"],
+  ["uv", "run", "pytest", "tests/integration", "-m", "dww_fast", "-q", "--durations=20"],
+  ["uv", "run", "pytest", "tests/unit", "-m", "dww_fast", "-q", "--durations=20"],
 ]
 
 # Ready 已覆盖的整模块与精确用例不在 Full 重复选择；它仍是必需依赖。
