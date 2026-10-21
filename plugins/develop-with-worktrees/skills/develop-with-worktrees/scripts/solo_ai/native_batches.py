@@ -472,6 +472,52 @@ def _run_full(
     return _release_runtime(repo, store, releasing)
 
 
+def _require_stopped_validation(attempt: dict[str, Any]) -> list[dict[str, Any]]:
+    """复用进程身份检查；超时回执也必须确认命令已退出。"""
+    profiles = attempt.get("profiles")
+    if not isinstance(profiles, list):
+        raise SoloAIError("Native validation attempt has no readable profiles")
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            raise SoloAIError("Native validation attempt has an unreadable profile")
+        ticket = (profile.get("queue") or {}).get("ticket")
+        if ticket and queue_ticket_snapshot(str(ticket)) is not None:
+            raise SoloAIError("Native validation still owns a live queue ticket")
+        command = profile.get("current_command")
+        if command is None and profile.get("state") == "timed_out":
+            runs = profile.get("runs")
+            if not isinstance(runs, list) or not runs or not isinstance(runs[-1], dict):
+                raise SoloAIError(
+                    "Timed out validation has no recorded process identity"
+                )
+            command = runs[-1]
+        if command is None:
+            if profile.get("state") == "running":
+                raise SoloAIError("Running validation has no recorded process identity")
+            continue
+        process = command.get("process") if isinstance(command, dict) else None
+        if not isinstance(process, dict):
+            raise SoloAIError("Running validation has no recorded process identity")
+        pid, created = process.get("pid"), process.get("create_time")
+        if (
+            not isinstance(pid, int)
+            or pid <= 0
+            or not isinstance(created, (int, float))
+        ):
+            raise SoloAIError("Running validation has no exact process identity")
+        try:
+            current_created = psutil.Process(pid).create_time()
+        except psutil.NoSuchProcess:
+            current_created = None
+        except (psutil.AccessDenied, psutil.Error, OSError) as exc:
+            raise SoloAIError(
+                "Cannot verify whether native validation is still live"
+            ) from exc
+        if current_created is not None and abs(current_created - created) <= 0.01:
+            raise SoloAIError("Native validation command is still live")
+    return profiles
+
+
 def _recover_validation(
     repo: GitRepo,
     store: StateStore,
@@ -511,42 +557,7 @@ def _recover_validation(
             raise SoloAIError(
                 "Native batch target or workspace changed during Full validation"
             )
-        profiles = attempt.get("profiles")
-        if not isinstance(profiles, list):
-            raise SoloAIError("Native validation attempt has no readable profiles")
-        for profile in profiles:
-            if not isinstance(profile, dict):
-                raise SoloAIError("Native validation attempt has an unreadable profile")
-            ticket = (profile.get("queue") or {}).get("ticket")
-            if ticket and queue_ticket_snapshot(str(ticket)) is not None:
-                raise SoloAIError("Native validation still owns a live queue ticket")
-            command = profile.get("current_command")
-            if command is None:
-                if profile.get("state") == "running":
-                    raise SoloAIError(
-                        "Running validation has no recorded process identity"
-                    )
-                continue
-            process = command.get("process") if isinstance(command, dict) else None
-            if not isinstance(process, dict):
-                raise SoloAIError("Running validation has no recorded process identity")
-            pid, created = process.get("pid"), process.get("create_time")
-            if (
-                not isinstance(pid, int)
-                or pid <= 0
-                or not isinstance(created, (int, float))
-            ):
-                raise SoloAIError("Running validation has no exact process identity")
-            try:
-                current_created = psutil.Process(pid).create_time()
-            except psutil.NoSuchProcess:
-                current_created = None
-            except (psutil.AccessDenied, psutil.Error, OSError) as exc:
-                raise SoloAIError(
-                    "Cannot verify whether native validation is still live"
-                ) from exc
-            if current_created is not None and abs(current_created - created) <= 0.01:
-                raise SoloAIError("Native validation command is still live")
+        profiles = _require_stopped_validation(attempt)
         result = (
             "failed"
             if any(
@@ -931,13 +942,22 @@ def repair_native_batch(
                 )
                 if (
                     attempt.get("state") != "completed"
-                    or attempt.get("result") != "failed"
+                    or attempt.get("result") not in {"failed", "timed_out"}
                     or attempt.get("task_id") != batch_id
+                    or attempt.get("owner") != {"kind": "batch", "id": batch_id}
+                    or attempt.get("candidate_head") != expected_head
+                    or attempt.get("base_head") != batch["base_before"]
+                    or repo.ref_head(f"refs/heads/{batch['base_ref']}")
+                    != batch["base_before"]
                     or not repo.is_clean(worktree)
                 ):
                     raise SoloAIError(
                         "Native Full is not a stopped ordinary failure with a clean workspace"
                     )
+                _require_stopped_validation(attempt)
+                require_exact_passed_batch_release(
+                    repo, receipt=batch.get("runtime_release") or {}
+                )
             elif batch["status"] == "conflicted" and not batch.get("merge_intent"):
                 raise SoloAIError("Native merge conflict lost its exact source intent")
             snapshot = repo.local_dir / "repair-patches" / f"{batch_id}-{digest}.patch"

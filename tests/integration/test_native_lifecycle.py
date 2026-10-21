@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import difflib
+import copy
+import os
 import argparse
 import json
 import sys
@@ -2393,3 +2395,100 @@ def test_finish_default_waiting_output_does_not_claim_delivery(git_repo: Path) -
     assert store.read()["batches"] == {}
     assert repo.head(git_repo) == base
     assert "waiting for local integration" in cli_module._human("finish", result)
+
+
+def test_stopped_timeout_repairs_exact_batch_and_preserves_failure(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = CommandSpec(
+        (
+            sys.executable,
+            "-c",
+            "from pathlib import Path; import time; "
+            "time.sleep(60) if Path('repair.txt').read_text().strip() == 'fail' else None",
+        )
+    )
+    repo, store = _native_repo(git_repo, commands=[command])
+    policy = git_repo / ".solo-ai/verification.toml"
+    policy.write_text(
+        policy.read_text(encoding="utf-8").replace(
+            "timeout_seconds = 2700", "timeout_seconds = 1"
+        ),
+        encoding="utf-8",
+    )
+    git(git_repo, "add", ".solo-ai/verification.toml")
+    git(git_repo, "commit", "-m", "test: bound timeout for recovery")
+    approve(repo, load_verification_config(repo))
+    task = start(repo, name="repair stopped timeout")
+    (Path(task["worktree"]) / "repair.txt").write_text("fail\n", encoding="utf-8")
+    commit_task(
+        repo,
+        task_id=task["id"],
+        lease=task["lease"],
+        message="test: timed out input",
+        paths=["repair.txt"],
+    )
+    finish(repo, task_id=task["id"], lease=task["lease"])
+    batch = seal_native_batch(
+        repo, task_ids=[task["id"]], cause="user", reason="deliver"
+    )
+    with pytest.raises(SoloAIError, match="timed out"):
+        run_native_batch(repo, batch_id=batch["id"])
+    failed = store.native_batch(batch["id"])
+    attempt_id = failed["validation_attempt"]
+    attempt = read_validation_attempt(repo, attempt_id)
+    assert attempt["result"] == "timed_out"
+    head = failed["integration_head"]
+    patch = git_repo.parent / "repair-timeout.patch"
+    patch.write_text(
+        "diff --git a/repair.txt b/repair.txt\n"
+        "--- a/repair.txt\n+++ b/repair.txt\n@@ -1 +1 @@\n-fail\n+pass\n",
+        encoding="utf-8",
+    )
+
+    def repair() -> dict:
+        return repair_native_batch(
+            repo,
+            batch_id=batch["id"],
+            expected_head=head,
+            patch_file=patch,
+            paths=["repair.txt"],
+            message="test: repair timeout",
+            reason="change the input that caused the timeout",
+        )
+
+    # 同一失败不能靠结果标签绕过身份或存活检查。
+    for key in ("owner", "candidate_head", "base_head"):
+        altered = copy.deepcopy(attempt)
+        altered[key] = None
+        with monkeypatch.context() as context:
+            context.setattr(
+                native_batches, "read_validation_attempt", lambda *_: altered
+            )
+            with pytest.raises(SoloAIError, match="stopped ordinary failure"):
+                repair()
+    with monkeypatch.context() as context:
+        context.setattr(
+            native_batches, "queue_ticket_snapshot", lambda *_: {"state": "active"}
+        )
+        with pytest.raises(SoloAIError, match="live queue ticket"):
+            repair()
+    altered = copy.deepcopy(attempt)
+    timed_out = next(p for p in altered["profiles"] if p["state"] == "timed_out")
+    timed_out["runs"][-1]["process"] = process_snapshot(os.getpid())
+    with monkeypatch.context() as context:
+        context.setattr(native_batches, "read_validation_attempt", lambda *_: altered)
+        with pytest.raises(SoloAIError, match="still live"):
+            repair()
+        timed_out["runs"] = []
+        with pytest.raises(SoloAIError, match="no recorded process identity"):
+            repair()
+    assert store.native_batch(batch["id"])["status"] == "validation-failed"
+    repaired = repair()
+    assert repaired["integration_head"] != head
+    assert repaired["repair_records"][-1]["validation_attempt"] == attempt_id
+    completed = run_native_batch(repo, batch_id=batch["id"])
+    assert completed["status"] == "completed"
+    assert len(completed["validation_attempts"]) == 2
+    assert read_validation_attempt(repo, attempt_id)["result"] == "timed_out"
+    assert (git_repo / "repair.txt").read_text(encoding="utf-8") == "pass\n"
