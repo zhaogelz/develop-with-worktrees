@@ -213,8 +213,10 @@ def test_bootstrap_preserves_ignored_directory_links(
     data = outside / "data.bin"
     data.write_bytes(b"external application data")
     name = ".solo-ai" if collision else "application-state"
-    repo.add_local_exclude(f"/{name}/")
+    # 不加末尾斜杠，确保 POSIX symlink 和 Windows junction 都命中规则。
+    repo.add_local_exclude(f"/{name}")
     directory_link(git_repo / name, outside)
+    assert git(git_repo, "check-ignore", "--", name) == name
     base = repo.head()
 
     if collision:
