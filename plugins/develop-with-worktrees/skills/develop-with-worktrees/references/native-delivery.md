@@ -93,8 +93,9 @@ states. `batch reconcile` with `--force`, a supported `--cause`, `--reason`,
 and `--base` closes an eligible tail. For a small, clearly shared integration
 script fix, `batch repair` takes the exact batch, expected head, patch file,
 paths, commit message, and reason. It commits the patch in the owned
-integration workspace after the prior validation processes stop, starts a new
-attempt, and keeps the failed attempt. Semantic
+integration workspace after the prior validation processes stop and batch runtime
+is released. This includes a completed timeout with exact stopped-process
+evidence. `batch recover` then starts a new attempt and keeps the failed attempt. Semantic
 source changes return to the task owner. Do not edit the integration worktree
 directly or retry an unchanged failed input in a loop.
 
