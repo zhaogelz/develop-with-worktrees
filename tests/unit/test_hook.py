@@ -1123,9 +1123,9 @@ def test_hook_denies_only_the_foreign_edit_without_quarantining_owner(
     denied = HOOK.decide(_payload(git_repo, tool="apply_patch", session="session-b"))
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert StateStore(repo).task(task["id"])["status"] == "active"
-    assert HOOK.decide(_payload(git_repo, tool="apply_patch", session="session-a")) is None
-
-
+    assert (
+        HOOK.decide(_payload(git_repo, tool="apply_patch", session="session-a")) is None
+    )
 
 def test_hook_script_emits_official_pretooluse_deny_protocol(git_repo: Path) -> None:
     completed = subprocess.run(
@@ -1151,11 +1151,10 @@ def test_hook_script_emits_official_pretooluse_deny_protocol(git_repo: Path) -> 
     assert output["permissionDecisionReason"]
 
 
-
 def test_hook_ignores_terminal_and_post_events_without_scanning_dirty_content(
     git_repo: Path, monkeypatch
 ) -> None:
-    repo = _initialized(git_repo)
+    _initialized(git_repo)
     dirty = git_repo / "existing.txt"
     dirty.write_text("preserve user content\n", encoding="utf-8")
     before = git(git_repo, "status", "--porcelain")
@@ -1175,14 +1174,24 @@ def test_hook_ignores_terminal_and_post_events_without_scanning_dirty_content(
     ):
         for event in ("PreToolUse", "PostToolUse"):
             for _ in range(2):
-                assert HOOK.decide({
-                    **_payload(git_repo, tool="Bash", command=command),
-                    "hook_event_name": event,
-                }) is None
-    assert HOOK.decide({
-        **_payload(git_repo, tool="apply_patch"),
-        "hook_event_name": "PostToolUse",
-    }) is None
+                assert (
+                    HOOK.decide(
+                        {
+                            **_payload(git_repo, tool="Bash", command=command),
+                            "hook_event_name": event,
+                        }
+                    )
+                    is None
+                )
+    assert (
+        HOOK.decide(
+            {
+                **_payload(git_repo, tool="apply_patch"),
+                "hook_event_name": "PostToolUse",
+            }
+        )
+        is None
+    )
     assert git(git_repo, "status", "--porcelain") == before
     assert dirty.read_text(encoding="utf-8") == "preserve user content\n"
     assert HOOK.read_guard_state(git_repo)[0].get("alerts", []) == []
@@ -1197,11 +1206,18 @@ def test_hook_definition_matches_only_native_edit_events() -> None:
 def test_hook_does_not_invent_edit_write_target_fields(git_repo: Path) -> None:
     _initialized(git_repo)
     for tool in ("Edit", "Write"):
-        for tool_input in ({}, {"file_path": "README.md"}, {"path": "README.md"},
-                           {"file_path": "README.md", "path": "other.md"}):
-            result = HOOK.decide({
-                **_payload(git_repo, tool=tool), "tool_input": tool_input,
-            })
+        for tool_input in (
+            {},
+            {"file_path": "README.md"},
+            {"path": "README.md"},
+            {"file_path": "README.md", "path": "other.md"},
+        ):
+            result = HOOK.decide(
+                {
+                    **_payload(git_repo, tool=tool),
+                    "tool_input": tool_input,
+                }
+            )
             assert result is None
 
 
@@ -1215,4 +1231,7 @@ def test_hook_wrong_directory_edit_points_to_owner_worktree(git_repo: Path) -> N
         assert owner["worktree"] in reason
         assert "ask the user" not in reason
         assert StateStore(repo).task(owner["id"])["status"] == "active"
-    assert HOOK.decide(_payload(Path(owner["worktree"]), tool="apply_patch", session="a")) is None
+    assert (
+        HOOK.decide(_payload(Path(owner["worktree"]), tool="apply_patch", session="a"))
+        is None
+    )

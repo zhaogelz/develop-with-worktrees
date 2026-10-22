@@ -992,10 +992,12 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             event,
             "Only when the user first intends to modify this unchosen repository, ask exactly:\n\n此仓库怎么修改？\n\n1. 每个任务使用独立目录（推荐）\n   任务互不影响，完成后自动合回。\n\n2. 这一次直接改当前目录\n   只跳过这一次，下次还会询问。\n\n3. 以后都直接改当前目录\n   记住此选择，这个仓库不再询问。\n\n只影响本机，可随时修改。\n\nAsk only this one question. After the user chooses, carry out the matching choice silently without any further confirmation. A child-agent instruction that already includes a one-time delegation code must register that code before asking the user anything.",
         )
+
     def deny(reason: str) -> dict[str, Any]:
         # 拒绝仅针对本次编辑；优先返回此会话已领取的正确工作目录。
         owned = [
-            task for task in state.get("tasks", {}).values()
+            task
+            for task in state.get("tasks", {}).values()
             if task.get("mode", "isolated") == "isolated"
             and _is_valid_isolated_owner(task, payload)[0]
         ]

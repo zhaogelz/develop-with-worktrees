@@ -81,7 +81,8 @@ For an active isolated task with a bound root, the supported trusted
 `SessionStart` path records only a small “refresh required” marker. Before a
 supported write, the Hook requires `anchor refresh-root` to read the current task
 and complete root once; terminal queries and the DWW `anchor` command remain
-available without Hook parsing. CLI operations still check their own task identity. This check is scoped to observed Hook events and tools,
+available without Hook parsing. CLI operations still check their own task identity.
+This check is scoped to observed Hook events and tools,
 not an operating-system sandbox. The CLI binding and version gates remain the
 fallback when the Hook is not trusted or an event/tool is not covered.
 
