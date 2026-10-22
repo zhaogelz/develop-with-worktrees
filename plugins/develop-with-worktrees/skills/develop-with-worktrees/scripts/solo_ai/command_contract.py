@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """DWW 对外顶层命令的唯一契约。
 
-该模块不能引入第三方依赖：CLI 和工作树 Hook 都会在受限环境中导入它。
+该模块由 CLI 在受限环境中导入，保持无第三方依赖。
 """
 
 TOP_LEVEL_COMMANDS = frozenset(
