@@ -33,7 +33,7 @@ resource_class = "normal"
 level = "ready"
 commands = [
   ["uv", "run", "python", "scripts/verify_repository.py"],
-  ["uv", "run", "pytest", "-q", "tests/integration/test_cli.py::test_user_facing_docs_describe_only_the_current_contract"],
+  ["uv", "run", "pytest", "-q", "tests/integration/test_cli.py::test_release_version_contract_matches_manifest_metadata_and_cli", "tests/integration/test_cli.py::test_plugin_manifest_matches_current_codex_component_contract", "tests/integration/test_cli.py::test_user_facing_docs_describe_only_the_current_contract"],
 ]
 
 # Ruff 已锁定在 uv.lock；开发期先做格式与语法检查，完整输入闭包未变时可
