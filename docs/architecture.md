@@ -104,9 +104,8 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   and dedicated commands. They need no exceptions in a terminal-command parser.
   The stable marketplace is prepared by its dedicated release script; normal
   refreshes therefore do not remove and re-add a marketplace.
-  Ordinary source tasks Finish and return their worktrees. A coordinator starts
-  plugin publication as a separate, short-lived maintenance task rather than
-  retaining a normal development worktree for release work.
+  Ordinary source tasks Finish and return their worktrees. Publishing an already
+  delivered fixed package does not require a new DWW task merely for Hook admission.
   If DWW itself blocks promotion, the installed maintenance entry accepts
   `RecoveryInstall` for one exact source with a passed Full proof. A composed
   batch still needs intact logs, frozen base, candidate identities, and

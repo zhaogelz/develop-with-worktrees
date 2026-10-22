@@ -121,9 +121,9 @@ unknown, linked, or mixed existing content remains rejected.
 
 In native state, an ordinary source Finish leaves its fixed worktree owned until
 its Ready head is delivered and the slot return succeeds. In legacy state,
-candidate publication returns the source worktree. A coordinator starts a
-separate short-lived maintenance task only when a plugin release is needed; an
-ordinary development worktree is never retained merely to publish a package.
+candidate publication returns the source worktree. Publishing an already delivered
+fixed package does not need a new DWW task merely for Hook admission; follow the
+authorized maintenance entry without retaining a development worktree for it.
 
 ## Identity and content protection
 
