@@ -18,8 +18,8 @@ commands = [
   ["uv", "run", "python", "videos/develop-with-worktrees-promo/scripts/check.py", "--snapshots", "--at", "3.8,9.8,22.8,29.8,34.8"],
 ]
 
-# 覆盖所有跟踪路径的真实静态检查。它既阻止未知路径静默通过，也为
-# 输入闭包不变的纯检查提供可复用的证明。
+# 覆盖所有跟踪路径的静态检查与文档契约用例。文档读取 README 和
+# references，放在本组的完整输入闭包中，避免快速组漏记其依赖。
 [[profiles]]
 id = "repository-static-ready"
 paths = ["**"]
@@ -33,6 +33,7 @@ resource_class = "normal"
 level = "ready"
 commands = [
   ["uv", "run", "python", "scripts/verify_repository.py"],
+  ["uv", "run", "pytest", "-q", "tests/integration/test_cli.py::test_user_facing_docs_describe_only_the_current_contract"],
 ]
 
 # Ruff 已锁定在 uv.lock；开发期先做格式与语法检查，完整输入闭包未变时可

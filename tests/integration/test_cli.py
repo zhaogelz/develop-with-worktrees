@@ -672,7 +672,6 @@ def test_hook_definition_remains_the_stable_trust_contract() -> None:
     )
 
 
-@pytest.mark.dww_fast
 def test_user_facing_docs_describe_only_the_current_contract() -> None:
     repository_root = Path(__file__).parents[2]
     plugin_root = repository_root / "plugins" / "develop-with-worktrees"
