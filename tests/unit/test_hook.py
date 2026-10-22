@@ -1127,6 +1127,7 @@ def test_hook_denies_only_the_foreign_edit_without_quarantining_owner(
         HOOK.decide(_payload(git_repo, tool="apply_patch", session="session-a")) is None
     )
 
+
 def test_hook_script_emits_official_pretooluse_deny_protocol(git_repo: Path) -> None:
     completed = subprocess.run(
         ["uv", "run", "--script", str(HOOK_PATH)],
