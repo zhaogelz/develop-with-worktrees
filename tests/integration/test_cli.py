@@ -659,6 +659,7 @@ def test_plugin_manifest_matches_current_codex_component_contract() -> None:
     assert all(isinstance(prompt, str) and len(prompt) <= 128 for prompt in prompts)
 
 
+@pytest.mark.dww_fast
 def test_hook_definition_remains_the_stable_trust_contract() -> None:
     repository_root = Path(__file__).parents[2]
     hook_definition = (
@@ -667,10 +668,11 @@ def test_hook_definition_remains_the_stable_trust_contract() -> None:
 
     assert (
         hashlib.sha256(hook_definition.read_bytes()).hexdigest()
-        == "7d587007506da7db3f1a82de1bb27befa7a59b38d141e1ce533e8bc9e89cec3d"
+        == "35c2e9db2d2a40055172584e4388c113358574f88e40c2850ea5f8915882d3a2"
     )
 
 
+@pytest.mark.dww_fast
 def test_user_facing_docs_describe_only_the_current_contract() -> None:
     repository_root = Path(__file__).parents[2]
     plugin_root = repository_root / "plugins" / "develop-with-worktrees"
@@ -712,6 +714,11 @@ def test_user_facing_docs_describe_only_the_current_contract() -> None:
     assert 'seal_policy = "auto_full"' in text
     assert "candidate_capacity = 10" in text
     assert "root-anchor" in text
+    safety = (skill_root / "references" / "safety.md").read_text(encoding="utf-8")
+    assert "does not subscribe to Bash or PostToolUse" in safety
+    assert "Enforced filesystem write permissions belong to the host runtime" in safety
+    assert "limited read-only command subset" not in safety
+    assert "Hook has no push-specific exception" in safety
     assert "[Recovery](references/recovery.md)" in text
     assert "[Runtime Adapter](references/runtime-adapter.md)" in text
     assert "[Host handoffs](references/host-handoffs.md)" in text

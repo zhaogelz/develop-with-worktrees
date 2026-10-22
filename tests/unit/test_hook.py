@@ -7,8 +7,7 @@ import subprocess
 from pathlib import Path
 
 from conftest import declare_delegated_adapter, git
-from solo_ai.cli import _doctor, _parser
-from solo_ai.command_contract import TOP_LEVEL_COMMANDS
+from solo_ai.cli import _doctor
 from solo_ai.config import CommandSpec
 from solo_ai.lifecycle import (
     abandon,
@@ -17,7 +16,6 @@ from solo_ai.lifecycle import (
     handoff,
     initialize,
     refresh_root_context,
-    resume_in_place,
     start,
 )
 from solo_ai.repo import GitRepo
@@ -88,60 +86,6 @@ def _initialized(path: Path, *, slots: int = 1) -> GitRepo:
         lambda state: state.update(schema_version=LEGACY_STATE_SCHEMA)
     )
     return repo
-
-
-def test_dww_subcommand_accepts_single_double_and_unquoted_paths(
-    git_repo: Path,
-) -> None:
-    for quote in ("", "'", '"'):
-        runner = f"{quote}{RUNNER_PATH}{quote}"
-        repo_value = f"{quote}{git_repo}{quote}"
-        command = f"uv run --script {runner} --repo {repo_value} --json status"
-        assert HOOK._dww_subcommand(command, git_repo) == "status"
-
-
-def test_dww_subcommand_accepts_repo_equals_and_read_only_help(
-    git_repo: Path,
-) -> None:
-    command = f"uv run --script '{RUNNER_PATH}' --json --repo='{git_repo}' --help"
-    assert HOOK._dww_subcommand(command, git_repo) == "help"
-
-
-def test_dww_subcommand_rejects_fake_runner_and_argument_text(
-    git_repo: Path,
-) -> None:
-    fake = git_repo / "dww.py"
-    assert (
-        HOOK._dww_subcommand(
-            f"uv run --script '{fake}' --repo '{git_repo}' status", git_repo
-        )
-        is None
-    )
-    assert (
-        HOOK._dww_subcommand(
-            f"uv run --script '{RUNNER_PATH}' --repo '{git_repo}' --name choose",
-            git_repo,
-        )
-        is None
-    )
-
-
-def test_dww_parse_error_does_not_repeat_repository_choice_prompt(
-    git_repo: Path,
-) -> None:
-    command = f"uv run --script '{RUNNER_PATH}' --repo '{git_repo}' --unknown"
-    result = HOOK.decide(_payload(git_repo, tool="Bash", command=command))
-    assert result is not None
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "invocation could not be verified" in reason
-    assert "three-choice" not in reason
-
-    valid_start = (
-        f"uv run --script '{RUNNER_PATH}' --repo '{git_repo}' start --name test"
-    )
-    choice = HOOK.decide(_payload(git_repo, tool="Bash", command=valid_start))
-    assert choice is not None
-    assert "three-choice" in choice["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_doctor_describes_stable_hook_trust_without_repeated_user_work(
@@ -313,14 +257,6 @@ def test_hook_steps_aside_only_for_an_approved_delegated_adapter(
     assert HOOK.decide(_payload(git_repo, tool="apply_patch")) is None
 
 
-def test_hook_recognizes_local_orchestration_commands_in_a_managed_repository(
-    git_repo: Path,
-) -> None:
-    _initialized(git_repo)
-    command = f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" orchestrate status'
-    assert HOOK.decide(_payload(git_repo, tool="Bash", command=command)) is None
-
-
 def test_hook_mature_workflow_precedes_current_task_choice(git_repo: Path) -> None:
     repo = GitRepo(git_repo)
     choose(
@@ -409,88 +345,6 @@ def test_hook_session_start_reports_current_task_without_reasking(
     assert "此仓库怎么修改？" not in message
 
 
-def test_hook_denies_unadopted_write_and_permits_strict_read(git_repo: Path) -> None:
-    write = HOOK.decide(_payload(git_repo, tool="Bash", command="git add README.md"))
-    read = HOOK.decide(_payload(git_repo, tool="Bash", command="git status --short"))
-    compound_read_then_write = HOOK.decide(
-        _payload(git_repo, tool="Bash", command="git status && Remove-Item README.md")
-    )
-    alias_like = HOOK.decide(
-        _payload(git_repo, tool="Bash", command="git statusx --short")
-    )
-    assert write["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert read is None
-    assert (
-        compound_read_then_write["hookSpecificOutput"]["permissionDecision"] == "deny"
-    )
-    assert alias_like["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_hook_allows_only_clean_primary_main_exact_origin_push(git_repo: Path) -> None:
-    repo = _initialized(git_repo)
-    head = repo.head(git_repo)
-    dry_run = f"git push --dry-run origin {head}:refs/heads/main"
-    publish = f"git push origin {head}:refs/heads/main"
-    assert HOOK.decide(_payload(git_repo, tool="Bash", command=dry_run)) is None
-    assert HOOK.decide(_payload(git_repo, tool="Bash", command=publish)) is None
-
-    rejected = (
-        f"git push --dry-run --force origin {head}:refs/heads/main",
-        f"git push --dry-run origin {head}:refs/heads/other",
-        f"git push --force origin {head}:refs/heads/main",
-        f"git push origin +{head}:refs/heads/main",
-        f"git push backup {head}:refs/heads/main",
-        f"git push origin {head}:refs/heads/other",
-        f"git push origin {head}:refs/tags/release",
-        "git push origin :refs/heads/main",
-        f"git push --mirror origin {head}:refs/heads/main",
-        f"git push origin {head}:refs/heads/main; git status",
-        f"git push\norigin {head}:refs/heads/main",
-        f"C:/fake/git push origin {head}:refs/heads/main",
-        f"git push origin {head}:refs/heads/main\x00",
-        f"git push origin {'0' * 40}:refs/heads/main",
-    )
-    for command in rejected:
-        result = HOOK.decide(_payload(git_repo, tool="Bash", command=command))
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    dirty = git_repo / "untracked.txt"
-    dirty.write_text("keep me\n", encoding="utf-8")
-    result = HOOK.decide(_payload(git_repo, tool="Bash", command=dry_run))
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-    dirty.unlink()
-
-    linked = git_repo.parent / "linked-worktree"
-    git(git_repo, "worktree", "add", "--detach", str(linked), head)
-    result = HOOK.decide(_payload(linked, tool="Bash", command=dry_run))
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    git(git_repo, "switch", "-c", "other")
-    result = HOOK.decide(_payload(git_repo, tool="Bash", command=dry_run))
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-    git(git_repo, "switch", "--detach", head)
-    result = HOOK.decide(_payload(git_repo, tool="Bash", command=dry_run))
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_hook_rejects_origin_push_when_git_identity_query_fails(
-    git_repo: Path, monkeypatch
-) -> None:
-    repo = _initialized(git_repo)
-    head = repo.head(git_repo)
-    real_run_git = HOOK._run_git
-
-    def fail_status(cwd: str, *args: str) -> str | None:
-        if args == ("status", "--porcelain"):
-            return None
-        return real_run_git(cwd, *args)
-
-    monkeypatch.setattr(HOOK, "_run_git", fail_status)
-    command = f"git push --dry-run origin {head}:refs/heads/main"
-    result = HOOK.decide(_payload(git_repo, tool="Bash", command=command))
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
 def test_hook_allows_only_the_session_that_chose_current_task(git_repo: Path) -> None:
     repo = GitRepo(git_repo)
     choice = choose(
@@ -537,30 +391,12 @@ def test_hook_allows_only_the_session_that_chose_current_task(git_repo: Path) ->
     )
 
 
-def test_hook_allows_choose_as_the_only_unadopted_write_entrypoint(
-    git_repo: Path,
-) -> None:
-    allowed = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            command=(
-                f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
-                "choose --mode current-task --session session-a"
-            ),
-        )
-    )
-    assert allowed is None
-
-
 def test_hook_long_term_current_directory_choice_steps_aside(git_repo: Path) -> None:
     repo = GitRepo(git_repo)
     choose(repo, mode="current-repository", slots=3, commands=None)
 
     result = HOOK.decide(_payload(git_repo, tool="apply_patch"))
-    assert result is not None
-    output = result["hookSpecificOutput"]
-    assert "Do not initialize" in output["additionalContext"]
+    assert result is None
     assert not (git_repo / ".solo-ai").exists()
 
 
@@ -734,7 +570,8 @@ def test_hook_requires_one_root_refresh_after_an_actual_session_recovery(
             ),
         )
     )
-    assert wrong_refresh["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert wrong_refresh is None
+    # 终端命令由 CLI 自身核对授权，Hook 不再解析 runner。
 
     refresh_root_context(repo, task_id=task["id"], lease=task["lease"])
     assert StateStore(repo).root_context_refresh_required(task["id"]) is None
@@ -1274,7 +1111,7 @@ def test_hook_keeps_codex_home_git_content_and_nested_repositories_protected(
         assert expected in denied["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-def test_hook_allows_only_bound_in_place_session_and_quarantines_mismatch(
+def test_hook_denies_only_the_foreign_edit_without_quarantining_owner(
     git_repo: Path,
 ) -> None:
     repo = _initialized(git_repo)
@@ -1285,232 +1122,9 @@ def test_hook_allows_only_bound_in_place_session_and_quarantines_mismatch(
     )
     denied = HOOK.decide(_payload(git_repo, tool="apply_patch", session="session-b"))
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert StateStore(repo).task(task["id"])["status"] == "quarantined"
-
-    resumed = resume_in_place(
-        repo,
-        task_id=task["id"],
-        session_id="session-c",
-        confirm=f"{task['id']}:main:{task['expected_head']}",
-    )
-    assert resumed["status"] == "active"
-    assert (
-        HOOK.decide(_payload(git_repo, tool="apply_patch", session="session-c")) is None
-    )
-
-
-def test_hook_rejects_raw_git_state_changes_in_bound_in_place_task(
-    git_repo: Path,
-) -> None:
-    repo = _initialized(git_repo)
-    task = start(repo, name="current state", in_place=True, session_id="session-a")
-
-    for status in ("active", "ready"):
-        StateStore(repo).update_task(task["id"], status=status)
-        for command in (
-            "git add .",
-            "git commit -m bypass",
-            "git switch other",
-            "git reset --hard",
-            "git clean -fd",
-            "cmd /c git commit -m bypass",
-            'pwsh -Command "git commit -m bypass"',
-        ):
-            denied = HOOK.decide(
-                _payload(git_repo, tool="Bash", command=command, session="session-a")
-            )
-            assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_hook_allows_bound_dww_finish_after_ready(git_repo: Path) -> None:
-    repo = _initialized(git_repo)
-    task = start(
-        repo, name="ready current state", in_place=True, session_id="session-a"
-    )
-    StateStore(repo).update_task(task["id"], status="ready")
-
-    allowed = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            session="session-a",
-            command=f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" finish --task {task["id"]} --lease private',
-        )
-    )
-    assert allowed is None
-
-
-def test_hook_allows_explicit_resume_after_a_stalled_codex_task(
-    git_repo: Path,
-) -> None:
-    repo = _initialized(git_repo)
-    task = start(repo, name="stalled current state", in_place=True, session_id="old")
-
-    allowed = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            session="new",
-            command=(
-                f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
-                f"resume-in-place --task {task['id']} "
-                f"--confirm {task['id']}:main:{task['expected_head']} --session new"
-            ),
-        )
-    )
-
-    assert allowed is None
     assert StateStore(repo).task(task["id"])["status"] == "active"
+    assert HOOK.decide(_payload(git_repo, tool="apply_patch", session="session-a")) is None
 
-
-def test_hook_posttooluse_quarantines_clean_head_drift(git_repo: Path) -> None:
-    repo = _initialized(git_repo)
-    task = start(repo, name="current state", in_place=True, session_id="session-a")
-    git(git_repo, "commit", "--allow-empty", "-m", "external head drift")
-
-    result = HOOK.decide(
-        {
-            **_payload(git_repo, tool="apply_patch", session="session-a"),
-            "hook_event_name": "PostToolUse",
-        }
-    )
-    assert result["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
-    assert StateStore(repo).task(task["id"])["status"] == "quarantined"
-
-
-def test_hook_allows_only_a_real_dww_runner_for_this_worktree(git_repo: Path) -> None:
-    _initialized(git_repo)
-    valid = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            command=f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" start --name task',
-        )
-    )
-    invalid = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            command=f'python x/dww.py --repo "{git_repo}" start --name task',
-        )
-    )
-    assert valid is None
-    assert invalid["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_hook_accepts_runner_targeting_same_common_dir_task_from_session_checkout(
-    git_repo: Path, tmp_path: Path
-) -> None:
-    repo = _initialized(git_repo)
-    task = start(
-        repo,
-        name="runner target from session checkout",
-        host_origin={"kind": "codex", "thread_id": "task-owner"},
-    )
-    worktree = Path(task["worktree"])
-
-    for command in (
-        f'uv run --script "{RUNNER_PATH}" --repo "{worktree}" status',
-        f"uv run --script '{RUNNER_PATH}' --repo={worktree} status",
-    ):
-        assert (
-            HOOK.decide(
-                _payload(
-                    git_repo,
-                    tool="Bash",
-                    command=command,
-                    session="task-owner",
-                )
-            )
-            is None
-        )
-
-    mutation = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            command=(
-                f'uv run --script "{RUNNER_PATH}" --repo "{worktree}" '
-                f"anchor show --task {task['id']}"
-            ),
-            session="other-session",
-        )
-    )
-    assert mutation is not None
-    assert mutation["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    foreign = tmp_path / "foreign-repository"
-    foreign.mkdir()
-    git(foreign, "init")
-    denied = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            command=f'uv run --script "{RUNNER_PATH}" --repo "{foreign}" status',
-            session="task-owner",
-        )
-    )
-    assert denied is not None
-    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_dww_runner_parser_requires_literal_shape_and_supports_power_shell_quotes(
-    git_repo: Path, tmp_path: Path
-) -> None:
-    spaced = tmp_path / "中文 仓库"
-    spaced.mkdir()
-    git(spaced, "init")
-
-    assert (
-        HOOK._dww_subcommand(
-            f"uv run --script {RUNNER_PATH} --repo='{spaced}' status", spaced
-        )
-        == "status"
-    )
-    assert (
-        HOOK._dww_subcommand(
-            f'uv run --script "{RUNNER_PATH}" --repo "{spaced}" --json version',
-            spaced,
-        )
-        == "version"
-    )
-    assert (
-        HOOK._dww_subcommand(
-            f"uv run --script {RUNNER_PATH} --repo {git_repo} status", git_repo
-        )
-        == "status"
-    )
-
-    for command in (
-        f'python x/dww.py --repo "{git_repo}" status',
-        f'Write-Output "{RUNNER_PATH}" --repo "{git_repo}" status',
-        (
-            f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
-            "status; Get-Content README.md"
-        ),
-        f'uv run --script "{RUNNER_PATH}" --repo "$env:DWW_REPO" status',
-        f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}',
-        f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" status --repo "{spaced}"',
-        f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" status --repo={spaced}',
-    ):
-        assert HOOK._dww_subcommand(command, git_repo) is None
-
-
-def test_hook_dirty_base_alert_is_visible_in_doctor(git_repo: Path) -> None:
-    repo = _initialized(git_repo)
-    (git_repo / "escaped.txt").write_text("preserve\n", encoding="utf-8")
-    HOOK.decide(
-        {
-            **_payload(git_repo, tool="apply_patch"),
-            "hook_event_name": "PostToolUse",
-        }
-    )
-
-    alerts = _doctor(repo)["guard_alerts"]
-    assert alerts[-1]["kind"] == "unauthorized-dirty-base"
-    assert alerts[-1]["paths"] == ["escaped.txt"]
-    assert "lease" not in json.dumps(alerts)
-    assert "session" not in json.dumps(alerts)
 
 
 def test_hook_script_emits_official_pretooluse_deny_protocol(git_repo: Path) -> None:
@@ -1537,269 +1151,68 @@ def test_hook_script_emits_official_pretooluse_deny_protocol(git_repo: Path) -> 
     assert output["permissionDecisionReason"]
 
 
-def test_read_only_parser_accepts_quoted_search_text_and_limited_pipeline() -> None:
-    assert HOOK._strict_read_only_bash("rg --no-config -n 'anchor|scope' README.md")
-    assert HOOK._strict_read_only_bash(
-        "Get-Content -LiteralPath 'README.md' -Encoding UTF8 | Select-Object -First 40"
-    )
-    assert HOOK._strict_read_only_bash("rg --no-config -n 'it''s|scope' README.md")
-    assert HOOK._strict_read_only_bash(
-        "rg --no-config -n -A 3 'anchor|scope' README.md"
-    )
-    assert HOOK._strict_read_only_bash("git status --short | Select-Object -First 20")
-    assert HOOK._strict_read_only_bash(
-        "git diff --stat | Select-Object -Skip 2 -Last 20"
-    )
-    assert HOOK._strict_read_only_bash(
-        "Get-ChildItem -LiteralPath . -Recurse -File | Select-Object -First 20"
-    )
 
-
-def test_read_only_parser_accepts_common_repository_enumeration() -> None:
-    assert HOOK._strict_read_only_bash("Get-Location")
-    assert HOOK._strict_read_only_bash("Get-ChildItem -Name")
-    assert HOOK._strict_read_only_bash("Get-ChildItem -LiteralPath docs -Name")
-    assert HOOK._strict_read_only_bash("Get-ChildItem -LiteralPath . -Recurse -File")
-    assert HOOK._strict_read_only_bash(
-        "Get-Content -LiteralPath 'README.md','AGENTS.md' -Encoding UTF8"
-    )
-    assert HOOK._strict_read_only_bash("git ls-files")
-    assert HOOK._strict_read_only_bash("git ls-files --cached --full-name")
-    assert HOOK._strict_read_only_bash("git worktree list --porcelain")
-    assert HOOK._strict_read_only_bash("Get-FileHash -LiteralPath README.md")
-    assert HOOK._strict_read_only_bash("Get-FileHash -Path README.md -Algorithm SHA256")
-
-
-def test_read_only_parser_limits_remote_head_query_to_origin_main() -> None:
-    assert HOOK._strict_read_only_bash("git ls-remote origin refs/heads/main")
-    for command in (
-        "git ls-remote origin",
-        "git ls-remote backup refs/heads/main",
-        "git ls-remote https://example.com/repo.git refs/heads/main",
-        "C:/fake/git ls-remote origin refs/heads/main",
-        "git ls-remote origin refs/heads/other",
-        "git ls-remote --upload-pack=helper origin refs/heads/main",
-        "git -c protocol.ext.allow=always ls-remote origin refs/heads/main",
-        "git ls-remote origin refs/heads/main; git push origin main",
-    ):
-        assert not HOOK._strict_read_only_bash(command)
-
-
-def test_read_only_parser_rejects_writes_and_external_rg_preprocessors() -> None:
-    assert not HOOK._strict_read_only_bash(
-        "Get-Content -LiteralPath README.md | Set-Content copy.md"
-    )
-    assert not HOOK._strict_read_only_bash("rg --pre cat -n anchor README.md")
-    assert not HOOK._strict_read_only_bash("git branch -D old-branch")
-    assert not HOOK._strict_read_only_bash("Get-Content README.md; Set-Content copy.md")
-    assert not HOOK._strict_read_only_bash("git diff --output=artifact.patch")
-    assert not HOOK._strict_read_only_bash("git show --ext-diff HEAD")
-    assert not HOOK._strict_read_only_bash("Get-Content -Path -Force")
-
-
-def test_read_only_parser_rejects_newline_command_chaining(git_repo: Path) -> None:
-    command = "rg --no-config needle README.md\nSet-Content escaped.txt value"
-
-    assert not HOOK._strict_read_only_bash(command)
-    result = HOOK.decide(_payload(git_repo, tool="Bash", command=command))
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_read_only_parser_keeps_quoted_pipe_as_search_text() -> None:
-    assert HOOK._strict_read_only_bash("rg --no-config -F '|' README.md")
-    assert HOOK._strict_read_only_bash("rg --no-config -- '--pre' README.md")
-    assert HOOK._strict_read_only_bash("rg --no-config -e '--pre' README.md")
-    assert HOOK._strict_read_only_bash("git status | Select-Object -First 1")
-
-
-def test_read_only_parser_requires_rg_config_isolation_and_known_options() -> None:
-    assert not HOOK._strict_read_only_bash("rg -n 'anchor|scope' README.md")
-    assert not HOOK._strict_read_only_bash(
-        "rg --no-config --unrecognized-option needle README.md"
-    )
-    assert not HOOK._strict_read_only_bash(
-        "rg --no-config --pre helper needle README.md"
-    )
-    assert "--no-config" in HOOK._read_only_rejection_reason(
-        "rg -n 'anchor|scope' README.md"
-    )
-
-
-def test_read_only_parser_limits_content_and_select_arguments() -> None:
-    assert not HOOK._strict_read_only_bash("Get-Content README.md CHANGELOG.md")
-    assert not HOOK._strict_read_only_bash(
-        "Get-Content -LiteralPath README.md -Delimiter ,"
-    )
-    assert not HOOK._strict_read_only_bash(
-        "Get-Content README.md | Select-Object -First 1_0"
-    )
-    assert not HOOK._strict_read_only_bash("Get-ChildItem -Recurse")
-    assert not HOOK._strict_read_only_bash("Get-Content -Path 'README.md','AGENTS.md'")
-    assert not HOOK._strict_read_only_bash(
-        "Get-Content -LiteralPath 'README.md',,'AGENTS.md'"
-    )
-    assert not HOOK._strict_read_only_bash(
-        "git diff --output=patch.txt | Select-Object -First 20"
-    )
-    assert not HOOK._strict_read_only_bash(
-        "git diff --ext-diff | Select-Object -First 20"
-    )
-    assert not HOOK._strict_read_only_bash(
-        "git status | Select-Object -First 20 | Set-Content out.txt"
-    )
-    assert not HOOK._strict_read_only_bash(
-        "Get-ChildItem -LiteralPath . -Recurse -File | Select-Object -First {20}"
-    )
-    assert not HOOK._strict_read_only_bash("git ls-files --with-tree=HEAD")
-    assert not HOOK._strict_read_only_bash("Get-FileHash -Recurse README.md")
-    assert not HOOK._strict_read_only_bash(
-        "Get-FileHash -Algorithm SHA256 README.md other.md"
-    )
-
-
-def test_maintenance_powershell_identity_rejects_a_sibling_executable(
-    tmp_path: Path, monkeypatch
-) -> None:
-    program_files = tmp_path / "Program Files"
-    trusted = program_files / "PowerShell" / "7" / "pwsh.exe"
-    trusted.parent.mkdir(parents=True)
-    trusted.write_text("official test marker\n", encoding="utf-8")
-    fake = trusted.parent / "pwsh-copy.exe"
-    fake.write_text("official test marker\n", encoding="utf-8")
-    monkeypatch.setenv("ProgramFiles", str(program_files))
-    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
-
-    assert HOOK._trusted_powershell_cli(str(trusted))
-    assert not HOOK._trusted_powershell_cli(str(fake))
-
-
-def test_plugin_maintenance_allows_only_owned_dww_commands(
+def test_hook_ignores_terminal_and_post_events_without_scanning_dirty_content(
     git_repo: Path, monkeypatch
 ) -> None:
-    """插件维护不能借只读解析器或任意任务扩大为通用 shell 权限。"""
     repo = _initialized(git_repo)
-    task = start(
-        repo,
-        name="plugin maintenance",
-        host_origin={"kind": "codex", "thread_id": "maintenance-owner"},
-    )
-    codex = git_repo / "official-codex.exe"
-    codex.write_text("official test marker\n", encoding="utf-8")
-    pwsh = git_repo / "official-pwsh.exe"
-    pwsh.write_text("official test marker\n", encoding="utf-8")
-    monkeypatch.setattr(
-        HOOK,
-        "_trusted_codex_cli",
-        lambda value: Path(value).resolve() == codex.resolve(),
-    )
-    monkeypatch.setattr(
-        HOOK,
-        "_trusted_powershell_cli",
-        lambda value: Path(value).resolve() == pwsh.resolve(),
-    )
-    task_worktree = Path(task["worktree"])
+    dirty = git_repo / "existing.txt"
+    dirty.write_text("preserve user content\n", encoding="utf-8")
+    before = git(git_repo, "status", "--porcelain")
 
-    def decide(command: str, *, session: str = "maintenance-owner") -> dict | None:
-        return HOOK.decide(
-            _payload(task_worktree, tool="Bash", command=command, session=session)
-        )
+    def unexpected_query(*args, **kwargs):
+        raise AssertionError("non-edit events must not inspect repository state")
 
-    quoted = f'& "{codex}"'
-    assert decide(f"{quoted} plugin marketplace list --json") is None
-    assert decide(f"{quoted} plugin list --marketplace dww-stable-local --json") is None
-    assert (
-        decide(f"{quoted} plugin add develop-with-worktrees@dww-stable-local --json")
-        is None
-    )
-
-    source_commit = git(git_repo, "rev-parse", "HEAD")
-    script = HOOK._maintenance_script_path()
-    release = (
-        f'& "{pwsh}" -NoProfile -File "{script}" -Mode Install '
-        f'-SourceRepo "{git_repo}" -SourceCommit {source_commit} '
-        f'-CodexPath "{codex}"'
-    )
-    assert decide(release) is None
-    assert decide(release.replace("-Mode Install", "-Mode RecoveryInstall")) is None
-    denied_recovery = decide(
-        release.replace("-Mode Install", "-Mode RecoveryInstall"),
-        session="other-session",
-    )
-    assert denied_recovery["hookSpecificOutput"]["permissionDecision"] == "deny"
-
+    monkeypatch.setattr(HOOK, "git_root", unexpected_query)
     for command in (
-        f'& "{git_repo / "fake-codex.exe"}" plugin marketplace list --json',
-        f"{quoted} plugin add another-plugin@dww-stable-local --json",
-        f"{quoted} plugin add develop-with-worktrees@other-market --json",
-        f"{quoted} plugin marketplace add C:\\untrusted --json",
-        f"{quoted} plugin marketplace remove dww-stable-local --json",
-        f"{quoted} plugin list --config injected --json",
-        f"{quoted} plugin marketplace list --json; Remove-Item README.md",
-        release.replace(str(pwsh), str(git_repo / "fake-pwsh.exe")),
-        release.replace(str(script), str(git_repo / "fake-maintain-dww-plugin.ps1")),
-        release.replace(str(codex), str(git_repo / "fake-codex.exe")),
-        release.replace(
-            f'-SourceRepo "{git_repo}"',
-            f'-SourceRepo "{git_repo / ".worktrees"}"',
-        ),
-        release.replace("-CodexPath", "-MigrateMarketplace -CodexPath"),
-        release + " -MarketplaceRoot C:\\untrusted",
-        release + "; Remove-Item README.md",
+        "Get-Content resume.txt; Get-Content notes.txt",
+        "rg text . | Select-Object -First 10",
+        "git status --short\nGet-ChildItem",
+        "uv run pytest -q tests/unit/test_hook.py",
+        "python script_that_can_write.py",
+        "git push --force origin main",
+        "codex plugin add example",
     ):
-        denied = decide(command)
-        assert denied is not None, command
-        assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert (
-            "plugin maintenance command is blocked"
-            in denied["hookSpecificOutput"]["permissionDecisionReason"]
-        )
-
-    assert (
-        decide(f"{quoted} plugin marketplace list --json", session="other-session")
-        is None
-    )
-    not_owner_release = decide(release, session="other-session")
-    assert not_owner_release is not None
-    assert not_owner_release["hookSpecificOutput"]["permissionDecision"] == "deny"
-    abandon(repo, task_id=task["id"], lease=task["lease"], confirm=task["id"])
-    assert decide(f"{quoted} plugin list --marketplace dww-stable-local --json") is None
-    denied_install = decide(
-        f"{quoted} plugin add develop-with-worktrees@dww-stable-local --json"
-    )
-    assert denied_install is not None
-    assert denied_install["hookSpecificOutput"]["permissionDecision"] == "deny"
+        for event in ("PreToolUse", "PostToolUse"):
+            for _ in range(2):
+                assert HOOK.decide({
+                    **_payload(git_repo, tool="Bash", command=command),
+                    "hook_event_name": event,
+                }) is None
+    assert HOOK.decide({
+        **_payload(git_repo, tool="apply_patch"),
+        "hook_event_name": "PostToolUse",
+    }) is None
+    assert git(git_repo, "status", "--porcelain") == before
+    assert dirty.read_text(encoding="utf-8") == "preserve user content\n"
+    assert HOOK.read_guard_state(git_repo)[0].get("alerts", []) == []
 
 
-def test_hook_allows_every_contract_command_and_rejects_a_spoofed_runner(
-    git_repo: Path,
-) -> None:
+def test_hook_definition_matches_only_native_edit_events() -> None:
+    hooks = json.loads(HOOK_DEFINITION_PATH.read_text(encoding="utf-8"))["hooks"]
+    assert set(hooks) == {"SessionStart", "PreToolUse"}
+    assert hooks["PreToolUse"][0]["matcher"] == "^apply_patch$"
+
+
+def test_hook_does_not_invent_edit_write_target_fields(git_repo: Path) -> None:
     _initialized(git_repo)
-    for command_name in TOP_LEVEL_COMMANDS:
-        allowed = HOOK.decide(
-            _payload(
-                git_repo,
-                tool="Bash",
-                command=(
-                    f'uv run --script "{RUNNER_PATH}" --repo "{git_repo}" '
-                    f"{command_name}"
-                ),
-            )
-        )
-        assert allowed is None, command_name
-    denied = HOOK.decide(
-        _payload(
-            git_repo,
-            tool="Bash",
-            command=(f'python x/dww.py --repo "{git_repo}" runtime'),
-        )
-    )
-
-    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    for tool in ("Edit", "Write"):
+        for tool_input in ({}, {"file_path": "README.md"}, {"path": "README.md"},
+                           {"file_path": "README.md", "path": "other.md"}):
+            result = HOOK.decide({
+                **_payload(git_repo, tool=tool), "tool_input": tool_input,
+            })
+            assert result is None
 
 
-def test_cli_and_hook_share_the_same_top_level_command_contract() -> None:
-    parser = _parser()
-    command_action = next(
-        action for action in parser._actions if action.dest == "command"
-    )
-    assert frozenset(command_action.choices) == TOP_LEVEL_COMMANDS
+def test_hook_wrong_directory_edit_points_to_owner_worktree(git_repo: Path) -> None:
+    repo = _initialized(git_repo, slots=2)
+    owner = start(repo, name="owner", host_origin={"kind": "codex", "thread_id": "a"})
+    other = start(repo, name="other", host_origin={"kind": "codex", "thread_id": "b"})
+    for directory in (git_repo, Path(other["worktree"])):
+        result = HOOK.decide(_payload(directory, tool="apply_patch", session="a"))
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert owner["worktree"] in reason
+        assert "ask the user" not in reason
+        assert StateStore(repo).task(owner["id"])["status"] == "active"
+    assert HOOK.decide(_payload(Path(owner["worktree"]), tool="apply_patch", session="a")) is None

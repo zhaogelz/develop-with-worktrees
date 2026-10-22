@@ -1,5 +1,5 @@
 {
-  "description": "Codex guardrails for develop-with-worktrees. On supported local tool paths, PreToolUse denies protected base-worktree writes before they run; the lifecycle CLI supplies task authorization.",
+  "description": "Codex edit-target guard for develop-with-worktrees. Checks explicit native edit paths and task ownership; terminal commands and filesystem permissions belong to the host runtime.",
   "hooks": {
     "SessionStart": [
       {
@@ -17,7 +17,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^(Bash|apply_patch|Edit|Write)$",
+        "matcher": "^apply_patch$",
         "hooks": [
           {
             "type": "command",
@@ -25,20 +25,6 @@
             "commandWindows": "$env:Path = \"$env:USERPROFILE\\.local\\bin;$env:Path\"; $env:PATHEXT = \".EXE;$env:PATHEXT\"; uv run --script \"$env:PLUGIN_ROOT/hooks/worktree_guard.py\"",
             "timeout": 15,
             "statusMessage": "Checking worktree policy"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "^(Bash|apply_patch|Edit|Write)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run --script \"$PLUGIN_ROOT/hooks/worktree_guard.py\"",
-            "commandWindows": "$env:Path = \"$env:USERPROFILE\\.local\\bin;$env:Path\"; $env:PATHEXT = \".EXE;$env:PATHEXT\"; uv run --script \"$env:PLUGIN_ROOT/hooks/worktree_guard.py\"",
-            "timeout": 15,
-            "statusMessage": "Reviewing worktree policy"
           }
         ]
       }

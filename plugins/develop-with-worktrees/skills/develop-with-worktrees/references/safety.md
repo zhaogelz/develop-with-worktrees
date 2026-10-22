@@ -16,19 +16,16 @@ the same task and its work; it never substitutes a guessed session identity.
 
 ## Hook trust and scope
 
-A trusted plugin Hook may deny supported Codex local writes to a protected base
-worktree before they happen. It recognizes a limited read-only command subset and
-fails closed for unknown or compound supported writes. The Hook derives repository
-scope from the current working directory and verified Git facts. For native
-`apply_patch`, it also inspects declared targets before an outside-repository
-session can leave routing: a managed target still requires its recorded owner.
-An unrelated repository cannot supply authorization for that target. It does not claim
-to sandbox deliberate cross-repository or specialized bypass paths.
+A trusted plugin Hook checks explicit native `apply_patch` targets before the
+edit runs. It also supplies lightweight SessionStart routing and task-recovery
+context. It does not subscribe to Bash or PostToolUse, classify terminal
+commands, or scan a dirty base after a read. Reading, searching, and filtering
+remain available regardless of existing changes; unknown content remains the
+lifecycle's responsibility and is never automatically adopted or cleaned.
 
-The read-only subset includes literal Get-Content path lists, directory recursion
-with an explicit path, and one numeric Select-Object pipeline after supported
-content, listing, status, or diff queries. It still rejects dynamic expressions,
-external ripgrep configuration, output-writing Git options, and shell composition.
+The Hook is an aid against editing the wrong directory. Scripts and terminal
+commands can write files without this Hook inspecting their side effects.
+Enforced filesystem write permissions belong to the host runtime and sandbox.
 
 `hooks/hooks.json` is the stable trust contract. Ordinary plugin, skill, and
 guard-script changes do not alter it. A first install or intentional definition
@@ -44,26 +41,23 @@ anchor, or release a slot.
 For an isolated-task write, the Hook requires the event's exact Codex session
 identifier to equal the task's recorded `host_origin.thread_id`. An absent,
 malformed, or different owner fails closed before the supported write runs.
-Hook `cwd` is the Codex session checkout, not a per-command exec workdir. For a
-DWW runner command, the Hook therefore parses the literal `uv run --script`
-shape and uses its `--repo` target only after verifying the installed runner and
-the same Git common directory. A target task then goes through the existing
-owner, root-refresh, branch, HEAD, and directory-identity checks; a foreign
-repository, fake runner, shell control syntax, duplicate/missing repo option,
-or malformed quoting remains denied.
-For `apply_patch`, the current Codex Hook contract carries the patch in
-`tool_input.command`. DWW also recognizes its older explicit `patch` field and
-direct-string form for compatibility, but rejects missing, malformed, or
+For `apply_patch`, the current verified Codex Hook contract carries the patch
+in `tool_input.command`. DWW also recognizes its older explicit `patch` field
+and direct-string form for compatibility, but rejects missing, malformed, or
 conflicting forms. It resolves every declared Add, Update, Delete, and Move
 source/destination path from the event working directory first: all repository
-targets must resolve to one active task in the same Git common directory. This
-permits an owner's absolute-path patch from the base worktree and rejects a
-cross-task or mixed-target patch as a whole. `Bash`, `Edit`, and `Write` receive
-the same owner check for the current working directory, but DWW does not infer
-arbitrary shell side effects or invent target fields the host did not provide. A
-host that omits a reliable Hook event, session identifier, or complete patch
-remains outside this protection and must be reported as such in native-host
-verification.
+targets must resolve to one active task in the same Git common directory.
+This permits an owner's absolute-path patch from the base worktree and rejects
+a cross-task or mixed-target patch as a whole. A wrong-directory denial points
+to the current session's verified task worktree, or tells it to run Start when
+no unique owner task exists. It rejects only that edit; a denied foreign edit
+does not quarantine the owner's task or require repeated user authorization.
+
+Only `apply_patch` currently has a verified complete target protocol here.
+`Edit` and `Write` are not subscribed: DWW does not invent a `file_path` or
+other field and authorize an edit from its checkout alone. Hosts or tools
+without a reliable event, session identifier, and complete target set remain
+outside this protection and must be reported as such in native-host verification.
 
 For `apply_patch` only, a verified current-session delivery artifact under
 `CODEX_HOME/visualizations/YYYY/MM/DD/<session-id>/` may be written even when
@@ -86,35 +80,20 @@ metadata path, foreign worktree, or mixed patch never inherits task permission.
 For an active isolated task with a bound root, the supported trusted
 `SessionStart` path records only a small “refresh required” marker. Before a
 supported write, the Hook requires `anchor refresh-root` to read the current task
-and complete root once; ordinary read-only queries and the trusted DWW `anchor`
-command remain available. This check is scoped to observed Hook events and tools,
+and complete root once; terminal queries and the DWW `anchor` command remain
+available without Hook parsing. CLI operations still check their own task identity. This check is scoped to observed Hook events and tools,
 not an operating-system sandbox. The CLI binding and version gates remain the
 fallback when the Hook is not trusted or an event/tool is not covered.
 
 ### Restricted local plugin maintenance
 
-The Hook keeps plugin maintenance separate from its ordinary read-only shell
-parser. It permits exact plugin and marketplace queries through an absolute,
-verified Windows Codex CLI even after Finish releases the task. Refreshing
-`develop-with-worktrees` from the fixed local `dww-stable-local` marketplace
-requires exactly one active isolated task owned by the current Codex session.
-A root refresh is still required before that write. It also permits exactly one
-installed-plugin maintenance entry: the formal PowerShell 7 executable,
-`-NoProfile -File`, and the
-`maintain-dww-plugin.ps1` stored beside the currently trusted Hook, followed by
-the fixed `Install`, same-common-dir primary `main` source root, full-commit
-and formal-Codex parameters. The script independently verifies that the source
-commit is exactly `main`. It
-rejects a different executable or script, plugin, marketplace, marketplace
-add/remove, `-MigrateMarketplace`, added or reordered parameters, shell
-composition, and configuration injection. The one-time move from an older
-marketplace source remains a human-only system PowerShell maintenance action;
-ordinary updates do not switch marketplace roots.
-
-Any command that appears to invoke the maintenance script or a Codex plugin
-subcommand but fails that exact contract is denied before the generic isolated
-task write allowance. This keeps a fake executable, fake script, or composed
-command from inheriting ordinary task permission.
+Plugin and marketplace maintenance use the formal host CLI and the installed
+`maintain-dww-plugin.ps1` entry under the user's existing authorization.
+The entry independently verifies its fixed source, primary main commit,
+marketplace layout, and installed package read-back. The Hook neither parses
+these terminal commands nor grants maintenance authority. Source delivery,
+installation, enablement, trust review, and actual host loading remain separate
+observations. Different formal release content requires a new package version.
 
 The stable-market release directory is not an archive. During a package switch
 the script keeps at most one `.previous-release` together with its one
@@ -306,23 +285,20 @@ remote, run a dry-run first, and use an ordinary non-force push. Remote
 divergence stops publication; it does not authorize an automatic pull, rebase,
 merge, deletion, tag, PR, or deployment.
 
-On a trusted Windows Hook, the narrow remote read is
-`git ls-remote origin refs/heads/main`. Publishing uses the current full local
-`main` SHA as `git push --dry-run origin <sha>:refs/heads/main`, followed by the
-same refspec without `--dry-run` after the coordinator checks its result. The
-Hook checks a clean primary `main` worktree and exact HEAD, and rejects force,
-other remotes, branches, and refspecs. It does not record authorization or
-perform the push itself. If local and remote histories have diverged, a reviewed
-local merge source can be prepared through the managed task command documented
-in [native delivery](native-delivery.md), then delivered and checked before
-publication.
+Use an explicit remote and destination ref for the reviewed local commit, for
+example `git push --dry-run origin <sha>:refs/heads/main`, then the same refspec
+without `--dry-run` after checking the result. These are host-owned terminal
+actions; the Hook has no push-specific exception or remote command allowlist.
+If local and remote histories have diverged, preserve the scene and report it.
+A separately authorized local merge source follows [native delivery](native-delivery.md).
 
 ## What DWW does not enforce
 
-DWW provides lifecycle safety, not an operating-system sandbox. A specialized
-path may bypass a Hook, and a project Adapter may deliberately escape the process
-boundary described by its contract. Those limits must stay visible rather than
-being presented as successful containment.
+DWW provides lifecycle checks and a native edit-target aid, not an operating-system
+sandbox. Terminal commands, scripts, and unverified edit protocols are outside
+Hook coverage. The host runtime owns enforced directory write permissions;
+passing a Hook test is not proof that all writes are contained. A project Adapter
+may also escape the process boundary described by its contract.
 
 ## Sensitive scan interpretation
 

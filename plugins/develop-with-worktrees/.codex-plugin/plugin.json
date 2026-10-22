@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Develop with Worktrees",
     "shortDescription": "Safe worktrees and verified task-head batches.",
-    "longDescription": "Plan repository changes without overdesign, route lifecycle ownership, isolate modifying tasks, keep a local task anchor, and carry original task commits through verified local integration without remote side effects. New repositories automatically freeze each full compatible task-head batch; a smaller exact tail freezes only for a recorded cause. Existing repositories retain their recorded lifecycle until migration. Native host task tools own orchestration, and Codex hooks remain optional hardening.",
+    "longDescription": "Plan repository changes without overdesign, route lifecycle ownership, isolate modifying tasks, keep a local task anchor, and carry original task commits through verified local integration without remote side effects. New repositories automatically freeze each full compatible task-head batch; a smaller exact tail freezes only for a recorded cause. Existing repositories retain their recorded lifecycle until migration. Native host task tools own orchestration, and Codex hooks optionally check explicit native patch targets; the host runtime owns filesystem write permissions.",
     "developerName": "develop-with-worktrees contributors",
     "category": "developer-tools",
     "capabilities": [
@@ -23,7 +23,7 @@
       "Session-bound one-task direct-development choice",
       "Local validation and integration gates",
       "Safe local lifecycle cleanup",
-      "Optional Codex write guard"
+      "Optional native patch-target guard"
     ],
     "defaultPrompt": [
       "Use $develop-with-worktrees to plan, route, and safely complete this Git change.",

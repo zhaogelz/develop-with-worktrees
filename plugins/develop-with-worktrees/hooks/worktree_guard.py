@@ -4,10 +4,10 @@
 
 """Codex PreToolUse guard for develop-with-worktrees.
 
-The optional hook is deliberately stdlib-only. It provides a hard PreToolUse
-denial for local Codex tool paths that invoke hooks; lifecycle correctness does
-not depend on it and it is not an operating-system sandbox. State is held under
-the Git common directory, never in user files.
+The optional hook checks explicit native edit targets on supported Codex paths.
+It does not classify terminal commands or inspect their side effects. Lifecycle
+checks and the host filesystem sandbox remain separate responsibilities. State
+is held under the Git common directory, never in user files.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -35,22 +34,10 @@ SKILL_SCRIPTS = (
 if str(SKILL_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SKILL_SCRIPTS))
 
-from solo_ai.command_contract import TOP_LEVEL_COMMANDS
 from solo_ai.delegated import inspect_delegated
 from solo_ai.routing import decide_route, detect_existing_workflows
 
 FINAL_TASK_STATES = {"finished", "abandoned", "candidate-published"}
-READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
-DWW_SUBCOMMANDS = TOP_LEVEL_COMMANDS
-DWW_QUARANTINE_SUBCOMMANDS = {"doctor", "status", "plan", "resume-in-place"}
-DWW_READ_ONLY_SUBCOMMANDS = {
-    "version",
-    "doctor",
-    "route",
-    "status",
-    "plan",
-    "help",
-}
 PATCH_SCOPE_EXTERNAL = "external"
 PATCH_SCOPE_PROTECTED = "protected"
 PATCH_SCOPE_SESSION_ARTIFACT = "session-artifact"
@@ -60,8 +47,6 @@ PATCH_SCOPE_CODEX_HOME = "codex-home-protected"
 PATCH_SCOPE_ARTIFACT_ESCAPE = "artifact-link-escape"
 PATCH_SCOPE_MIXED = "mixed-targets"
 PATCH_SCOPE_FOREIGN_REPOSITORY = "foreign-repository"
-MAINTENANCE_PLUGIN = "develop-with-worktrees"
-MAINTENANCE_MARKETPLACE = "dww-stable-local"
 
 
 def _run_git(cwd: str, *args: str) -> str | None:
@@ -170,39 +155,6 @@ def _with_guard_lock(path: Path, update: Any) -> None:
         shutil.rmtree(lock, ignore_errors=True)
 
 
-def _record_alert(root: Path, *, kind: str, paths: list[str]) -> None:
-    _, path = read_guard_state(root)
-    if path is None:
-        return
-
-    def update(current: dict[str, Any]) -> None:
-        alerts = current.setdefault("alerts", [])
-        alert = {
-            "kind": kind,
-            "worktree": str(root),
-            "paths": paths[:20],
-            "observed_at": int(time.time()),
-        }
-        if not alerts or alerts[-1] != alert:
-            alerts.append(alert)
-        del alerts[:-20]
-
-    _with_guard_lock(path, update)
-
-
-def _quarantine(root: Path, task_id: str, reason: str) -> None:
-    _, path = read_guard_state(root)
-    if path is None:
-        return
-
-    def update(state: dict[str, Any]) -> None:
-        quarantines = state.setdefault("quarantines", {})
-        if isinstance(quarantines, dict):
-            quarantines[task_id] = {"reason": reason, "observed_at": int(time.time())}
-
-    _with_guard_lock(path, update)
-
-
 def _mark_root_context_refresh(root: Path, task_id: str, *, reason: str) -> None:
     """只记录本次恢复需读取的轻量标记，不在 Hook 中读完整方案。"""
 
@@ -220,19 +172,6 @@ def _mark_root_context_refresh(root: Path, task_id: str, *, reason: str) -> None
             }
 
     _with_guard_lock(path, update)
-
-
-def command_from(payload: dict[str, Any]) -> str:
-    tool_input = (
-        payload.get("tool_input")
-        or payload.get("toolInput")
-        or payload.get("input")
-        or {}
-    )
-    if not isinstance(tool_input, dict):
-        return ""
-    value = tool_input.get("command")
-    return value if isinstance(value, str) else ""
 
 
 def patch_from(payload: dict[str, Any]) -> str:
@@ -688,13 +627,6 @@ def _fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _dirty_paths(root: Path) -> list[str]:
-    output = _run_git(str(root), "status", "--porcelain=v1", "--untracked-files=all")
-    if not output:
-        return []
-    return [line[3:] if len(line) > 3 else line for line in output.splitlines()]
-
-
 def preference_disabled(root: Path) -> bool:
     common = common_dir(root)
     if common is None:
@@ -919,866 +851,6 @@ def _is_valid_in_place(
     return True, ""
 
 
-class _ReadToken:
-    """保存只读命令词元及其是否来自引号，避免把字面竖线当作管道。"""
-
-    __slots__ = ("value", "quoted")
-
-    def __init__(self, value: str, quoted: bool = False) -> None:
-        self.value = value
-        self.quoted = quoted
-
-
-def _tokenize_read_only(command: str) -> list[_ReadToken] | None:
-    """只解析一行 PowerShell 文字和一条明确管道，不执行用户输入。"""
-    if "\r" in command or "\n" in command:
-        return None
-    tokens: list[_ReadToken] = []
-    current: list[str] = []
-    quote: str | None = None
-    quoted = False
-    token_started = False
-
-    def flush() -> None:
-        nonlocal current, quoted, token_started
-        if token_started:
-            tokens.append(_ReadToken("".join(current), quoted=quoted))
-        current = []
-        quoted = False
-        token_started = False
-
-    index = 0
-    while index < len(command):
-        char = command[index]
-        if quote == "'":
-            if char == "'":
-                if index + 1 < len(command) and command[index + 1] == "'":
-                    current.append("'")
-                    index += 2
-                    continue
-                quote = None
-            else:
-                current.append(char)
-            index += 1
-            continue
-        if quote == '"':
-            if char in {"$", "\x60"}:
-                return None
-            if char == '"':
-                quote = None
-            else:
-                current.append(char)
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            quote = char
-            quoted = True
-            token_started = True
-            index += 1
-            continue
-        if char.isspace():
-            flush()
-            index += 1
-            continue
-        if char == "|":
-            flush()
-            tokens.append(_ReadToken("|"))
-            index += 1
-            continue
-        if char in {";", "&", "<", ">", "\x60", "$", "(", ")", "{", "}"}:
-            return None
-        current.append(char)
-        token_started = True
-        index += 1
-    if quote is not None:
-        return None
-    flush()
-    return tokens
-
-
-def _command_name(argument: _ReadToken) -> str:
-    return argument.value.replace("\\", "/").rsplit("/", 1)[-1].lower()
-
-
-def _safe_rg(tokens: list[_ReadToken]) -> bool:
-    if len(tokens) < 2:
-        return False
-    flags = {
-        "--files",
-        "-a",
-        "--text",
-        "-n",
-        "--line-number",
-        "-l",
-        "--files-with-matches",
-        "-F",
-        "--fixed-strings",
-        "-i",
-        "--ignore-case",
-        "-S",
-        "--case-sensitive",
-        "-s",
-        "--smart-case",
-    }
-    valued = {
-        "-e",
-        "--regexp",
-        "-g",
-        "--glob",
-        "-A",
-        "--after-context",
-        "-B",
-        "--before-context",
-        "-C",
-        "--context",
-        "-m",
-        "--max-count",
-    }
-    numeric = {
-        "-A",
-        "--after-context",
-        "-B",
-        "--before-context",
-        "-C",
-        "--context",
-        "-m",
-        "--max-count",
-    }
-    no_config = False
-    files_mode = False
-    positions = 0
-    index = 1
-    while index < len(tokens):
-        argument = tokens[index].value
-        if argument == "--":
-            positions += len(tokens[index + 1 :])
-            break
-        if argument == "--no-config":
-            if no_config:
-                return False
-            no_config = True
-            index += 1
-            continue
-        if argument in flags:
-            files_mode = files_mode or argument == "--files"
-            index += 1
-            continue
-        if argument in valued:
-            if index + 1 >= len(tokens):
-                return False
-            value = tokens[index + 1].value
-            if argument in numeric and not value.isdecimal():
-                return False
-            index += 2
-            continue
-        if argument.startswith("--regexp=") or argument.startswith("--glob="):
-            if not argument.partition("=")[2]:
-                return False
-            index += 1
-            continue
-        if argument.startswith("-"):
-            return False
-        positions += 1
-        index += 1
-    return no_config and (files_mode or positions > 0)
-
-
-def _safe_get_content(tokens: list[_ReadToken]) -> bool:
-    if len(tokens) < 2:
-        return False
-    options_with_values = {"-literalpath", "-path", "-encoding", "-totalcount", "-tail"}
-    seen: set[str] = set()
-    path_seen = False
-    index = 1
-    while index < len(tokens):
-        argument = tokens[index].value
-        lowered = argument.lower()
-        if lowered in options_with_values:
-            if lowered in seen or index + 1 >= len(tokens):
-                return False
-            value = tokens[index + 1].value
-            if lowered in {"-literalpath", "-path"}:
-                if path_seen or not value or value.startswith("-"):
-                    return False
-                if "," in value and (
-                    lowered != "-literalpath"
-                    or not all(
-                        part and not part.startswith("-") for part in value.split(",")
-                    )
-                ):
-                    return False
-                path_seen = True
-            elif lowered == "-encoding":
-                if value.lower() != "utf8":
-                    return False
-            elif not value.isdecimal():
-                return False
-            seen.add(lowered)
-            index += 2
-            continue
-        if lowered == "-raw":
-            if lowered in seen:
-                return False
-            seen.add(lowered)
-            index += 1
-            continue
-        if argument.startswith("-"):
-            return False
-        if path_seen or "," in argument:
-            return False
-        path_seen = True
-        index += 1
-    return path_seen
-
-
-def _safe_get_child_item(tokens: list[_ReadToken]) -> bool:
-    """Allow the small directory-listing subset used for repository inspection."""
-    options_with_values = {"-literalpath", "-path"}
-    flags = {"-name", "-file", "-directory", "-recurse"}
-    seen: set[str] = set()
-    path_seen = False
-    index = 1
-    while index < len(tokens):
-        argument = tokens[index].value
-        lowered = argument.lower()
-        if lowered in options_with_values:
-            if lowered in seen or index + 1 >= len(tokens):
-                return False
-            value = tokens[index + 1].value
-            if path_seen or value.startswith("-"):
-                return False
-            path_seen = True
-            seen.add(lowered)
-            index += 2
-            continue
-        if lowered in flags:
-            if lowered in seen:
-                return False
-            seen.add(lowered)
-            index += 1
-            continue
-        if argument.startswith("-") or path_seen:
-            return False
-        path_seen = True
-        index += 1
-    return "-recurse" not in seen or path_seen
-
-
-def _safe_get_file_hash(tokens: list[_ReadToken]) -> bool:
-    """Allow exact file hashing used to compare source and installed packages."""
-    options_with_values = {"-literalpath", "-path", "-algorithm"}
-    algorithms = {"md5", "sha1", "sha256", "sha384", "sha512"}
-    seen: set[str] = set()
-    path_seen = False
-    index = 1
-    while index < len(tokens):
-        argument = tokens[index].value
-        lowered = argument.lower()
-        if lowered in options_with_values:
-            if lowered in seen or index + 1 >= len(tokens):
-                return False
-            value = tokens[index + 1].value
-            if lowered in {"-literalpath", "-path"}:
-                if path_seen or value.startswith("-"):
-                    return False
-                path_seen = True
-            elif lowered == "-algorithm" and value.lower() not in algorithms:
-                return False
-            seen.add(lowered)
-            index += 2
-            continue
-        if argument.startswith("-") or path_seen:
-            return False
-        path_seen = True
-        index += 1
-    return path_seen
-
-
-def _safe_git_ls_files(tokens: list[_ReadToken]) -> bool:
-    """Keep Git file enumeration read-only without accepting Git config injection."""
-    allowed = {
-        "--cached",
-        "--modified",
-        "--deleted",
-        "--others",
-        "--exclude-standard",
-        "--full-name",
-        "--deduplicate",
-        "--directory",
-        "--no-empty-directory",
-    }
-    return all(argument.value.lower() in allowed for argument in tokens[2:])
-
-
-def _safe_git_ls_remote(tokens: list[_ReadToken]) -> bool:
-    """只查询固定 origin 的 main 引用，不接收 Git 选项或任意 URL。"""
-    return (
-        len(tokens) == 4
-        and tokens[0].value == "git"
-        and tokens[2].value == "origin"
-        and tokens[3].value == "refs/heads/main"
-    )
-
-
-def _safe_select(tokens: list[_ReadToken]) -> bool:
-    if len(tokens) < 3 or _command_name(tokens[0]) != "select-object":
-        return False
-    allowed = {"-first", "-skip", "-last"}
-    seen: set[str] = set()
-    index = 1
-    saw_count = False
-    while index < len(tokens):
-        argument = tokens[index].value.lower()
-        if argument not in allowed or index + 1 >= len(tokens):
-            return False
-        if not tokens[index + 1].value.isdecimal() or argument in seen:
-            return False
-        seen.add(argument)
-        saw_count = True
-        index += 2
-    return saw_count
-
-
-def _safe_read_only_command(tokens: list[_ReadToken]) -> bool:
-    if not tokens:
-        return False
-    name = _command_name(tokens[0])
-    if name in {"ls", "dir", "pwd", "get-location"}:
-        return len(tokens) == 1
-    if name == "rg":
-        return _safe_rg(tokens)
-    if name == "get-content":
-        return _safe_get_content(tokens)
-    if name == "get-childitem":
-        return _safe_get_child_item(tokens)
-    if name == "get-filehash":
-        return _safe_get_file_hash(tokens)
-    if name in {"where", "get-command", "test-path"}:
-        return len(tokens) > 1
-    if name != "git" or len(tokens) < 2:
-        return False
-    subcommand = tokens[1].value.lower()
-    if subcommand in {"status", "diff", "log", "show", "rev-parse"}:
-        blocked = (
-            "--output",
-            "--ext-diff",
-            "--textconv",
-            "--upload-pack",
-            "--config",
-            "--config-env",
-            "-c",
-            "-o",
-        )
-        return not any(
-            argument.value.lower() == option
-            or argument.value.lower().startswith(option + "=")
-            for argument in tokens[2:]
-            for option in blocked
-        )
-    if subcommand == "branch":
-        return len(tokens) == 2 or all(
-            argument.value.lower() in {"--show-current", "--list", "-a", "-r", "-v"}
-            for argument in tokens[2:]
-        )
-    if subcommand == "ls-files":
-        return _safe_git_ls_files(tokens)
-    if subcommand == "ls-remote":
-        return _safe_git_ls_remote(tokens)
-    return subcommand == "worktree" and [token.value for token in tokens[2:]] in (
-        ["list"],
-        ["list", "--porcelain"],
-    )
-
-
-def _strict_read_only_bash(command: str) -> bool:
-    tokens = _tokenize_read_only(command)
-    pipes = [
-        index
-        for index, token in enumerate(tokens or [])
-        if token.value == "|" and not token.quoted
-    ]
-    if not tokens or len(pipes) > 1:
-        return False
-    if not pipes:
-        return _safe_read_only_command(tokens)
-    separator = pipes[0]
-    left = tokens[:separator]
-    right = tokens[separator + 1 :]
-    if not left or not _safe_read_only_command(left) or not _safe_select(right):
-        return False
-    name = _command_name(left[0])
-    return name in {"rg", "get-content", "get-childitem"} or (
-        name == "git" and left[1].value.lower() in {"status", "diff"}
-    )
-
-
-def _tokenize_plugin_maintenance(command: str) -> list[_ReadToken] | None:
-    """只接受 Windows 常见的一次 ``& \"…\\codex.exe\"`` 调用。
-
-    这不是只读命令解析器的扩展：调用符仅在这里、且只能出现在第一个
-    字符位置。其余语法继续由已有的保守词元器拒绝。
-    """
-    value = command.strip()
-    if value.startswith("&"):
-        if len(value) == 1 or not value[1].isspace():
-            return None
-        value = value[1:].lstrip()
-    tokens = _tokenize_read_only(value)
-    if not tokens or any(token.value == "|" and not token.quoted for token in tokens):
-        return None
-    return tokens
-
-
-def _trusted_codex_cli(value: str) -> bool:
-    """确认 Windows 正式 Codex CLI 的绝对、非链接安装位置。
-
-    命令名或 PATH 不足以证明来源，因此只接受用户本机 Codex 安装目录中
-    某个版本目录下的 ``codex.exe``。这不是对任意可执行文件的白名单。
-    """
-    candidate = Path(value)
-    if not candidate.is_absolute() or candidate.name.casefold() != "codex.exe":
-        return False
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if not local_app_data:
-        local_app_data = str(Path.home() / "AppData" / "Local")
-    try:
-        raw = candidate.absolute()
-        resolved = raw.resolve(strict=True)
-        install_root = (Path(local_app_data) / "OpenAI" / "Codex" / "bin").resolve(
-            strict=True
-        )
-        relative = resolved.relative_to(install_root)
-    except (OSError, ValueError):
-        return False
-    # 正式布局是 bin/<build>/codex.exe；拒绝目录链接和根目录中的同名文件。
-    return (
-        raw == resolved
-        and len(relative.parts) == 2
-        and relative.name.casefold() == "codex.exe"
-    )
-
-
-def _trusted_powershell_cli(value: str) -> bool:
-    """确认 Windows PowerShell 7 的正式、非链接安装位置。
-
-    维护发布会写入用户级本地市场，不能把裸 ``pwsh`` 或 PATH 中同名程序
-    当作身份。当前契约仅支持 PowerShell 7 的标准安装位置。
-    """
-    program_file_roots = [
-        value
-        for value in (
-            os.environ.get("ProgramFiles"),
-            os.environ.get("ProgramFiles(x86)"),
-        )
-        if value
-    ]
-    if not program_file_roots:
-        return False
-    raw = Path(value)
-    try:
-        resolved = raw.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return False
-    if not raw.is_absolute() or raw != resolved:
-        return False
-    for program_files in program_file_roots:
-        try:
-            trusted = (Path(program_files) / "PowerShell" / "7" / "pwsh.exe").resolve(
-                strict=True
-            )
-        except (OSError, RuntimeError):
-            continue
-        if resolved == trusted:
-            return True
-    return False
-
-
-def _maintenance_script_path() -> Path:
-    """返回与当前受信 Hook 同一已安装插件根中的维护脚本。"""
-    return (Path(__file__).resolve().parents[1] / "maintain-dww-plugin.ps1").resolve()
-
-
-def _main_primary_worktree(root: Path) -> Path | None:
-    """从同一 common-dir 的首个工作树确认干净的 ``main`` 主根。"""
-    output = _run_git(str(root), "worktree", "list", "--porcelain")
-    if not output:
-        return None
-    first_record = output.split("\n\n", 1)[0].splitlines()
-    worktree_line = next(
-        (line for line in first_record if line.startswith("worktree ")), None
-    )
-    if worktree_line is None:
-        return None
-    try:
-        primary = Path(worktree_line.removeprefix("worktree ")).resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    if common_dir(primary) != common_dir(root):
-        return None
-    if _run_git(str(primary), "branch", "--show-current") != "main":
-        return None
-    return primary
-
-
-def _exact_origin_main_push(command: str, root: Path) -> bool:
-    """只放行干净 main 主工作树的精确 SHA 到 origin/main 发布形状。"""
-    if any(character in command for character in ("\r", "\n", "\x00")):
-        return False
-    tokens = _tokenize_read_only(command)
-    if not tokens or tokens[0].value != "git":
-        return False
-    values = [token.value for token in tokens]
-    if len(values) == 4:
-        if values[1:3] != ["push", "origin"]:
-            return False
-        refspec = values[3]
-    elif len(values) == 5:
-        if values[1:4] != ["push", "--dry-run", "origin"]:
-            return False
-        refspec = values[4]
-    else:
-        return False
-    match = re.fullmatch(r"([0-9a-f]{40}):refs/heads/main", refspec)
-    if match is None:
-        return False
-    primary = _main_primary_worktree(root)
-    return bool(
-        primary is not None
-        and root.resolve() == primary
-        and _run_git(str(root), "rev-parse", "HEAD") == match.group(1)
-        and _run_git(str(root), "status", "--porcelain") == ""
-    )
-
-
-def _plugin_release_invocation(command: str, root: Path) -> bool:
-    """识别唯一允许的已安装 DWW 维护脚本调用。
-
-    这是独立的写入入口，不继承只读解析器。每个位置、参数名和参数顺序都
-    固定，因而 ``-MigrateMarketplace``、包装器、追加参数或 shell 拼接都
-    无法借此通过。
-    """
-    tokens = _tokenize_plugin_maintenance(command)
-    if not tokens or not _trusted_powershell_cli(tokens[0].value):
-        return False
-    values = [token.value for token in tokens]
-    if len(values) != 12:
-        return False
-    if [values[index].casefold() for index in (1, 2, 4, 6, 8, 10)] != [
-        "-noprofile",
-        "-file",
-        "-mode",
-        "-sourcerepo",
-        "-sourcecommit",
-        "-codexpath",
-    ]:
-        return False
-    if values[5].casefold() not in {"install", "recoveryinstall"}:
-        return False
-    try:
-        script = Path(values[3])
-        expected_script = _maintenance_script_path()
-        source_repo = Path(values[7])
-        source_git_root = _run_git(str(source_repo), "rev-parse", "--show-toplevel")
-        if source_git_root is None:
-            return False
-        source_root = Path(source_git_root)
-        primary_root = _main_primary_worktree(root)
-        if primary_root is None:
-            return False
-        resolved_source = source_repo.resolve(strict=True)
-        resolved_script = script.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return False
-    if (
-        not script.is_absolute()
-        or script != resolved_script
-        or resolved_script != expected_script
-        or resolved_source != primary_root
-        or source_root.resolve() != primary_root
-    ):
-        return False
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", values[9]):
-        return False
-    return _trusted_codex_cli(values[11])
-
-
-def _plugin_maintenance_invocation(command: str) -> str | None:
-    """识别一条精确的 DWW 本地插件查询或重装命令。
-
-    首次市场迁移不能在这里完成：它必须由已核实的系统 PowerShell 发布
-    脚本执行。稳定市场建立后，正常更新只需要重装这一指定插件。
-    """
-    tokens = _tokenize_plugin_maintenance(command)
-    if not tokens or not _trusted_codex_cli(tokens[0].value):
-        return None
-    values = [token.value for token in tokens[1:]]
-    lowered = [value.casefold() for value in values]
-    if len(lowered) == 2 and lowered == ["plugin", "--help"]:
-        return "query"
-    if len(lowered) == 2 and lowered == ["plugin", "help"]:
-        return "query"
-    if len(lowered) >= 3 and lowered[:3] == ["plugin", "marketplace", "list"]:
-        return "query" if lowered[3:] in ([], ["--json"]) else None
-    if len(lowered) >= 3 and lowered[:3] == ["plugin", "marketplace", "--help"]:
-        return "query" if lowered[3:] == [] else None
-    if len(lowered) >= 3 and lowered[:3] == ["plugin", "marketplace", "help"]:
-        return "query" if lowered[3:] == [] else None
-    if len(lowered) >= 2 and lowered[:2] == ["plugin", "list"]:
-        remaining = values[2:]
-        seen_marketplace = False
-        seen_json = False
-        index = 0
-        while index < len(remaining):
-            option = remaining[index].casefold()
-            if (
-                option == "--marketplace"
-                and not seen_marketplace
-                and index + 1 < len(remaining)
-            ):
-                if remaining[index + 1] != MAINTENANCE_MARKETPLACE:
-                    return None
-                seen_marketplace = True
-                index += 2
-                continue
-            if option == "--json" and not seen_json:
-                seen_json = True
-                index += 1
-                continue
-            return None
-        return "query" if seen_marketplace else None
-    if len(lowered) >= 3 and lowered[:2] == ["plugin", "add"]:
-        if values[2] != f"{MAINTENANCE_PLUGIN}@{MAINTENANCE_MARKETPLACE}":
-            return None
-        return "install" if lowered[3:] in ([], ["--json"]) else None
-    return None
-
-
-def _looks_like_plugin_maintenance(command: str) -> bool:
-    """保守识别伪装或拼接后的 DWW 插件维护尝试。
-
-    此函数不扩展任何允许范围。它只在精确解析失败时阻止命令落入普通
-    isolated-task 的通用放行，且避开带引号的普通文本搜索。
-    """
-    tokens = _tokenize_plugin_maintenance(command)
-    if tokens:
-        values = [token.value for token in tokens]
-        for index, value in enumerate(values):
-            name = PureWindowsPath(value).name.casefold()
-            if name.endswith("maintain-dww-plugin.ps1") and (
-                index == 0
-                or values[index - 1].casefold() == "-file"
-                or PureWindowsPath(values[index - 1]).name.casefold()
-                in {"pwsh", "pwsh.exe"}
-            ):
-                return True
-            if name.endswith("codex.exe") and index + 1 < len(values):
-                if values[index + 1].casefold() == "plugin":
-                    return True
-    return bool(
-        re.search(
-            r"""(?ix)
-            (?:
-                -file\s+(?:"[^"]*maintain-dww-plugin\.ps1"|\S*maintain-dww-plugin\.ps1)
-                |
-                (?:^|[;&|]\s*|&\s*)
-                (?:"[^"]*codex\.exe"|[^\s;&|]*codex\.exe)\s+plugin\b
-            )
-            """,
-            command,
-        )
-    )
-
-
-def _owned_maintenance_task(
-    state: dict[str, Any],
-    guard: dict[str, Any],
-    root: Path,
-    payload: dict[str, Any],
-    *,
-    require_write: bool,
-) -> tuple[dict[str, Any] | None, str]:
-    """维护只可绑定到唯一、仍归当前会话所有的同仓隔离任务。"""
-    source_common = common_dir(root)
-    if source_common is None:
-        return None, "repository common directory could not be verified"
-    candidates: list[dict[str, Any]] = []
-    for task in state.get("tasks", {}).values():
-        if not isinstance(task, dict) or task.get("mode", "isolated") != "isolated":
-            continue
-        worktree = task.get("worktree")
-        if not isinstance(worktree, str):
-            continue
-        try:
-            if common_dir(Path(worktree)) != source_common:
-                continue
-        except OSError:
-            continue
-        if _is_valid_isolated_owner(task, payload)[0]:
-            candidates.append(task)
-    if len(candidates) != 1:
-        return (
-            None,
-            "plugin maintenance requires exactly one active isolated task owned by this Codex session",
-        )
-    task = candidates[0]
-    if require_write:
-        if denial := _isolated_write_denial(guard, task, payload):
-            return None, denial
-    return task, ""
-
-
-def _read_only_rejection_reason(command: str) -> str:
-    tokens = _tokenize_read_only(command)
-    if not tokens:
-        return "Bash command contains unsupported shell syntax and cannot be confirmed as read-only."
-    pipes = [
-        index
-        for index, token in enumerate(tokens)
-        if token.value == "|" and not token.quoted
-    ]
-    if len(pipes) > 1 or (pipes and not _safe_select(tokens[pipes[0] + 1 :])):
-        return "Bash command uses an unsupported pipeline or query form; use a direct read-only command or a supported query | Select-Object with numeric line options."
-    if _command_name(tokens[0]) == "rg" and not any(
-        token.value == "--no-config" for token in tokens
-    ):
-        return "rg read-only queries must include --no-config; for example: rg --no-config --files."
-    if not _safe_read_only_command(tokens):
-        return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."
-    return "Bash command was not recognized as a supported read-only query; protected worktree writes remain blocked."
-
-
-def _dww_runner_present(command: str) -> bool:
-    """仅用于拒绝文案：出现 runner 路径不代表命令可以执行。"""
-    expected = (
-        Path(__file__).resolve().parents[1]
-        / "skills"
-        / "develop-with-worktrees"
-        / "scripts"
-        / "dww.py"
-    ).resolve()
-    return (
-        str(expected).replace("\\", "/").lower() in command.replace("\\", "/").lower()
-    )
-
-
-def _dww_invocation(command: str, root: Path) -> tuple[str, Path] | None:
-    """Parse one literal DWW runner call and return its target worktree root.
-
-    Hook ``cwd`` is the Codex session directory. ``--repo`` is an explicit DWW
-    target, so it is accepted only after the real runner and literal
-    PowerShell command shape have been checked, and only when its Git common
-    directory matches the session repository.
-    """
-    tokens = _tokenize_read_only(command)
-    if not tokens or any(token.value == "|" and not token.quoted for token in tokens):
-        return None
-    if len(tokens) < 4:
-        return None
-    if _command_name(tokens[0]) not in {"uv", "uv.exe"}:
-        return None
-    if tokens[1].value.lower() != "run" or tokens[2].value.lower() != "--script":
-        return None
-    runner = Path(tokens[3].value).resolve()
-    expected_runner = (
-        Path(__file__).resolve().parents[1]
-        / "skills"
-        / "develop-with-worktrees"
-        / "scripts"
-        / "dww.py"
-    ).resolve()
-    if runner != expected_runner:
-        return None
-    repo_value: str | None = None
-    subcommand: str | None = None
-    index = 4
-    while index < len(tokens):
-        argument = tokens[index].value
-        lowered = argument.lower()
-        if lowered == "--repo":
-            if repo_value is not None or index + 1 >= len(tokens):
-                return None
-            value = tokens[index + 1].value
-            if not value or value.startswith("-"):
-                return None
-            repo_value = value
-            index += 2
-            continue
-        if lowered.startswith("--repo="):
-            if repo_value is not None:
-                return None
-            value = argument.partition("=")[2]
-            if not value:
-                return None
-            repo_value = value
-            index += 1
-            continue
-        if lowered == "--json":
-            index += 1
-            continue
-        if lowered == "--help":
-            if index != len(tokens) - 1:
-                return None
-            subcommand = "help"
-            break
-        if lowered in DWW_SUBCOMMANDS:
-            if any(
-                token.value.lower() == "--repo"
-                or token.value.lower().startswith("--repo=")
-                for token in tokens[index + 1 :]
-            ):
-                return None
-            subcommand = lowered
-            break
-        return None
-    if subcommand is None:
-        return None
-    target_root = root.resolve() if repo_value is None else git_root(repo_value)
-    if target_root is None:
-        return None
-    session_common = common_dir(root)
-    target_common = common_dir(target_root)
-    if session_common is None or target_common != session_common:
-        return None
-    return subcommand, target_root
-
-
-def _dww_subcommand(command: str, root: Path) -> str | None:
-    """Return the subcommand only for a real same-common-dir DWW invocation."""
-    invocation = _dww_invocation(command, root)
-    return invocation[0] if invocation is not None else None
-
-
-def _is_git_command(command: str) -> bool:
-    try:
-        tokens = shlex.split(command.strip(), posix=False)
-    except ValueError:
-        return False
-    if not tokens:
-        return False
-    executable = Path(tokens[0].strip('"')).name.lower()
-    if executable in {"git", "git.exe", "git.cmd"}:
-        return True
-    if executable not in {
-        "cmd",
-        "cmd.exe",
-        "pwsh",
-        "pwsh.exe",
-        "powershell",
-        "powershell.exe",
-    }:
-        return False
-    directives = {"/c", "-command", "-c"}
-    for index, argument in enumerate(tokens[:-1]):
-        if argument.lower() in directives:
-            nested = tokens[index + 1].strip('"').strip().split(maxsplit=1)
-            return bool(nested) and Path(nested[0]).name.lower() in {
-                "git",
-                "git.exe",
-                "git.cmd",
-            }
-    return False
-
-
 def _deny(reason: str) -> dict[str, Any]:
     return {
         "hookSpecificOutput": {
@@ -1804,7 +876,7 @@ def _session_context(
     session = _session(payload)
     base = (
         "Repository adopts develop-with-worktrees. For ordinary modifications, proactively use Start → exact-path Commit → useful development checks → Finish in the returned worktree; new default batched tasks may Finish directly from active after the exact commit. Follow the applicable batch or explicit tail until the requested work is delivered. "
-        "The trusted Codex hook hard-denies writes in the current base worktree unless a task has explicit authorization."
+        "The optional Codex hook checks explicit native edit targets and directs edits to the owning task worktree. Terminal commands are outside its scope; the host runtime owns filesystem write permissions."
     )
     if session:
         base += f" This Codex session identifier is `{session}`. If the user explicitly requests direct changes in this directory for this task, choose current-task first, then do not run the DWW lifecycle."
@@ -1816,8 +888,13 @@ def _session_context(
 
 def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
     event = str(payload.get("hook_event_name") or payload.get("hookEventName") or "")
-    root = git_root(str(payload.get("cwd") or "."))
     tool = str(payload.get("tool_name") or payload.get("toolName") or "")
+    # 非编辑工具及事后事件完全退出，不扫描脏基线或猜测终端读写。
+    if event != "SessionStart" and (
+        event != "PreToolUse" or tool.lower() != "apply_patch"
+    ):
+        return None
+    root = git_root(str(payload.get("cwd") or "."))
     if event == "PreToolUse" and tool.lower() == "apply_patch":
         # 在路由提前退出前检查实际目标；仓库外会话不能跳过目标仓库的保护。
         targets = _apply_patch_targets(payload, root or Path.cwd())
@@ -1881,13 +958,13 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             + "`. Use `dww delegated invoke` and the repository's own instructions; do not initialize or run the managed DWW Start/Ready/Finish lifecycle. The generic guard steps aside because the repository adapter remains authoritative.",
         )
     if action == "disabled":
+        if event != "SessionStart":
+            return None
         return _context(
             event,
             "The user chose normal current-directory development for this repository on this machine. Do not initialize or run develop-with-worktrees for this task; follow the user's explicit direction.",
         )
     if action == "current-task":
-        # 用户明确要求“像没安装一样”时，连 PostToolUse 脏基线告警也必须退出，
-        # 否则仍会把本次普通开发误报为逃逸写入。
         if event == "SessionStart":
             return _context(
                 event,
@@ -1915,37 +992,29 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
             event,
             "Only when the user first intends to modify this unchosen repository, ask exactly:\n\n此仓库怎么修改？\n\n1. 每个任务使用独立目录（推荐）\n   任务互不影响，完成后自动合回。\n\n2. 这一次直接改当前目录\n   只跳过这一次，下次还会询问。\n\n3. 以后都直接改当前目录\n   记住此选择，这个仓库不再询问。\n\n只影响本机，可随时修改。\n\nAsk only this one question. After the user chooses, carry out the matching choice silently without any further confirmation. A child-agent instruction that already includes a one-time delegation code must register that code before asking the user anything.",
         )
-    if event not in {"PreToolUse", "PostToolUse"}:
-        return None
-    tool = str(payload.get("tool_name") or payload.get("toolName") or "")
-    command = command_from(payload)
-    if event == "PostToolUse":
-        task = _task_for_worktree(state, guard, root)
-        if task and task.get("mode", "isolated") == "isolated":
-            return None
-        if task and task.get("mode") == "in-place":
-            valid, reason = _is_valid_in_place(root, task, payload)
-            if not valid:
-                _quarantine(root, str(task.get("id")), reason)
-                return _context(
-                    event,
-                    "Current-worktree identity changed after a tool call. Files were preserved and the task was quarantined: "
-                    + reason
-                    + ". Use dww doctor; do not continue, reset, clean, or move files automatically.",
-                )
-            return None
-        if adopted and (dirty := _dirty_paths(root)):
-            _record_alert(root, kind="unauthorized-dirty-base", paths=dirty)
-            return _context(
-                event,
-                "Detected tracked or untracked changes in a protected base worktree. The files were preserved; do not continue, reset, clean, or move them automatically. Review dww doctor for the recorded paths and ask the user how to proceed.",
-            )
-        return None
+    def deny(reason: str) -> dict[str, Any]:
+        # 拒绝仅针对本次编辑；优先返回此会话已领取的正确工作目录。
+        owned = [
+            task for task in state.get("tasks", {}).values()
+            if task.get("mode", "isolated") == "isolated"
+            and _is_valid_isolated_owner(task, payload)[0]
+        ]
+        if len(owned) == 1:
+            reason += f" Edit only in your task worktree: {owned[0]['worktree']}."
+        else:
+            reason += f" Run dww Start for {root} and edit only its returned worktree."
+        return _deny(reason)
+
     if tool.lower() == "apply_patch":
         patch_payload = _patch_payload_with_inferred_owner_cwd(state, payload, root)
         patch_scope = _apply_patch_scope(patch_payload, root)
         if patch_scope in {PATCH_SCOPE_EXTERNAL, PATCH_SCOPE_SESSION_ARTIFACT}:
             return None
+        if action == "ask":
+            return deny(
+                "Choose this repository's modification workflow before this edit; "
+                "use the single repository-choice prompt from SessionStart."
+            )
         if patch_scope not in {PATCH_SCOPE_PROTECTED, PATCH_SCOPE_CODEX_HOME}:
             reasons = {
                 PATCH_SCOPE_INVALID: "apply_patch 补丁字段、执行目录或可信会话产物根无法确认",
@@ -1955,7 +1024,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
                 PATCH_SCOPE_MIXED: "apply_patch 混合了会话产物、仓库或普通外部目标",
                 PATCH_SCOPE_FOREIGN_REPOSITORY: "apply_patch 目标属于其他或嵌套 Git 仓库",
             }
-            return _deny(
+            return deny(
                 reasons.get(
                     patch_scope,
                     "apply_patch target paths could not be determined safely",
@@ -1965,138 +1034,26 @@ def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
         patch_task, patch_reason = _patch_target_task(state, guard, patch_payload, root)
         if patch_task is None:
             if patch_scope == PATCH_SCOPE_CODEX_HOME:
-                return _deny(
+                return deny(
                     "apply_patch 目标属于受保护的 CODEX_HOME 配置、索引或非产物路径. "
                     "Protected worktree writes remain blocked."
                 )
-            return _deny(
+            return deny(
                 (patch_reason or "apply_patch target task could not be verified")
                 + ". Protected worktree writes remain blocked."
             )
         if patch_task.get("mode", "isolated") == "isolated":
             if denial := _isolated_write_denial(guard, patch_task, patch_payload):
-                return _deny(denial)
+                return deny(denial)
             return None
         patch_root = Path(str(patch_task["worktree"])).resolve()
         valid, reason = _is_valid_in_place(patch_root, patch_task, payload)
         if not valid:
-            _quarantine(patch_root, str(patch_task.get("id")), reason)
-            return _deny(
-                "Current-worktree authorization is no longer valid; files were preserved "
-                "and the in-place task was quarantined: " + reason
+            return deny(
+                "Current-worktree authorization is invalid for this edit: " + reason
             )
         return None
-    dww_invocation = _dww_invocation(command, root) if tool == "Bash" else None
-    dww_command = dww_invocation[0] if dww_invocation is not None else None
-    dww_target_root = dww_invocation[1] if dww_invocation is not None else None
-    if tool == "Bash" and _strict_read_only_bash(command):
-        return None
-    if action == "ask":
-        if dww_command in {
-            "init",
-            "choose",
-            "doctor",
-            "route",
-            "status",
-            "version",
-            "help",
-        }:
-            return None
-        if tool == "Bash" and dww_command is None and _dww_runner_present(command):
-            return _deny(
-                "A DWW runner path was detected, but the invocation could not be "
-                "verified. Check literal quoting, --repo and the subcommand; "
-                "the repository choice was not changed and no write was allowed."
-            )
-        return _deny(
-            "Potential repository write is blocked until the user chooses how this repository should be modified. Show the one compact three-choice question, then use the matching trusted dww choose command."
-        )
-    if tool == "Bash":
-        if _plugin_release_invocation(command, root):
-            _task, denial = _owned_maintenance_task(
-                state, guard, root, payload, require_write=True
-            )
-            if _task is None:
-                return _deny("Plugin maintenance is blocked: " + denial)
-            return None
-        maintenance = _plugin_maintenance_invocation(command)
-        if maintenance is not None:
-            if maintenance == "query":
-                return None
-            _task, denial = _owned_maintenance_task(
-                state, guard, root, payload, require_write=True
-            )
-            if _task is None:
-                return _deny("Plugin maintenance is blocked: " + denial)
-            return None
-        if _looks_like_plugin_maintenance(command):
-            return _deny(
-                "DWW plugin maintenance command is blocked unless it exactly matches "
-                "the trusted query, add, or Install contract."
-            )
-        if _exact_origin_main_push(command, root):
-            return None
-    task = (
-        _task_for_worktree(state, guard, dww_target_root)
-        if dww_target_root is not None
-        else None
-    ) or _task_for_worktree(state, guard, root)
-    if task and task.get("mode", "isolated") == "isolated":
-        if dww_command in DWW_READ_ONLY_SUBCOMMANDS:
-            return None
-        if dww_command == "anchor":
-            valid, reason = _is_valid_isolated_owner(task, payload)
-            if not valid:
-                return _deny("Isolated-worktree authorization is invalid: " + reason)
-            return None
-        if denial := _isolated_write_denial(guard, task, payload):
-            return _deny(denial)
-        return None
-    if task and task.get("mode") == "in-place":
-        if task.get("status") == "quarantined":
-            if dww_command in DWW_QUARANTINE_SUBCOMMANDS:
-                return None
-            return _deny(
-                "In-place task is quarantined. Preserve the worktree and use only dww doctor/status/plan or explicit resume-in-place after manual restoration."
-            )
-        task_root = Path(str(task["worktree"])).resolve()
-        valid, reason = _is_valid_in_place(task_root, task, payload)
-        if not valid:
-            if dww_command == "resume-in-place":
-                return None
-            _quarantine(task_root, str(task.get("id")), reason)
-            return _deny(
-                "Current-worktree authorization is no longer valid; files were preserved and the in-place task was quarantined: "
-                + reason
-            )
-        if dww_command in DWW_SUBCOMMANDS:
-            return None
-        if tool == "Bash" and _is_git_command(command):
-            return _deny(
-                "Direct Git state changes are blocked in an in-place task. Use exact-path dww commit; do not run raw git add, commit, switch, reset, clean, merge, or checkout."
-            )
-        # Current-worktree tasks may run their test/tool commands and edit files;
-        # branch and HEAD are checked again after the call.
-        return None
-    if dww_invocation is not None:
-        return None
-    if tool == "Bash" and "dww.py" in command.replace("\\", "/"):
-        return _deny(
-            "Only the installed develop-with-worktrees lifecycle runner with --repo set to this worktree is allowed. The supplied dww command was not recognized."
-        )
-    dirty = _dirty_paths(root)
-    if dirty:
-        _record_alert(root, kind="unauthorized-dirty-base", paths=dirty)
-        detail = ", ".join(dirty[:5])
-        return _deny(
-            "Protected base worktree already has unowned changes. They were preserved; do not continue, reset, clean, or move them automatically. Inspect and ask the user how to proceed. Paths: "
-            + detail
-        )
-    if tool == "Bash" and command:
-        return _deny(_read_only_rejection_reason(command))
-    return _deny(
-        "Protected base-worktree write blocked. For ordinary work, run dww Start and edit only its returned worktree. If the user explicitly asks to change this directory for this task, first choose current-task and then follow normal development without a DWW lifecycle."
-    )
+    return None
 
 
 def main() -> int:
@@ -2121,7 +1078,7 @@ def main() -> int:
         message = "develop-with-worktrees guard could not inspect this hook event. Treat a possible write as unsafe and retry only after dww doctor."
         if event == "PreToolUse":
             result = _deny(message)
-        elif event in {"SessionStart", "PostToolUse"}:
+        elif event == "SessionStart":
             result = _context(event, message)
         else:
             print(message, file=sys.stderr)
