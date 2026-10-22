@@ -85,24 +85,27 @@ needs safe recovery; it is not a shortcut for simplifying the default flow.
   `CODEX_HOME` still needs its exact directory identity, branch, candidate head,
   and owner session to match. Neither narrow exception grants access to other
   Codex data, Git-tracked content, nested repositories, links, or mixed targets.
+- The optional Hook is an edit-target aid. It subscribes only to the verified
+  native `apply_patch` target protocol and lightweight SessionStart routing.
+  It checks every declared target, owner session, directory identity, branch,
+  and HEAD; a wrong-directory edit is denied with the owning task's directory.
+  Missing or conflicting patch targets deny that edit. Other edit tools have no
+  verified complete target protocol here and remain outside this Hook.
+- Terminal commands are not classified or intercepted. Scripts can write files;
+  filesystem write permissions belong to the host runtime. Ordinary reading,
+  searching, and filtering remain available even with existing changes.
+  There is no PostToolUse dirty-baseline scan, repeated stop-and-ask message,
+  or Hook-created quarantine after another session's denied edit.
+  Commit, Ready, integration, promotion, and cleanup keep their existing exact
+  identity, content-preservation, and verification gates.
 - Native patch checks resolve managed target repositories even when the session
-  starts outside Git; an unrelated checkout cannot bypass the target's protection.
-  Other Hook events use the session checkout as the repository domain, while a DWW
-  runner's literal `--repo` selects the lifecycle target. The Hook accepts that
-  target only when the installed runner is exact and both worktrees share the
-  same Git common directory; the target task still passes the existing owner,
-  root-refresh, branch, HEAD, and directory-identity checks. It never treats an
-  arbitrary command argument or a foreign repository as an execution context.
-- Plugin maintenance is not folded into the read-only shell parser. A current
-  owner with exactly one verified isolated task may query the formal Windows
-  Codex CLI and refresh only `develop-with-worktrees` from the fixed
-  `dww-stable-local` marketplace. Marketplace replacement, another plugin or
-  marketplace, a non-official executable, and shell composition remain denied.
+  starts outside Git; an unrelated checkout cannot authorize a protected target.
+- Plugin maintenance and remote publication follow their explicit authorization
+  and dedicated commands. They need no exceptions in a terminal-command parser.
   The stable marketplace is prepared by its dedicated release script; normal
   refreshes therefore do not remove and re-add a marketplace.
-  Ordinary source tasks Finish and return their worktrees. A coordinator starts
-  plugin publication as a separate, short-lived maintenance task rather than
-  retaining a normal development worktree for release work.
+  Ordinary source tasks Finish and return their worktrees. Publishing an already
+  delivered fixed package does not require a new DWW task merely for Hook admission.
   If DWW itself blocks promotion, the installed maintenance entry accepts
   `RecoveryInstall` for one exact source with a passed Full proof. A composed
   batch still needs intact logs, frozen base, candidate identities, and
