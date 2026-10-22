@@ -27,12 +27,10 @@ Develop with Worktrees（DWW）是一个 Codex 插件：**给每个修改任务�
 
 ## 安装
 
-需要可安装插件的 Codex、Git，以及可运行 Python 工具的 [uv](https://docs.astral.sh/uv/)。当前公开版本为 `0.5.0-beta.10`。
-
-此源码分支中的编辑钩子调整[尚未发布](CHANGELOG.md#unreleased)。
+需要可安装插件的 Codex、Git，以及可运行 Python 工具的 [uv](https://docs.astral.sh/uv/)。当前公开版本为 `0.5.0-beta.11`。
 
 ```text
-codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.10
+codex plugin marketplace add zhaogelz/develop-with-worktrees --ref v0.5.0-beta.11
 codex plugin add develop-with-worktrees@develop-with-worktrees
 ```
 
